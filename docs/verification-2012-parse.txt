@@ -1,0 +1,8 @@
+sql-auditor corpus grammar check
+================================
+Produced  : 2026-08-08T15:12:22Z
+Commit    : 3977608
+ScriptDom : C:\Program Files\Microsoft SQL Server Management Studio 22\Release\Common7\IDE\Extensions\Application\Microsoft.SqlServer.TransactSql.ScriptDom.dll
+Files     : 14
+
+queries/10.system/010.properties.sql           TSql110 (SQL Server 2012)    resultsets 6/6  ok

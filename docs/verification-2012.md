@@ -13,15 +13,25 @@ someone runs it, and commit the result.
 
 ### Static parse under the 2012 grammar
 
-Every file in the corpus has been parsed with
-`Microsoft.SqlServer.TransactSql.ScriptDom` (version 18.0) under the T-SQL
-grammar matching its own declared floor. For the four ungated collectors that is
-`TSql110Parser`, the SQL Server 2012 grammar. All parse with zero errors.
+This half is reproducible, and you should reproduce it rather than believe the
+paragraph. `tools/verify-corpus-grammar.ps1` parses every file in the corpus
+with `Microsoft.SqlServer.TransactSql.ScriptDom`, under the T-SQL grammar
+matching that file's own declared floor — `TSql110Parser`, the SQL Server 2012
+grammar, for the four ungated collectors — and checks each file's declared
+`@resultsets` count against the number of result-returning top-level `SELECT`
+statements in the parse tree.
 
-The same parse confirms the declared result-set counts, read from the AST rather
-than trusted from the `@resultsets` directive:
+```
+pwsh -File tools/verify-corpus-grammar.ps1
+```
 
-| Query | Result sets declared | Confirmed from the AST |
+It exits 0 when everything passes and 1 otherwise. The output of the last run is
+committed as [`verification-2012-parse.txt`](verification-2012-parse.txt), which
+records the date, the commit and the ScriptDom build used. All 14 files parse
+with zero errors, and every result-set count matches — including the four that
+carry the 2012 claim:
+
+| Query | `@resultsets` declared | Counted from the parse tree |
 | --- | --- | --- |
 | `10.system/010.properties.sql` | 6 | 6 |
 | `10.system/050.tempdb.sql` | 11 | 11 |
@@ -30,9 +40,17 @@ than trusted from the `@resultsets` directive:
 
 The predecessor's originals fail the same parse with "XML expected, JSON found",
 which is independent confirmation that the rework was necessary rather than
-cosmetic.
+cosmetic. That comparison is not reproducible from this repository — the
+originals are not in it — so take it as background rather than as evidence.
 
 ### Version applicability of every column
+
+This half is **not** reproducible from the repository, and it is the weaker of
+the two. Every column referenced by a collector was checked by hand against its
+Microsoft Learn page for the version in which it appeared. There is no script
+and no recorded output; the evidence is the `@min_version` directives themselves
+and the review history. Read it as a careful manual pass, not as a check you can
+re-run.
 
 Every column referenced by a collector has been checked against its Microsoft
 Learn page for the version in which it appeared. Columns that postdate 2012 were
@@ -63,8 +81,8 @@ instance will not collect a column it does in fact have.
 ## What has not been verified
 
 **No collection has ever been executed against SQL Server 2012, or against any
-version other than SQL Server 2022 (16.0).** Everything above is static analysis:
-a parse and a documentation check. Neither can detect
+version other than SQL Server 2022 (16.0).** Everything above is static
+analysis: a parse and a documentation check. Neither can detect
 
 - a DMV that exists on 2012 but returns a different shape or type than expected;
 - a `SERVERPROPERTY` name that is valid on 2022 and returns `NULL` on 2012

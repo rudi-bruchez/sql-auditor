@@ -532,3 +532,67 @@ func TestKeepRunsNeverLandOnAnExistingRun(t *testing.T) {
 		t.Errorf("want 3 folders and 3 archives, got %d entries: %v", len(entries), names)
 	}
 }
+
+// An unreadable --queries-dir used to exit 1 and print nothing: Run appended
+// the cause to the manifest and then returned a nil error, so the CLI — which
+// prints only what it is handed — said nothing at all. Exit 1 is documented as
+// "the instance could not be reached", so a DBA who mistyped the path following
+// the timeout remedy in docs/dba-guide.md was told their server was down.
+//
+// Both halves matter and both are asserted here. The code must be 2, the
+// configuration refusal, and the error must come back so the operator is told
+// which path failed. Reaching this at all requires --queries-dir; the embedded
+// corpus is verified by TestEmbeddedCorpusIsValid.
+func TestRunReportsAnUnreadableQueriesDirAsBadConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "no-such-corpus")
+	code, err := Run(context.Background(), Options{
+		Config: &Config{
+			Server:     "localhost",
+			OutputDir:  filepath.Join(dir, "output"),
+			QueriesDir: missing,
+		},
+		Corpus: os.DirFS(missing),
+		Root:   ".",
+		Now:    time.Now(),
+	})
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2 (bad configuration, not 1 'instance unreachable')", code)
+	}
+	if err == nil {
+		t.Fatal("Run returned a nil error, so the CLI prints nothing and the operator sees only a status code")
+	}
+	if !strings.Contains(err.Error(), "query corpus") {
+		t.Errorf("error %q does not say the query corpus was the problem", err)
+	}
+	// os.DirFS roots the corpus at ".", so the underlying error names "." and
+	// not the path the operator typed. Naming the directory is what makes the
+	// message actionable.
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("error %q does not name the directory that was given (%s)", err, missing)
+	}
+}
+
+// The manifest is still written for that failure. A run that produced nothing
+// must leave a record of having been attempted, and this path returns before a
+// run folder exists, so it lands in the output directory.
+func TestRunLeavesAManifestWhenTheCorpusCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "output")
+	missing := filepath.Join(dir, "no-such-corpus")
+	if _, err := Run(context.Background(), Options{
+		Config: &Config{Server: "localhost", OutputDir: out, QueriesDir: missing},
+		Corpus: os.DirFS(missing),
+		Root:   ".",
+		Now:    time.Now(),
+	}); err == nil {
+		t.Fatal("want an error")
+	}
+	b, err := os.ReadFile(filepath.Join(out, "_run.json"))
+	if err != nil {
+		t.Fatalf("no manifest written: %v", err)
+	}
+	if !strings.Contains(string(b), "query corpus") {
+		t.Errorf("manifest does not record the cause:\n%s", b)
+	}
+}
