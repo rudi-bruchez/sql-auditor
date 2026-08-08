@@ -14,14 +14,24 @@ your databases, and does not change any configuration.
 
 ## Install
 
+**There is no release yet.** Until the first tag is published, build from source:
+
+```
+git clone https://github.com/rudi-bruchez/sql-auditor
+cd sql-auditor
+go build ./cmd/sql-auditor
+```
+
+Once the first release exists, `go install` and a downloadable binary become the
+normal routes:
+
 ```
 go install github.com/rudi-bruchez/sql-auditor/cmd/sql-auditor@latest
 ```
 
-Or download a binary from the releases page. Each release publishes a SHA-256 of
-every asset, and each binary carries a build provenance attestation tying it to
-the commit and workflow that produced it. This is not a reproducible build: you
-cannot rebuild a byte-identical binary yourself. See
+Releases will publish a SHA-256 of every asset and a build provenance
+attestation for each binary. Neither exists today. What you can verify now, and
+what those will and will not add, is set out in
 [docs/dba-guide.md](docs/dba-guide.md#can-i-verify-the-binary).
 
 ## Commands
@@ -44,18 +54,21 @@ Options for `check` and `collect`:
 | `--queries-dir DIR` | run a corpus from disk instead of the embedded one |
 | `--output-dir DIR` | where to write results |
 | `--keep` | keep an existing same-day run folder, suffixing this run |
-| `--include-session-text` | also collect the SQL text of running sessions |
+| `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
 
 There is no `--password` flag. A password on the command line ends up in `ps`
 output and in shell history; put it in `.env` instead.
 
 `--include-session-text` is off by default and turning it on is a disclosure
-decision, not a performance one. Read
+decision, not a performance one: that statement text is the verbatim SQL of live
+batches and can carry literals copied out of application tables. Read
 [docs/dba-guide.md](docs/dba-guide.md#--include-session-text) before you use it.
 
 ## Configuration
 
-Settings are read from a `.env` file in the working directory. Precedence is
+Settings are read from a `.env` file in the working directory. Copy
+[`.env.example`](.env.example) to `.env` and fill in `SQL_SERVER`; every other
+key in it is already set to the value the tool would use anyway. Precedence is
 flag, then `.env`, then the process environment, then the default — note that
 `.env` beats an exported environment variable, which is the reverse of the usual
 twelve-factor ordering and is
@@ -117,6 +130,4 @@ archive, and the three behaviours that are not obvious from the outside.
 
 ## Licence
 
-No licence has been chosen yet and no `LICENSE` file is in this repository.
-Until one is added, the code is under exclusive copyright: the source is
-readable here, but no rights to use, copy, modify or redistribute it are granted.
+MIT. See [LICENSE](LICENSE).

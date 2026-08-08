@@ -312,6 +312,18 @@ func readsSessionText(s Script) bool {
 	return strings.Contains(strings.ToLower(StripSQLComments(s.SQL)), "dm_exec_sql_text")
 }
 
+// corpusError names the directory the operator actually typed. os.DirFS roots
+// the corpus at ".", so every failure below it surfaces as "GetFileAttributesEx
+// .:" — a message that describes a path the operator never wrote and cannot act
+// on. The embedded corpus has no such directory, so the wrapping only applies
+// when one was supplied.
+func corpusError(cfg *Config, err error) error {
+	if cfg.QueriesDir == "" {
+		return fmt.Errorf("reading the query corpus: %w", err)
+	}
+	return fmt.Errorf("reading the query corpus from %s: %w", cfg.QueriesDir, err)
+}
+
 // Check reports what a collection would do without doing it: which queries
 // were found, which databases they would be pointed at, what the login is
 // allowed to read, and whether the output directory will take the results.
@@ -322,7 +334,7 @@ func readsSessionText(s Script) bool {
 func Check(ctx context.Context, o Options) (int, error) {
 	scripts, err := Discover(o.Corpus, o.Root)
 	if err != nil {
-		return 2, err
+		return 2, corpusError(o.Config, err)
 	}
 	lintFailures := 0
 	fmt.Printf("Queries (%d):\n", len(scripts))
@@ -484,16 +496,39 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return code, nil
 	}
 
-	if !outputWritable(o.Config.OutputDir) {
-		m.Errors = append(m.Errors, ErrorEntry{
-			Message: "output directory " + o.Config.OutputDir + " is not writable"})
-		return finish("", 2)
+	// finishWith is finish for a failure the operator has to be told about in
+	// words. finish alone returns a nil error, and the CLI prints only what it
+	// is handed — so a run killed by an unreadable --queries-dir exited silently
+	// and left the operator with a bare status code to interpret. Every caller
+	// that knows why it is stopping uses this one.
+	//
+	// A manifest-write failure outranks the cause: at that point nothing has
+	// recorded the run anywhere, which is the more urgent thing to report.
+	finishWith := func(runFolder string, code int, cause error) (int, error) {
+		c, werr := finish(runFolder, code)
+		if werr != nil {
+			return c, werr
+		}
+		return c, cause
 	}
 
+	if !outputWritable(o.Config.OutputDir) {
+		err := fmt.Errorf("output directory %s is not writable", o.Config.OutputDir)
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", 2, err)
+	}
+
+	// A corpus that cannot be read or discovered is a bad configuration, not a
+	// fatal one: exit 1 is documented as "the instance could not be reached",
+	// and reporting a mistyped --queries-dir that way sends a DBA to check a
+	// server that was never contacted. Both paths are reachable only through
+	// --queries-dir/QUERIES_DIR — the embedded corpus is verified by a test —
+	// so both are the operator's typo and both exit 2.
 	sum, err := CorpusSHA256(o.Corpus, o.Root)
 	if err != nil {
-		m.Errors = append(m.Errors, ErrorEntry{Message: "reading the query corpus: " + err.Error()})
-		return finish("", 1)
+		err = corpusError(o.Config, err)
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", 2, err)
 	}
 	from := "embedded"
 	if o.Config.QueriesDir != "" {
@@ -503,14 +538,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 
 	scripts, err := Discover(o.Corpus, o.Root)
 	if err != nil {
+		err = corpusError(o.Config, err)
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finish("", 1)
+		return finishWith("", 2, err)
 	}
 
 	db, err := Open(o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finish("", 1)
+		return finishWith("", 1, err)
 	}
 	defer db.Close()
 
@@ -520,8 +556,9 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// not a diagnosis anybody would arrive at from the message.
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		m.Errors = append(m.Errors, ErrorEntry{Message: "cannot reach the instance: " + err.Error()})
-		return finish("", 1)
+		err = fmt.Errorf("cannot reach the instance: %w", err)
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", 1, err)
 	}
 	defer func() { conn.Close() }()
 
@@ -529,9 +566,9 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// while the manifest goes on to make claims about the database list.
 	m.Preflight = runPreflightWithDeadline(ctx, conn, o.Config)
 	if PreflightExitCode(m.Preflight, 0, true) == 1 {
-		m.Errors = append(m.Errors, ErrorEntry{
-			Message: "the instance did not answer the preflight; nothing was collected"})
-		return finish("", 1)
+		err := errors.New("the instance did not answer the preflight; nothing was collected")
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", 1, err)
 	}
 	denied := DeniedCapabilities(m.Preflight)
 	// connect is not a per-script gate. Reaching here means it answered.
@@ -540,7 +577,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	si, err := probeWithDeadline(ctx, conn, o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finish("", 1)
+		return finishWith("", 1, err)
 	}
 	m.Server = ServerBlock{Name: si.Name, Version: si.Version, Edition: si.Edition,
 		UTCOffsetMinutes: si.UTCOffsetMinutes, Auth: authLabel(o.Config)}
@@ -548,12 +585,12 @@ func Run(ctx context.Context, o Options) (int, error) {
 	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finish("", 1)
+		return finishWith("", 1, err)
 	}
 	sel, err := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finish("", 2)
+		return finishWith("", 2, err)
 	}
 	folders := ResolveDatabaseFolders(sel.Included)
 	m.Targets = TargetBlock{Databases: folders, Skipped: sel.Skipped}
@@ -579,10 +616,14 @@ func Run(ctx context.Context, o Options) (int, error) {
 			path, FlagIncludeSessionText))
 	}
 
+	// A run folder that cannot be prepared is the operator's to fix — a --keep
+	// collision, or a path the process may not create — so it exits 2 like the
+	// other configuration refusals rather than 1, which claims the instance was
+	// unreachable when it has in fact just been read successfully.
 	runFolder := runFolderFor(o.Config.OutputDir, si.Name, o.Now, o.Keep)
 	if err := prepareRunFolder(runFolder, o.Keep); err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finish("", 1)
+		return finishWith("", 2, err)
 	}
 
 	for _, p := range plan {
@@ -618,13 +659,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 				conn.Close()
 				fresh, cerr := db.Conn(ctx)
 				if cerr != nil {
-					m.Errors = append(m.Errors, ErrorEntry{Message: "reconnect failed: " + cerr.Error()})
-					return finish(runFolder, 1)
+					cerr = fmt.Errorf("reconnect failed: %w", cerr)
+					m.Errors = append(m.Errors, ErrorEntry{Message: cerr.Error()})
+					return finishWith(runFolder, 1, cerr)
 				}
 				conn = fresh
 				if rerr := resetWithDeadline(ctx, conn, o.Config); rerr != nil {
-					m.Errors = append(m.Errors, ErrorEntry{Message: "session reset after reconnect failed: " + rerr.Error()})
-					return finish(runFolder, 1)
+					rerr = fmt.Errorf("session reset after reconnect failed: %w", rerr)
+					m.Errors = append(m.Errors, ErrorEntry{Message: rerr.Error()})
+					return finishWith(runFolder, 1, rerr)
 				}
 			}
 		}

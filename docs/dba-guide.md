@@ -46,6 +46,10 @@ It collects; it does not judge. There are no thresholds and no recommendations
 in the tool or in its output. It gathers facts and records what it could not
 gather.
 
+The tool is open source under the MIT licence — see
+[LICENSE](../LICENSE) — so you are free to read it, run it, modify it and pass
+it on. Nothing here asks you to accept terms.
+
 ## What permissions it needs
 
 The login must be able to connect. Beyond that there are three rights the
@@ -61,7 +65,15 @@ the wording below is the same string the tool prints and writes into the archive
 | Read performance counters | `VIEW SERVER STATE` | wait statistics, schedulers, memory and tempdb usage not collected |
 | Read backup history from msdb | `SELECT` on `msdb.dbo.backupset` | backup history not collected — the report must not read this as 'no backups exist' |
 
-A read-only login with all three, verified against SQL Server 2022:
+One caution about `VIEW ANY DEFINITION`. SQL Server does not raise an error when
+it is missing. Metadata visibility filters catalog views row by row, so a query
+against `sys.databases` still succeeds and simply returns fewer rows — only the
+databases the login owns or is mapped to. Such a login can produce an archive
+that lists no user databases at all while every query reports success. The
+collector detects this case specifically and says so in the archive, but it is
+worth granting the right so the picture is complete.
+
+### Step 1: the instance-scope rights
 
 ```sql
 CREATE LOGIN sqlauditor WITH PASSWORD = '...';
@@ -72,17 +84,50 @@ CREATE USER sqlauditor FOR LOGIN sqlauditor;
 ALTER ROLE db_datareader ADD MEMBER sqlauditor;
 ```
 
-Per-database collectors additionally need the login to be able to connect to the
-database. A database the login cannot reach is skipped with the reason
-`no access for this login`, and named in the manifest.
+**This is not the whole recipe, and stopping here is the mistake to avoid.** A
+login with exactly these rights passes all four permission probes — four green
+`ok` lines, no warning — and then collects roughly two thirds of what it should,
+because every per-database collector is skipped. Measured on SQL Server 2022:
+9 results instead of 13.
 
-One caution about `VIEW ANY DEFINITION`. SQL Server does not raise an error when
-it is missing. Metadata visibility filters catalog views row by row, so a query
-against `sys.databases` still succeeds and simply returns fewer rows — only the
-databases the login owns or is mapped to. Such a login can produce an archive
-that lists no user databases at all while every query reports success. The
-collector detects this case specifically and says so in the archive, but it is
-worth granting the right so the picture is complete.
+### Step 2: access to each database
+
+Per-database collectors run inside each database and need the login to be able
+to connect to it. Without that, the database is skipped with the reason
+`no access for this login` and the archive is missing the file layout, backup
+history, index and fragmentation data for it. The skip is recorded in
+`MANIFEST.txt` under "Databases skipped", so the omission is visible — but only
+if you read that far.
+
+Either give the login a user in each database you want collected:
+
+```sql
+USE AppDb;
+CREATE USER sqlauditor FOR LOGIN sqlauditor;
+ALTER ROLE db_datareader ADD MEMBER sqlauditor;
+```
+
+Or, to cover the whole instance including databases created later, one
+server-level grant does it (SQL Server 2014 and later):
+
+```sql
+GRANT CONNECT ANY DATABASE TO sqlauditor;
+```
+
+`CONNECT ANY DATABASE` grants nothing in any database beyond the ability to
+connect. Combined with the `VIEW ANY DEFINITION` from step 1, that is exactly
+what the collector needs and no more: metadata everywhere, table contents
+nowhere. You do not also need `VIEW ANY DATABASE` — `VIEW ANY DEFINITION`
+already implies it.
+
+On SQL Server 2012, which has no `CONNECT ANY DATABASE`, the per-database user
+is the only route.
+
+### Confirming you got it right
+
+Run `check` and look at the database list, not only at the permission lines.
+Four `ok` probes above a `Databases that would be collected (0)` means step 2 is
+missing.
 
 ## Run `check` first
 
@@ -97,6 +142,7 @@ sql-auditor check
 On an instance where everything is available:
 
 ```
+note: the connection is encrypted but the server certificate is NOT validated (SQL_TRUST_SERVER_CERTIFICATE=true)
 Queries (14):
   10.system/010.properties.sql
   10.system/012.soft-numa.sql                SQL Server 13+
@@ -136,11 +182,19 @@ it is skipped on older instances, and the flag name means it is opt-in.
 On a login without `VIEW ANY DEFINITION` and `VIEW SERVER STATE`:
 
 ```
+note: the connection is encrypted but the server certificate is NOT validated (SQL_TRUST_SERVER_CERTIFICATE=true)
+Queries (14):
+  ... (unchanged - the query list does not depend on permissions)
+
+Output   : output
+
 Permissions:
   ok      connect
   denied  view_any_definition — instance configuration and database file layout not collected
   denied  view_server_state — wait statistics, schedulers, memory and tempdb usage not collected
   ok      msdb_read
+
+Server   : SQLPROD01  16.0.4265.3  Developer Edition (64-bit)
 
 Databases that would be collected (0):
   (none)
@@ -154,13 +208,16 @@ the `denied` lines as answering two different questions: the exit code says
 whether the tool can proceed, and the `denied` lines say how much of the picture
 you will get.
 
-The exit codes from `check` are:
+`check` and `collect` use the same three codes:
 
 | Code | Meaning |
 | --- | --- |
 | `0` | usable, possibly degraded |
 | `1` | the instance did not answer — nothing can be collected |
-| `2` | the configuration is unusable: the query corpus fails its lint, or the output directory cannot be written |
+| `2` | the configuration is unusable, or the run was partial: a `--queries-dir` that cannot be read, a query corpus that fails its lint, an output directory that cannot be written, or, for `collect`, a collector that failed |
+
+Whenever either command exits non-zero it prints the reason on stderr first. If
+you get a bare `1` with nothing above it, that is a bug — please report it.
 
 There is a real difference between `denied` and `error` in that list.
 `denied` means the server was reached, understood the query, and refused it —
@@ -262,21 +319,46 @@ writes a file and stops.
 
 ## Can I verify the binary?
 
-Partly, and it is worth being precise about how far it goes.
+Partly, and it is worth being precise about how far it goes — including about
+what does not exist yet.
 
-- **The source is public.** Every query is in the repository and can also be
-  written out of the binary you were given, with `sql-auditor queries export`.
-  Comparing the two tells you the binary is running the published questions.
-- **Releases publish a SHA-256** of every asset, so you can confirm the file you
-  downloaded is the file that was published.
-- **Each released binary carries a build provenance attestation**, tying it to
-  the source commit and the workflow run that built it.
+**What you can do today:**
 
-What none of that gives you is a reproducible build. You cannot compile the
-source yourself and get a byte-identical binary to compare against, so the
-attestation is a statement by the build system about what it did, not something
-you can independently recompute. If your standard is "I built it myself", build
-from source and run your own binary: `go build ./cmd/sql-auditor`.
+- **Read the source.** The whole project is public, and every query is in the
+  repository.
+- **Check that the binary is running the published questions.** Write the
+  queries out of the binary you were handed and compare them with the
+  repository:
+
+  ```
+  sql-auditor queries export --to ./from-binary
+  ```
+
+  Whatever that binary does, it does with those files. `MANIFEST.txt` also
+  records the SHA-256 of the corpus each run used.
+- **Build it yourself.** If your standard is "I compiled it", that is the
+  strongest option available and it is available now:
+
+  ```
+  git clone https://github.com/rudi-bruchez/sql-auditor
+  cd sql-auditor
+  go build ./cmd/sql-auditor
+  ```
+
+**What does not exist yet.** No release has been published. There is no releases
+page to check a download against, no published SHA-256, and no build provenance
+attestation. When the first release is tagged it will carry both a digest for
+every asset and an attestation tying each binary to the commit and workflow that
+produced it — but none of that is available today, and a binary you were handed
+before then cannot be checked against any of it. If you were given a binary from
+somewhere other than your own `go build`, the only verification currently open
+to you is the corpus comparison above.
+
+**And what none of it will ever give you** is a reproducible build. You will not
+be able to compile the source and get a byte-identical binary to compare
+against, so the attestation, once it exists, is a statement by the build system
+about what it did rather than something you can independently recompute. Build
+from source if you need more than that.
 
 ## Three things that are not obvious from the outside
 
@@ -318,20 +400,25 @@ trouble rather than merely busy.
 There is one thing it does **not** bound, and it is the one you probably came
 here for. Each collector declares its own timeout in the query file, and a
 declared timeout wins over `SQL_QUERY_TIMEOUT_SEC` outright. Every file in the
-shipped corpus declares one: 60 seconds, except the per-database properties
-collector at 300. So raising `SQL_QUERY_TIMEOUT_SEC` will not give a slow
-collector longer to finish.
+shipped corpus declares one: 60 seconds, except
+`20.databases/020.properties.sql` at 300. So raising `SQL_QUERY_TIMEOUT_SEC`
+will not give a slow collector longer to finish.
 
-The collectors that will exceed 60 seconds first are the schema-heavy ones —
-index fragmentation, largest objects, missing and unused indexes — which walk
-every object in the database. A database with tens of thousands of objects can
-pass that mark. A collector that times out is recorded as an error, the run
-continues to the next one, and the process exits `2`; the archive is written
-either way, missing that one file. A partial archive with timeouts in the error
-list is the signal to give those collectors longer.
+The collector that will run out of time first is
+`20.databases/020.properties.sql`, the same one already given 300 seconds. It is
+the schema-heavy one: index fragmentation, largest objects, and missing and
+unused indexes are all result sets inside that single file, and all of them walk
+every object in the database. It runs once per database, so its 300 seconds is
+per database rather than for the run. A database with tens of thousands of
+objects, or a heavily fragmented one, can pass even that mark.
 
-To do that, take a copy of the corpus, edit the `@timeout` line of the file
-concerned, and run against the copy:
+A collector that times out is recorded as an error, the run continues to the
+next one, and the process exits `2`; the archive is written either way, missing
+that one file. A partial archive with timeouts in the error list is the signal
+to give that file longer.
+
+To do that, take a copy of the corpus, edit its `@timeout` line, and run against
+the copy:
 
 ```
 sql-auditor queries export --to ./my-queries
@@ -352,6 +439,11 @@ SQL_QUERY_TIMEOUT_SEC=120
 ```
 
 ### `.env` overrides exported environment variables
+
+Settings live in a `.env` file in the working directory. The repository ships
+[`.env.example`](../.env.example) as a starting point: copy it to `.env` and
+fill in `SQL_SERVER`. Every other key in it is already set to the value the tool
+would use anyway, so copying it verbatim changes nothing else.
 
 Precedence is: **command-line flag, then `.env`, then the process environment,
 then the built-in default.**
@@ -383,8 +475,11 @@ records it.
 Authenticated: sql:sqlauditor
 ```
 
-To make the exported value win, either remove the key from `.env` or override it
-on the command line, which beats both:
+Setting the key to an empty value in `.env` does **not** pin it to empty — an
+empty value is treated as absent, so `SQL_USER=` in `.env` lets the exported
+`svc_monitoring` through. To make the exported value win, either delete the line
+or leave it empty; to override both, use the command line, which beats
+everything:
 
 ```
 sql-auditor collect --user svc_monitoring
@@ -452,7 +547,9 @@ right.
 
 The scope is narrow — five rows, and only sessions holding a snapshot
 transaction open — but narrow is not the same as safe. One row is enough to
-carry a customer's details out of your building.
+carry a customer's details out of your building. A session that opened its
+transaction and then went idle has no batch running, so its text comes back
+empty; that is luck, not a safeguard.
 
 Turn it on when the question is why the tempdb version store is growing or why
 it will not shrink, and you need to know which transaction is pinning it and
@@ -508,8 +605,7 @@ with. The tool prints a notice on every run to make sure this is not a silent
 assumption:
 
 ```
-note: the connection is encrypted but the server certificate is NOT validated
-(SQL_TRUST_SERVER_CERTIFICATE=true)
+note: the connection is encrypted but the server certificate is NOT validated (SQL_TRUST_SERVER_CERTIFICATE=true)
 ```
 
 If your instance has a certificate your machine trusts, set
@@ -552,10 +648,10 @@ sql-auditor collect
 
 A fresh container has no user databases, so the per-database collectors have
 nothing to run against and `check` reports zero databases. Create one to see the
-full corpus run:
+full corpus run — the image ships `sqlcmd`, so no client is needed on the host:
 
-```sql
-CREATE DATABASE AppDb;
+```
+podman exec sqlauditor-test /opt/mssql-tools18/bin/sqlcmd   -S localhost -U sa -P 'Str0ng!Passw0rd' -C   -Q 'CREATE DATABASE AppDb;'
 ```
 
 When you are finished:
