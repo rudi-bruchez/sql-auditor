@@ -55,9 +55,14 @@ func ParseDotEnv(r io.Reader) (map[string]string, error) {
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
 		switch {
-		case len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"',
-			len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'':
-			v = v[1 : len(v)-1]
+		case len(v) >= 1 && (v[0] == '"' || v[0] == '\''):
+			// Quoted value: take everything up to the matching close quote
+			// and discard anything after it (including a trailing comment),
+			// so a "#" inside the quotes is preserved verbatim.
+			q := v[0]
+			if end := strings.IndexByte(v[1:], q); end >= 0 {
+				v = v[1 : end+1]
+			}
 		default:
 			if i := strings.Index(v, " #"); i >= 0 {
 				v = strings.TrimSpace(v[:i])
@@ -88,20 +93,39 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		}
 		return def
 	}
+	// firstErr captures the first malformed-value error encountered by
+	// boolOf or secOf. An absent or empty value still takes the default
+	// silently; only a present-but-unparseable value is an error — that
+	// matches the hard-fail stance already taken on unknown keys and on
+	// SQL_LOGIN.
+	var firstErr error
 	boolOf := func(key string, def bool) bool {
-		v := strings.ToLower(get(key, ""))
-		switch v {
+		raw := get(key, "")
+		if raw == "" {
+			return def
+		}
+		switch strings.ToLower(raw) {
 		case "1", "true", "yes", "on":
 			return true
 		case "0", "false", "no", "off":
 			return false
 		}
+		if firstErr == nil {
+			firstErr = fmt.Errorf("%s: invalid value %q, want one of 1/true/yes/on or 0/false/no/off", key, raw)
+		}
 		return def
 	}
 	secOf := func(key string, def int) time.Duration {
-		n, err := strconv.Atoi(get(key, ""))
+		raw := get(key, "")
+		if raw == "" {
+			return time.Duration(def) * time.Second
+		}
+		n, err := strconv.Atoi(raw)
 		if err != nil || n <= 0 {
-			n = def
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: invalid value %q, want a positive whole number of seconds", key, raw)
+			}
+			return time.Duration(def) * time.Second
 		}
 		return time.Duration(n) * time.Second
 	}
@@ -121,6 +145,9 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		OutputDir:      get("OUTPUT_DIR", "output"),
 		DBInclude:      get("DB_INCLUDE", ""),
 		DBExclude:      get("DB_EXCLUDE", ""),
+	}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("SQL_SERVER is not set: put it in .env or pass --server")
