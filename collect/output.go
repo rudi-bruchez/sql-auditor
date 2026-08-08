@@ -81,6 +81,16 @@ func RunFolderName(server string, t time.Time) string {
 	return fmt.Sprintf("%s-%s", SafeFolderName(server), t.Format("2006-01-02"))
 }
 
+// FailedRunFolderName names the directory a fatal run's manifest goes into. A
+// run that dies before it knows the server's name still has to leave a record,
+// and writing it straight into OUTPUT_DIR left MANIFEST.txt and _run.json lying
+// beside the run folders of every later, successful run — where the next reader
+// takes them for one of those runs' own documents. The name says what it is and
+// the timestamp keeps two failures apart.
+func FailedRunFolderName(t time.Time) string {
+	return "failed-run-" + t.UTC().Format("2006-01-02-150405")
+}
+
 func ResultRelativePath(dir, base, dbFolder string) string {
 	if dbFolder == "" {
 		return path.Join(dir, base+".json")

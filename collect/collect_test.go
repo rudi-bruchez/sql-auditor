@@ -282,8 +282,14 @@ func TestSkipReasonForDeniedPermission(t *testing.T) {
 	if !skip {
 		t.Fatal("a script declaring a denied permission must be skipped")
 	}
-	if !strings.Contains(reason, "view_server_state") {
+	// The label, not the capability key. This reason is printed into
+	// MANIFEST.txt, whose reader has never seen "view_server_state" and has no
+	// way to look it up; the same rule the Coverage block follows.
+	if !strings.Contains(reason, "VIEW SERVER STATE") {
 		t.Errorf("reason %q does not name the permission", reason)
+	}
+	if strings.Contains(reason, "view_server_state") {
+		t.Errorf("reason %q leaks the internal capability key", reason)
 	}
 	// "connect" is handled before any script is considered: an unreachable
 	// instance abandons the run rather than skipping the scripts that declare
@@ -575,7 +581,10 @@ func TestRunReportsAnUnreadableQueriesDirAsBadConfiguration(t *testing.T) {
 
 // The manifest is still written for that failure. A run that produced nothing
 // must leave a record of having been attempted, and this path returns before a
-// run folder exists, so it lands in the output directory.
+// run folder exists, so it lands in a named failed-run-* subdirectory of the
+// output directory. Not in the output directory itself: MANIFEST.txt lying
+// beside the run folders of later, successful runs is read as belonging to one
+// of them.
 func TestRunLeavesAManifestWhenTheCorpusCannotBeRead(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "output")
@@ -588,11 +597,34 @@ func TestRunLeavesAManifestWhenTheCorpusCannotBeRead(t *testing.T) {
 	}); err == nil {
 		t.Fatal("want an error")
 	}
-	b, err := os.ReadFile(filepath.Join(out, "_run.json"))
+	if _, err := os.Stat(filepath.Join(out, "_run.json")); err == nil {
+		t.Error("the manifest was written into the output directory itself")
+	}
+	b, err := os.ReadFile(filepath.Join(failedRunDir(t, out), "_run.json"))
 	if err != nil {
 		t.Fatalf("no manifest written: %v", err)
 	}
 	if !strings.Contains(string(b), "query corpus") {
 		t.Errorf("manifest does not record the cause:\n%s", b)
 	}
+}
+
+// failedRunDir finds the single failed-run-* directory a fatal run leaves
+// under the output directory.
+func failedRunDir(t *testing.T, out string) string {
+	t.Helper()
+	entries, err := os.ReadDir(out)
+	if err != nil {
+		t.Fatalf("reading %s: %v", out, err)
+	}
+	var found []string
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "failed-run-") {
+			found = append(found, filepath.Join(out, e.Name()))
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want one failed-run-* directory under %s, got %v", out, found)
+	}
+	return found[0]
 }

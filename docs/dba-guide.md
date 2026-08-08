@@ -215,7 +215,12 @@ you will get.
 | --- | --- |
 | `0` | usable, possibly degraded |
 | `1` | the instance did not answer — nothing can be collected |
-| `2` | the configuration is unusable, or the run was partial: a `--queries-dir` that cannot be read, a query corpus that fails its lint, an output directory that cannot be written, or, for `collect`, a collector that failed |
+| `2` | the configuration is unusable, or the run was partial: a `SQL_SERVER` that cannot be parsed, a `--queries-dir` that cannot be read, a query corpus that fails its lint, an output directory that cannot be written, or, for `collect`, a collector that failed |
+
+A mistyped address is `2`, not `1`. `HOST\` with no instance name, or a bare
+`::1,1433` missing its brackets, is refused before a socket is opened, so
+nothing has been asked of any server and `1` would send you to check a machine
+that was never contacted.
 
 Whenever either command exits non-zero it prints the reason on stderr first. If
 you get a bare `1` with nothing above it, that is a bug — please report it.
@@ -294,7 +299,11 @@ What is in here that names things:
   - database, schema and object names
   - the Windows or SQL login names of database owners
 
-Passwords and connection secrets are masked before being written.
+The password of the login used for this run is recorded nowhere in this
+archive. The run settings in _run.json are the query and output directories,
+the database name filters, and whether session text was collected; any setting
+whose name marks it as a password, token or other secret is replaced with
+"(redacted)" before that block is written.
 
 That is metadata about the estate rather than the data held in it, but the
 login names above are attributable to people, so treat this as internal

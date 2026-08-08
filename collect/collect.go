@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	mssql "github.com/microsoft/go-mssqldb"
 )
@@ -237,10 +238,38 @@ func skipReason(s Script, denied map[string]bool, serverVersion []int, enabled m
 	}
 	for _, p := range s.Permissions {
 		if denied[p] {
-			return fmt.Sprintf("the login lacks %s, which this query declares in @permissions", p), true
+			return fmt.Sprintf("the login cannot %s, which this query declares in @permissions",
+				lowerFirst(capabilityLabel(p))), true
 		}
 	}
 	return "", false
+}
+
+// capabilityLabel turns a capability key into the English label the preflight
+// carries for it. The rule is stated in preflight.go: MANIFEST.txt gets the
+// Label, _run.json keeps the Name. This list goes into MANIFEST.txt, so
+// "view_any_definition" — an internal key from a vocabulary its reader has
+// never seen — must not appear there. An unknown key falls back to itself
+// rather than to nothing.
+func capabilityLabel(name string) string {
+	for _, c := range Capabilities() {
+		if c.Name == name {
+			return c.Label
+		}
+	}
+	return name
+}
+
+// lowerFirst downcases the first letter so a label written to stand alone
+// ("Read backup history from msdb") reads correctly mid-sentence. The
+// permission name in parentheses is upper-case and unaffected.
+func lowerFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	r[0] = unicode.ToLower(r[0])
+	return string(r)
 }
 
 func scriptByPath(scripts []Script, path string) Script {
@@ -324,6 +353,20 @@ func corpusError(cfg *Config, err error) error {
 	return fmt.Errorf("reading the query corpus from %s: %w", cfg.QueriesDir, err)
 }
 
+// openExitCode grades an Open failure. Open does not contact the server, so
+// everything it can refuse is a configuration mistake — but only the address
+// parse is certain to be one, and it is the case that actually occurs: an
+// empty SQL_SERVER, a trailing backslash with no instance name, an
+// unbracketed IPv6 literal. Reporting those as 1 tells the operator "the
+// instance could not be reached" about a socket that was never opened, which
+// is the same defect already fixed for an unreadable --queries-dir.
+func openExitCode(err error) int {
+	if IsBadServerAddress(err) {
+		return 2
+	}
+	return 1
+}
+
 // Check reports what a collection would do without doing it: which queries
 // were found, which databases they would be pointed at, what the login is
 // allowed to read, and whether the output directory will take the results.
@@ -357,7 +400,7 @@ func Check(ctx context.Context, o Options) (int, error) {
 
 	db, err := Open(o.Config)
 	if err != nil {
-		return 1, err
+		return openExitCode(err), err
 	}
 	defer db.Close()
 
@@ -478,16 +521,22 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// finish is the only exit from this function that matters: a manifest is
 	// written on every path, including the fatal ones, because a run that
 	// produced nothing still has to leave a record of having been attempted.
-	// With no run folder yet, it falls back to the output directory, and
-	// WriteManifestWithFallback falls back again to a temp directory and
-	// finally to stderr.
+	// With no run folder yet, it falls back to a named, timestamped directory
+	// under the output directory — not to the output directory itself, where
+	// the two documents would sit beside the run folders of every later run
+	// and be read as belonging to one of them. WriteManifestWithFallback falls
+	// back again to a temp directory and finally to stderr.
 	finish := func(runFolder string, code int) (int, error) {
 		m.Run.FinishedUTC = nowUTC()
 		m.Run.DurationSec = int(time.Since(started).Seconds())
 		m.Run.ExitCode = code
 		dest := runFolder
 		if dest == "" {
-			dest = o.Config.OutputDir
+			stamp := o.Now
+			if stamp.IsZero() {
+				stamp = started
+			}
+			dest = filepath.Join(o.Config.OutputDir, FailedRunFolderName(stamp))
 			_ = os.MkdirAll(dest, 0o755)
 		}
 		if _, err := WriteManifestWithFallback(m, dest); err != nil {
@@ -546,7 +595,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	db, err := Open(o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finishWith("", 1, err)
+		return finishWith("", openExitCode(err), err)
 	}
 	defer db.Close()
 

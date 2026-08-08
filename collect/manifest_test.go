@@ -17,12 +17,21 @@ func TestManifestHumanStatesDataNature(t *testing.T) {
 	m := &Manifest{}
 	m.Server.Name, m.Server.Version = "SRV01", "11.0.7001.0"
 	m.Targets.Databases = []DatabaseFolder{{Name: "AppProd", Folder: "AppProd"}}
+	// The embedded corpus, so the paragraph that tells the reader how to check
+	// the queries for themselves is rendered. That instruction is the one
+	// self-verification step in the document, and it has to be a command that
+	// works: bare "queries export" exits 2 asking for --to.
+	m.Sources = map[string]SourceInfo{"queries": {From: "embedded", SHA256: "abc"}}
 	h := flatten(m.Human())
 	for _, want := range []string{
 		"SRV01", "11.0.7001.0", "AppProd",
 		"read-only SELECT statements",
 		"does not read any user or application table",
-		"Passwords and connection secrets are masked",
+		// Scoped to what the collector actually masks. An unqualified claim
+		// that "secrets are masked" describes nothing this program does.
+		"The password of the login used for this run is recorded nowhere",
+		`replaced with "(redacted)"`,
+		"queries export --to DIR",
 		"login names of database owners",
 	} {
 		if !strings.Contains(h, want) {
