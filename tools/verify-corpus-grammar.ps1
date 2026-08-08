@@ -62,18 +62,33 @@ function Get-ParserFor([string]$minVersion) {
 $files = Get-ChildItem -Path $QueriesDir -Recurse -Filter '*.sql' | Sort-Object FullName
 if (-not $files) { throw "no .sql files under $QueriesDir" }
 
-# The recorded output is an artifact someone will read months later, so it says
-# when it was produced and from which commit. Without that it is a wall of "ok"
-# lines that could describe any version of the corpus.
-$commit = try { (git rev-parse --short HEAD 2>$null) } catch { $null }
-if (-not $commit) { $commit = '(not a git checkout)' }
+# The recorded output is an artifact someone will read months later, so it has
+# to say which corpus it describes. It identifies that by the git tree object of
+# queries/, not by HEAD.
+#
+# HEAD cannot work. The artifact is committed one commit after the run that
+# produced it, so a HEAD stamp is always the commit before the one containing
+# the file — which is exactly how the first version of this artifact came to
+# contradict the document citing it. Amending does not help either: amending
+# changes the commit id, so the stamp goes stale again.
+#
+# The tree object of queries/ has neither problem. It changes when and only when
+# the corpus changes, it is unaffected by commits that touch anything else, and
+# a reader can check the artifact still describes the current corpus with a
+# single command that needs no history:
+#
+#     git rev-parse HEAD:queries
+$corpusTree = try { (git rev-parse 'HEAD:queries' 2>$null) } catch { $null }
+if (-not $corpusTree) { $corpusTree = '(not a git checkout)' }
 
 "sql-auditor corpus grammar check"
 "================================"
-"Produced  : $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
-"Commit    : $commit"
-"ScriptDom : $ScriptDomPath"
-"Files     : $($files.Count)"
+"Produced    : $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
+"Corpus tree : $corpusTree"
+"              (git rev-parse HEAD:queries - this artifact describes that corpus"
+"               and no other; if the two differ, re-run this script)"
+"ScriptDom   : $ScriptDomPath"
+"Files       : $($files.Count)"
 ""
 
 $failures = 0

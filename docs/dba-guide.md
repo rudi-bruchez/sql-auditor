@@ -12,7 +12,7 @@ the questions you need answered before you do.
 - [Can I verify the binary?](#can-i-verify-the-binary)
 - [Three things that are not obvious from the outside](#three-things-that-are-not-obvious-from-the-outside)
   - [`READ UNCOMMITTED`](#the-collector-runs-under-read-uncommitted)
-  - [Timeouts](#timeouts-15-s-to-connect-60-s-per-query)
+  - [Timeouts](#timeouts-15-s-to-connect-and-why-raising-the-query-timeout-may-not-help)
   - [`.env` precedence](#env-overrides-exported-environment-variables)
 - [`--include-session-text`](#--include-session-text)
 - [Authentication](#authentication)
@@ -46,9 +46,10 @@ It collects; it does not judge. There are no thresholds and no recommendations
 in the tool or in its output. It gathers facts and records what it could not
 gather.
 
-The tool is open source under the MIT licence — see
-[LICENSE](../LICENSE) — so you are free to read it, run it, modify it and pass
-it on. Nothing here asks you to accept terms.
+The tool is MIT licensed — see [LICENSE](../LICENSE). Running it, modifying it
+and passing it on are all permitted, and nothing here asks you to accept terms.
+Reading the source is permitted too, but not yet possible: it has not been
+published. See [Can I verify the binary?](#can-i-verify-the-binary).
 
 ## What permissions it needs
 
@@ -319,46 +320,55 @@ writes a file and stops.
 
 ## Can I verify the binary?
 
-Partly, and it is worth being precise about how far it goes — including about
-what does not exist yet.
+Less than you should be comfortable with, at the moment. Be precise about which
+bucket each thing falls into.
 
-**What you can do today:**
+**What you can do today.** One thing, and it is worth doing:
 
-- **Read the source.** The whole project is public, and every query is in the
-  repository.
-- **Check that the binary is running the published questions.** Write the
-  queries out of the binary you were handed and compare them with the
-  repository:
+- **Check which questions the binary will ask.** Write the queries out of the
+  binary you were handed and read them:
 
   ```
   sql-auditor queries export --to ./from-binary
   ```
 
-  Whatever that binary does, it does with those files. `MANIFEST.txt` also
-  records the SHA-256 of the corpus each run used.
-- **Build it yourself.** If your standard is "I compiled it", that is the
-  strongest option available and it is available now:
+  Whatever that binary collects, it collects with those files, and they are
+  plain SQL. `MANIFEST.txt` also records the SHA-256 of the corpus each run
+  used, so an archive can be tied to the questions behind it.
 
-  ```
-  git clone https://github.com/rudi-bruchez/sql-auditor
-  cd sql-auditor
-  go build ./cmd/sql-auditor
-  ```
+  Note what this does *not* establish. It tells you what the collector asks. It
+  does not prove the binary contains nothing else, because you have nothing
+  independent to compare the binary against.
 
-**What does not exist yet.** No release has been published. There is no releases
-page to check a download against, no published SHA-256, and no build provenance
-attestation. When the first release is tagged it will carry both a digest for
-every asset and an attestation tying each binary to the commit and workflow that
-produced it — but none of that is available today, and a binary you were handed
-before then cannot be checked against any of it. If you were given a binary from
-somewhere other than your own `go build`, the only verification currently open
-to you is the corpus comparison above.
+**What does not exist yet — which is most of it.** The source has not been
+published: the repository at `github.com/rudi-bruchez/sql-auditor` is still
+empty, so you cannot read the code, and you cannot build your own binary from
+it. No release has been published either, so there is no releases page, no
+published SHA-256 to check a download against, and no build provenance
+attestation.
 
-**And what none of it will ever give you** is a reproducible build. You will not
-be able to compile the source and get a byte-identical binary to compare
-against, so the attestation, once it exists, is a statement by the build system
-about what it did rather than something you can independently recompute. Build
-from source if you need more than that.
+When the source is published, building it yourself becomes available, and it is
+the strongest option — nothing here beats compiling from source you have read:
+
+```
+git clone https://github.com/rudi-bruchez/sql-auditor
+cd sql-auditor
+go build ./cmd/sql-auditor
+```
+
+When the first version is released, it will carry a digest for every asset and
+an attestation tying each binary to the commit and workflow that produced it.
+
+Until both of those happen, a binary you were handed cannot be checked against
+anything except its own query corpus. If that is not enough assurance for your
+situation, the honest answer is to wait, or to ask whoever gave you the binary
+for the source.
+
+**And what none of it will ever give you** is a reproducible build. Even once
+the source is public, you will not be able to compile it and get a
+byte-identical binary to compare against, so the attestation is a statement by
+the build system about what it did rather than something you can independently
+recompute.
 
 ## Three things that are not obvious from the outside
 
@@ -384,7 +394,7 @@ reconciling these numbers to the penny. There is no case in this corpus where a
 dirty read produces a wrong answer that a clean read would have got right; the
 worst outcome is a value fractionally staler than the instant it was requested.
 
-### Timeouts: 15 s to connect, 60 s per query
+### Timeouts: 15 s to connect, and why raising the query timeout may not help
 
 `SQL_CONNECT_TIMEOUT_SEC` defaults to 15 seconds and covers establishing the
 connection, and nothing after it. Raise it if the instance is behind a slow link
@@ -628,10 +638,9 @@ podman run -d --name sqlauditor-test \
 Substitute `docker run` for `podman run` if that is what you have; the arguments
 are identical.
 
-`mcr.microsoft.com/mssql/server:2022-latest` is the tag pinned in `compose.yaml`
-and the image CI runs its integration job against, so a failure you see locally
-against this image is the one CI would see. Port 11433 on the host keeps it
-clear of a local SQL Server on 1433.
+`mcr.microsoft.com/mssql/server:2022-latest` is the tag pinned in the
+repository's `compose.yaml`, and the only version the collector has been run
+against. Port 11433 on the host keeps it clear of a local SQL Server on 1433.
 
 Then point a `.env` at it:
 
@@ -651,7 +660,7 @@ nothing to run against and `check` reports zero databases. Create one to see the
 full corpus run — the image ships `sqlcmd`, so no client is needed on the host:
 
 ```
-podman exec sqlauditor-test /opt/mssql-tools18/bin/sqlcmd   -S localhost -U sa -P 'Str0ng!Passw0rd' -C   -Q 'CREATE DATABASE AppDb;'
+podman exec sqlauditor-test /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Str0ng!Passw0rd' -C -Q 'CREATE DATABASE AppDb;'
 ```
 
 When you are finished:

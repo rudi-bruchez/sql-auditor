@@ -14,7 +14,11 @@ your databases, and does not change any configuration.
 
 ## Install
 
-**There is no release yet.** Until the first tag is published, build from source:
+**Not yet installable.** The source has not been published: the public
+repository is still empty, and there is no release. Nothing in this section
+works today, and none of it is a route you can take until that changes.
+
+When the source is published, building it will be:
 
 ```
 git clone https://github.com/rudi-bruchez/sql-auditor
@@ -22,16 +26,16 @@ cd sql-auditor
 go build ./cmd/sql-auditor
 ```
 
-Once the first release exists, `go install` and a downloadable binary become the
-normal routes:
+When the first version is tagged and released, `go install` and a downloadable
+binary join it:
 
 ```
 go install github.com/rudi-bruchez/sql-auditor/cmd/sql-auditor@latest
 ```
 
-Releases will publish a SHA-256 of every asset and a build provenance
-attestation for each binary. Neither exists today. What you can verify now, and
-what those will and will not add, is set out in
+Releases will also publish a SHA-256 of every asset and a build provenance
+attestation for each binary. None of that exists today. What can and cannot be
+verified, now and later, is set out in
 [docs/dba-guide.md](docs/dba-guide.md#can-i-verify-the-binary).
 
 ## Commands
@@ -84,7 +88,7 @@ twelve-factor ordering and is
 | `SQL_ENCRYPT` | `true` | encrypt the connection |
 | `SQL_TRUST_SERVER_CERTIFICATE` | `true` | skip server certificate validation |
 | `SQL_CONNECT_TIMEOUT_SEC` | `15` | seconds to establish the connection |
-| `SQL_QUERY_TIMEOUT_SEC` | `60` | seconds per round trip made by the pipeline itself; a collector's own `@timeout` wins over it ([why](docs/dba-guide.md#timeouts-15-s-to-connect-60-s-per-query)) |
+| `SQL_QUERY_TIMEOUT_SEC` | `60` | seconds per round trip made by the pipeline itself; a collector's own `@timeout` wins over it ([why](docs/dba-guide.md#timeouts-15-s-to-connect-and-why-raising-the-query-timeout-may-not-help)) |
 | `SQL_APPLICATION_NAME` | `sql-auditor` | application name shown in `sys.dm_exec_sessions` |
 | `QUERIES_DIR` | *(empty)* | run a corpus from disk instead of the embedded one |
 | `OUTPUT_DIR` | `output` | where run folders and archives are written |

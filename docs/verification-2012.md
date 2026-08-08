@@ -26,10 +26,24 @@ pwsh -File tools/verify-corpus-grammar.ps1
 ```
 
 It exits 0 when everything passes and 1 otherwise. The output of the last run is
-committed as [`verification-2012-parse.txt`](verification-2012-parse.txt), which
-records the date, the commit and the ScriptDom build used. All 14 files parse
-with zero errors, and every result-set count matches — including the four that
-carry the 2012 claim:
+committed as [`verification-2012-parse.txt`](verification-2012-parse.txt),
+recording the date, the ScriptDom build used, and the git tree object of
+`queries/` — which is what tells you the artifact still describes the corpus in
+front of you:
+
+```
+git rev-parse HEAD:queries
+```
+
+If that hash differs from the `Corpus tree` line in the artifact, the corpus has
+changed since the parse and the artifact is stale; re-run the script. (The stamp
+is the corpus tree rather than a commit id on purpose: the artifact is always
+committed one commit after the run that produced it, so a commit stamp would
+name the commit before the one containing the file, and amending to fix it would
+change the id again.)
+
+As recorded, all 14 files parse with zero errors and every result-set count
+matches — including the four that carry the 2012 claim:
 
 | Query | `@resultsets` declared | Counted from the parse tree |
 | --- | --- | --- |
@@ -52,10 +66,9 @@ and no recorded output; the evidence is the `@min_version` directives themselves
 and the review history. Read it as a careful manual pass, not as a check you can
 re-run.
 
-Every column referenced by a collector has been checked against its Microsoft
-Learn page for the version in which it appeared. Columns that postdate 2012 were
-moved into separate files carrying a `@min_version` directive, so the ungated
-collectors reference only what 2012 provides. The gated files and their floors:
+Columns that postdate 2012 were moved into separate files carrying a
+`@min_version` directive, so the ungated collectors reference only what 2012
+provides. The gated files and their floors:
 
 | File | `@min_version` | Version |
 | --- | --- | --- |
