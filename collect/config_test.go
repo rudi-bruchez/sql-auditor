@@ -86,3 +86,94 @@ func TestResolveRequiresServer(t *testing.T) {
 		t.Fatal("expected an error when SQL_SERVER is unset")
 	}
 }
+
+func TestParseDotEnvQuotesAndComments(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"hash inside double quotes is preserved", `V="a#b"`, "a#b"},
+		{"quoted value followed by trailing comment", `V="secret" # note`, "secret"},
+		{"unquoted value with trailing comment", `V=plain # note`, "plain"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseDotEnv(strings.NewReader(tt.in))
+			if err != nil {
+				t.Fatalf("ParseDotEnv: %v", err)
+			}
+			if got["V"] != tt.want {
+				t.Errorf("V = %q, want %q", got["V"], tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveBoolAndSecValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		dotenv     map[string]string
+		wantErr    bool
+		errKey     string
+		checkField func(*Config) bool
+	}{
+		{
+			name:   "valid true spellings",
+			dotenv: map[string]string{"SQL_ENCRYPT": "yes"},
+			checkField: func(c *Config) bool {
+				return c.Encrypt == true
+			},
+		},
+		{
+			name:   "valid false spellings",
+			dotenv: map[string]string{"SQL_ENCRYPT": "off"},
+			checkField: func(c *Config) bool {
+				return c.Encrypt == false
+			},
+		},
+		{
+			name:   "absent key takes the default",
+			dotenv: map[string]string{},
+			checkField: func(c *Config) bool {
+				return c.Encrypt == true && c.ConnectTimeout == 15*time.Second
+			},
+		},
+		{
+			name:    "malformed SQL_ENCRYPT errors and names the key",
+			dotenv:  map[string]string{"SQL_ENCRYPT": "flase"},
+			wantErr: true,
+			errKey:  "SQL_ENCRYPT",
+		},
+		{
+			name:    "malformed SQL_CONNECT_TIMEOUT_SEC errors and names the key",
+			dotenv:  map[string]string{"SQL_CONNECT_TIMEOUT_SEC": "abc"},
+			wantErr: true,
+			errKey:  "SQL_CONNECT_TIMEOUT_SEC",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dotenv := map[string]string{"SQL_SERVER": "host"}
+			for k, v := range tt.dotenv {
+				dotenv[k] = v
+			}
+			cfg, err := Resolve(nil, dotenv, func(string) string { return "" })
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected an error, got none")
+				}
+				if !strings.Contains(err.Error(), tt.errKey) {
+					t.Errorf("error should name %s, got: %v", tt.errKey, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if !tt.checkField(cfg) {
+				t.Errorf("unexpected config: %+v", cfg)
+			}
+		})
+	}
+}
