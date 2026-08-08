@@ -166,3 +166,54 @@ func TestDiscoverRejectsStrayFiles(t *testing.T) {
 		t.Errorf("error should name the stray file, got: %v", err)
 	}
 }
+
+func TestDiscoverRejectsFileAtQueryRoot(t *testing.T) {
+	// A correctly named file with no NN.area/ directory level must not be
+	// silently accepted as a collector — that is worse than a silent skip.
+	fsys := fstest.MapFS{
+		"queries/010.properties.sql": {Data: []byte("-- @resultsets: a:object\nSELECT 1;")},
+	}
+	_, err := Discover(fsys, "queries")
+	if err == nil {
+		t.Fatal("expected an error naming the root-level file")
+	}
+	if !strings.Contains(err.Error(), "010.properties.sql") {
+		t.Errorf("error should name the stray file, got: %v", err)
+	}
+}
+
+func TestStripSQLCommentsNestedBlocks(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"nested block comment", "SELECT /* outer /* inner */ still commented? */ 1;", "SELECT  1;"},
+		{"unterminated block comment does not panic",
+			"SELECT 1; /* never closed", "SELECT 1; "},
+		{"unterminated string literal does not panic",
+			"SELECT 'never closed", "SELECT 'never closed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StripSQLComments(tc.in); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseScriptReportsFirstDirectiveErrorOnly(t *testing.T) {
+	// @permissions appears before @resultsets in document order, so its
+	// problem is the one reported; fixing top-down converges.
+	body := "-- @permissions: SELECT ANY DICTIONARY\n" +
+		"-- @resultsets: a:thing\n" +
+		"SELECT 1;"
+	fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
+	got, err := Discover(fsys, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if !strings.Contains(got[0].LintError, "SELECT ANY DICTIONARY") {
+		t.Errorf("lint error = %q, want it to mention the first problem (@permissions)", got[0].LintError)
+	}
+	if strings.Contains(got[0].LintError, "thing") {
+		t.Errorf("lint error = %q, should not report the later @resultsets problem", got[0].LintError)
+	}
+}

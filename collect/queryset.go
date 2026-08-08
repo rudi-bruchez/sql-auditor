@@ -31,9 +31,11 @@ var (
 	// NN.area/NNN.name.sql — anything else is an editor dropping or a mistake.
 	dirPattern  = regexp.MustCompile(`^\d{2}\.[a-z0-9-]+$`)
 	filePattern = regexp.MustCompile(`^\d{3}\.[a-z0-9-]+\.sql$`)
-	goPattern   = regexp.MustCompile(`(?im)^\s*GO\s*(--.*)?$`)
-	forJSON     = regexp.MustCompile(`(?i)\bFOR\s+JSON\b`)
-	directive   = regexp.MustCompile(`^\s*--\s*@(\w+)\s*:?\s*(.*)$`)
+	// Matched only against StripSQLComments output, where -- comments no
+	// longer exist, so no trailing-comment allowance is needed here.
+	goPattern = regexp.MustCompile(`(?im)^\s*GO\s*$`)
+	forJSON   = regexp.MustCompile(`(?i)\bFOR\s+JSON\b`)
+	directive = regexp.MustCompile(`^\s*--\s*@(\w+)\s*:?\s*(.*)$`)
 )
 
 // Discover walks root, parses header directives and lints each file. Lint
@@ -55,7 +57,10 @@ func Discover(fsys fs.FS, root string) ([]Script, error) {
 			}
 			return nil
 		}
-		if !filePattern.MatchString(path.Base(p)) {
+		// A file must match NNN.name.sql AND sit directly inside an
+		// NN.area directory — a file at the query root (parent ".") or
+		// under a misnamed directory is a stray, not a collector.
+		if !filePattern.MatchString(path.Base(p)) || !dirPattern.MatchString(path.Dir(rel)) {
 			stray = append(stray, p)
 			return nil
 		}
@@ -122,21 +127,25 @@ func parseScript(rel, sql string) Script {
 				}
 				key, ok := NormalisePermission(p)
 				if !ok {
-					s.LintError = fmt.Sprintf("@permissions: unknown permission %q; "+
-						"expected one of VIEW SERVER STATE, VIEW ANY DEFINITION, MSDB READ, CONNECT", p)
+					if s.LintError == "" {
+						s.LintError = fmt.Sprintf("@permissions: unknown permission %q; "+
+							"expected one of VIEW SERVER STATE, VIEW ANY DEFINITION, MSDB READ, CONNECT", p)
+					}
 					continue
 				}
 				s.Permissions = append(s.Permissions, key)
 			}
 		case "resultsets":
 			specs, err := parseResultSets(val)
-			if err != nil {
+			if err != nil && s.LintError == "" {
 				s.LintError = err.Error()
 			}
 			s.Results = specs
 		case "correlated":
-			s.LintError = "correlated result sets are not supported: a result set must not " +
-				"reference a column of another; split it into its own query"
+			if s.LintError == "" {
+				s.LintError = "correlated result sets are not supported: a result set must not " +
+					"reference a column of another; split it into its own query"
+			}
 		}
 	}
 	if s.LintError == "" {
@@ -160,9 +169,12 @@ func NormalisePermission(s string) (string, bool) {
 	return k, ok
 }
 
-// StripSQLComments removes -- line comments and /* */ blocks while leaving
-// string literals untouched, so the GO and FOR JSON lints cannot fire on prose
-// that merely mentions them. Doubled quotes inside a literal are handled.
+// StripSQLComments removes -- line comments and /* */ blocks — including
+// nested block comments, which SQL Server allows — while leaving string
+// literals untouched, so the GO and FOR JSON lints cannot fire on prose that
+// merely mentions them. Doubled quotes inside a literal are handled. An
+// unterminated block comment or string literal is not an error here; the
+// text before it is kept and stripping simply stops.
 func StripSQLComments(sql string) string {
 	var b strings.Builder
 	b.Grow(len(sql))
@@ -173,6 +185,7 @@ func StripSQLComments(sql string) string {
 		literal
 	)
 	state := code
+	blockDepth := 0
 	for i := 0; i < len(sql); i++ {
 		c := sql[i]
 		switch state {
@@ -183,6 +196,7 @@ func StripSQLComments(sql string) string {
 				i++
 			case c == '/' && i+1 < len(sql) && sql[i+1] == '*':
 				state = blockComment
+				blockDepth = 1
 				i++
 			case c == '\'':
 				state = literal
@@ -196,9 +210,16 @@ func StripSQLComments(sql string) string {
 				b.WriteByte(c)
 			}
 		case blockComment:
-			if c == '*' && i+1 < len(sql) && sql[i+1] == '/' {
-				state = code
+			switch {
+			case c == '/' && i+1 < len(sql) && sql[i+1] == '*':
+				blockDepth++
 				i++
+			case c == '*' && i+1 < len(sql) && sql[i+1] == '/':
+				blockDepth--
+				i++
+				if blockDepth == 0 {
+					state = code
+				}
 			}
 		case literal:
 			b.WriteByte(c)
