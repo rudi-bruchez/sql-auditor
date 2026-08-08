@@ -53,6 +53,14 @@ var (
 	goPattern = regexp.MustCompile(`(?im)^\s*GO\s*$`)
 	forJSON   = regexp.MustCompile(`(?i)\bFOR\s+JSON\b`)
 	directive = regexp.MustCompile(`^\s*--\s*@(\w+)\s*:?\s*(.*)$`)
+
+	// The auditor contract, as patterns. Whitespace is loose because the
+	// contract is about what the server is asked to do, not about how the
+	// author laid the statement out.
+	nocountPattern    = regexp.MustCompile(`(?i)\bSET\s+NOCOUNT\s+ON\b`)
+	isolationPattern  = regexp.MustCompile(`(?i)\bSET\s+TRANSACTION\s+ISOLATION\s+LEVEL\s+READ\s+UNCOMMITTED\b`)
+	queryHintPattern  = regexp.MustCompile(`(?i)\bOPTION\s*\(\s*RECOMPILE\s*,\s*MAXDOP\s+1\s*\)`)
+	optionWordPattern = regexp.MustCompile(`(?i)\bOPTION\s*\(`)
 )
 
 // Discover walks root, parses header directives and lints each file. Lint
@@ -136,13 +144,28 @@ func parseScript(rel, sql string) Script {
 		key, val := strings.ToLower(m[1]), strings.TrimSpace(m[2])
 		switch key {
 		case "scope":
-			if val == "database" {
+			// Linted, not shrugged off. "@scope: databases" used to fall
+			// through to the instance default, so a per-database collector ran
+			// once against master and produced one file where there should have
+			// been one per database — with nothing anywhere saying so.
+			switch val {
+			case "database":
 				s.Scope = ScopeDatabase
+			case "instance":
+				s.Scope = ScopeInstance
+			default:
+				setLint(fmt.Sprintf("@scope: unknown scope %q; expected instance or database", val))
 			}
 		case "timeout":
-			if n, err := strconv.Atoi(val); err == nil {
-				s.TimeoutSec = n
+			// Also linted. A misspelt timeout silently reverted to
+			// SQL_QUERY_TIMEOUT_SEC, so the one collector that needs longer
+			// than the default was cut off by it.
+			n, err := strconv.Atoi(val)
+			if err != nil || n <= 0 {
+				setLint(fmt.Sprintf("@timeout: %q is not a positive whole number of seconds", val))
+				continue
 			}
+			s.TimeoutSec = n
 		case "permissions":
 			for _, p := range strings.Split(val, ",") {
 				p = strings.TrimSpace(p)
@@ -359,5 +382,50 @@ func lint(sql string, results []ResultSpec) string {
 	if len(results) == 0 {
 		return "missing the @resultsets directive; declare each result set as name:object or name:array"
 	}
-	return ""
+	return contractLint(stripped, results)
+}
+
+// contractLint enforces the auditor contract: every collector runs with
+// NOCOUNT on, at READ UNCOMMITTED, and with OPTION (RECOMPILE, MAXDOP 1) on
+// every statement that returns rows.
+//
+// It exists because the fourteen files in the corpus comply by review rather
+// than by rule, and review does not scale to the fifteenth. The rule is the
+// point of the contract: NOCOUNT keeps rowcount messages out of the result
+// stream the encoder walks, READ UNCOMMITTED means the collector never waits
+// on — or blocks — a production workload, and RECOMPILE with MAXDOP 1 keeps a
+// diagnostic query from poisoning the plan cache or taking a parallel worker
+// off the instance it is auditing.
+//
+// The OPTION check is an approximation and is deliberately a weak one: telling
+// a rowset-producing statement from an assignment or a DECLARE needs a SQL
+// parser, which this program does not have. Instead it requires at least as
+// many OPTION (RECOMPILE, MAXDOP 1) clauses as there are declared result sets.
+// That cannot pass a file which omits one from a SELECT — every result set
+// needs its own — but it can pass a file that puts two hints on one statement
+// and none on another. It catches the omission that actually happens: an
+// author appending a result set and forgetting the hint.
+//
+// sql must already have had its comments stripped, or a file explaining why it
+// removed a hint would satisfy the check by talking about it.
+func contractLint(sql string, results []ResultSpec) string {
+	if !nocountPattern.MatchString(sql) {
+		return "missing SET NOCOUNT ON: rowcount messages travel in the result stream and the collector must not emit them"
+	}
+	if !isolationPattern.MatchString(sql) {
+		return "missing SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED: a collector must never block or be blocked by the workload it audits"
+	}
+	hints := len(queryHintPattern.FindAllString(sql, -1))
+	if hints >= len(results) {
+		return ""
+	}
+	// A malformed hint is the likelier mistake once one is present at all, so
+	// say which of the two problems this is.
+	if len(optionWordPattern.FindAllString(sql, -1)) > hints {
+		return fmt.Sprintf("every result set needs OPTION (RECOMPILE, MAXDOP 1) written exactly so; "+
+			"found %d of the %d declared in @resultsets, and at least one OPTION clause in another form",
+			hints, len(results))
+	}
+	return fmt.Sprintf("every result set needs OPTION (RECOMPILE, MAXDOP 1); found %d for the %d declared in @resultsets",
+		hints, len(results))
 }
