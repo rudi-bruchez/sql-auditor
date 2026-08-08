@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	mssql "github.com/microsoft/go-mssqldb"
@@ -205,7 +206,16 @@ func TestDeniedCapabilities(t *testing.T) {
 
 type fakeAnswer struct {
 	rows int
-	err  error
+	// err fails the query outright, at QueryContext.
+	err error
+	// rowsErr fails the query partway through the result set, after rows have
+	// already been delivered. SQL Server does this: a batch can begin
+	// streaming and then raise, so an error is not only something that happens
+	// instead of a result set. probeCapability exists to catch these — it
+	// drains the rows and returns rows.Err() — and without this field the
+	// fake's Next could only ever return io.EOF, leaving that behaviour
+	// documented but unexercised.
+	rowsErr error
 }
 
 type fakeDriver struct {
@@ -232,15 +242,23 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, _ []driver.Name
 	if a.err != nil {
 		return nil, a.err
 	}
-	return &fakeRows{left: a.rows}, nil
+	return &fakeRows{left: a.rows, err: a.rowsErr}, nil
 }
 
-type fakeRows struct{ left int }
+type fakeRows struct {
+	left int
+	err  error
+}
 
 func (r *fakeRows) Columns() []string { return []string{"c"} }
 func (r *fakeRows) Close() error      { return nil }
 func (r *fakeRows) Next(dest []driver.Value) error {
 	if r.left <= 0 {
+		// The configured failure arrives after the rows, which is how a
+		// mid-stream error reaches a client: some data, then the error.
+		if r.err != nil {
+			return r.err
+		}
 		return io.EOF
 	}
 	r.left--
@@ -248,12 +266,18 @@ func (r *fakeRows) Next(dest []driver.Value) error {
 	return nil
 }
 
-// openFake registers a driver under a name unique to the test and hands back a
-// single connection, matching how RunPreflight is really called.
+// fakeSeq names each registered driver uniquely. database/sql has no way to
+// unregister, and registering the same name twice panics, so a name derived
+// from the test would blow up under -count=2 — precisely the invocation used
+// to hunt flakes.
+var fakeSeq atomic.Int64
+
+// openFake registers a driver under a name unique to this call and hands back
+// a single connection, matching how RunPreflight is really called.
 func openFake(t *testing.T, answers map[string]fakeAnswer) (*sql.Conn, *fakeDriver) {
 	t.Helper()
 	d := &fakeDriver{answers: answers}
-	name := "preflight-fake-" + t.Name()
+	name := fmt.Sprintf("preflight-fake-%d", fakeSeq.Add(1))
 	sql.Register(name, d)
 	db, err := sql.Open(name, "")
 	if err != nil {
@@ -367,6 +391,11 @@ func TestRunPreflightTransportFailureErrorsAndShortCircuits(t *testing.T) {
 	if s := statusOf(got, "connect"); s != "ok" {
 		t.Errorf("connect = %q, want ok", s)
 	}
+	// This assertion is load-bearing and must not be removed as redundant. It
+	// is the ONLY thing that catches the short-circuit being dropped: if the
+	// later probes did run, the fake has no answer configured for them and
+	// returns an error that is also not an mssql.Error, so they still classify
+	// as "error" and every status assertion above still passes.
 	if len(d.asked) != 2 {
 		t.Errorf("driver was asked %v; the probes after the failure should not have run", d.asked)
 	}
@@ -389,5 +418,50 @@ func TestRunPreflightConnectRefusalIsError(t *testing.T) {
 	}
 	if code := PreflightExitCode(got, 0, true); code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
+	}
+}
+
+// An error can arrive after rows have already been delivered: SQL Server can
+// begin streaming a batch and then raise. probeCapability drains the result
+// set precisely to catch that, and a probe that stopped at QueryContext would
+// call such a failure a success.
+func TestRunPreflightErrorMidResultSet(t *testing.T) {
+	tests := []struct {
+		name    string
+		rowsErr error
+		want    string
+	}{
+		// The server got partway through, then refused. Still a refusal.
+		{"refusal mid-stream", mssql.Error{Number: 297, Message: "denied"}, "denied"},
+		// The connection died mid-stream. Not a refusal.
+		{"transport failure mid-stream", io.ErrUnexpectedEOF, "error"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			caps := []Capability{{Name: "view_server_state", SQL: "q", Impact: "no waits"}}
+			c, _ := openFake(t, map[string]fakeAnswer{
+				"q": {rows: 2, rowsErr: tc.rowsErr},
+			})
+			got := RunPreflight(context.Background(), c, caps)
+			if s := statusOf(got, "view_server_state"); s != tc.want {
+				t.Errorf("got %q, want %q — the error arrived after the rows and was dropped", s, tc.want)
+			}
+			if got[0].Impact == "" {
+				t.Error("a failed check must state its impact")
+			}
+		})
+	}
+}
+
+// A NeedsRows probe that fails partway must be classified from the error, not
+// from the row count it happened to reach. Rows arrived, so a count-only rule
+// would call this ok.
+func TestRunPreflightNeedsRowsErrorMidResultSetWins(t *testing.T) {
+	caps := []Capability{{Name: "view_any_definition", SQL: "q", Impact: "no file layout", NeedsRows: true}}
+	c, _ := openFake(t, map[string]fakeAnswer{
+		"q": {rows: 5, rowsErr: mssql.Error{Number: 297, Message: "denied"}},
+	})
+	if s := statusOf(RunPreflight(context.Background(), c, caps), "view_any_definition"); s != "denied" {
+		t.Errorf("got %q, want denied", s)
 	}
 }
