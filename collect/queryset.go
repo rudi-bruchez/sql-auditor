@@ -27,7 +27,21 @@ type Script struct {
 	// MinVersion is the dotted ProductVersion prefix below which this script
 	// must not run. nil means ungated.
 	MinVersion []int
-	LintError  string
+	// RequiresFlag names an opt-in the operator must have switched on for this
+	// script to run. Empty means the script always runs. It exists for
+	// collectors whose output is more revealing than metadata — the archive's
+	// disclosure paragraph is written from the same decision — so the default
+	// has to be "not collected" and the gate has to be visible in the file
+	// itself rather than in a list held somewhere else.
+	RequiresFlag string
+	LintError    string
+}
+
+// KnownFlags is the closed set of names @requires_flag accepts. A typo would
+// otherwise gate a script on a flag no command line can ever set, silently
+// dropping a collector from every run.
+var KnownFlags = map[string]string{
+	"include_session_text": "--include-session-text",
 }
 
 var (
@@ -156,6 +170,14 @@ func parseScript(rel, sql string) Script {
 				continue
 			}
 			s.MinVersion = v
+		case "requires_flag":
+			name := strings.ToLower(strings.TrimSpace(val))
+			if _, ok := KnownFlags[name]; !ok {
+				setLint(fmt.Sprintf("@requires_flag: unknown flag %q; expected one of %s",
+					val, strings.Join(knownFlagNames(), ", ")))
+				continue
+			}
+			s.RequiresFlag = name
 		case "correlated":
 			setLint("correlated result sets are not supported: a result set must not " +
 				"reference a column of another; split it into its own query")
@@ -165,6 +187,15 @@ func parseScript(rel, sql string) Script {
 		s.LintError = lint(sql, s.Results)
 	}
 	return s
+}
+
+func knownFlagNames() []string {
+	names := make([]string, 0, len(KnownFlags))
+	for n := range KnownFlags {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ParseVersion splits a dotted version into components. It returns nil for

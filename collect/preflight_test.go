@@ -14,13 +14,13 @@ import (
 )
 
 func TestPreflightExitCode(t *testing.T) {
-	ok := []Check{{Name: "connect", Status: "ok"}}
-	denied := []Check{{Name: "connect", Status: "ok"}, {Name: "msdb_read", Status: "denied"}}
-	dead := []Check{{Name: "connect", Status: "error"}}
+	ok := []CapabilityCheck{{Name: "connect", Status: "ok"}}
+	denied := []CapabilityCheck{{Name: "connect", Status: "ok"}, {Name: "msdb_read", Status: "denied"}}
+	dead := []CapabilityCheck{{Name: "connect", Status: "error"}}
 
 	tests := []struct {
 		name     string
-		checks   []Check
+		checks   []CapabilityCheck
 		lint     int
 		writable bool
 		want     int
@@ -40,7 +40,7 @@ func TestPreflightExitCode(t *testing.T) {
 		// instance that is no longer there.
 		{
 			"server disappeared after connecting",
-			[]Check{
+			[]CapabilityCheck{
 				{Name: "connect", Status: "ok"},
 				{Name: "view_any_definition", Status: "error"},
 				{Name: "view_server_state", Status: "error"},
@@ -52,7 +52,7 @@ func TestPreflightExitCode(t *testing.T) {
 		// merely degraded still exits 0.
 		{
 			"every capability denied is still exit 0",
-			[]Check{
+			[]CapabilityCheck{
 				{Name: "connect", Status: "ok"},
 				{Name: "view_any_definition", Status: "denied"},
 				{Name: "view_server_state", Status: "denied"},
@@ -183,7 +183,7 @@ func TestRaisingProbesDoNotRequireRows(t *testing.T) {
 }
 
 func TestDeniedCapabilities(t *testing.T) {
-	checks := []Check{
+	checks := []CapabilityCheck{
 		{Name: "connect", Status: "ok"},
 		{Name: "view_server_state", Status: "denied"},
 		{Name: "msdb_read", Status: "error"},
@@ -293,7 +293,7 @@ func openFake(t *testing.T, answers map[string]fakeAnswer) (*sql.Conn, *fakeDriv
 	return c, d
 }
 
-func statusOf(checks []Check, name string) string {
+func statusOf(checks []CapabilityCheck, name string) string {
 	for _, c := range checks {
 		if c.Name == name {
 			return c.Status

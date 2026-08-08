@@ -8,7 +8,7 @@ import (
 	mssql "github.com/microsoft/go-mssqldb"
 )
 
-// Check is the outcome of one capability probe. Status is one of:
+// CapabilityCheck is the outcome of one capability probe. Status is one of:
 //
 //	"ok"     the read succeeded; whatever needs this capability will run
 //	"denied" the server answered with an error; the capability is unavailable
@@ -23,7 +23,7 @@ import (
 // MANIFEST.txt is read by a security officer, and "view_any_definition" tells
 // that reader nothing; Name stays in _run.json, where the identifier is what
 // an analysis layer matches on.
-type Check struct {
+type CapabilityCheck struct {
 	Name   string `json:"name"`
 	Label  string `json:"label,omitempty"`
 	Status string `json:"status"`
@@ -93,18 +93,18 @@ func Capabilities() []Capability {
 //
 // It never returns an error. A failed probe is the answer, not a failure of
 // the preflight — the whole point is to report gaps rather than abort on them.
-func RunPreflight(ctx context.Context, c *sql.Conn, caps []Capability) []Check {
-	out := make([]Check, 0, len(caps))
+func RunPreflight(ctx context.Context, c *sql.Conn, caps []Capability) []CapabilityCheck {
+	out := make([]CapabilityCheck, 0, len(caps))
 	unreachable := false
 	for _, p := range caps {
 		// Once the instance has proven unreachable, the remaining probes can
 		// only repeat that verdict, each after a full connect timeout. Report
 		// them without asking.
 		if unreachable {
-			out = append(out, Check{Name: p.Name, Label: p.Label, Status: "error", Impact: p.Impact})
+			out = append(out, CapabilityCheck{Name: p.Name, Label: p.Label, Status: "error", Impact: p.Impact})
 			continue
 		}
-		check := Check{Name: p.Name, Label: p.Label, Status: "ok"}
+		check := CapabilityCheck{Name: p.Name, Label: p.Label, Status: "ok"}
 		rows, err := probeCapability(ctx, c, p.SQL)
 		if err == nil && p.NeedsRows && rows == 0 {
 			// The server answered, and the answer was "you may see nothing".
@@ -156,7 +156,7 @@ func probeCapability(ctx context.Context, c *sql.Conn, query string) (int, error
 // at all — PreflightExitCode returns 1 and the run is abandoned before any
 // script is considered. A caller that treated it as an ordinary skip would
 // quietly emit an output file describing a server it never reached.
-func DeniedCapabilities(checks []Check) map[string]bool {
+func DeniedCapabilities(checks []CapabilityCheck) map[string]bool {
 	out := map[string]bool{}
 	for _, c := range checks {
 		if c.Status != "ok" {
@@ -186,7 +186,7 @@ func DeniedCapabilities(checks []Check) map[string]bool {
 // degraded" — for an instance that is no longer there. This cannot swallow a
 // legitimate denial, because RunPreflight assigns "error" only to a failure
 // that is not an mssql.Error, meaning a transport failure and never a refusal.
-func PreflightExitCode(checks []Check, lintFailures int, outputWritable bool) int {
+func PreflightExitCode(checks []CapabilityCheck, lintFailures int, outputWritable bool) int {
 	for _, c := range checks {
 		if c.Status == "error" {
 			return 1
