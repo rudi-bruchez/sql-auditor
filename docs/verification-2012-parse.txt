@@ -1,8 +1,26 @@
 sql-auditor corpus grammar check
 ================================
-Produced  : 2026-08-08T15:12:22Z
-Commit    : 3977608
-ScriptDom : C:\Program Files\Microsoft SQL Server Management Studio 22\Release\Common7\IDE\Extensions\Application\Microsoft.SqlServer.TransactSql.ScriptDom.dll
-Files     : 14
+Produced    : 2026-08-08T15:28:48Z
+Corpus tree : 31430df45c35ce1e4189a65fdda3cf634b77a657
+              (git rev-parse HEAD:queries - this artifact describes that corpus
+               and no other; if the two differ, re-run this script)
+ScriptDom   : C:\Program Files\Microsoft SQL Server Management Studio 22\Release\Common7\IDE\Extensions\Application\Microsoft.SqlServer.TransactSql.ScriptDom.dll
+Files       : 14
 
 queries/10.system/010.properties.sql           TSql110 (SQL Server 2012)    resultsets 6/6  ok
+queries/10.system/012.soft-numa.sql            TSql130 (SQL Server 2016)    resultsets 1/1  ok
+queries/10.system/013.memory-model.sql         TSql130 (SQL Server 2016)    resultsets 1/1  ok
+queries/10.system/014.cpu-topology.sql         TSql130 (SQL Server 2016)    resultsets 1/1  ok
+queries/10.system/050.tempdb.sql               TSql110 (SQL Server 2012)    resultsets 11/11  ok
+queries/10.system/051.version-store.sql        TSql130 (SQL Server 2016)    resultsets 2/2  ok
+queries/10.system/052.session-text.sql         TSql110 (SQL Server 2012)    resultsets 1/1  ok
+queries/20.databases/010.all-databases.sql     TSql110 (SQL Server 2012)    resultsets 1/1  ok
+queries/20.databases/011.all-databases-2014.sql TSql120 (SQL Server 2014)    resultsets 1/1  ok
+queries/20.databases/012.all-databases-query-store.sql TSql130 (SQL Server 2016)    resultsets 1/1  ok
+queries/20.databases/020.properties.sql        TSql110 (SQL Server 2012)    resultsets 7/7  ok
+queries/20.databases/021.properties-2014.sql   TSql120 (SQL Server 2014)    resultsets 1/1  ok
+queries/20.databases/022.query-store.sql       TSql130 (SQL Server 2016)    resultsets 2/2  ok
+queries/20.databases/023.log-vlf.sql           TSql130 (SQL Server 2016)    resultsets 2/2  ok
+
+All 14 files parse under their declared grammar, and every
+@resultsets count matches the parse tree.
