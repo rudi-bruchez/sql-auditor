@@ -81,6 +81,35 @@ func TestResolveDatabaseFoldersDisambiguatesCaseInsensitively(t *testing.T) {
 	}
 }
 
+func TestResolveDatabaseFoldersSuffixItselfCanCollide(t *testing.T) {
+	// The generated suffix "a~2" (minted for the second "a"-like name) must
+	// itself be checked against a database literally named "a~2", or the two
+	// fold to the same Windows directory.
+	got := ResolveDatabaseFolders([]string{"a", "A", "a~2"})
+	want := []string{"a", "A~2", "a~2~2"}
+	for i, w := range want {
+		if got[i].Folder != w {
+			t.Errorf("folder[%d] = %q, want %q", i, got[i].Folder, w)
+		}
+	}
+}
+
+func TestResolveDatabaseFoldersNoFoldedDuplicates(t *testing.T) {
+	// Regression guard: whatever the algorithm, no two emitted folders may
+	// fold to the same name under Windows' case-insensitive comparison.
+	names := []string{"Northwind", "northwind", "NORTHWIND", "a", "A", "a~2"}
+	got := ResolveDatabaseFolders(names)
+	seen := map[string]DatabaseFolder{}
+	for _, df := range got {
+		key := strings.ToUpper(df.Folder)
+		if prev, ok := seen[key]; ok {
+			t.Errorf("folders %q (for db %q) and %q (for db %q) fold to the same name %q",
+				prev.Folder, prev.Name, df.Folder, df.Name, key)
+		}
+		seen[key] = df
+	}
+}
+
 func TestRunFolderName(t *testing.T) {
 	ts := time.Date(2026, 8, 8, 9, 5, 0, 0, time.UTC)
 	if got := RunFolderName(`SRV01\INST`, ts); got != "SRV01_INST-2026-08-08" {

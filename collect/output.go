@@ -57,15 +57,18 @@ func SafeFolderName(name string) string {
 // case-sensitive; the original casing is still preserved in the emitted
 // folder name.
 func ResolveDatabaseFolders(names []string) []DatabaseFolder {
-	seen := map[string]int{}
+	taken := map[string]bool{}
 	out := make([]DatabaseFolder, 0, len(names))
 	for _, n := range names {
-		f := SafeFolderName(n)
-		key := strings.ToUpper(f)
-		seen[key]++
-		if c := seen[key]; c > 1 {
-			f = fmt.Sprintf("%s~%d", f, c)
+		base := SafeFolderName(n)
+		f := base
+		// Both the candidate and every generated suffix must be checked, or a
+		// database genuinely named "a~2" collides with the suffix minted for
+		// a database named "A".
+		for i := 2; taken[strings.ToUpper(f)]; i++ {
+			f = fmt.Sprintf("%s~%d", base, i)
 		}
+		taken[strings.ToUpper(f)] = true
 		out = append(out, DatabaseFolder{Name: n, Folder: f})
 	}
 	return out
