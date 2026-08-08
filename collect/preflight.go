@@ -135,6 +135,12 @@ func probeCapability(ctx context.Context, c *sql.Conn, query string) (int, error
 // DeniedCapabilities is the set of capability names that did not come back
 // "ok", for matching against the @permissions a script declares. A capability
 // that errored is as unavailable as one that was denied, so both belong here.
+//
+// "connect" appearing in this set is not an instruction to skip the scripts
+// that declare CONNECT. It means the instance is unreachable and nothing runs
+// at all — PreflightExitCode returns 1 and the run is abandoned before any
+// script is considered. A caller that treated it as an ordinary skip would
+// quietly emit an output file describing a server it never reached.
 func DeniedCapabilities(checks []Check) map[string]bool {
 	out := map[string]bool{}
 	for _, c := range checks {
@@ -158,9 +164,16 @@ func DeniedCapabilities(checks []Check) map[string]bool {
 //
 // An unreachable instance outranks a bad configuration, because fixing the
 // configuration would not make the run possible.
+//
+// ANY check with status "error" returns 1, not just "connect". A server can go
+// away after the first probe answers: connect stays "ok", every later probe
+// fails, and keying on connect alone would exit 0 — "usable, possibly
+// degraded" — for an instance that is no longer there. This cannot swallow a
+// legitimate denial, because RunPreflight assigns "error" only to a failure
+// that is not an mssql.Error, meaning a transport failure and never a refusal.
 func PreflightExitCode(checks []Check, lintFailures int, outputWritable bool) int {
 	for _, c := range checks {
-		if c.Name == "connect" && c.Status != "ok" {
+		if c.Status == "error" {
 			return 1
 		}
 	}
