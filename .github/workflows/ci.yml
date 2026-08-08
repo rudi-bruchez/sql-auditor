@@ -32,6 +32,11 @@ jobs:
           fi
       - run: go vet ./...
       - run: go test ./... -count=1
+      # Twice in one process. Task 7 found a sql.Register call on a path that
+      # ran per invocation, which panics with "called twice for driver" the
+      # second time and is invisible to a -count=1 run. The whole class costs a
+      # second to guard against.
+      - run: go test ./collect/ -count=2
       # The release workflow cross-compiles for these two targets. Finding out
       # at tag time that one of them does not build is finding out too late.
       - name: cross-compile

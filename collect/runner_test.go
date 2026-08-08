@@ -143,3 +143,29 @@ func TestQuoteNameEscapesBracket(t *testing.T) {
 		t.Errorf("quoteName = %q", got)
 	}
 }
+
+// An address the parser refuses is a typo, not an unreachable server: nothing
+// has been dialled at the point it is refused. Exit 1 is documented as "the
+// instance could not be reached" and would send a DBA to check a machine that
+// was never contacted, so Run and Check ask this before choosing a code.
+func TestBadServerAddressIsMarkedAsConfiguration(t *testing.T) {
+	for _, addr := range []string{"", "HOST\\", "::1,1433", "localhost,not-a-port"} {
+		_, err := Open(&Config{Server: addr, Database: "master"})
+		if err == nil {
+			t.Errorf("Open(%q): want an error", addr)
+			continue
+		}
+		if !IsBadServerAddress(err) {
+			t.Errorf("Open(%q): %v is not reported as a bad address", addr, err)
+		}
+		if openExitCode(err) != 2 {
+			t.Errorf("Open(%q): exit code = %d, want 2", addr, openExitCode(err))
+		}
+	}
+	// A well-formed address that nothing answers on is the other case, and it
+	// must keep exit 1. Open does not dial, so there is no error to grade here
+	// — the grading only has to not claim a typo.
+	if IsBadServerAddress(nil) {
+		t.Error("a nil error must not be reported as a bad address")
+	}
+}

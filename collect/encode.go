@@ -253,7 +253,15 @@ func encodeValue(v any, sqlType string) (json.RawMessage, string) {
 		if t, ok := v.(time.Time); ok {
 			return mustMarshal(t.Format(time.RFC3339)), ""
 		}
-	case "DATETIME", "DATETIME2", "SMALLDATETIME":
+	case "DATETIME2":
+		if t, ok := v.(time.Time); ok {
+			// datetime2 carries up to seven fractional digits and the spec
+			// keeps them. The trailing-nine layout prints them only when they
+			// are there, so a whole second still renders as HH:MM:SS rather
+			// than HH:MM:SS.0000000.
+			return mustMarshal(t.Format("2006-01-02T15:04:05.9999999")), ""
+		}
+	case "DATETIME", "SMALLDATETIME":
 		if t, ok := v.(time.Time); ok {
 			// ISO 8601 local, no offset. Emitting Z or -00:00 would assert a
 			// UTC conversion that never happened.
@@ -265,7 +273,9 @@ func encodeValue(v any, sqlType string) (json.RawMessage, string) {
 		}
 	case "TIME":
 		if t, ok := v.(time.Time); ok {
-			return mustMarshal(t.Format("15:04:05")), ""
+			// HH:MM:SS[.fffffff], as the spec writes it: time(7) is the default
+			// precision and truncating to whole seconds discarded it silently.
+			return mustMarshal(t.Format("15:04:05.9999999")), ""
 		}
 	case "DECIMAL", "NUMERIC", "MONEY", "SMALLMONEY":
 		return encodeNumericText(numericText(v))

@@ -261,3 +261,36 @@ func TestEncodeDatetimeIsNotRFC3339(t *testing.T) {
 		t.Errorf("emitted datetime is not valid ISO 8601 local: %v", err)
 	}
 }
+
+// time(7) and datetime2(7) carry fractional seconds and the spec keeps them:
+// "HH:MM:SS[.fffffff]". Truncating to whole seconds discarded them with no
+// warning, which is exactly the silent loss the lossless-conversion claim
+// rules out. The brackets are the other half: a whole second must not gain a
+// ".0000000".
+func TestFractionalSecondsSurvive(t *testing.T) {
+	frac := time.Date(2026, 8, 8, 13, 45, 30, 1234567*100, time.UTC)
+	whole := time.Date(2026, 8, 8, 13, 45, 30, 0, time.UTC)
+	tests := []struct {
+		name, sqlType string
+		in            time.Time
+		want          string
+	}{
+		{"time with fraction", "TIME", frac, `"13:45:30.1234567"`},
+		{"time on the second", "TIME", whole, `"13:45:30"`},
+		{"datetime2 with fraction", "DATETIME2", frac, `"2026-08-08T13:45:30.1234567"`},
+		{"datetime2 on the second", "DATETIME2", whole, `"2026-08-08T13:45:30"`},
+		// datetime has no seventh digit to keep and is left alone.
+		{"datetime", "DATETIME", whole, `"2026-08-08T13:45:30"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, warn := encodeValue(tc.in, tc.sqlType)
+			if warn != "" {
+				t.Errorf("unexpected warning: %s", warn)
+			}
+			if string(got) != tc.want {
+				t.Errorf("got %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
