@@ -22,19 +22,20 @@ var reservedNames = map[string]bool{
 const invalidChars = `<>:"/\|?*,`
 
 func SafeFolderName(name string) string {
-	var b strings.Builder
+	var runes []rune
 	for _, r := range name {
 		if r < 0x20 || strings.ContainsRune(invalidChars, r) {
-			b.WriteByte('_')
+			runes = append(runes, '_')
 			continue
 		}
-		b.WriteRune(r)
+		runes = append(runes, r)
 	}
-	s := b.String()
-	if len(s) > 100 {
-		s = s[:100]
+	// Truncate by rune, not byte, so a multi-byte rune at the boundary is
+	// never split into invalid UTF-8.
+	if len(runes) > 100 {
+		runes = runes[:100]
 	}
-	s = strings.TrimRight(s, ". ")
+	s := strings.TrimRight(string(runes), ". ")
 	if s == "" {
 		s = "_"
 	}
@@ -50,14 +51,19 @@ func SafeFolderName(name string) string {
 
 // ResolveDatabaseFolders assigns one folder per database, suffixing ~2, ~3 …
 // when two distinct names sanitise to the same folder. Silently merging them
-// would put two databases' results in one directory.
+// would put two databases' results in one directory. Collisions are detected
+// case-insensitively (keyed on the upper-cased folder name) because Windows
+// directories are case-insensitive even when the SQL Server collation is
+// case-sensitive; the original casing is still preserved in the emitted
+// folder name.
 func ResolveDatabaseFolders(names []string) []DatabaseFolder {
 	seen := map[string]int{}
 	out := make([]DatabaseFolder, 0, len(names))
 	for _, n := range names {
 		f := SafeFolderName(n)
-		seen[f]++
-		if c := seen[f]; c > 1 {
+		key := strings.ToUpper(f)
+		seen[key]++
+		if c := seen[key]; c > 1 {
 			f = fmt.Sprintf("%s~%d", f, c)
 		}
 		out = append(out, DatabaseFolder{Name: n, Folder: f})

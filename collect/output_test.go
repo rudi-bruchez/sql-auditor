@@ -1,8 +1,10 @@
 package collect
 
 import (
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestSafeFolderName(t *testing.T) {
@@ -29,6 +31,26 @@ func TestSafeFolderName(t *testing.T) {
 	}
 }
 
+func TestSafeFolderNameTruncatesByRuneNotByte(t *testing.T) {
+	// 99 ASCII chars followed by several multi-byte runes ('é' is 2 bytes in
+	// UTF-8). A byte-based truncation at 100 bytes would split the rune at
+	// the boundary and produce invalid UTF-8.
+	var b strings.Builder
+	for i := 0; i < 99; i++ {
+		b.WriteByte('x')
+	}
+	for i := 0; i < 10; i++ {
+		b.WriteRune('é')
+	}
+	got := SafeFolderName(b.String())
+	if !utf8.ValidString(got) {
+		t.Errorf("SafeFolderName truncated to invalid UTF-8: %q", got)
+	}
+	if n := utf8.RuneCountInString(got); n != 100 {
+		t.Errorf("SafeFolderName truncated to %d runes, want 100", n)
+	}
+}
+
 func TestResolveDatabaseFoldersDisambiguates(t *testing.T) {
 	// Two distinct database names can sanitise to the same folder.
 	got := ResolveDatabaseFolders([]string{"a/b", `a\b`, "other"})
@@ -40,6 +62,22 @@ func TestResolveDatabaseFoldersDisambiguates(t *testing.T) {
 	}
 	if got[2].Folder != "other" {
 		t.Errorf("third folder = %q, want other", got[2].Folder)
+	}
+}
+
+func TestResolveDatabaseFoldersDisambiguatesCaseInsensitively(t *testing.T) {
+	// Windows directories are case-insensitive even when the SQL Server
+	// collation is case-sensitive, so "Northwind", "northwind" and
+	// "NORTHWIND" must all be treated as colliding.
+	got := ResolveDatabaseFolders([]string{"Northwind", "northwind", "NORTHWIND"})
+	if got[0].Folder != "Northwind" {
+		t.Errorf("first folder = %q, want Northwind", got[0].Folder)
+	}
+	if got[1].Folder != "northwind~2" {
+		t.Errorf("second folder = %q, want northwind~2", got[1].Folder)
+	}
+	if got[2].Folder != "NORTHWIND~3" {
+		t.Errorf("third folder = %q, want NORTHWIND~3", got[2].Folder)
 	}
 }
 
