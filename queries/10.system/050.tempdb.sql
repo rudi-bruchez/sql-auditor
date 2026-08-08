@@ -14,6 +14,9 @@
 -- volume), and recommended_start_files is gone — that threshold is a judgement
 -- and belongs to the analysis layer, not the collector.
 --
+-- Session statement text is NOT collected here. It lives in
+-- 052.session-text.sql behind --include-session-text.
+--
 -- SQL Server 2012 is the floor. Removed for that reason:
 --   SERVERPROPERTY('IsTempdbMetadataMemoryOptimized')      (2019)
 --   sys.dm_tran_version_store_space_usage                  (2016 SP2)
@@ -81,19 +84,19 @@ SELECT
     (SELECT COUNT(*) FROM sys.dm_tran_active_snapshot_database_transactions) AS active_snapshot_txn_count
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* ───────── oldest_snapshot_transactions: blocking version-store cleanup ───────── */
+/* ───────── oldest_snapshot_transactions: blocking version-store cleanup ─────────
+   Identifiers and durations only. The statement text of these sessions, and
+   the login, host and program names behind them, moved to
+   052.session-text.sql, which runs only under --include-session-text: that
+   text is the verbatim SQL of live batches and can carry literals copied out
+   of application tables. Which of the two ran is what MANIFEST.txt's
+   disclosure paragraph is written from, so the columns must not drift back
+   here. session_id still joins the rows in both files. */
 SELECT TOP (5)
        ast.session_id,
        ast.transaction_sequence_num,
-       ast.elapsed_time_seconds,
-       es.login_name, es.host_name, es.program_name,
-       est.text AS current_batch
+       ast.elapsed_time_seconds
 FROM sys.dm_tran_active_snapshot_database_transactions AS ast
-LEFT JOIN sys.dm_exec_sessions AS es ON es.session_id = ast.session_id
-OUTER APPLY (
-    SELECT r.sql_handle FROM sys.dm_exec_requests r WHERE r.session_id = ast.session_id
-) AS req
-OUTER APPLY sys.dm_exec_sql_text(req.sql_handle) AS est
 ORDER BY ast.elapsed_time_seconds DESC
 OPTION (RECOMPILE, MAXDOP 1);
 

@@ -58,6 +58,19 @@ type ResultEntry struct {
 	Status     string `json:"status"`
 }
 
+// SkippedScript records a collector that was deliberately not run, and why.
+//
+// The three reasons — a permission the login was refused, a server too old for
+// the query, an opt-in flag left off — are not errors and must not set exit 2.
+// A degraded run is a success. But an absent output file is indistinguishable
+// from a collector that never existed unless the omission is written down, so
+// the analysis layer would read "not collected" as "nothing there", which is
+// the same silent failure CoverageBlock exists to prevent.
+type SkippedScript struct {
+	Script string `json:"script"`
+	Reason string `json:"reason"`
+}
+
 type ErrorEntry struct {
 	Script   string `json:"script"`
 	Target   string `json:"target"`
@@ -116,11 +129,12 @@ type Manifest struct {
 	Server    ServerBlock           `json:"server"`
 	Config    map[string]string     `json:"config"`
 	Sources   map[string]SourceInfo `json:"sources"`
-	Preflight []Check               `json:"preflight"`
+	Preflight []CapabilityCheck     `json:"preflight"`
 	Coverage  CoverageBlock         `json:"coverage"`
 	Collected CollectedKinds        `json:"collected"`
 	Targets   TargetBlock           `json:"targets"`
 	Results   []ResultEntry         `json:"results"`
+	Skipped   []SkippedScript       `json:"skipped_scripts"`
 	Warnings  []string              `json:"warnings"`
 	Errors    []ErrorEntry          `json:"errors"`
 }
@@ -312,6 +326,7 @@ func (m *Manifest) Human() string {
 	m.writeCoverage(&b)
 	m.writeTargets(&b)
 	m.writeWhatWasRead(&b)
+	m.writeNotRun(&b)
 	m.writeProblems(&b)
 	m.writeSources(&b)
 
@@ -520,6 +535,20 @@ func (m *Manifest) writeWhatWasRead(b *strings.Builder) {
 			line += fmt.Sprintf(" - %d failed", t.failed)
 		}
 		b.WriteString(line + "\n")
+	}
+}
+
+// writeNotRun lists the collectors that were deliberately skipped. It sits
+// next to the list of what ran because the two are read together: a reader
+// asking why a section is missing from the report gets the answer here rather
+// than concluding the tool is broken.
+func (m *Manifest) writeNotRun(b *strings.Builder) {
+	if len(m.Skipped) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\nQueries not run (%d):\n", len(m.Skipped))
+	for _, s := range m.Skipped {
+		fmt.Fprintf(b, "  - %s\n      %s\n", s.Script, s.Reason)
 	}
 }
 

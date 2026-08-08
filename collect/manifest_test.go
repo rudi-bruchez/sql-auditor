@@ -153,7 +153,7 @@ func TestHumanBytesScales(t *testing.T) {
 // A probe that got no answer is not a refused permission. Saying so would send
 // a DBA hunting for a GRANT that was never the problem.
 func TestCoverageDoesNotReportATransportFailureAsADenial(t *testing.T) {
-	m := &Manifest{Preflight: []Check{
+	m := &Manifest{Preflight: []CapabilityCheck{
 		{Name: "connect", Status: "ok"},
 		{Name: "view_any_definition", Label: "Read server and database metadata (VIEW ANY DEFINITION)",
 			Status: "error", Impact: "instance configuration and database file layout not collected"},
@@ -180,7 +180,7 @@ func TestCoverageDoesNotReportATransportFailureAsADenial(t *testing.T) {
 // vocabulary; _run.json is read by code that matches on it.
 func TestHumanPrintsCapabilityLabelsAndJSONKeepsIdentifiers(t *testing.T) {
 	dir := t.TempDir()
-	m := &Manifest{Preflight: []Check{
+	m := &Manifest{Preflight: []CapabilityCheck{
 		{Name: "view_server_state", Label: "Read performance counters (VIEW SERVER STATE)",
 			Status: "denied", Impact: "wait statistics not collected"},
 	}}
@@ -207,7 +207,7 @@ func TestHumanPrintsCapabilityLabelsAndJSONKeepsIdentifiers(t *testing.T) {
 // the manifest untagged and emitted Go field names.
 func TestRunJSONUsesSnakeCaseKeysForEmbeddedTypes(t *testing.T) {
 	dir := t.TempDir()
-	m := &Manifest{Preflight: []Check{{Name: "connect", Status: "ok"}}}
+	m := &Manifest{Preflight: []CapabilityCheck{{Name: "connect", Status: "ok"}}}
 	m.Targets.Databases = []DatabaseFolder{{Name: "AppProd", Folder: "AppProd"}}
 	m.Targets.Skipped = []SkipReason{{Name: "OldArchive", Reason: "state=OFFLINE"}}
 	if err := m.WriteJSON(dir); err != nil {
@@ -270,7 +270,7 @@ func TestWriteManifestWritesBothFilesInTheRunFolder(t *testing.T) {
 // the preflight array.
 func TestCoverageFlagsSilentlyIncompleteDatabaseList(t *testing.T) {
 	dir := t.TempDir()
-	m := &Manifest{Preflight: []Check{
+	m := &Manifest{Preflight: []CapabilityCheck{
 		{Name: "connect", Status: "ok"},
 		{Name: "view_any_definition", Status: "denied", Impact: "instance configuration and database file layout not collected"},
 		{Name: "view_server_state", Status: "ok"},
@@ -310,7 +310,7 @@ func TestCoverageFlagsSilentlyIncompleteDatabaseList(t *testing.T) {
 // "Databases covered: 0" with no explanation reads as a broken tool. The human
 // text has to say why the list is empty and that emptiness is not a finding.
 func TestHumanExplainsZeroDatabasesUnderDeniedDefinition(t *testing.T) {
-	m := &Manifest{Preflight: []Check{
+	m := &Manifest{Preflight: []CapabilityCheck{
 		{Name: "connect", Status: "ok"},
 		{Name: "view_any_definition", Status: "denied", Impact: "instance configuration and database file layout not collected"},
 	}}
@@ -335,7 +335,7 @@ func TestHumanExplainsZeroDatabasesUnderDeniedDefinition(t *testing.T) {
 }
 
 func TestHumanReportsCompleteCoverageWhenNothingWasDenied(t *testing.T) {
-	m := &Manifest{Preflight: []Check{
+	m := &Manifest{Preflight: []CapabilityCheck{
 		{Name: "connect", Status: "ok"},
 		{Name: "view_any_definition", Status: "ok"},
 		{Name: "view_server_state", Status: "ok"},
@@ -354,7 +354,7 @@ func TestHumanReportsCompleteCoverageWhenNothingWasDenied(t *testing.T) {
 // An unreachable instance is a different failure from a refusal, and the
 // coverage verdict must not launder one into the other.
 func TestCoverageDistinguishesErrorFromDenial(t *testing.T) {
-	m := &Manifest{Preflight: []Check{{Name: "connect", Status: "error", Impact: "nothing can run"}}}
+	m := &Manifest{Preflight: []CapabilityCheck{{Name: "connect", Status: "error", Impact: "nothing can run"}}}
 	m.refreshCoverage()
 	if m.Coverage.Status != "incomplete" {
 		t.Errorf("status = %q, want incomplete", m.Coverage.Status)
