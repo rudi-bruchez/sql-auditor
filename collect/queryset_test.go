@@ -217,3 +217,89 @@ func TestParseScriptReportsFirstDirectiveErrorOnly(t *testing.T) {
 		t.Errorf("lint error = %q, should not report the later @resultsets problem", got[0].LintError)
 	}
 }
+
+func TestParseVersion(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []int
+	}{
+		{"13", []int{13}},
+		{"13.0.5026", []int{13, 0, 5026}},
+		{"11.0.7001.0", []int{11, 0, 7001, 0}},
+		{"", nil},
+		{"not.a.version", nil},
+	}
+	for _, tc := range tests {
+		got := ParseVersion(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("ParseVersion(%q) = %v, want %v", tc.in, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("ParseVersion(%q) = %v, want %v", tc.in, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+func TestVersionAtLeast(t *testing.T) {
+	tests := []struct {
+		name       string
+		have, want string
+		ok         bool
+	}{
+		{"2012 does not satisfy 2016 SP2", "11.0.7001.0", "13.0.5026", false},
+		{"2016 RTM does not satisfy 2016 SP2", "13.0.1601.5", "13.0.5026", false},
+		{"2016 SP2 satisfies itself", "13.0.5026.0", "13.0.5026", true},
+		{"2019 satisfies 2016 SP2", "15.0.4123.1", "13.0.5026", true},
+		{"2014 satisfies a major-only gate of 12", "12.0.6024.0", "12", true},
+		{"2012 does not satisfy a major-only gate of 12", "11.0.7001.0", "12", false},
+		{"an ungated script always runs", "11.0.7001.0", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := VersionAtLeast(ParseVersion(tc.have), ParseVersion(tc.want)); got != tc.ok {
+				t.Errorf("VersionAtLeast(%s, %s) = %v, want %v", tc.have, tc.want, got, tc.ok)
+			}
+		})
+	}
+}
+
+func TestDiscoverParsesMinVersion(t *testing.T) {
+	fsys := fstest.MapFS{
+		"queries/10.system/015.cpu.sql": {Data: []byte(
+			"-- @resultsets: root:object\n-- @min_version: 13.0.5026\nSELECT 1 AS x;")},
+		"queries/10.system/010.a.sql": {Data: []byte(
+			"-- @resultsets: root:object\nSELECT 1 AS x;")},
+	}
+	got, err := Discover(fsys, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if got[0].MinVersion != nil {
+		t.Errorf("ungated script has MinVersion %v, want nil", got[0].MinVersion)
+	}
+	want := []int{13, 0, 5026}
+	if len(got[1].MinVersion) != len(want) {
+		t.Fatalf("MinVersion = %v, want %v", got[1].MinVersion, want)
+	}
+	for i := range want {
+		if got[1].MinVersion[i] != want[i] {
+			t.Fatalf("MinVersion = %v, want %v", got[1].MinVersion, want)
+		}
+	}
+}
+
+func TestDiscoverRejectsBadMinVersion(t *testing.T) {
+	fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(
+		"-- @resultsets: root:object\n-- @min_version: sixteen\nSELECT 1;")}}
+	got, err := Discover(fsys, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if got[0].LintError == "" || !strings.Contains(got[0].LintError, "sixteen") {
+		t.Errorf("lint error = %q, want it to name the bad value", got[0].LintError)
+	}
+}

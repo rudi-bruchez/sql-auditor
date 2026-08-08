@@ -24,7 +24,10 @@ type Script struct {
 	TimeoutSec      int
 	Results         []ResultSpec
 	Permissions     []string
-	LintError       string
+	// MinVersion is the dotted ProductVersion prefix below which this script
+	// must not run. nil means ungated.
+	MinVersion []int
+	LintError  string
 }
 
 var (
@@ -97,6 +100,13 @@ func parseScript(rel, sql string) Script {
 		Base: strings.TrimSuffix(path.Base(rel), ".sql"),
 		SQL:  sql,
 	}
+	// setLint keeps the FIRST problem in document order, so fixing a header
+	// top-down converges instead of uncovering one error at a time.
+	setLint := func(msg string) {
+		if s.LintError == "" {
+			s.LintError = msg
+		}
+	}
 	for _, line := range strings.Split(sql, "\n") {
 		t := strings.TrimSpace(line)
 		if t == "" {
@@ -141,6 +151,13 @@ func parseScript(rel, sql string) Script {
 				s.LintError = err.Error()
 			}
 			s.Results = specs
+		case "min_version":
+			v := ParseVersion(val)
+			if v == nil {
+				setLint(fmt.Sprintf("@min_version: %q is not a dotted version number", val))
+				continue
+			}
+			s.MinVersion = v
 		case "correlated":
 			if s.LintError == "" {
 				s.LintError = "correlated result sets are not supported: a result set must not " +
@@ -152,6 +169,44 @@ func parseScript(rel, sql string) Script {
 		s.LintError = lint(sql, s.Results)
 	}
 	return s
+}
+
+// ParseVersion splits a dotted version into components. It returns nil for
+// anything that is not a dotted run of integers, so a malformed directive is
+// distinguishable from an absent one.
+func ParseVersion(s string) []int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ".")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// VersionAtLeast reports whether have >= want, comparing component by
+// component. A shorter want is a prefix gate: want 12 is satisfied by any
+// 12.x.y. An empty want means ungated.
+func VersionAtLeast(have, want []int) bool {
+	if len(want) == 0 {
+		return true
+	}
+	for i, w := range want {
+		if i >= len(have) {
+			return false // have is shorter and equal so far: 13 vs 13.0.5026
+		}
+		if have[i] != w {
+			return have[i] > w
+		}
+	}
+	return true
 }
 
 // permissionKeys maps what a query author writes to the capability keys the
