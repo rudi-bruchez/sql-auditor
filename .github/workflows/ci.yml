@@ -1,0 +1,112 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Everything that needs no database. Kept separate from the matrix so the
+  # formatting, vet and unit-test verdict is reported once, not twice.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test ./... -count=1
+      # The release workflow cross-compiles for these two targets. Finding out
+      # at tag time that one of them does not build is finding out too late.
+      - name: cross-compile
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/sql-auditor
+          GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/sql-auditor
+      # The embedded corpus has to survive the round trip to disk, because
+      # --queries-dir runs it that way.
+      - name: queries export round trip
+        run: |
+          go run ./cmd/sql-auditor queries export --to "$RUNNER_TEMP/corpus"
+          find "$RUNNER_TEMP/corpus" -name '*.sql' | sort
+          test "$(find "$RUNNER_TEMP/corpus" -name '*.sql' | wc -l)" -eq 14
+
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 2017 is the oldest image Microsoft publishes, so it is the oldest
+        # version that can be tested automatically at all. The supported floor
+        # is 2012 and is verified by hand — see docs/verification-2012.md.
+        mssql: ["2017-latest", "2022-latest"]
+    services:
+      sql:
+        image: mcr.microsoft.com/mssql/server:${{ matrix.mssql }}
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Str0ng!Passw0rd"
+        ports: ["1433:1433"]
+    env:
+      SQL_SERVER: localhost,1433
+      SQL_USER: sa
+      SQL_PASSWORD: "Str0ng!Passw0rd"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # A service container is "started" as soon as the process is up, which is
+      # well before SQL Server accepts logins. Retrying a statement that also
+      # creates the user database collapses the wait and the fixture into one
+      # step: without a user database, the four per-database collectors have
+      # nothing to run against and would silently never be exercised.
+      - name: wait for SQL Server and create a user database
+        run: |
+          for attempt in $(seq 1 40); do
+            if docker run --rm --network host mcr.microsoft.com/mssql-tools \
+                 /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -l 5 \
+                 -Q "IF DB_ID('ci_probe') IS NULL CREATE DATABASE ci_probe;"; then
+              echo "instance is up after $attempt attempt(s)"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "SQL Server did not become reachable" >&2
+          docker ps -a
+          exit 1
+      - name: check
+        run: go run ./cmd/sql-auditor check
+      - name: collect
+        run: go run ./cmd/sql-auditor collect --output-dir "$RUNNER_TEMP/out"
+      # collect exits 0 on a clean run, but an empty run also exits 0 if the
+      # corpus somehow produced nothing. Assert on the artefacts instead: the
+      # four per-database results are the ones a missing fixture would drop.
+      - name: assert the run is complete
+        run: |
+          run_dir=$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)
+          echo "run folder: $run_dir"
+          find "$run_dir" -name '*.json' | sort
+          test -f "$run_dir/_run.json"
+          test "$(find "$RUNNER_TEMP/out" -maxdepth 1 -name '*.zip' | wc -l)" -eq 1
+          for f in 020.properties 021.properties-2014 022.query-store 023.log-vlf; do
+            test -f "$run_dir/20.databases/ci_probe/$f.json"
+          done
+          # 13 of the 14 scripts run; 052.session-text is opt-in and stays off.
+          test "$(find "$run_dir" -name '*.json' ! -name '_run.json' | wc -l)" -eq 13

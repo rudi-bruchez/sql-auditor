@@ -1,0 +1,62 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload the binaries
+  id-token: write # mint the OIDC token Sigstore signs with
+  attestations: write # persist the provenance attestation
+  artifact-metadata: write # create the artifact storage record
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # A tag can be pushed without the branch ever having gone through ci.
+      - run: go vet ./...
+      - run: go test ./... -count=1
+      - name: build
+        run: |
+          mkdir -p dist
+          for target in windows/amd64 linux/amd64; do
+            os=${target%/*}
+            arch=${target#*/}
+            ext=""
+            case "$os" in windows) ext=".exe" ;; esac
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA::8}" \
+              -o "dist/sql-auditor-$os-$arch$ext" ./cmd/sql-auditor
+          done
+          # Glob the binaries by name, not "*": SHA256SUMS must not check itself.
+          (cd dist && sha256sum sql-auditor-* > SHA256SUMS)
+          cat dist/SHA256SUMS
+      # A binary that reports the wrong version is worse than no binary: the
+      # support conversation starts from a lie. The runner is linux/amd64, so
+      # that artefact can be executed here and made to prove its own stamping.
+      - name: verify the version stamp
+        run: |
+          stamped=$(./dist/sql-auditor-linux-amd64 version)
+          echo "$stamped"
+          expected="sql-auditor ${GITHUB_REF_NAME} (${GITHUB_SHA::8})"
+          test "$stamped" = "$expected" || {
+            echo "expected: $expected" >&2
+            exit 1
+          }
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/sql-auditor-*
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
