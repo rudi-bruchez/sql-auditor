@@ -18,16 +18,27 @@ import (
 // Impact is empty when Status is "ok" and otherwise carries the capability's
 // stated consequence, so a caller printing the checks never has to look the
 // consequence up.
-type Check struct{ Name, Status, Impact string }
+//
+// Label is the capability written for someone who has never read this code.
+// MANIFEST.txt is read by a security officer, and "view_any_definition" tells
+// that reader nothing; Name stays in _run.json, where the identifier is what
+// an analysis layer matches on.
+type Check struct {
+	Name   string `json:"name"`
+	Label  string `json:"label,omitempty"`
+	Status string `json:"status"`
+	Impact string `json:"impact,omitempty"`
+}
 
 // Capability is one thing the collector needs to be able to do, plus the
 // query that establishes whether it can and the consequence if it cannot.
 //
 // Name is the same vocabulary NormalisePermission produces for the
 // @permissions directive, so a denied capability can be matched against the
-// scripts that declared it. The two must not drift.
+// scripts that declared it. The two must not drift. Label is the same thing
+// said in English, for the manifest.
 type Capability struct {
-	Name, SQL, Impact string
+	Name, Label, SQL, Impact string
 	// NeedsRows marks a probe whose denial is silent. SQL Server's metadata
 	// visibility rules filter catalog views row by row rather than raising:
 	// a login without VIEW ANY DEFINITION does not get an error from
@@ -57,14 +68,18 @@ type Capability struct {
 // measured returning all 97 rows to a login holding an explicit DENY.
 func Capabilities() []Capability {
 	return []Capability{
-		{Name: "connect", SQL: "SELECT 1",
+		{Name: "connect", Label: "Connect to the instance",
+			SQL:    "SELECT 1",
 			Impact: "nothing can run"},
-		{Name: "view_any_definition", SQL: "SELECT TOP 1 database_id FROM sys.master_files",
+		{Name: "view_any_definition", Label: "Read server and database metadata (VIEW ANY DEFINITION)",
+			SQL:       "SELECT TOP 1 database_id FROM sys.master_files",
 			Impact:    "instance configuration and database file layout not collected",
 			NeedsRows: true},
-		{Name: "view_server_state", SQL: "SELECT TOP 1 wait_type FROM sys.dm_os_wait_stats",
+		{Name: "view_server_state", Label: "Read performance counters (VIEW SERVER STATE)",
+			SQL:    "SELECT TOP 1 wait_type FROM sys.dm_os_wait_stats",
 			Impact: "wait statistics, schedulers, memory and tempdb usage not collected"},
-		{Name: "msdb_read", SQL: "SELECT TOP 1 database_name FROM msdb.dbo.backupset",
+		{Name: "msdb_read", Label: "Read backup history from msdb",
+			SQL:    "SELECT TOP 1 database_name FROM msdb.dbo.backupset",
 			Impact: "backup history not collected — the report must not read this as 'no backups exist'"},
 	}
 }
@@ -86,10 +101,10 @@ func RunPreflight(ctx context.Context, c *sql.Conn, caps []Capability) []Check {
 		// only repeat that verdict, each after a full connect timeout. Report
 		// them without asking.
 		if unreachable {
-			out = append(out, Check{Name: p.Name, Status: "error", Impact: p.Impact})
+			out = append(out, Check{Name: p.Name, Label: p.Label, Status: "error", Impact: p.Impact})
 			continue
 		}
-		check := Check{Name: p.Name, Status: "ok"}
+		check := Check{Name: p.Name, Label: p.Label, Status: "ok"}
 		rows, err := probeCapability(ctx, c, p.SQL)
 		if err == nil && p.NeedsRows && rows == 0 {
 			// The server answered, and the answer was "you may see nothing".
