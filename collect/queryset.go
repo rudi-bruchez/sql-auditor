@@ -137,18 +137,16 @@ func parseScript(rel, sql string) Script {
 				}
 				key, ok := NormalisePermission(p)
 				if !ok {
-					if s.LintError == "" {
-						s.LintError = fmt.Sprintf("@permissions: unknown permission %q; "+
-							"expected one of VIEW SERVER STATE, VIEW ANY DEFINITION, MSDB READ, CONNECT", p)
-					}
+					setLint(fmt.Sprintf("@permissions: unknown permission %q; "+
+						"expected one of VIEW SERVER STATE, VIEW ANY DEFINITION, MSDB READ, CONNECT", p))
 					continue
 				}
 				s.Permissions = append(s.Permissions, key)
 			}
 		case "resultsets":
 			specs, err := parseResultSets(val)
-			if err != nil && s.LintError == "" {
-				s.LintError = err.Error()
+			if err != nil {
+				setLint(err.Error())
 			}
 			s.Results = specs
 		case "min_version":
@@ -159,10 +157,8 @@ func parseScript(rel, sql string) Script {
 			}
 			s.MinVersion = v
 		case "correlated":
-			if s.LintError == "" {
-				s.LintError = "correlated result sets are not supported: a result set must not " +
-					"reference a column of another; split it into its own query"
-			}
+			setLint("correlated result sets are not supported: a result set must not " +
+				"reference a column of another; split it into its own query")
 		}
 	}
 	if s.LintError == "" {

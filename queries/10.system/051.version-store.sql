@@ -19,7 +19,7 @@
 -- unlike sys.dm_tran_version_store.
 --
 -- SERVERPROPERTY returns NULL for a property it does not know, so
--- IsTempdbMetadataMemoryOptimized (SQL Server 2019) is safe to ask for on any
+-- IsTempDbMetadataMemoryOptimized (SQL Server 2019) is safe to ask for on any
 -- build and rides along here rather than earning a gate of its own. On
 -- anything below 2019 it is NULL, which is also the answer: the feature does
 -- not exist there.
@@ -28,7 +28,7 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
-    CONVERT(int, SERVERPROPERTY('IsTempdbMetadataMemoryOptimized'))  AS [tempdb.metadata_memory_optimized],
+    CONVERT(int, SERVERPROPERTY('IsTempDbMetadataMemoryOptimized'))  AS [tempdb.metadata_memory_optimized],
     (SELECT CAST(SUM(vs.reserved_space_kb) / 1024.0 AS DECIMAL(14,1))
        FROM sys.dm_tran_version_store_space_usage AS vs)             AS [tempdb.version_store_total_mb]
 OPTION (RECOMPILE, MAXDOP 1);
