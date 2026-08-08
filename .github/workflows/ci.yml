@@ -3,7 +3,6 @@ name: ci
 on:
   push:
     branches: ["**"]
-    tags-ignore: ["**"]
   pull_request:
 
 permissions:
@@ -91,16 +90,22 @@ jobs:
           echo "SQL Server did not become reachable" >&2
           docker ps -a
           exit 1
+      # --env /dev/null is not decoration. Configuration precedence is
+      # flag > .env > process environment, so a .env file appearing in the
+      # workspace — generated, or committed by accident — would outrank the
+      # credentials set above and point every leg of the matrix at some other
+      # server while the job still went green. Reading an empty file instead
+      # makes that impossible.
       - name: check
-        run: go run ./cmd/sql-auditor check
+        run: go run ./cmd/sql-auditor check --env /dev/null
       - name: collect
-        run: go run ./cmd/sql-auditor collect --output-dir "$RUNNER_TEMP/out"
+        run: go run ./cmd/sql-auditor collect --env /dev/null --output-dir "$RUNNER_TEMP/out"
       # collect exits 0 on a clean run, but an empty run also exits 0 if the
       # corpus somehow produced nothing. Assert on the artefacts instead: the
       # four per-database results are the ones a missing fixture would drop.
       - name: assert the run is complete
         run: |
-          run_dir=$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
           echo "run folder: $run_dir"
           find "$run_dir" -name '*.json' | sort
           test -f "$run_dir/_run.json"
