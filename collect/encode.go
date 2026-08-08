@@ -335,10 +335,16 @@ func trimNumeric(s string) string {
 	return s
 }
 
-// guidString renders a uniqueidentifier canonically. go-mssqldb returns
-// mssql.UniqueIdentifier, which is a [16]byte with its own String method; a
-// raw [16]byte or []byte is handled too so the encoder stays testable without
-// importing the driver.
+// guidString renders a uniqueidentifier canonically. go-mssqldb defines
+// mssql.UniqueIdentifier with its own String method, but a column scanned into
+// an `any` — which is how ReadResultSets scans everything — arrives as a raw
+// 16-byte slice instead, so that path has to be correct on its own.
+//
+// SQL Server sends the first three fields little-endian: the wire bytes for
+// 6F9619FF-8B86-D011-… are FF 19 96 6F 86 8B 11 D0 …. Printing them in wire
+// order yields ff19966f-868b-11d0-…, a different GUID that still looks
+// plausible. Verified against the driver's own UniqueIdentifier.String on a
+// live SQL Server 2022.
 func guidString(v any) (string, bool) {
 	type stringer interface{ String() string }
 	if s, ok := v.(stringer); ok {
@@ -356,7 +362,11 @@ func guidString(v any) (string, bool) {
 	if len(b) != 16 {
 		return "", false
 	}
-	return strings.ToLower(fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])), true
+	return strings.ToLower(fmt.Sprintf("%x-%x-%x-%x-%x",
+		[]byte{b[3], b[2], b[1], b[0]},
+		[]byte{b[5], b[4]},
+		[]byte{b[7], b[6]},
+		b[8:10], b[10:16])), true
 }
 
 func mustMarshal(v any) json.RawMessage {

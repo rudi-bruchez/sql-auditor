@@ -185,8 +185,11 @@ func TestEncodeTypesDrivenBySQLTypeName(t *testing.T) {
 			"123.45", `123.45`},
 		{"money becomes a number", "MONEY",
 			[]byte("10.50"), `10.5`},
+		// Wire bytes as SQL Server actually sends them: the first three fields
+		// are little-endian. Captured from a live server, cross-checked against
+		// go-mssqldb's UniqueIdentifier.String.
 		{"uniqueidentifier becomes a canonical lowercase GUID", "UNIQUEIDENTIFIER",
-			[]byte{0x6F, 0x96, 0x19, 0xFF, 0x8B, 0x86, 0xD0, 0x11, 0xB4, 0x2D,
+			[]byte{0xFF, 0x19, 0x96, 0x6F, 0x86, 0x8B, 0x11, 0xD0, 0xB4, 0x2D,
 				0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF},
 			`"6f9619ff-8b86-d011-b42d-00c04fc964ff"`},
 	}
