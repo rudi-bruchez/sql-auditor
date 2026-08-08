@@ -1,0 +1,500 @@
+package collect
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+type ToolInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+}
+
+type RunInfo struct {
+	StartedUTC  string `json:"started_utc"`
+	FinishedUTC string `json:"finished_utc"`
+	DurationSec int    `json:"duration_sec"`
+	ExitCode    int    `json:"exit_code"`
+}
+
+type ServerBlock struct {
+	Name             string `json:"name"`
+	Version          string `json:"version"`
+	Edition          string `json:"edition"`
+	Auth             string `json:"auth"`
+	UTCOffsetMinutes int    `json:"utc_offset_minutes"`
+}
+
+// SourceInfo records where a corpus came from and what it hashed to, so an
+// audit can state which questions were asked and prove they were the published
+// ones.
+type SourceInfo struct {
+	From   string `json:"from"`
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+}
+
+type TargetBlock struct {
+	Databases []DatabaseFolder `json:"databases"`
+	Skipped   []SkipReason     `json:"skipped"`
+}
+
+type ResultEntry struct {
+	Script     string `json:"script"`
+	Scope      string `json:"scope"`
+	Target     string `json:"target"`
+	Output     string `json:"output"`
+	Bytes      int    `json:"bytes"`
+	DurationMS int    `json:"duration_ms"`
+	Status     string `json:"status"`
+}
+
+type ErrorEntry struct {
+	Script   string `json:"script"`
+	Target   string `json:"target"`
+	Message  string `json:"message"`
+	SQLError int    `json:"sql_error"`
+}
+
+// CoverageBlock is the verdict on whether this archive describes the whole
+// instance. It exists because the interesting failure is silent.
+//
+// A login without VIEW ANY DEFINITION is not refused by SQL Server: metadata
+// visibility filters catalog views row by row, so sys.databases simply returns
+// fewer rows. Measured live, it dropped from 4 rows to 2, and since database
+// selection keeps only database_id > 4, such a login yields zero user
+// databases while every query reports success. Nothing in Results, Errors or
+// Warnings would show it. Without this block, an analysis layer reading an
+// empty Targets.Databases would conclude the instance hosts no databases.
+//
+// Status is one of:
+//
+//	"complete"   every probed capability was available
+//	"incomplete" at least one was denied or unanswered; data is missing
+//	"unknown"    no preflight was recorded, so no claim can be made
+//
+// DatabaseListMayBeIncomplete is the decisive flag and is set only on
+// evidence: the view_any_definition probe did not come back "ok". False means
+// "no reason to doubt the list", never "the list was verified".
+type CoverageBlock struct {
+	Status                      string   `json:"status"`
+	DatabaseListMayBeIncomplete bool     `json:"database_list_may_be_incomplete"`
+	Denied                      []string `json:"denied_capabilities"`
+	Notes                       []string `json:"notes"`
+}
+
+type Manifest struct {
+	Tool      ToolInfo              `json:"tool"`
+	Run       RunInfo               `json:"run"`
+	Server    ServerBlock           `json:"server"`
+	Config    map[string]string     `json:"config"`
+	Sources   map[string]SourceInfo `json:"sources"`
+	Preflight []Check               `json:"preflight"`
+	Coverage  CoverageBlock         `json:"coverage"`
+	Targets   TargetBlock           `json:"targets"`
+	Results   []ResultEntry         `json:"results"`
+	Warnings  []string              `json:"warnings"`
+	Errors    []ErrorEntry          `json:"errors"`
+}
+
+// NewManifest starts a manifest with the tool identity and a start timestamp
+// already recorded, so a run that dies early still produces a document that
+// says when it was attempted and by what.
+func NewManifest(name, version, commit string) *Manifest {
+	return &Manifest{
+		Tool: ToolInfo{Name: name, Version: version, Commit: commit},
+		Run:  RunInfo{StartedUTC: nowUTC()},
+	}
+}
+
+const (
+	manifestJSONName  = "_run.json"
+	manifestHumanName = "MANIFEST.txt"
+)
+
+// WriteJSON writes _run.json into runFolder. Coverage is recomputed first: it
+// is derived from Preflight, and a stale verdict is worse than none.
+func (m *Manifest) WriteJSON(runFolder string) error {
+	m.refreshCoverage()
+	b, err := m.marshalJSON()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(runFolder, manifestJSONName), b, 0o644)
+}
+
+// WriteHuman writes MANIFEST.txt into runFolder.
+func (m *Manifest) WriteHuman(runFolder string) error {
+	return os.WriteFile(filepath.Join(runFolder, manifestHumanName), []byte(m.Human()), 0o644)
+}
+
+// marshalJSON renders the manifest with the configuration redacted. The
+// redaction works on a copy: the same Manifest is written more than once in a
+// run, and a caller's map must not be quietly emptied by the first write.
+func (m *Manifest) marshalJSON() ([]byte, error) {
+	safe := *m
+	safe.Config = redactConfig(m.Config)
+	return json.MarshalIndent(&safe, "", "  ")
+}
+
+// secretKeyHints are the substrings that mark a configuration key whose value
+// must never leave the client's site inside the archive.
+var secretKeyHints = []string{"password", "passwd", "pwd", "secret", "token", "credential", "apikey", "api_key", "connectionstring", "connection_string"}
+
+func redactConfig(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		lower := strings.ToLower(k)
+		redacted := false
+		for _, hint := range secretKeyHints {
+			if strings.Contains(lower, hint) {
+				redacted = true
+				break
+			}
+		}
+		if redacted && v != "" {
+			out[k] = "(redacted)"
+		} else {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// WriteManifestWithFallback honours the rule that a manifest exists for every
+// run. When the run folder is unwritable — which is exactly the fatal path
+// where a manifest matters most — it falls back to a temporary directory and
+// returns where it landed.
+//
+// MANIFEST.txt is written alongside in both cases. A failure to write it is
+// reported on stderr but is not fatal: _run.json carries a superset of the
+// same facts, and refusing the whole write because the prose copy failed would
+// throw away the record of the run.
+func WriteManifestWithFallback(m *Manifest, runFolder string) (string, error) {
+	if err := m.WriteJSON(runFolder); err == nil {
+		if herr := m.WriteHuman(runFolder); herr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", manifestHumanName, herr)
+		}
+		return filepath.Join(runFolder, manifestJSONName), nil
+	}
+	b, err := m.marshalJSON()
+	if err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp("", "sql-auditor-run-*")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, manifestJSONName)
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		return "", err
+	}
+	if herr := m.WriteHuman(dir); herr != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", manifestHumanName, herr)
+	}
+	fmt.Fprintf(os.Stderr, "output directory unwritable; manifest written to %s\n", path)
+	return path, nil
+}
+
+// refreshCoverage derives Coverage from Preflight. It is idempotent and is
+// called before every write, so the two can never disagree.
+func (m *Manifest) refreshCoverage() {
+	c := CoverageBlock{Status: "unknown"}
+	if len(m.Preflight) == 0 {
+		m.Coverage = c
+		return
+	}
+	c.Status = "complete"
+	for _, chk := range m.Preflight {
+		if chk.Status == "ok" {
+			continue
+		}
+		c.Status = "incomplete"
+		c.Denied = append(c.Denied, chk.Name)
+		if chk.Name == "view_any_definition" {
+			c.DatabaseListMayBeIncomplete = true
+			c.Notes = append(c.Notes, "VIEW ANY DEFINITION was not available to this login. SQL Server does not raise on that: catalog views silently return fewer rows, so the list of databases in targets.databases may be short or empty. An empty list means \"not visible to this login\", not \"not present on this server\".")
+		}
+		if chk.Status == "error" {
+			c.Notes = append(c.Notes, fmt.Sprintf("The %s probe got no answer from the server, which is a transport failure rather than a refusal: the collection stopped short of what the login was actually allowed to read.", chk.Name))
+		}
+	}
+	m.Coverage = c
+}
+
+// Human renders MANIFEST.txt: what a DBA shows their security team to get the
+// transfer approved. It has to answer, without the author present, which
+// server this is, when it was read, what was read, and whether any business
+// data is in the archive.
+func (m *Manifest) Human() string {
+	m.refreshCoverage()
+	var b strings.Builder
+
+	b.WriteString("sql-auditor collection\n")
+	b.WriteString("======================\n\n")
+	fmt.Fprintf(&b, "Server       : %s\n", orUnknown(m.Server.Name))
+	fmt.Fprintf(&b, "Version      : %s\n", orUnknown(strings.TrimSpace(m.Server.Version+" "+m.Server.Edition)))
+	// Spelled out rather than left as a trailing Z: the reader of this file is
+	// not necessarily someone who reads RFC 3339 for a living.
+	collected := orUnknown(m.Run.StartedUTC)
+	if m.Run.StartedUTC != "" {
+		collected += " (UTC)"
+	}
+	fmt.Fprintf(&b, "Collected    : %s\n", collected)
+	if m.Run.DurationSec > 0 {
+		fmt.Fprintf(&b, "Duration     : %d s\n", m.Run.DurationSec)
+	}
+	if m.Server.Auth != "" {
+		fmt.Fprintf(&b, "Authenticated: %s\n", m.Server.Auth)
+	}
+	tool := strings.TrimSpace(m.Tool.Name + " " + m.Tool.Version)
+	if m.Tool.Commit != "" {
+		tool = strings.TrimSpace(tool + " (" + m.Tool.Commit + ")")
+	}
+	fmt.Fprintf(&b, "Tool         : %s\n", orUnknown(tool))
+
+	m.writeDataNature(&b)
+	m.writeCoverage(&b)
+	m.writeTargets(&b)
+	m.writeWhatWasRead(&b)
+	m.writeProblems(&b)
+	m.writeSources(&b)
+
+	b.WriteString("\nThe machine-readable form of everything above, including the full list of\n")
+	b.WriteString("output files, is in _run.json next to this file.\n")
+	return b.String()
+}
+
+func (m *Manifest) writeDataNature(b *strings.Builder) {
+	b.WriteString(`
+What this archive contains
+--------------------------
+Catalog metadata and performance counters only: server configuration, database
+options and file layout, wait statistics, index, job and backup metadata.
+
+There is no business data in it: no table contents, no rows from application
+tables, no personal data, no credentials. The collector issues read-only
+SELECT statements against system catalog views and dynamic management views;
+it does not read user tables and it does not write to the instance.
+
+The archive does identify this server. Its name, version, database names,
+object names and file paths appear in the collected files. That is metadata
+about the estate, not data held in it, so route the archive according to your
+policy for infrastructure documentation.
+
+Every query the collector runs is published at
+github.com/rudi-bruchez/sql-auditor, and the exact corpus used for this run can
+be listed with "sql-auditor queries export".
+`)
+}
+
+func (m *Manifest) writeCoverage(b *strings.Builder) {
+	b.WriteString("\nCoverage\n--------\n")
+	switch m.Coverage.Status {
+	case "complete":
+		b.WriteString("COMPLETE - every permission the collector checks for was available to the\n")
+		b.WriteString("login used for this run. Nothing below was omitted for want of a right.\n")
+	case "unknown":
+		b.WriteString("UNKNOWN - no permission check was recorded for this run, so this document\n")
+		b.WriteString("cannot state whether the collector read everything it asked for. Treat the\n")
+		b.WriteString("lists below as what was collected, not as what exists.\n")
+	default:
+		b.WriteString("INCOMPLETE - the login used for this run was refused, or got no answer for,\n")
+		b.WriteString("some of what the collector needs. Parts of this instance were not read:\n\n")
+		for _, chk := range m.Preflight {
+			if chk.Status == "ok" {
+				continue
+			}
+			state := "denied"
+			if chk.Status == "error" {
+				state = "no answer - the instance was unreachable at that point"
+			}
+			fmt.Fprintf(b, "  - %s (%s)\n", chk.Name, state)
+			if chk.Impact != "" {
+				fmt.Fprintf(b, "      consequence: %s\n", chk.Impact)
+			}
+		}
+	}
+	if m.Coverage.DatabaseListMayBeIncomplete {
+		b.WriteString(`
+Why the database list below may be short or empty
+-------------------------------------------------
+Missing VIEW ANY DEFINITION does not produce an error in SQL Server. Metadata
+visibility filters catalog views row by row, so a query on sys.databases still
+succeeds and simply returns fewer rows: only the databases this login owns or
+is mapped to. Measured on a live instance, that turned 4 rows into 2, and
+because system databases are excluded from collection, the login saw no user
+databases at all while every query reported success.
+
+So read an empty or short list below as "not visible to this login", never as
+"not present on this server". What this instance actually hosts cannot be
+determined from this archive. Re-run with VIEW ANY DEFINITION granted at the
+server level to get a complete picture.
+`)
+	}
+}
+
+func (m *Manifest) writeTargets(b *strings.Builder) {
+	fmt.Fprintf(b, "\nDatabases covered (%d):\n", len(m.Targets.Databases))
+	switch {
+	case len(m.Targets.Databases) > 0:
+		for _, d := range m.Targets.Databases {
+			fmt.Fprintf(b, "  - %s\n", d.Name)
+		}
+	case m.Coverage.DatabaseListMayBeIncomplete:
+		b.WriteString("  (none were visible to this login - see the section above)\n")
+	default:
+		b.WriteString("  (none matched the selection for this run)\n")
+	}
+	if len(m.Targets.Skipped) > 0 {
+		fmt.Fprintf(b, "\nDatabases skipped (%d):\n", len(m.Targets.Skipped))
+		for _, s := range m.Targets.Skipped {
+			fmt.Fprintf(b, "  - %s (%s)\n", s.Name, s.Reason)
+		}
+	}
+}
+
+// writeWhatWasRead lists each query once with the number of times it ran,
+// rather than one line per database. A per-database corpus over twenty
+// databases would otherwise bury the document in hundreds of repeated lines
+// and nobody would read to the end.
+func (m *Manifest) writeWhatWasRead(b *strings.Builder) {
+	type tally struct {
+		scope  string
+		runs   int
+		failed int
+	}
+	byScript := map[string]*tally{}
+	var order []string
+	for _, r := range m.Results {
+		t, ok := byScript[r.Script]
+		if !ok {
+			t = &tally{scope: r.Scope}
+			byScript[r.Script] = t
+			order = append(order, r.Script)
+		}
+		t.runs++
+		if r.Status != "" && r.Status != "ok" {
+			t.failed++
+		}
+	}
+	sort.Strings(order)
+	fmt.Fprintf(b, "\nQueries run (%d distinct, %d executions):\n", len(order), len(m.Results))
+	if len(order) == 0 {
+		b.WriteString("  (none)\n")
+		return
+	}
+	for _, name := range order {
+		t := byScript[name]
+		line := "  - " + name
+		if t.scope != "" {
+			line += " [" + t.scope + "]"
+		}
+		if t.runs > 1 {
+			line += fmt.Sprintf(" x%d", t.runs)
+		}
+		if t.failed > 0 {
+			line += fmt.Sprintf(" - %d failed", t.failed)
+		}
+		b.WriteString(line + "\n")
+	}
+}
+
+func (m *Manifest) writeProblems(b *strings.Builder) {
+	if len(m.Errors) > 0 {
+		fmt.Fprintf(b, "\nErrors (%d):\n", len(m.Errors))
+		for _, e := range m.Errors {
+			target := e.Target
+			if target == "" {
+				target = "instance"
+			}
+			fmt.Fprintf(b, "  - %s on %s: %s\n", e.Script, target, e.Message)
+		}
+	}
+	if len(m.Warnings) > 0 {
+		fmt.Fprintf(b, "\nWarnings (%d):\n", len(m.Warnings))
+		for _, w := range m.Warnings {
+			fmt.Fprintf(b, "  - %s\n", w)
+		}
+	}
+}
+
+func (m *Manifest) writeSources(b *strings.Builder) {
+	if len(m.Sources) == 0 {
+		return
+	}
+	names := make([]string, 0, len(m.Sources))
+	for n := range m.Sources {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	b.WriteString("\nQuery corpus\n------------\n")
+	for _, n := range names {
+		s := m.Sources[n]
+		fmt.Fprintf(b, "  %s: from=%s path=%s\n    sha256=%s\n", n, orUnknown(s.From), orUnknown(s.Path), orUnknown(s.SHA256))
+	}
+}
+
+func orUnknown(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "(not recorded)"
+	}
+	return s
+}
+
+// CorpusSHA256 hashes the corpus so an audit can state which questions were
+// asked, and whether they came from the binary or from --queries-dir.
+//
+// Paths are made relative to root before hashing. The embedded corpus is
+// reached as "queries/..." and an external one through os.DirFS as "...", and
+// the hash is worthless for comparing the two if the root it was reached
+// through changes the result.
+//
+// Each entry contributes its path and its byte length before its content, so
+// a rename changes the hash and no two different corpora can be framed into
+// the same byte stream.
+func CorpusSHA256(fsys fs.FS, root string) (string, error) {
+	var paths []string
+	err := fs.WalkDir(fsys, root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		paths = append(paths, p)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(paths)
+	h := sha256.New()
+	for _, p := range paths {
+		b, err := fs.ReadFile(fsys, p)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(h, "%s %d\n", relativeTo(root, p), len(b))
+		h.Write(b)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func relativeTo(root, p string) string {
+	if root == "" || root == "." {
+		return p
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(p, root), "/")
+}
+
+func nowUTC() string { return time.Now().UTC().Format(time.RFC3339) }
