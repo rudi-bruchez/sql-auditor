@@ -24,14 +24,14 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
-    COUNT(*)                                                        AS [log.vlf_count],
-    SUM(CASE WHEN li.vlf_active = 1 THEN 1 ELSE 0 END)              AS [log.vlf_active_count],
-    SUM(CASE WHEN li.vlf_active = 0 THEN 1 ELSE 0 END)              AS [log.vlf_inactive_count],
-    CAST(MIN(li.vlf_size_mb) AS DECIMAL(14,2))                      AS [log.vlf_min_size_mb],
-    CAST(AVG(li.vlf_size_mb) AS DECIMAL(14,2))                      AS [log.vlf_avg_size_mb],
-    CAST(MAX(li.vlf_size_mb) AS DECIMAL(14,2))                      AS [log.vlf_max_size_mb],
-    SUM(CASE WHEN li.vlf_size_mb < 1 THEN 1 ELSE 0 END)             AS [log.vlf_under_1mb_count],
-    COUNT(DISTINCT li.file_id)                                      AS [log.file_count]
+    COUNT(*)                                                        AS [space.vlf_count],
+    SUM(CASE WHEN li.vlf_active = 1 THEN 1 ELSE 0 END)              AS [space.vlf_active_count],
+    SUM(CASE WHEN li.vlf_active = 0 THEN 1 ELSE 0 END)              AS [space.vlf_inactive_count],
+    CAST(MIN(li.vlf_size_mb) AS DECIMAL(14,2))                      AS [space.vlf_min_size_mb],
+    CAST(AVG(li.vlf_size_mb) AS DECIMAL(14,2))                      AS [space.vlf_avg_size_mb],
+    CAST(MAX(li.vlf_size_mb) AS DECIMAL(14,2))                      AS [space.vlf_max_size_mb],
+    SUM(CASE WHEN li.vlf_size_mb < 1 THEN 1 ELSE 0 END)             AS [space.vlf_under_1mb_count],
+    COUNT(DISTINCT li.file_id)                                      AS [space.log_file_count]
 FROM sys.dm_db_log_info(NULL) AS li
 OPTION (RECOMPILE, MAXDOP 1);
 
