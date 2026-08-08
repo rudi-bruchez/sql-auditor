@@ -33,8 +33,13 @@ SELECT
     /* ───────── system / topology ───────── */
     si.cpu_count                                                    AS [system.logical_cpus],
     si.scheduler_count                                              AS [system.active_schedulers],
+    -- node_state_desc is a composite string, not an enum: one state
+    -- (ONLINE / OFFLINE / IDLE / IDLE_READY) followed by zero or more
+    -- combinable flags (DAC, THREAD_RESOURCES_LOW, HOT ADDED). Matching
+    -- 'ONLINE DAC' exactly would miss 'IDLE DAC' and
+    -- 'ONLINE DAC THREAD_RESOURCES_LOW', silently counting one node too many.
     (SELECT COUNT(*) FROM sys.dm_os_nodes
-      WHERE node_state_desc <> 'ONLINE DAC')                        AS [system.numa_nodes],
+      WHERE node_state_desc NOT LIKE '%DAC%')                       AS [system.numa_nodes],
     si.hyperthread_ratio                                            AS [system.hyperthread_ratio],
     si.affinity_type_desc                                           AS [system.affinity_type],
     si.virtual_machine_type_desc                                    AS [system.machine_type],
