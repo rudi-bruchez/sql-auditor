@@ -43,45 +43,92 @@ type Options struct {
 // watched finish.
 func prepareRunFolder(path string, keep bool) error {
 	if keep {
+		// --keep must never land on an occupied name. runFolderFor already
+		// looks for a free one, but if it ever hands back a taken path the
+		// two runs would merge into one folder: this run's manifest beside
+		// the previous run's result files, describing an archive it does not
+		// match. A run collected under --include-session-text merging into a
+		// run collected without it puts session text inside an archive whose
+		// own MANIFEST.txt says there is none. Refuse loudly instead.
+		if taken, what := runNameTaken(path); taken {
+			return fmt.Errorf("--keep: %s already exists; this run would be written into "+
+				"the same place as an earlier one and the two would be indistinguishable", what)
+		}
 		return os.MkdirAll(path, 0o755)
 	}
-	zip := path + ".zip"
-	_, dirErr := os.Stat(path)
-	_, zipErr := os.Stat(zip)
-	if dirErr == nil || zipErr == nil {
-		var existing []string
-		if dirErr == nil {
-			existing = append(existing, path)
-		}
-		if zipErr == nil {
-			existing = append(existing, zip)
-		}
-		fmt.Fprintf(os.Stderr, "replacing the previous run of the same day: %s\n"+
-			"pass --keep to write this run alongside it instead\n",
-			strings.Join(existing, " and "))
+	if warning := replacingRunWarning(path); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
 	}
 	if err := os.RemoveAll(path); err != nil {
 		return err
 	}
-	if err := os.Remove(zip); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(path + ".zip"); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return os.MkdirAll(path, 0o755)
+}
+
+// runNameTaken reports whether anything from an earlier run already occupies
+// this name. The archive counts: it sits beside the folder rather than inside
+// it, so a folder that was moved away while its .zip stayed still leaves a
+// name that a second run would appear to have produced.
+func runNameTaken(path string) (bool, string) {
+	_, dirErr := os.Stat(path)
+	_, zipErr := os.Stat(path + ".zip")
+	switch {
+	case dirErr == nil && zipErr == nil:
+		return true, path + " and " + path + ".zip"
+	case dirErr == nil:
+		return true, path
+	case zipErr == nil:
+		return true, path + ".zip"
+	}
+	return false, ""
+}
+
+// replacingRunWarning is the notice printed before a same-day rerun destroys
+// its predecessor, or "" when there is nothing to destroy. It names the
+// archive as well as the folder: the .zip is what gets mailed onward, it is
+// named for the same server and day, and an operator told only about the
+// folder has no reason to expect it gone.
+func replacingRunWarning(path string) string {
+	taken, what := runNameTaken(path)
+	if !taken {
+		return ""
+	}
+	return "replacing the previous run of the same day: " + what +
+		"\npass --keep to write this run alongside it instead"
 }
 
 // runFolderFor applies the collision policy: a same-day rerun replaces the
 // previous one, unless --keep, in which case this run is suffixed with the
 // time and both survive. The archive follows the folder, so there is one rule
 // to explain rather than two.
+//
+// The search continues past the time suffix. Three --keep runs inside one
+// minute all produce the same HHMM, and a version that suffixed once returned
+// the same occupied name to each of them — the second and third runs then
+// wrote their results into the first run's folder. Nothing failed: each run
+// left its own manifest, describing only its own queries, next to the union of
+// everybody's output files. A run collected without --include-session-text
+// ended up shipping a zip containing session text under a MANIFEST.txt that
+// denied it.
 func runFolderFor(outputDir, server string, now time.Time, keep bool) string {
 	base := filepath.Join(outputDir, RunFolderName(server, now))
 	if !keep {
 		return base
 	}
-	if _, err := os.Stat(base); os.IsNotExist(err) {
+	if taken, _ := runNameTaken(base); !taken {
 		return base
 	}
-	return base + "-" + now.Format("1504")
+	withTime := base + "-" + now.Format("1504")
+	candidate := withTime
+	for i := 2; ; i++ {
+		if taken, _ := runNameTaken(candidate); !taken {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d", withTime, i)
+	}
 }
 
 // outputWritable reports whether the process can actually create files in dir.
@@ -92,17 +139,38 @@ func runFolderFor(outputDir, server string, now time.Time, keep bool) string {
 // run only discovered it after connecting, querying and having nowhere to put
 // the answers.
 func outputWritable(dir string) bool {
+	_, err := writeProbe(dir)
+	return err == nil
+}
+
+// writeProbe does the work and returns the path it used, so a test can assert
+// the probe was written into the directory under test. That is not a detail: a
+// probe created in os.TempDir() reports on the temp directory, always succeeds
+// on a normal machine, and passes every assertion about the return value while
+// testing nothing about the output directory at all.
+func writeProbe(dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return false
+		return "", err
 	}
 	f, err := os.CreateTemp(dir, ".sql-auditor-write-probe-*")
 	if err != nil {
-		return false
+		return "", err
 	}
 	name := f.Name()
 	f.Close()
-	os.Remove(name)
-	return true
+	// Removed immediately: the run folder is archived, and a stray probe file
+	// in the output directory is one more thing for a reader to explain.
+	return name, os.Remove(name)
+}
+
+// deadline bounds one server round trip. SQL_CONNECT_TIMEOUT_SEC covers
+// dialling and nothing after it, so without this every statement outside
+// runUnit's own query ran on a bare context: a USE against a database in
+// single-user mode, a preflight probe behind a lock, or a ping down a
+// half-open socket would block collect indefinitely with no exit but Ctrl-C.
+// The whole point of this tool is that it finishes and leaves a manifest.
+func deadline(ctx context.Context, cfg *Config) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, cfg.QueryTimeout)
 }
 
 func ExportQueries(corpus fs.FS, root, dest string) error {
@@ -175,6 +243,15 @@ func skipReason(s Script, denied map[string]bool, serverVersion []int, enabled m
 	return "", false
 }
 
+func scriptByPath(scripts []Script, path string) Script {
+	for _, s := range scripts {
+		if s.Path == path {
+			return s
+		}
+	}
+	return Script{}
+}
+
 func joinVersion(v []int) string {
 	parts := make([]string, len(v))
 	for i, n := range v {
@@ -202,13 +279,37 @@ func planScripts(scripts []Script, denied map[string]bool, serverVersion []int, 
 // from the plan rather than from the flag is the point — a corpus without such
 // a collector must not disclose one because the option was passed, and a
 // collector that ran must be disclosed however it came to run.
-func collectsSessionText(plan []plannedScript) bool {
+//
+// It returns the scripts responsible, not just a boolean, so the caller can
+// name an ungated one in a warning.
+func collectsSessionText(plan []plannedScript) []string {
+	var by []string
 	for _, p := range plan {
-		if p.Skip == "" && p.Script.LintError == "" && p.Script.RequiresFlag == FlagIncludeSessionText {
-			return true
+		if p.Skip != "" || p.Script.LintError != "" {
+			continue
+		}
+		if p.Script.RequiresFlag == FlagIncludeSessionText || readsSessionText(p.Script) {
+			by = append(by, p.Script.Path)
 		}
 	}
-	return false
+	return by
+}
+
+// readsSessionText looks for the DMF that turns a plan handle into the
+// verbatim SQL of a live batch.
+//
+// The directive alone is not enough. --queries-dir accepts a corpus this
+// project has never seen, and a file there reading sys.dm_exec_sql_text
+// without declaring @requires_flag would put application literals in the
+// archive under a manifest saying session_text: false — the exact defect the
+// gate exists to prevent, reintroduced by the one path that bypasses the
+// embedded corpus. So the claim is made from what the SQL reads, and the
+// directive only decides whether it runs.
+//
+// Comments are stripped first: 050.tempdb.sql explains in prose why it no
+// longer reads this, and prose must not trip the disclosure.
+func readsSessionText(s Script) bool {
+	return strings.Contains(strings.ToLower(StripSQLComments(s.SQL)), "dm_exec_sql_text")
 }
 
 // Check reports what a collection would do without doing it: which queries
@@ -259,7 +360,7 @@ func Check(ctx context.Context, o Options) (int, error) {
 	defer conn.Close()
 
 	fmt.Println("\nPermissions:")
-	checks := RunPreflight(ctx, conn, Capabilities())
+	checks := runPreflightWithDeadline(ctx, conn, o.Config)
 	for _, c := range checks {
 		if c.Status == "ok" {
 			fmt.Printf("  ok      %s\n", c.Name)
@@ -268,7 +369,7 @@ func Check(ctx context.Context, o Options) (int, error) {
 		fmt.Printf("  %-7s %s — %s\n", c.Status, c.Name, c.Impact)
 	}
 
-	si, err := Probe(ctx, conn)
+	si, err := probeWithDeadline(ctx, conn, o.Config)
 	if err == nil {
 		fmt.Printf("\nServer   : %s  %s  %s\n", si.Name, si.Version, si.Edition)
 	}
@@ -276,7 +377,7 @@ func Check(ctx context.Context, o Options) (int, error) {
 	// The database list is the blast radius. It comes last because it is the
 	// part a reader scrolls back to, and it is printed even when it is empty —
 	// an empty list is itself the finding when VIEW ANY DEFINITION is missing.
-	cands, cerr := CandidateDatabases(ctx, conn)
+	cands, cerr := candidatesWithDeadline(ctx, conn, o.Config)
 	if cerr != nil {
 		fmt.Fprintf(os.Stderr, "could not list databases: %v\n", cerr)
 	} else {
@@ -300,6 +401,31 @@ func Check(ctx context.Context, o Options) (int, error) {
 		}
 	}
 	return PreflightExitCode(checks, lintFailures, writable), nil
+}
+
+// The three read-only calls the pipeline makes outside runUnit, each bounded.
+// They are wrappers rather than inline WithTimeout blocks because both Run and
+// Check make all three, and a deadline missing from one copy is invisible
+// until an instance hangs.
+func runPreflightWithDeadline(ctx context.Context, c *sql.Conn, cfg *Config) []CapabilityCheck {
+	// One budget for the four probes together: each is a TOP 1 read, so an
+	// instance that cannot answer all four inside a single query timeout is
+	// exactly the unreachable instance RunPreflight reports as "error".
+	dctx, cancel := deadline(ctx, cfg)
+	defer cancel()
+	return RunPreflight(dctx, c, Capabilities())
+}
+
+func probeWithDeadline(ctx context.Context, c *sql.Conn, cfg *Config) (ServerInfo, error) {
+	dctx, cancel := deadline(ctx, cfg)
+	defer cancel()
+	return Probe(dctx, c)
+}
+
+func candidatesWithDeadline(ctx context.Context, c *sql.Conn, cfg *Config) ([]DatabaseInfo, error) {
+	dctx, cancel := deadline(ctx, cfg)
+	defer cancel()
+	return CandidateDatabases(dctx, c)
 }
 
 // scriptNote annotates a discovered script with the conditions attached to it,
@@ -401,7 +527,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 
 	// Populated before anything can return, so Coverage is never "unknown"
 	// while the manifest goes on to make claims about the database list.
-	m.Preflight = RunPreflight(ctx, conn, Capabilities())
+	m.Preflight = runPreflightWithDeadline(ctx, conn, o.Config)
 	if PreflightExitCode(m.Preflight, 0, true) == 1 {
 		m.Errors = append(m.Errors, ErrorEntry{
 			Message: "the instance did not answer the preflight; nothing was collected"})
@@ -411,7 +537,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// connect is not a per-script gate. Reaching here means it answered.
 	delete(denied, "connect")
 
-	si, err := Probe(ctx, conn)
+	si, err := probeWithDeadline(ctx, conn, o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finish("", 1)
@@ -419,7 +545,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	m.Server = ServerBlock{Name: si.Name, Version: si.Version, Edition: si.Edition,
 		UTCOffsetMinutes: si.UTCOffsetMinutes, Auth: authLabel(o.Config)}
 
-	cands, err := CandidateDatabases(ctx, conn)
+	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finish("", 1)
@@ -436,7 +562,22 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// The disclosure paragraph and the queries that run come from this one
 	// decision. Split them and the manifest eventually describes a different
 	// archive from the one beside it.
-	m.Collected.SessionText = collectsSessionText(plan)
+	sessionTextBy := collectsSessionText(plan)
+	m.Collected.SessionText = len(sessionTextBy) > 0
+	for _, path := range sessionTextBy {
+		if scriptByPath(scripts, path).RequiresFlag == FlagIncludeSessionText {
+			continue
+		}
+		// An ungated collector cannot come from the embedded corpus — a test
+		// forbids it — so this is a --queries-dir corpus. The archive is
+		// disclosed correctly either way; the warning is so the operator
+		// learns their corpus is collecting more than the flag suggests.
+		m.Warnings = append(m.Warnings, fmt.Sprintf(
+			"%s reads sys.dm_exec_sql_text without declaring @requires_flag: %s. "+
+				"This archive contains session statement text and says so, but the "+
+				"query should carry the gate so the default run does not collect it.",
+			path, FlagIncludeSessionText))
+	}
 
 	runFolder := runFolderFor(o.Config.OutputDir, si.Name, o.Now, o.Keep)
 	if err := prepareRunFolder(runFolder, o.Keep); err != nil {
@@ -472,7 +613,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 			// One reconnect attempt on a dead connection. The replacement is
 			// reset before the next unit uses it — the PowerShell version
 			// skipped that step and quietly broke its own invariant.
-			if !connAlive(ctx, conn) {
+			if !connAlive(ctx, conn, o.Config) {
 				fmt.Fprintln(os.Stderr, "connection lost; attempting one reconnect")
 				conn.Close()
 				fresh, cerr := db.Conn(ctx)
@@ -481,7 +622,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 					return finish(runFolder, 1)
 				}
 				conn = fresh
-				if rerr := ResetSession(ctx, conn, o.Config.Database); rerr != nil {
+				if rerr := resetWithDeadline(ctx, conn, o.Config); rerr != nil {
 					m.Errors = append(m.Errors, ErrorEntry{Message: "session reset after reconnect failed: " + rerr.Error()})
 					return finish(runFolder, 1)
 				}
@@ -508,11 +649,17 @@ func Run(ctx context.Context, o Options) (int, error) {
 func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	runFolder string, s Script, u DatabaseFolder) error {
 
-	if err := ResetSession(ctx, conn, o.Config.Database); err != nil {
+	if err := resetWithDeadline(ctx, conn, o.Config); err != nil {
 		return err
 	}
 	if u.Name != "" {
-		if _, err := conn.ExecContext(ctx, "USE "+quoteName(u.Name)+";"); err != nil {
+		// USE is not free: it takes a lock on the target database and blocks
+		// behind a session holding it in single-user or restoring mode. On a
+		// bare context that is a collect that never returns.
+		uctx, ucancel := deadline(ctx, o.Config)
+		_, err := conn.ExecContext(uctx, "USE "+quoteName(u.Name)+";")
+		ucancel()
+		if err != nil {
 			return err
 		}
 	}
@@ -566,10 +713,22 @@ func authLabel(c *Config) string {
 	return "windows"
 }
 
+func resetWithDeadline(ctx context.Context, c *sql.Conn, cfg *Config) error {
+	dctx, cancel := deadline(ctx, cfg)
+	defer cancel()
+	return ResetSession(dctx, c, cfg.Database)
+}
+
 // connAlive distinguishes a dead connection from a query that merely failed.
 // A missing permission or a bad column must not trigger a reconnect.
-func connAlive(ctx context.Context, c *sql.Conn) bool {
-	return c.PingContext(ctx) == nil
+//
+// The ping is bounded like everything else. A half-open socket answers
+// neither way, and an unbounded liveness check is the one call that can hang
+// precisely when the connection has already failed.
+func connAlive(ctx context.Context, c *sql.Conn, cfg *Config) bool {
+	dctx, cancel := deadline(ctx, cfg)
+	defer cancel()
+	return c.PingContext(dctx) == nil
 }
 
 // sqlErrorNumber extracts the SQL Server error number so the manifest records

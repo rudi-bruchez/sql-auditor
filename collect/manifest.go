@@ -473,15 +473,27 @@ func (m *Manifest) checkStatus(name string) string {
 }
 
 func (m *Manifest) writeTargets(b *strings.Builder) {
-	fmt.Fprintf(b, "\nDatabases covered (%d):\n", len(m.Targets.Databases))
+	// Coverage UNKNOWN means the run never got far enough to probe anything,
+	// so it never listed the databases either. "(none matched the selection
+	// for this run)" would be a statement about an instance that was never
+	// contacted — a run against a dead port printed exactly that. An empty
+	// list is only a finding once there is a connection behind it.
 	switch {
+	case m.Coverage.Status == "unknown" && len(m.Targets.Databases) == 0:
+		b.WriteString("\nDatabases covered\n-----------------\n")
+		b.WriteString("No database list was collected. This run recorded no permission check,\n")
+		b.WriteString("so nothing here describes what this instance holds or does not hold.\n")
+		b.WriteString("See the Coverage section above.\n")
 	case len(m.Targets.Databases) > 0:
+		fmt.Fprintf(b, "\nDatabases covered (%d):\n", len(m.Targets.Databases))
 		for _, d := range m.Targets.Databases {
 			fmt.Fprintf(b, "  - %s\n", d.Name)
 		}
 	case m.Coverage.DatabaseListMayBeIncomplete:
+		b.WriteString("\nDatabases covered (0):\n")
 		b.WriteString("  (none were visible to this login - see the section above)\n")
 	default:
+		b.WriteString("\nDatabases covered (0):\n")
 		b.WriteString("  (none matched the selection for this run)\n")
 	}
 	if len(m.Targets.Skipped) > 0 {
