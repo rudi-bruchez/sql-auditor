@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-type DatabaseFolder struct{ Name, Folder string }
+type DatabaseFolder struct {
+	Name   string `json:"name"`
+	Folder string `json:"folder"`
+}
 
 // reservedNames are Windows device names. They are reserved as the stem too,
 // so "CON.reports" is just as illegal as "CON".

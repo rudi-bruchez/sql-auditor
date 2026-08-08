@@ -23,7 +23,10 @@ type DatabaseInfo struct {
 	HasAccess   bool
 }
 
-type SkipReason struct{ Name, Reason string }
+type SkipReason struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
 
 type Selection struct {
 	Included []string

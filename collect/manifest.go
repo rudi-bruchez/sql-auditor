@@ -92,6 +92,24 @@ type CoverageBlock struct {
 	Notes                       []string `json:"notes"`
 }
 
+// CollectedKinds records categories of content that are not always present and
+// that change what the archive discloses. The manifest's disclosure paragraph
+// is written from this, not from a constant: MANIFEST.txt is the document a
+// DBA shows their security team, so a claim in it that does not match what the
+// run actually collected is the worst defect this file can have.
+//
+// The zero value is the narrow, safe wording. A collector that starts
+// gathering something more revealing has to say so here to be honest, and
+// forgetting to set the flag cannot silently widen an existing claim.
+type CollectedKinds struct {
+	// SessionText marks that statement text captured from running sessions is
+	// in the archive — sys.dm_exec_sql_text and the session's login, host and
+	// program names. That text is the verbatim SQL of live batches and can
+	// carry literals copied out of application tables, so it is the one thing
+	// the collector gathers that is not purely metadata.
+	SessionText bool `json:"session_text"`
+}
+
 type Manifest struct {
 	Tool      ToolInfo              `json:"tool"`
 	Run       RunInfo               `json:"run"`
@@ -100,6 +118,7 @@ type Manifest struct {
 	Sources   map[string]SourceInfo `json:"sources"`
 	Preflight []Check               `json:"preflight"`
 	Coverage  CoverageBlock         `json:"coverage"`
+	Collected CollectedKinds        `json:"collected"`
 	Targets   TargetBlock           `json:"targets"`
 	Results   []ResultEntry         `json:"results"`
 	Warnings  []string              `json:"warnings"`
@@ -195,17 +214,27 @@ func WriteManifestWithFallback(m *Manifest, runFolder string) (string, error) {
 	}
 	dir, err := os.MkdirTemp("", "sql-auditor-run-*")
 	if err != nil {
-		return "", err
+		return "", lastResort(b, err)
 	}
 	path := filepath.Join(dir, manifestJSONName)
 	if err := os.WriteFile(path, b, 0o644); err != nil {
-		return "", err
+		return "", lastResort(b, err)
 	}
 	if herr := m.WriteHuman(dir); herr != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", manifestHumanName, herr)
 	}
 	fmt.Fprintf(os.Stderr, "output directory unwritable; manifest written to %s\n", path)
 	return path, nil
+}
+
+// lastResort prints the manifest to stderr when no filesystem the process can
+// reach will take it. Both the run folder and the temp directory being
+// unwritable is a strange machine, but the point of the fallback chain is that
+// a run always leaves a record, and a record on the operator's terminal can
+// still be copied out. Returning the error alone would leave nothing anywhere.
+func lastResort(manifestJSON []byte, cause error) error {
+	fmt.Fprintf(os.Stderr, "cannot write the manifest anywhere (%v); it follows on stderr:\n%s\n", cause, manifestJSON)
+	return cause
 }
 
 // refreshCoverage derives Coverage from Preflight. It is idempotent and is
@@ -224,8 +253,16 @@ func (m *Manifest) refreshCoverage() {
 		c.Status = "incomplete"
 		c.Denied = append(c.Denied, chk.Name)
 		if chk.Name == "view_any_definition" {
+			// The list is untrustworthy either way, but the reason differs and
+			// the manifest must not report a dropped connection as a refused
+			// permission: that sends a DBA hunting for a GRANT that was never
+			// the problem.
 			c.DatabaseListMayBeIncomplete = true
-			c.Notes = append(c.Notes, "VIEW ANY DEFINITION was not available to this login. SQL Server does not raise on that: catalog views silently return fewer rows, so the list of databases in targets.databases may be short or empty. An empty list means \"not visible to this login\", not \"not present on this server\".")
+			if chk.Status == "denied" {
+				c.Notes = append(c.Notes, "VIEW ANY DEFINITION was refused for this login. SQL Server does not raise on that: catalog views silently return fewer rows, so the list of databases in targets.databases may be short or empty. An empty list means \"not visible to this login\", not \"not present on this server\".")
+			} else {
+				c.Notes = append(c.Notes, "The view_any_definition probe got no answer, so it is not known whether this login could see every database. The list in targets.databases is what was collected before contact was lost, not necessarily what the instance holds.")
+			}
 		}
 		if chk.Status == "error" {
 			c.Notes = append(c.Notes, fmt.Sprintf("The %s probe got no answer from the server, which is a transport failure rather than a refusal: the collection stopped short of what the login was actually allowed to read.", chk.Name))
@@ -246,8 +283,9 @@ func (m *Manifest) Human() string {
 	b.WriteString("======================\n\n")
 	fmt.Fprintf(&b, "Server       : %s\n", orUnknown(m.Server.Name))
 	fmt.Fprintf(&b, "Version      : %s\n", orUnknown(strings.TrimSpace(m.Server.Version+" "+m.Server.Edition)))
-	// Spelled out rather than left as a trailing Z: the reader of this file is
-	// not necessarily someone who reads RFC 3339 for a living.
+	// The timestamp keeps its RFC 3339 form but gets the zone named in words
+	// beside it: the reader of this file does not necessarily know that the
+	// trailing Z means UTC.
 	collected := orUnknown(m.Run.StartedUTC)
 	if m.Run.StartedUTC != "" {
 		collected += " (UTC)"
@@ -264,6 +302,11 @@ func (m *Manifest) Human() string {
 		tool = strings.TrimSpace(tool + " (" + m.Tool.Commit + ")")
 	}
 	fmt.Fprintf(&b, "Tool         : %s\n", orUnknown(tool))
+	// How big is it and how many files — the first two things anyone asked to
+	// approve a transfer wants to know, and the only way to tell at a glance
+	// that the archive is the size a metadata collection should be.
+	files, bytes := m.contents()
+	fmt.Fprintf(&b, "Contents     : %d data files, %s\n", files, humanBytes(bytes))
 
 	m.writeDataNature(&b)
 	m.writeCoverage(&b)
@@ -277,27 +320,73 @@ func (m *Manifest) Human() string {
 	return b.String()
 }
 
+// writeDataNature is the paragraph the whole document exists to support: the
+// one a security officer reads before releasing the archive. Every sentence in
+// it has to be true of THIS run, which is why the disclosure list is driven by
+// m.Collected and the provenance sentence by m.Sources rather than by prose
+// fixed at compile time.
 func (m *Manifest) writeDataNature(b *strings.Builder) {
 	b.WriteString(`
 What this archive contains
 --------------------------
-Catalog metadata and performance counters only: server configuration, database
-options and file layout, wait statistics, index, job and backup metadata.
+Server and database metadata, and performance counters: configuration
+settings, database options, file layout and sizes, wait statistics, index
+and backup metadata.
 
-There is no business data in it: no table contents, no rows from application
-tables, no personal data, no credentials. The collector issues read-only
-SELECT statements against system catalog views and dynamic management views;
-it does not read user tables and it does not write to the instance.
+The collector issues only read-only SELECT statements against system
+catalog views and dynamic management views. It runs no INSERT, UPDATE,
+DELETE or DDL, and it does not read any user or application table.
 
-The archive does identify this server. Its name, version, database names,
-object names and file paths appear in the collected files. That is metadata
-about the estate, not data held in it, so route the archive according to your
-policy for infrastructure documentation.
-
-Every query the collector runs is published at
-github.com/rudi-bruchez/sql-auditor, and the exact corpus used for this run can
-be listed with "sql-auditor queries export".
+What is in here that names things:
+  - this server's name, version, edition and file paths
+  - database, schema and object names
+  - the Windows or SQL login names of database owners
 `)
+	if m.Collected.SessionText {
+		b.WriteString(`  - the SQL text of statements running during collection, which may
+    contain values from application tables, together with the login,
+    host and program names of the sessions running them
+`)
+	}
+	b.WriteString("\nPasswords and connection secrets are masked before being written.\n")
+	if m.Collected.SessionText {
+		b.WriteString(`
+Most of this is metadata about the estate rather than the data held in it,
+but the captured statement text can carry values copied from application
+tables, and the login names are attributable to people. Treat this archive
+as potentially containing personal data and handle it on that basis.
+`)
+	} else {
+		b.WriteString(`
+That is metadata about the estate rather than the data held in it, but the
+login names above are attributable to people, so treat this as internal
+infrastructure documentation rather than public material.
+`)
+	}
+	m.writeCorpusProvenance(b)
+}
+
+// writeCorpusProvenance says where the questions came from. The published-
+// corpus claim is the reader's way of checking the paragraph above for
+// themselves, so it must not be made when --queries-dir supplied a corpus this
+// project has never seen.
+func (m *Manifest) writeCorpusProvenance(b *strings.Builder) {
+	src, ok := m.Sources["queries"]
+	switch {
+	case ok && src.From == "embedded":
+		b.WriteString(`
+Every query the collector runs is published at
+github.com/rudi-bruchez/sql-auditor, and the exact corpus used for this run
+can be listed with "sql-auditor queries export".
+`)
+	case ok:
+		b.WriteString(`
+The queries used for this run did not come from the published corpus: they
+were supplied from a local directory, so their content is vouched for only
+by the SHA-256 recorded under "Query corpus" below. Verify that hash against
+the directory the run was given before relying on the description above.
+`)
+	}
 }
 
 func (m *Manifest) writeCoverage(b *strings.Builder) {
@@ -317,33 +406,55 @@ func (m *Manifest) writeCoverage(b *strings.Builder) {
 			if chk.Status == "ok" {
 				continue
 			}
-			state := "denied"
+			state := "refused for this login"
 			if chk.Status == "error" {
 				state = "no answer - the instance was unreachable at that point"
 			}
-			fmt.Fprintf(b, "  - %s (%s)\n", chk.Name, state)
+			// The label, not the identifier: this reader has never seen the
+			// permission vocabulary. _run.json keeps the identifier.
+			name := chk.Label
+			if name == "" {
+				name = chk.Name
+			}
+			fmt.Fprintf(b, "  - %s\n      %s\n", name, state)
 			if chk.Impact != "" {
 				fmt.Fprintf(b, "      consequence: %s\n", chk.Impact)
 			}
 		}
 	}
 	if m.Coverage.DatabaseListMayBeIncomplete {
-		b.WriteString(`
-Why the database list below may be short or empty
--------------------------------------------------
-Missing VIEW ANY DEFINITION does not produce an error in SQL Server. Metadata
+		b.WriteString("\nWhy the database list below may be short or empty\n")
+		b.WriteString("-------------------------------------------------\n")
+		if m.checkStatus("view_any_definition") == "error" {
+			b.WriteString(`The check for VIEW ANY DEFINITION got no answer from the server, so it is not
+known whether this login could see every database on it. The connection failed;
+the permission was not refused. Read the list below as what had been collected
+when contact was lost, not as what this instance holds.
+`)
+		} else {
+			b.WriteString(`Missing VIEW ANY DEFINITION does not produce an error in SQL Server. Metadata
 visibility filters catalog views row by row, so a query on sys.databases still
 succeeds and simply returns fewer rows: only the databases this login owns or
-is mapped to. Measured on a live instance, that turned 4 rows into 2, and
-because system databases are excluded from collection, the login saw no user
-databases at all while every query reported success.
+is mapped to. Because system databases are excluded from collection, such a
+login can end up with no user databases at all while every query reports
+success.
 
 So read an empty or short list below as "not visible to this login", never as
 "not present on this server". What this instance actually hosts cannot be
 determined from this archive. Re-run with VIEW ANY DEFINITION granted at the
 server level to get a complete picture.
 `)
+		}
 	}
+}
+
+func (m *Manifest) checkStatus(name string) string {
+	for _, chk := range m.Preflight {
+		if chk.Name == name {
+			return chk.Status
+		}
+	}
+	return ""
 }
 
 func (m *Manifest) writeTargets(b *strings.Builder) {
@@ -447,6 +558,37 @@ func (m *Manifest) writeSources(b *strings.Builder) {
 	}
 }
 
+// contents counts the distinct output files and their total size. Distinct,
+// because a script that writes one document per database has one Results entry
+// per database but a run that appended to the same file would otherwise be
+// counted twice. The counts exclude _run.json and MANIFEST.txt themselves,
+// which are the two files describing the rest.
+func (m *Manifest) contents() (files int, bytes int64) {
+	seen := map[string]bool{}
+	for _, r := range m.Results {
+		if r.Output == "" || seen[r.Output] {
+			continue
+		}
+		seen[r.Output] = true
+		files++
+		bytes += int64(r.Bytes)
+	}
+	return files, bytes
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d bytes", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
+}
+
 func orUnknown(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return "(not recorded)"
@@ -462,9 +604,11 @@ func orUnknown(s string) string {
 // the hash is worthless for comparing the two if the root it was reached
 // through changes the result.
 //
-// Each entry contributes its path and its byte length before its content, so
-// a rename changes the hash and no two different corpora can be framed into
-// the same byte stream.
+// Each entry is framed as "<len(path)> <path> <len(content)>\n<content>", so a
+// rename changes the hash and no two different corpora can produce the same
+// byte stream. Both lengths are needed for that. Length-prefixing the content
+// alone is not injective, because a path is free to contain the separator and
+// the digits: {"a": "", "b": ""} and {"a 0\nb": ""} both frame to "a 0\nb 0\n".
 func CorpusSHA256(fsys fs.FS, root string) (string, error) {
 	var paths []string
 	err := fs.WalkDir(fsys, root, func(p string, d fs.DirEntry, err error) error {
@@ -484,7 +628,8 @@ func CorpusSHA256(fsys fs.FS, root string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		fmt.Fprintf(h, "%s %d\n", relativeTo(root, p), len(b))
+		rel := relativeTo(root, p)
+		fmt.Fprintf(h, "%d %s %d\n", len(rel), rel, len(b))
 		h.Write(b)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil

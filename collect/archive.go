@@ -9,6 +9,14 @@ import (
 	"path/filepath"
 )
 
+// archivable admits only regular files. WalkDir lstats, so a symlink arrives
+// at the walk function as a symlink: the header would keep the link bit while
+// os.Open follows the link, pulling the target's whole content into an archive
+// that tells its reader it holds nothing but server metadata. Devices, sockets
+// and pipes have no business in a collection either, and opening one can block
+// the run indefinitely.
+func archivable(fi fs.FileInfo) bool { return fi.Mode().IsRegular() }
+
 // Zip packages runFolder into destZip, keeping the run folder as the single
 // top-level directory inside the archive so it cannot explode into the
 // recipient's working directory.
@@ -66,6 +74,9 @@ func Zip(runFolder, destZip string) (err error) {
 		fi, err := d.Info()
 		if err != nil {
 			return err
+		}
+		if !archivable(fi) {
+			return nil
 		}
 		hdr, err := zip.FileInfoHeader(fi)
 		if err != nil {
