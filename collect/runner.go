@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 
 	_ "github.com/microsoft/go-mssqldb"
@@ -29,14 +30,106 @@ type Selection struct {
 	Skipped  []SkipReason
 }
 
+// parseServer normalises the ways a SQL Server address is written into the two
+// pieces the sqlserver:// URL needs: an authority for u.Host and an instance
+// name for u.Path.
+//
+// The driver's URL parser accepts only host:port. Every other canonical form
+// fails, and the named-instance one fails before a socket is opened:
+//
+//	localhost,11433       lookup localhost,11433: no such host
+//	HOST\SQLEXPRESS       unable to parse connection string: invalid URL format
+//
+// host,port is what .env.example documents and what every PowerShell-era
+// configuration contains, and HOST\INSTANCE is how SQL Express and every
+// multi-instance box is addressed, so both have to be translated here.
+//
+// Accepted: host, host,port, host:port, host\instance, host\instance,port,
+// each optionally prefixed tcp:, and IPv6 literals in brackets.
+func parseServer(server string) (hostport, instance string, err error) {
+	s := strings.TrimSpace(server)
+	if s == "" {
+		return "", "", fmt.Errorf("server address is empty")
+	}
+	// A tcp: prefix names the network protocol and is not part of the address.
+	// Guard against an IPv6 literal, which also starts with a colon-heavy run.
+	if len(s) > 4 && strings.EqualFold(s[:4], "tcp:") {
+		s = strings.TrimSpace(s[4:])
+	}
+	// Instance first: the backslash always precedes the port, so splitting here
+	// leaves at most one ",port" or ":port" behind.
+	if i := strings.IndexByte(s, '\\'); i >= 0 {
+		s, instance = s[:i], strings.TrimSpace(s[i+1:])
+		if instance == "" {
+			return "", "", fmt.Errorf("server address %q has a backslash but no instance name", server)
+		}
+		if j := strings.IndexAny(instance, ",:"); j >= 0 {
+			instance, s = instance[:j], s+instance[j:]
+		}
+	}
+	host, port := s, ""
+	// An IPv6 literal is bracketed and full of colons, so the port separator is
+	// only whatever follows the closing bracket.
+	if strings.HasPrefix(host, "[") {
+		end := strings.IndexByte(host, ']')
+		if end < 0 {
+			return "", "", fmt.Errorf("server address %q has an unclosed IPv6 bracket", server)
+		}
+		rest := host[end+1:]
+		host = host[:end+1]
+		switch {
+		case rest == "":
+		case rest[0] == ',' || rest[0] == ':':
+			port = strings.TrimSpace(rest[1:])
+		default:
+			return "", "", fmt.Errorf("server address %q: unexpected %q after the IPv6 literal", server, rest)
+		}
+	} else if i := strings.IndexByte(host, ','); i >= 0 {
+		host, port = host[:i], strings.TrimSpace(host[i+1:])
+	} else if i := strings.LastIndexByte(host, ':'); i >= 0 {
+		// Only a bare host:port here — an unbracketed multi-colon string is an
+		// IPv6 literal missing its brackets, not a port.
+		if strings.IndexByte(host, ':') != i {
+			return "", "", fmt.Errorf("server address %q looks like an IPv6 literal; wrap it in brackets, as [::1],1433", server)
+		}
+		host, port = host[:i], strings.TrimSpace(host[i+1:])
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", "", fmt.Errorf("server address %q has no host", server)
+	}
+	// A colon still left in an unbracketed host means an IPv6 literal written
+	// without brackets, which url.Parse would silently mangle.
+	if !strings.HasPrefix(host, "[") && strings.Contains(host, ":") {
+		return "", "", fmt.Errorf("server address %q looks like an IPv6 literal; wrap it in brackets, as [::1],1433", server)
+	}
+	if port == "" {
+		return host, instance, nil
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return "", "", fmt.Errorf("server address %q: %q is not a port number", server, port)
+	}
+	return host + ":" + port, instance, nil
+}
+
+// Open builds a sqlserver:// URL from cfg and returns a pool pinned to a single
+// connection. It does not contact the server: database/sql connects lazily, so
+// a bad address surfaces on the first query, not here.
 func Open(cfg *Config) (*sql.DB, error) {
+	hostport, instance, err := parseServer(cfg.Server)
+	if err != nil {
+		return nil, err
+	}
 	q := url.Values{}
 	q.Set("database", cfg.Database)
 	q.Set("app name", cfg.AppName)
 	q.Set("connection timeout", fmt.Sprint(int(cfg.ConnectTimeout.Seconds())))
 	q.Set("encrypt", fmt.Sprint(cfg.Encrypt))
 	q.Set("TrustServerCertificate", fmt.Sprint(cfg.TrustCert))
-	u := &url.URL{Scheme: "sqlserver", Host: cfg.Server, RawQuery: q.Encode()}
+	u := &url.URL{Scheme: "sqlserver", Host: hostport, RawQuery: q.Encode()}
+	if instance != "" {
+		u.Path = "/" + instance
+	}
 	if cfg.User != "" && !cfg.Integrated {
 		u.User = url.UserPassword(cfg.User, cfg.Password)
 	}
@@ -51,21 +144,36 @@ func Open(cfg *Config) (*sql.DB, error) {
 	return db, nil
 }
 
-func Probe(ctx context.Context, db *sql.DB) (ServerInfo, error) {
+// Probe reads the server's identity and clock offset. It takes a *sql.Conn,
+// not a *sql.DB: the pool allows exactly one connection, so a caller holding a
+// Conn that also passed the DB here would deadlock until its context expired.
+//
+// Every column is scanned nullably and a NULL costs only its own field, never
+// the whole probe. SERVERPROPERTY('ServerName') is NULL on some Azure and
+// contained configurations, and scanning that into a *string fails the entire
+// row with "converting NULL to string is unsupported".
+func Probe(ctx context.Context, c *sql.Conn) (ServerInfo, error) {
 	var si ServerInfo
-	// Columns are read individually: a single NULL in a multi-column SELECT
-	// of SERVERPROPERTY would propagate and lose the others.
-	err := db.QueryRowContext(ctx, `
+	var name, version, edition sql.NullString
+	var offset sql.NullInt64
+	err := c.QueryRowContext(ctx, `
         SELECT CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
                CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')),
                CONVERT(nvarchar(128), SERVERPROPERTY('Edition')),
                DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())`).
-		Scan(&si.Name, &si.Version, &si.Edition, &si.UTCOffsetMinutes)
-	return si, err
+		Scan(&name, &version, &edition, &offset)
+	if err != nil {
+		return si, err
+	}
+	si.Name, si.Version, si.Edition = name.String, version.String, edition.String
+	si.UTCOffsetMinutes = int(offset.Int64)
+	return si, nil
 }
 
-func CandidateDatabases(ctx context.Context, db *sql.DB) ([]DatabaseInfo, error) {
-	rows, err := db.QueryContext(ctx, `
+// CandidateDatabases lists every user database with the facts SelectTargets
+// needs. It takes a *sql.Conn for the same reason Probe does.
+func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error) {
+	rows, err := c.QueryContext(ctx, `
         SELECT d.name, d.state_desc,
                CASE WHEN d.source_database_id IS NULL THEN 0 ELSE 1 END,
                CASE WHEN HAS_DBACCESS(d.name) = 1 THEN 1 ELSE 0 END
@@ -92,9 +200,19 @@ func CandidateDatabases(ctx context.Context, db *sql.DB) ([]DatabaseInfo, error)
 // SelectTargets applies include/exclude wildcards and records a reason for
 // every exclusion, so the manifest can explain an absent database rather than
 // leaving the analysis layer to guess.
-func SelectTargets(c []DatabaseInfo, include, exclude string) Selection {
+//
+// A malformed pattern is an error, not a pattern that matches nothing: an
+// unclosed [ in DB_EXCLUDE would otherwise collect a database the user
+// explicitly asked to leave alone, and say nothing about it.
+func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error) {
 	var sel Selection
 	inc, exc := splitPatterns(include), splitPatterns(exclude)
+	if err := checkPatterns("DB_INCLUDE", inc); err != nil {
+		return sel, err
+	}
+	if err := checkPatterns("DB_EXCLUDE", exc); err != nil {
+		return sel, err
+	}
 	for _, d := range c {
 		switch {
 		case d.State != "ONLINE":
@@ -111,7 +229,19 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) Selection {
 			sel.Included = append(sel.Included, d.Name)
 		}
 	}
-	return sel
+	return sel, nil
+}
+
+// checkPatterns validates each pattern once, up front, so a syntax error is
+// reported against the setting the user wrote rather than silently changing
+// which databases are collected.
+func checkPatterns(setting string, patterns []string) error {
+	for _, p := range patterns {
+		if _, err := path.Match(strings.ToLower(p), ""); err != nil {
+			return fmt.Errorf("%s: invalid pattern %q: %w", setting, p, err)
+		}
+	}
+	return nil
 }
 
 func splitPatterns(s string) []string {
@@ -149,6 +279,10 @@ func quoteName(n string) string {
 
 // ReadResultSets materialises every result set in order, matching each to its
 // declared spec.
+//
+// The caller owns rows and must close it. The pool allows one connection, so a
+// caller that forgets does not leak a connection, it hangs the entire run at
+// the next query.
 func ReadResultSets(rows *sql.Rows, specs []ResultSpec) ([]NamedResultSet, error) {
 	var out []NamedResultSet
 	for i := 0; ; i++ {

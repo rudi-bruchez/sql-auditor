@@ -27,8 +27,13 @@ type ResultSpec struct {
 	Shape Shape
 }
 
-// ResultSet is one materialised result set. Types is optional and used only
-// to sharpen warning messages.
+// ResultSet is one materialised result set.
+//
+// Types holds the driver's SQL type name per column and is required, not
+// decorative: it is the only thing separating DECIMAL, VARBINARY and
+// UNIQUEIDENTIFIER, which all arrive as []byte, and DATETIME from
+// DATETIMEOFFSET, which both arrive as time.Time. Leave it empty and every
+// decimal in the corpus is emitted as a hex string.
 type ResultSet struct {
 	Columns []string
 	Types   []string
