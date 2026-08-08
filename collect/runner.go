@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -11,6 +12,33 @@ import (
 
 	_ "github.com/microsoft/go-mssqldb"
 )
+
+// badAddress marks a failure to make sense of SQL_SERVER, as opposed to a
+// failure to reach the instance it names. parseServer refuses an empty
+// address, a trailing backslash and an unbracketed IPv6 literal before any
+// socket is opened, so the operator has a typo, not an unreachable server.
+//
+// The distinction is the exit code. 1 is documented as "the instance could not
+// be reached" and sends a DBA to check a server that was never contacted; a
+// configuration mistake is 2, as it already is for an unreadable
+// --queries-dir. IsBadServerAddress is how Run and Check tell the two apart.
+type badAddress struct{ err error }
+
+func (b badAddress) Error() string { return b.err.Error() }
+func (b badAddress) Unwrap() error { return b.err }
+
+// IsBadServerAddress reports whether err comes from parsing the configured
+// server address rather than from contacting the instance.
+func IsBadServerAddress(err error) bool {
+	var b badAddress
+	return errors.As(err, &b)
+}
+
+// fail is parseServer's only error path, so no refusal can be added later that
+// forgets the marker and silently reports a typo as an unreachable instance.
+func fail(format string, a ...any) (string, string, error) {
+	return "", "", badAddress{fmt.Errorf(format, a...)}
+}
 
 type ServerInfo struct {
 	Name, Version, Edition string
@@ -52,7 +80,7 @@ type Selection struct {
 func parseServer(server string) (hostport, instance string, err error) {
 	s := strings.TrimSpace(server)
 	if s == "" {
-		return "", "", fmt.Errorf("server address is empty")
+		return fail("server address is empty")
 	}
 	// A tcp: prefix names the network protocol and is not part of the address.
 	// Guard against an IPv6 literal, which also starts with a colon-heavy run.
@@ -64,7 +92,7 @@ func parseServer(server string) (hostport, instance string, err error) {
 	if i := strings.IndexByte(s, '\\'); i >= 0 {
 		s, instance = s[:i], strings.TrimSpace(s[i+1:])
 		if instance == "" {
-			return "", "", fmt.Errorf("server address %q has a backslash but no instance name", server)
+			return fail("server address %q has a backslash but no instance name", server)
 		}
 		if j := strings.IndexAny(instance, ",:"); j >= 0 {
 			instance, s = instance[:j], s+instance[j:]
@@ -76,7 +104,7 @@ func parseServer(server string) (hostport, instance string, err error) {
 	if strings.HasPrefix(host, "[") {
 		end := strings.IndexByte(host, ']')
 		if end < 0 {
-			return "", "", fmt.Errorf("server address %q has an unclosed IPv6 bracket", server)
+			return fail("server address %q has an unclosed IPv6 bracket", server)
 		}
 		rest := host[end+1:]
 		host = host[:end+1]
@@ -85,7 +113,7 @@ func parseServer(server string) (hostport, instance string, err error) {
 		case rest[0] == ',' || rest[0] == ':':
 			port = strings.TrimSpace(rest[1:])
 		default:
-			return "", "", fmt.Errorf("server address %q: unexpected %q after the IPv6 literal", server, rest)
+			return fail("server address %q: unexpected %q after the IPv6 literal", server, rest)
 		}
 	} else if i := strings.IndexByte(host, ','); i >= 0 {
 		host, port = host[:i], strings.TrimSpace(host[i+1:])
@@ -93,24 +121,24 @@ func parseServer(server string) (hostport, instance string, err error) {
 		// Only a bare host:port here — an unbracketed multi-colon string is an
 		// IPv6 literal missing its brackets, not a port.
 		if strings.IndexByte(host, ':') != i {
-			return "", "", fmt.Errorf("server address %q looks like an IPv6 literal; wrap it in brackets, as [::1],1433", server)
+			return fail("server address %q looks like an IPv6 literal; wrap it in brackets, as [::1],1433", server)
 		}
 		host, port = host[:i], strings.TrimSpace(host[i+1:])
 	}
 	host = strings.TrimSpace(host)
 	if host == "" {
-		return "", "", fmt.Errorf("server address %q has no host", server)
+		return fail("server address %q has no host", server)
 	}
 	// A colon still left in an unbracketed host means an IPv6 literal written
 	// without brackets, which url.Parse would silently mangle.
 	if !strings.HasPrefix(host, "[") && strings.Contains(host, ":") {
-		return "", "", fmt.Errorf("server address %q looks like an IPv6 literal; wrap it in brackets, as [::1],1433", server)
+		return fail("server address %q looks like an IPv6 literal; wrap it in brackets, as [::1],1433", server)
 	}
 	if port == "" {
 		return host, instance, nil
 	}
 	if _, err := strconv.Atoi(port); err != nil {
-		return "", "", fmt.Errorf("server address %q: %q is not a port number", server, port)
+		return fail("server address %q: %q is not a port number", server, port)
 	}
 	return host + ":" + port, instance, nil
 }
