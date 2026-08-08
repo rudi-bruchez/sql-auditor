@@ -1,5 +1,5 @@
 -- @scope:       instance
--- @resultsets:  root:object, trace_flags:array, space:object, version_store:object, oldest_snapshot_transactions:array, tempdb_files:array, files:array, file_io:array, perf_counters:array, live_page_contention:array, instance_latch_waits:array
+-- @resultsets:  root:object, trace_flags:array, space:object, version_store:object, oldest_snapshot_transactions:array, files:array, file_io:array, perf_counters:array, live_page_contention:array, instance_latch_waits:array
 -- @permissions: VIEW SERVER STATE, VIEW ANY DEFINITION
 -- @timeout:     60
 --
@@ -9,10 +9,20 @@
 -- sys.database_files and FILEPROPERTY all report on the current database and
 -- have no cross-database form on SQL Server 2012.
 --
--- Raw facts only: the per-file rows replace the four collapsed booleans the
--- earlier version derived (equal size, equal growth, any percent growth, same
--- volume), and recommended_start_files is gone — that threshold is a judgement
--- and belongs to the analysis layer, not the collector.
+-- Raw facts only: the per-file rows of the files result set replace the four
+-- collapsed booleans the earlier version derived (equal size, equal growth,
+-- any percent growth, same volume), and recommended_start_files is gone — that
+-- threshold is a judgement and belongs to the analysis layer, not the
+-- collector.
+--
+-- There is one per-file result set, not two. An earlier version shipped
+-- tempdb_files beside files: the two asked the same question of the same
+-- catalog view and answered it differently (raw growth pages against a
+-- formatted string, a drive-letter prefix against a real mount point), so a
+-- reader had no way to tell which one to believe. files is the survivor
+-- because it derives the volume from sys.dm_os_volume_stats. LEFT(physical_name, 3)
+-- is a Windows drive-letter heuristic and yields "/va" for every default path
+-- on Linux, which makes every file look co-located whatever the layout.
 --
 -- Session statement text is NOT collected here. It lives in
 -- 052.session-text.sql behind --include-session-text.
@@ -100,24 +110,18 @@ FROM sys.dm_tran_active_snapshot_database_transactions AS ast
 ORDER BY ast.elapsed_time_seconds DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* ───────── tempdb_files: size, growth and volume per file ─────────
+/* ───────── files: config, used space, volume and volume free ─────────
    One row per file, so the analysis layer can say which file differs and by
-   how much instead of only that they differ. */
-SELECT
-    mf.file_id                                        AS [file_id],
-    mf.name                                           AS [logical_name],
-    mf.physical_name                                  AS [physical_name],
-    mf.type_desc                                      AS [type],
-    CAST(mf.size * 8 / 1024.0 AS DECIMAL(14,1))       AS [size_mb],
-    mf.growth                                         AS [growth],
-    mf.is_percent_growth                              AS [is_percent_growth],
-    LEFT(mf.physical_name, 3)                         AS [volume]
-FROM sys.master_files AS mf
-WHERE mf.database_id = 2
-ORDER BY mf.type, mf.file_id
-OPTION (RECOMPILE, MAXDOP 1);
+   how much instead of only that they differ. volume comes from
+   sys.dm_os_volume_stats (2008 R2 and later, inside the 2012 floor), so
+   co-location can be derived from it rather than guessed at.
 
-/* ───────── files: config + used + volume free ───────── */
+   Measured on SQL Server 2022 for Linux, volume_mount_point comes back NULL
+   while total_bytes and available_bytes are populated. NULL is the correct
+   answer there: the analysis layer reads it as "the mount point is not known
+   on this platform" and declines to judge, where the drive-letter prefix this
+   column replaced returned "/va" for every default path and made every file
+   look co-located whatever the layout. */
 SELECT
     mf.file_id,
     mf.name,

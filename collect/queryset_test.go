@@ -6,6 +6,12 @@ import (
 	"testing/fstest"
 )
 
+// contractPreamble is the two SET statements the auditor contract demands of
+// every collector. Fixtures that assert a clean lint have to carry them, and
+// an OPTION (RECOMPILE, MAXDOP 1) per declared result set, or they fail the
+// contract check rather than the thing they are testing.
+const contractPreamble = "SET NOCOUNT ON;\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\n"
+
 const goodSQL = `-- @scope:       instance
 -- @resultsets:  instance:object, waits:array
 -- @permissions: VIEW SERVER STATE
@@ -116,7 +122,8 @@ func TestLintIgnoresForJSONInsideComments(t *testing.T) {
 	// lint. This is the whole reason the lint runs on stripped SQL.
 	body := "-- @resultsets: a:object\n" +
 		"-- FOR JSON was removed: the collector must work on SQL Server 2012.\n" +
-		"SELECT 1 AS x;"
+		contractPreamble +
+		"SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);"
 	fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
 	got, err := Discover(fsys, "queries")
 	if err != nil {
@@ -130,7 +137,8 @@ func TestLintIgnoresForJSONInsideComments(t *testing.T) {
 func TestDiscoverNormalisesPermissions(t *testing.T) {
 	body := "-- @resultsets: a:object\n" +
 		"-- @permissions: VIEW SERVER STATE, view any definition, msdb read\n" +
-		"SELECT 1;"
+		contractPreamble +
+		"SELECT 1 OPTION (RECOMPILE, MAXDOP 1);"
 	fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
 	got, err := Discover(fsys, "queries")
 	if err != nil {
@@ -301,5 +309,105 @@ func TestDiscoverRejectsBadMinVersion(t *testing.T) {
 	}
 	if got[0].LintError == "" || !strings.Contains(got[0].LintError, "sixteen") {
 		t.Errorf("lint error = %q, want it to name the bad value", got[0].LintError)
+	}
+}
+
+// The auditor contract is what makes a collector safe to run on a production
+// instance. Fourteen files comply by review; these tests are so the fifteenth
+// complies by rule.
+func TestLintEnforcesTheAuditorContract(t *testing.T) {
+	const header = "-- @resultsets: a:array, b:array\n"
+	tests := []struct {
+		name, sql, want string
+	}{
+		{"missing NOCOUNT",
+			header + "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\n" +
+				"SELECT 1 OPTION (RECOMPILE, MAXDOP 1);\nSELECT 2 OPTION (RECOMPILE, MAXDOP 1);",
+			"SET NOCOUNT ON"},
+		{"missing isolation level",
+			header + "SET NOCOUNT ON;\n" +
+				"SELECT 1 OPTION (RECOMPILE, MAXDOP 1);\nSELECT 2 OPTION (RECOMPILE, MAXDOP 1);",
+			"READ UNCOMMITTED"},
+		{"one result set short of a hint",
+			header + contractPreamble + "SELECT 1 OPTION (RECOMPILE, MAXDOP 1);\nSELECT 2;",
+			"OPTION (RECOMPILE, MAXDOP 1)"},
+		{"hint without MAXDOP",
+			header + contractPreamble +
+				"SELECT 1 OPTION (RECOMPILE, MAXDOP 1);\nSELECT 2 OPTION (RECOMPILE);",
+			"in another form"},
+		// The contract is about the code, not the prose. A file explaining why
+		// it dropped a hint must not satisfy the check by mentioning it.
+		{"prose does not satisfy the contract",
+			header + "-- SET NOCOUNT ON and OPTION (RECOMPILE, MAXDOP 1) belong on every query.\n" +
+				"SELECT 1;\nSELECT 2;",
+			"SET NOCOUNT ON"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(tc.sql)}}
+			got, err := Discover(fsys, "queries")
+			if err != nil {
+				t.Fatalf("Discover: %v", err)
+			}
+			if !strings.Contains(got[0].LintError, tc.want) {
+				t.Errorf("lint error = %q, want it to mention %q", got[0].LintError, tc.want)
+			}
+		})
+	}
+}
+
+func TestLintAcceptsMoreHintsThanResultSets(t *testing.T) {
+	// 050.tempdb.sql assigns into a variable with its own hinted statement, so
+	// the count legitimately exceeds the number of result sets.
+	body := "-- @resultsets: a:array\n" + contractPreamble +
+		"DECLARE @n int;\nSELECT @n = COUNT(*) FROM sys.databases OPTION (RECOMPILE, MAXDOP 1);\n" +
+		"SELECT @n AS n OPTION (RECOMPILE, MAXDOP 1);"
+	fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
+	got, err := Discover(fsys, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if got[0].LintError != "" {
+		t.Errorf("unexpected lint error: %s", got[0].LintError)
+	}
+}
+
+// @scope: databases used to fall through to the instance default, so a
+// per-database collector ran once against master and the run silently held one
+// file where it should have held one per database.
+func TestDiscoverRejectsBadScopeAndTimeout(t *testing.T) {
+	for _, tc := range []struct{ name, header, want string }{
+		{"scope", "-- @scope: databases\n", "databases"},
+		{"timeout", "-- @timeout: 60s\n", "60s"},
+		{"zero timeout", "-- @timeout: 0\n", "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "-- @resultsets: a:object\n" + tc.header + contractPreamble +
+				"SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);"
+			fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
+			got, err := Discover(fsys, "queries")
+			if err != nil {
+				t.Fatalf("Discover: %v", err)
+			}
+			if got[0].LintError == "" || !strings.Contains(got[0].LintError, tc.want) {
+				t.Errorf("lint error = %q, want it to name the bad value", got[0].LintError)
+			}
+		})
+	}
+}
+
+func TestDiscoverAcceptsExplicitInstanceScope(t *testing.T) {
+	body := "-- @resultsets: a:object\n-- @scope: instance\n-- @timeout: 90\n" +
+		contractPreamble + "SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);"
+	fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
+	got, err := Discover(fsys, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if got[0].LintError != "" {
+		t.Fatalf("unexpected lint error: %s", got[0].LintError)
+	}
+	if got[0].Scope != ScopeInstance || got[0].TimeoutSec != 90 {
+		t.Errorf("scope = %v, timeout = %d", got[0].Scope, got[0].TimeoutSec)
 	}
 }
