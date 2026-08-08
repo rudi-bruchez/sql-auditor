@@ -334,6 +334,25 @@ func TestHumanExplainsZeroDatabasesUnderDeniedDefinition(t *testing.T) {
 	}
 }
 
+// A run that never reached the instance — a wrong port, a refused login —
+// records no preflight, so coverage is UNKNOWN. It also never listed the
+// databases. Printing "Databases covered (0): (none matched the selection for
+// this run)" makes a statement about an instance that was never contacted, on
+// the strength of no evidence at all.
+func TestHumanMakesNoDatabaseClaimWhenNoPreflightRan(t *testing.T) {
+	m := &Manifest{}
+	m.Server.Name = "SRV01"
+	flat := flatten(m.Human())
+	if strings.Contains(flat, "none matched the selection") {
+		t.Error("MANIFEST.txt asserted that no database matched, having never asked the server")
+	}
+	for _, want := range []string{"UNKNOWN", "No database list was collected"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("MANIFEST.txt should contain %q:\n%s", want, m.Human())
+		}
+	}
+}
+
 func TestHumanReportsCompleteCoverageWhenNothingWasDenied(t *testing.T) {
 	m := &Manifest{Preflight: []CapabilityCheck{
 		{Name: "connect", Status: "ok"},
