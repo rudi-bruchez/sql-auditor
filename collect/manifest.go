@@ -363,7 +363,19 @@ What is in here that names things:
     host and program names of the sessions running them
 `)
 	}
-	b.WriteString("\nPasswords and connection secrets are masked before being written.\n")
+	// Scoped deliberately. The redaction this describes applies to the run
+	// settings block and to nothing else, because that is the only place the
+	// collector masks anything. An unqualified "secrets are masked" would be a
+	// claim about the whole archive that no code in this program enforces, and
+	// it would turn into a false one the first time a collector reads a job
+	// step or a linked-server definition.
+	b.WriteString(`
+The password of the login used for this run is recorded nowhere in this
+archive. The run settings in _run.json are the query and output directories,
+the database name filters, and whether session text was collected; any setting
+whose name marks it as a password, token or other secret is replaced with
+"(redacted)" before that block is written.
+`)
 	if m.Collected.SessionText {
 		b.WriteString(`
 Most of this is metadata about the estate rather than the data held in it,
@@ -392,7 +404,7 @@ func (m *Manifest) writeCorpusProvenance(b *strings.Builder) {
 		b.WriteString(`
 Every query the collector runs is published at
 github.com/rudi-bruchez/sql-auditor, and the exact corpus used for this run
-can be listed with "sql-auditor queries export".
+can be written out with "sql-auditor queries export --to DIR" and read.
 `)
 	case ok:
 		b.WriteString(`
@@ -509,10 +521,14 @@ func (m *Manifest) writeTargets(b *strings.Builder) {
 // databases would otherwise bury the document in hundreds of repeated lines
 // and nobody would read to the end.
 func (m *Manifest) writeWhatWasRead(b *strings.Builder) {
+	// There is no failure tally. Results holds successes only — runUnit is its
+	// sole producer and appends nothing on the error path, which goes to
+	// Errors instead — so a "%d failed" count here could never be anything but
+	// zero, and a line that cannot fire is a line nobody maintains. Failures
+	// are reported under Errors below.
 	type tally struct {
-		scope  string
-		runs   int
-		failed int
+		scope string
+		runs  int
 	}
 	byScript := map[string]*tally{}
 	var order []string
@@ -524,9 +540,6 @@ func (m *Manifest) writeWhatWasRead(b *strings.Builder) {
 			order = append(order, r.Script)
 		}
 		t.runs++
-		if r.Status != "" && r.Status != "ok" {
-			t.failed++
-		}
 	}
 	sort.Strings(order)
 	fmt.Fprintf(b, "\nQueries run (%d distinct, %d executions):\n", len(order), len(m.Results))
@@ -542,9 +555,6 @@ func (m *Manifest) writeWhatWasRead(b *strings.Builder) {
 		}
 		if t.runs > 1 {
 			line += fmt.Sprintf(" x%d", t.runs)
-		}
-		if t.failed > 0 {
-			line += fmt.Sprintf(" - %d failed", t.failed)
 		}
 		b.WriteString(line + "\n")
 	}
@@ -568,11 +578,19 @@ func (m *Manifest) writeProblems(b *strings.Builder) {
 	if len(m.Errors) > 0 {
 		fmt.Fprintf(b, "\nErrors (%d):\n", len(m.Errors))
 		for _, e := range m.Errors {
-			target := e.Target
-			if target == "" {
-				target = "instance"
+			// An error raised by the run itself rather than by a collector has
+			// no script, and the "<script> on <target>:" form then renders as
+			// "  -  on instance: ..." — a double space and a dangling "on".
+			// Every fatal-path manifest is made of exactly those errors, and
+			// those are the manifests that get mailed back.
+			switch {
+			case e.Script == "":
+				fmt.Fprintf(b, "  - %s\n", e.Message)
+			case e.Target == "":
+				fmt.Fprintf(b, "  - %s on instance: %s\n", e.Script, e.Message)
+			default:
+				fmt.Fprintf(b, "  - %s on %s: %s\n", e.Script, e.Target, e.Message)
 			}
-			fmt.Fprintf(b, "  - %s on %s: %s\n", e.Script, target, e.Message)
 		}
 	}
 	if len(m.Warnings) > 0 {
