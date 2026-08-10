@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSelectTargetsWildcards(t *testing.T) {
@@ -119,6 +120,31 @@ func TestParseServerURLShape(t *testing.T) {
 	// looks for it.
 	if got, want := u.String(), "sqlserver://HOST:1433/SQLEXPRESS"; got != want {
 		t.Errorf("URL = %q, want %q", got, want)
+	}
+}
+
+// ConnectTimeout must reach the driver as "dial timeout" and never as
+// "connection timeout". The driver hands "connection timeout" to a wrapper
+// that re-arms a socket read deadline for the life of the session, so setting
+// it caps every query at ConnectTimeout and silently overrides the @timeout
+// each collector declares — a 300 s collector dies at 15 s, on whichever
+// databases happen to be slow that day. This test is the regression net: the
+// symptom is invisible until a query runs long on a real instance.
+func TestConnectTimeoutIsDialOnly(t *testing.T) {
+	u, err := connURL(&Config{
+		Server: "localhost", Database: "master", AppName: "t",
+		ConnectTimeout: 15 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	if got := q.Get("dial timeout"); got != "15" {
+		t.Errorf("dial timeout = %q, want %q", got, "15")
+	}
+	if _, ok := q["connection timeout"]; ok {
+		t.Error(`"connection timeout" is set; it caps every query at ConnectTimeout ` +
+			`and defeats the @timeout collectors declare`)
 	}
 }
 

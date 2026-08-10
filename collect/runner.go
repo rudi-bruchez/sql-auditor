@@ -143,10 +143,9 @@ func parseServer(server string) (hostport, instance string, err error) {
 	return host + ":" + port, instance, nil
 }
 
-// Open builds a sqlserver:// URL from cfg and returns a pool pinned to a single
-// connection. It does not contact the server: database/sql connects lazily, so
-// a bad address surfaces on the first query, not here.
-func Open(cfg *Config) (*sql.DB, error) {
+// connURL builds the sqlserver:// URL Open connects with. It is separate from
+// Open so the connection string can be asserted on without a server.
+func connURL(cfg *Config) (*url.URL, error) {
 	hostport, instance, err := parseServer(cfg.Server)
 	if err != nil {
 		return nil, err
@@ -154,7 +153,17 @@ func Open(cfg *Config) (*sql.DB, error) {
 	q := url.Values{}
 	q.Set("database", cfg.Database)
 	q.Set("app name", cfg.AppName)
-	q.Set("connection timeout", fmt.Sprint(int(cfg.ConnectTimeout.Seconds())))
+	// "dial timeout", never "connection timeout". The driver hands the latter
+	// to newTimeoutConn, which re-arms a socket deadline before every read for
+	// the whole life of the session — so it does not bound dialling, it caps
+	// every query at ConnectTimeout and the @timeout a collector declares
+	// never gets to apply. Observed against a real instance: collectors
+	// declaring @timeout 300 died at 15 s with "Invalid TDS stream: ...
+	// i/o timeout" on exactly the databases whose work exceeded 15 s. The
+	// driver's own source says not to set it ("Do not set a connection
+	// timeout. Use Context to manage such things.", msdsn/conn_str.go), and
+	// every call site here already carries a context deadline.
+	q.Set("dial timeout", fmt.Sprint(int(cfg.ConnectTimeout.Seconds())))
 	q.Set("encrypt", fmt.Sprint(cfg.Encrypt))
 	q.Set("TrustServerCertificate", fmt.Sprint(cfg.TrustCert))
 	u := &url.URL{Scheme: "sqlserver", Host: hostport, RawQuery: q.Encode()}
@@ -163,6 +172,17 @@ func Open(cfg *Config) (*sql.DB, error) {
 	}
 	if cfg.User != "" && !cfg.Integrated {
 		u.User = url.UserPassword(cfg.User, cfg.Password)
+	}
+	return u, nil
+}
+
+// Open builds a sqlserver:// URL from cfg and returns a pool pinned to a single
+// connection. It does not contact the server: database/sql connects lazily, so
+// a bad address surfaces on the first query, not here.
+func Open(cfg *Config) (*sql.DB, error) {
+	u, err := connURL(cfg)
+	if err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("sqlserver", u.String())
 	if err != nil {
