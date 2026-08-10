@@ -93,6 +93,13 @@ func Capabilities() []Capability {
 		{Name: "agent_jobs", Label: "Read the Agent job inventory (msdb.dbo.sysjobs_view)",
 			SQL:    "SELECT TOP 1 job_id FROM msdb.dbo.sysjobs_view",
 			Impact: "Agent jobs not collected — the report must not read this as 'no jobs' or 'no failing jobs'"},
+		// Asked as a permission question rather than by running the procedure:
+		// sp_readerrorlog reads the whole current log, which is minutes of work
+		// on a long-uptime instance and far too expensive for a probe.
+		{Name: "error_log", Label: "Read the SQL Server error log (sys.sp_readerrorlog)",
+			SQL:       "SELECT 1 WHERE HAS_PERMS_BY_NAME('sys.sp_readerrorlog', 'OBJECT', 'EXECUTE') = 1",
+			Impact:    "the error log is not collected — the report must not read this as 'no errors were logged'",
+			NeedsRows: true},
 	}
 }
 
