@@ -18,13 +18,27 @@
 -- index. The pattern matched here is CONVERT_IMPLICIT(nvarchar — with the
 -- column inside — so a plan that merely widens a parameter does not appear.
 --
--- IT DOES NOT USE THE PlanAffectingConvert WARNING, and that is deliberate.
--- The obvious detection is to look for SQL Server's own warning about the
--- conversion. The plan that prompted this collector carried NO warning at
--- all: the engine emits it only when it judges the conversion to affect a
--- seek plan or a cardinality estimate, and it frequently does not. A
--- warning-based check would have reported a clean instance. Matching the plan
--- text finds the case the warning misses.
+-- IT DOES NOT USE THE PlanAffectingConvert WARNING, and the reason is the
+-- collation, not luck.
+--
+-- Under a WINDOWS collation — French_CI_AS, Latin1_General_CI_AS, anything
+-- not prefixed SQL_ — varchar sorts in the same order as the equivalent
+-- nvarchar. Order being preserved, the optimizer can still seek across the
+-- conversion by computing a range at runtime, which shows in the plan as
+-- StartRange/EndRange against an Expr rather than a plain equality. Having
+-- achieved a seek, the engine has nothing to warn about and stays silent —
+-- while every column beyond the one that got the range remains in the
+-- residual predicate, evaluated per row.
+--
+-- Under a legacy SQL_ collation the two sort orders differ, no range is
+-- possible, the seek is lost outright, and only then does the warning appear.
+--
+-- So the warning is absent precisely where the schema is modern. Measured on
+-- the instance this was built against, a French_CI_AS estate: 10 of 22
+-- detected conversions carried no warning, including the three most-executed
+-- statements. A warning-based check reports a clean bill of health on exactly
+-- the estates most likely to be affected. server_raised_warning is projected
+-- so the analysis layer can see that split rather than infer it.
 --
 -- BOUNDED, AND THE BOUND IS REPORTED. Casting plan XML to text is CPU-heavy
 -- per plan, so only the heaviest cached plans are examined — heaviest by
