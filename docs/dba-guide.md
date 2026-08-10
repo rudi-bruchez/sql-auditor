@@ -39,7 +39,7 @@ can write them out and read them before you run anything:
 sql-auditor queries export --to ./queries-to-review
 ```
 
-The corpus is 14 files. The archive records the SHA-256 of the exact corpus that
+The corpus is 28 files. The archive records the SHA-256 of the exact corpus that
 was used, so a run can be tied to the questions it asked.
 
 It collects; it does not judge. There are no thresholds and no recommendations
@@ -53,8 +53,25 @@ published. See [Can I verify the binary?](#can-i-verify-the-binary).
 
 ## What permissions it needs
 
-The login must be able to connect. Beyond that there are three rights the
-collector uses, and none of the three is required: it probes each one before it
+**The short answer: let the tool write the script.**
+
+```
+sql-auditor check --grant-script grants.sql
+```
+
+`check` probes each permission, then writes the T-SQL that grants exactly the
+ones that came back refused — for the login the server reports, not the one in
+your `.env`, which is not always the same principal. Each statement in the file
+carries the reason for it, the collectors it unlocks, and, where there is one,
+the security consequence to weigh. Nothing is executed: the login being
+measured cannot grant anything by definition. Read the file, then hand it to
+someone who can run it.
+
+The rest of this section is what that script contains, for the reader who wants
+to know before running anything.
+
+The login must be able to connect. Beyond that there are five rights the
+collector uses, and none of them is required: it probes each one before it
 starts and carries on without whatever it was refused, recording the omission.
 This is what each one costs when it is missing, in the collector's own words —
 the wording below is the same string the tool prints and writes into the archive.
@@ -63,8 +80,22 @@ the wording below is the same string the tool prints and writes into the archive
 | --- | --- | --- |
 | Connect to the instance | `CONNECT SQL` | nothing can run |
 | Read server and database metadata | `VIEW ANY DEFINITION` (server level) | instance configuration and database file layout not collected |
-| Read performance counters | `VIEW SERVER STATE` | wait statistics, schedulers, memory and tempdb usage not collected |
-| Read backup history from msdb | `SELECT` on `msdb.dbo.backupset` | backup history not collected — the report must not read this as 'no backups exist' |
+| Read performance counters | `VIEW SERVER STATE`, or `VIEW SERVER PERFORMANCE STATE` on SQL Server 2022 and later | wait statistics, schedulers, memory and tempdb usage not collected |
+| Read backup history | `SELECT` on `msdb.dbo.backupset` | backup history not collected — the report must not read this as 'no backups exist' |
+| Read the Agent job inventory | `SQLAgentReaderRole` in msdb | Agent jobs not collected — the report must not read this as 'no jobs' or 'no failing jobs' |
+| Read the SQL Server error log | covered by `VIEW SERVER STATE` before 2022; `VIEW ANY ERROR LOG` from 2022 | the error log is not collected — the report must not read this as 'no errors were logged' |
+
+Two of those deserve a second look before you grant them.
+
+`SQLAgentReaderRole` implies `SQLAgentUserRole`, whose members can create and
+run jobs they own, through any proxy already granted to that role. On an
+instance with permissive proxies that is a real privilege. Leaving it out is a
+supported outcome: the Agent collector is skipped and the archive says so.
+
+On SQL Server 2022 and later the generated script asks for `VIEW SERVER
+PERFORMANCE STATE` rather than `VIEW SERVER STATE`. It covers the dynamic
+management views the collector reads without also opening the security-related
+ones, and it is the narrower of the two.
 
 One caution about `VIEW ANY DEFINITION`. SQL Server does not raise an error when
 it is missing. Metadata visibility filters catalog views row by row, so a query
@@ -76,20 +107,35 @@ worth granting the right so the picture is complete.
 
 ### Step 1: the instance-scope rights
 
+Creating the login is the one part the tool cannot write for you, since it has
+no business choosing a password:
+
 ```sql
 CREATE LOGIN sqlauditor WITH PASSWORD = '...';
-GRANT VIEW ANY DEFINITION TO sqlauditor;
-GRANT VIEW SERVER STATE  TO sqlauditor;
-USE msdb;
-CREATE USER sqlauditor FOR LOGIN sqlauditor;
-ALTER ROLE db_datareader ADD MEMBER sqlauditor;
 ```
 
-**This is not the whole recipe, and stopping here is the mistake to avoid.** A
-login with exactly these rights passes all four permission probes — four green
-`ok` lines, no warning — and then collects roughly two thirds of what it should,
-because every per-database collector is skipped. Measured on SQL Server 2022:
-9 results instead of 13.
+From there, run `check` with that login and let it write the rest:
+
+```
+sql-auditor check --user sqlauditor --grant-script grants.sql
+```
+
+The generated file grants `VIEW ANY DEFINITION` and `VIEW SERVER STATE` at the
+server, creates a user in msdb, and grants `SELECT` on `msdb.dbo.backupset`
+plus `SQLAgentReaderRole` — and nothing else. In particular it does **not** put
+the login in `db_datareader` on msdb, which an earlier version of this guide
+suggested: that role also hands over Database Mail contents, job step commands
+and operator addresses, none of which the collector reads.
+
+**Step 1 alone is not the whole recipe, and stopping here is the mistake to
+avoid.** A login with exactly these rights passes every permission probe —
+green `ok` lines, no warning — and then collects roughly two thirds of what it
+should, because every per-database collector is skipped. Measured on SQL Server
+2022: 9 results instead of 13.
+
+The generated script covers this too, which is why it is written at the end of
+`check` rather than straight after the probes: it needs the list of databases
+the run would skip. Those get a section of their own.
 
 ### Step 2: access to each database
 
@@ -100,13 +146,26 @@ history, index and fragmentation data for it. The skip is recorded in
 `MANIFEST.txt` under "Databases skipped", so the omission is visible — but only
 if you read that far.
 
-Either give the login a user in each database you want collected:
+The generated script writes this section for you, one block per database the
+run reported as skipped. What it emits is a user and nothing else:
 
 ```sql
 USE AppDb;
 CREATE USER sqlauditor FOR LOGIN sqlauditor;
-ALTER ROLE db_datareader ADD MEMBER sqlauditor;
 ```
+
+No role membership. A user with none carries `CONNECT` and that is all the
+per-database collectors need: the metadata they read is already covered by
+`VIEW ANY DEFINITION` at the server, and the dynamic management views by
+`VIEW SERVER STATE`, which implies `VIEW DATABASE STATE` everywhere.
+
+There is one exception, and it is opt-in. `--estimate-compression` runs
+`sp_estimate_data_compression_savings`, which samples the actual rows of a
+table into tempdb and therefore needs `SELECT` on the data. Without it that
+collector fails with error 229 and the run says so. If you want compression
+estimates, that flag is the only reason to grant read access to user tables —
+and it is worth granting narrowly, on the tables you care about, rather than
+through `db_datareader`.
 
 Or, to cover the whole instance including databases created later, one
 server-level grant does it (SQL Server 2014 and later):
@@ -127,8 +186,8 @@ is the only route.
 ### Confirming you got it right
 
 Run `check` and look at the database list, not only at the permission lines.
-Four `ok` probes above a `Databases that would be collected (0)` means step 2 is
-missing.
+Green probes above a `Databases that would be collected (0)` line mean step 2
+is missing. Re-running with --grant-script writes the fix.
 
 ## Run `check` first
 

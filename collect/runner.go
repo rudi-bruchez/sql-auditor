@@ -42,7 +42,13 @@ func fail(format string, a ...any) (string, string, error) {
 
 type ServerInfo struct {
 	Name, Version, Edition string
-	UTCOffsetMinutes       int
+	// Login is the connected principal as the SERVER names it. It is not the
+	// login string from the configuration: a Windows login arrives as
+	// DOMAIN\user whatever case was typed, and a login can be reached through
+	// a group. Anything that writes the login into a GRANT has to use this one
+	// or it grants permissions to a principal nobody is connecting with.
+	Login            string
+	UTCOffsetMinutes int
 }
 
 type DatabaseInfo struct {
@@ -50,6 +56,13 @@ type DatabaseInfo struct {
 	IsSnapshot  bool
 	HasAccess   bool
 }
+
+// SkipNoAccess is the reason a database is left out because the login
+// cannot connect to it. It is a constant because two places must agree on
+// it: the run that records the skip, and the grant script that offers to
+// fix it. A literal in both would drift and the fix would silently stop
+// being offered.
+const SkipNoAccess = "no access for this login"
 
 type SkipReason struct {
 	Name   string `json:"name"`
@@ -205,18 +218,19 @@ func Open(cfg *Config) (*sql.DB, error) {
 // row with "converting NULL to string is unsupported".
 func Probe(ctx context.Context, c *sql.Conn) (ServerInfo, error) {
 	var si ServerInfo
-	var name, version, edition sql.NullString
+	var name, version, edition, login sql.NullString
 	var offset sql.NullInt64
 	err := c.QueryRowContext(ctx, `
         SELECT CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
                CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')),
                CONVERT(nvarchar(128), SERVERPROPERTY('Edition')),
-               DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())`).
-		Scan(&name, &version, &edition, &offset)
+               DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()),
+               SUSER_SNAME()`).
+		Scan(&name, &version, &edition, &offset, &login)
 	if err != nil {
 		return si, err
 	}
-	si.Name, si.Version, si.Edition = name.String, version.String, edition.String
+	si.Name, si.Version, si.Edition, si.Login = name.String, version.String, edition.String, login.String
 	si.UTCOffsetMinutes = int(offset.Int64)
 	return si, nil
 }
@@ -271,7 +285,7 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error)
 		case d.IsSnapshot:
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, "database snapshot"})
 		case !d.HasAccess:
-			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, "no access for this login"})
+			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, SkipNoAccess})
 		case len(inc) > 0 && !matchAny(inc, d.Name):
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, "not matched by DB_INCLUDE"})
 		case matchAny(exc, d.Name):
