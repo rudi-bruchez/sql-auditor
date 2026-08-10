@@ -73,6 +73,16 @@ DECLARE @top int = 20, @min_mb int = 100, @kind nvarchar(60) = N'PAGE';
 DECLARE @failures int = 0, @attempted int = 0;
 DECLARE @first_err int = 0, @first_msg nvarchar(2048) = N'', @first_obj sysname = NULL;
 
+/* Dropped before creation, because the collector runs once per database ON
+   THE SAME SESSION: a #temp table outlives the batch that made it and the
+   second database fails with error 2714, "there is already an object named
+   #candidates". This guard is in the originating tsql-scripts and removing it
+   was a mistake — an interactive script gets away without it because the DBA
+   opens a new window; an unattended sweep of eleven databases does not.
+   Measured: DATAWAREHOUSE succeeded, DSA_M3 failed on the very next call. */
+IF OBJECT_ID('tempdb..#candidates') IS NOT NULL DROP TABLE #candidates;
+IF OBJECT_ID('tempdb..#savings')    IS NOT NULL DROP TABLE #savings;
+
 CREATE TABLE #candidates (
     schema_name sysname, object_name sysname, object_id int,
     reserved_mb decimal(18,2), rows_ bigint);
