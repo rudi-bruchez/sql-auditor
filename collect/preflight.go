@@ -78,9 +78,21 @@ func Capabilities() []Capability {
 		{Name: "view_server_state", Label: "Read performance counters (VIEW SERVER STATE)",
 			SQL:    "SELECT TOP 1 wait_type FROM sys.dm_os_wait_stats",
 			Impact: "wait statistics, schedulers, memory and tempdb usage not collected"},
-		{Name: "msdb_read", Label: "Read backup history from msdb",
+		// Each probe names the object it actually reads, because the label is
+		// what a reader generalises from. "Read backup history from msdb"
+		// invited the conclusion that msdb was readable; SQLAgentReaderRole
+		// grants backupset and sysjobs_view while denying sysjobsteps,
+		// sysjobhistory, sysschedules, sysalerts and the mail tables, so the
+		// two halves of msdb have to be probed separately or the manifest
+		// claims coverage it does not have.
+		{Name: "msdb_read", Label: "Read backup history (msdb.dbo.backupset)",
 			SQL:    "SELECT TOP 1 database_name FROM msdb.dbo.backupset",
 			Impact: "backup history not collected — the report must not read this as 'no backups exist'"},
+		// Deliberately not NeedsRows: an instance with no Agent jobs returns
+		// no rows, and that is an answer, not a denial.
+		{Name: "agent_jobs", Label: "Read the Agent job inventory (msdb.dbo.sysjobs_view)",
+			SQL:    "SELECT TOP 1 job_id FROM msdb.dbo.sysjobs_view",
+			Impact: "Agent jobs not collected — the report must not read this as 'no jobs' or 'no failing jobs'"},
 	}
 }
 
