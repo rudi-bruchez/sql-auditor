@@ -25,7 +25,12 @@ go.work
 go.work.sum
 
 # env file
-.env
+# The glob matters: ".env" alone does not match ".env.local", ".env.prod" or
+# any other suffixed variant, and those are exactly the files that end up
+# holding a real server, login and password while ".env" stays a template.
+# ".env.example" is committed on purpose and is excluded from the rule below.
+.env*
+!.env.example
 
 # Editor/IDE
 # .idea/
