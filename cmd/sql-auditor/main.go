@@ -53,6 +53,12 @@ func run() int {
 		sessionText = fs.Bool("include-session-text", false,
 			"also collect the SQL text of sessions running during collection, "+
 				"with their login, host and program names — this may contain application data")
+		// Off by default for cost, not for privacy. The estimate samples real
+		// data into tempdb, and the objects worth asking about are the large
+		// ones — which is precisely when it hurts.
+		estimateCompression = fs.Bool("estimate-compression", false,
+			"also estimate page-compression savings on the largest uncompressed objects — "+
+				"this samples data into tempdb and is slow on large tables")
 	)
 	_ = fs.Parse(args)
 
@@ -113,7 +119,10 @@ func run() int {
 	opts := collect.Options{
 		Config: cfg, Corpus: sqlauditor.Queries, Root: "queries",
 		Now: time.Now(), Keep: *keep, Version: version, Commit: commit,
-		Flags: map[string]bool{collect.FlagIncludeSessionText: *sessionText},
+		Flags: map[string]bool{
+			collect.FlagIncludeSessionText:  *sessionText,
+			collect.FlagEstimateCompression: *estimateCompression,
+		},
 	}
 	if cfg.QueriesDir != "" {
 		opts.Corpus = os.DirFS(cfg.QueriesDir)
@@ -154,6 +163,9 @@ Options (check, collect):
                               the login, host and program names behind them.
                               Off by default: that text can contain application
                               data. MANIFEST.txt discloses it when it is on.
+  --estimate-compression      also estimate page-compression savings on the largest
+                              uncompressed objects. Off by default for cost: it
+                              samples data into tempdb and is slow on big tables.
 
 Exit codes: 0 success, 2 partial failure or bad configuration, 1 fatal.
 `)

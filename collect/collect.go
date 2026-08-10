@@ -21,6 +21,23 @@ import (
 // field that discloses the result to whoever is asked to approve the transfer.
 const FlagIncludeSessionText = "include_session_text"
 
+// FlagEstimateCompression gates the compression-savings estimate. It guards
+// two things at once, and an earlier version of this comment got it wrong by
+// naming only the first.
+//
+// Cost: sp_estimate_data_compression_savings copies sampled data into tempdb,
+// compresses it and measures. On the objects worth asking about that is the
+// most expensive thing this corpus can do, on the instance being audited.
+//
+// Data access: it does that by SELECTing the rows. Every other collector in
+// this corpus reads catalog views and DMVs only, and MANIFEST.txt states
+// plainly that no user or application table is read — which is why a
+// read-only audit login normally has no SELECT anywhere and this collector
+// fails with error 229 on such a login, by design. Turning the flag on is
+// therefore a decision about touching client data, not only about spending
+// I/O, and it needs the same deliberateness as session text.
+const FlagEstimateCompression = "estimate_compression"
+
 type Options struct {
 	Config *Config
 	Corpus fs.FS

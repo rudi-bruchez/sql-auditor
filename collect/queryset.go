@@ -42,6 +42,7 @@ type Script struct {
 // dropping a collector from every run.
 var KnownFlags = map[string]string{
 	"include_session_text": "--include-session-text",
+	"estimate_compression": "--estimate-compression",
 }
 
 var (
