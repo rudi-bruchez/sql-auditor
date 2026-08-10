@@ -58,6 +58,7 @@ Options for `check` and `collect`:
 | `--queries-dir DIR` | run a corpus from disk instead of the embedded one |
 | `--output-dir DIR` | where to write results |
 | `--keep` | keep an existing same-day run folder, suffixing this run |
+| `--grant-script FILE` | `check` only. Write the T-SQL that grants the permissions found missing, for the login the server reports, with the reason for each. Never executed. |
 | `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
 
 There is no `--password` flag. A password on the command line ends up in `ps`

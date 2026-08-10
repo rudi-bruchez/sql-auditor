@@ -48,6 +48,9 @@ type Options struct {
 	// absent from the map is off, so the default is always the narrow one.
 	Flags           map[string]bool
 	Version, Commit string
+	// GrantScript, when set, is where "check" writes the T-SQL that grants
+	// the permissions the probe found missing. Empty means write nothing.
+	GrantScript string
 }
 
 // prepareRunFolder creates the run folder, clearing it and the archive beside
@@ -444,11 +447,13 @@ func Check(ctx context.Context, o Options) (int, error) {
 	si, err := probeWithDeadline(ctx, conn, o.Config)
 	if err == nil {
 		fmt.Printf("\nServer   : %s  %s  %s\n", si.Name, si.Version, si.Edition)
+		fmt.Printf("Login    : %s\n", si.Login)
 	}
 
 	// The database list is the blast radius. It comes last because it is the
 	// part a reader scrolls back to, and it is printed even when it is empty —
 	// an empty list is itself the finding when VIEW ANY DEFINITION is missing.
+	var noAccess []string
 	cands, cerr := candidatesWithDeadline(ctx, conn, o.Config)
 	if cerr != nil {
 		fmt.Fprintf(os.Stderr, "could not list databases: %v\n", cerr)
@@ -471,8 +476,72 @@ func Check(ctx context.Context, o Options) (int, error) {
 				fmt.Printf("  - %s (%s)\n", s.Name, s.Reason)
 			}
 		}
+		for _, s := range sel.Skipped {
+			if s.Reason == SkipNoAccess {
+				noAccess = append(noAccess, s.Name)
+			}
+		}
+	}
+
+	// The grant script comes last because it needs everything above: the
+	// probe results, the version that selects the permission vocabulary, and
+	// the databases the run would skip for lack of access. That last one is
+	// the reason it cannot be written earlier — it is also the gap the probes
+	// cannot see, and the one that silently costs two thirds of the
+	// collectors.
+	if o.GrantScript != "" {
+		if werr := writeGrantScript(o, scripts, checks, si, err, noAccess); werr != nil {
+			fmt.Fprintf(os.Stderr, "could not write %s: %v\n", o.GrantScript, werr)
+			return 2, nil
+		}
+	} else if anyDenied(checks) || len(noAccess) > 0 {
+		fmt.Print("\nSomething is missing above. To generate the T-SQL that grants\n" +
+			"exactly what is missing, and nothing more, for a DBA to review:\n\n" +
+			"  sql-auditor check --grant-script grants.sql\n")
 	}
 	return PreflightExitCode(checks, lintFailures, writable), nil
+}
+
+// writeGrantScript builds the permission script and puts it on disk. It is
+// a function rather than four lines inline because it has one judgement to
+// make: what to do when the probe that yields the login and the version
+// failed.
+//
+// It refuses. A script naming the login from the configuration rather than
+// the one the server reports would be a plausible-looking file granting
+// permissions to a principal nobody connects with, and the operator would
+// find out only when the next run is still denied.
+func writeGrantScript(o Options, scripts []Script, checks []CapabilityCheck, si ServerInfo, probeErr error, noAccess []string) error {
+	if probeErr != nil {
+		return fmt.Errorf("the server probe failed, so the login and version are unknown: %w", probeErr)
+	}
+	if strings.TrimSpace(si.Login) == "" {
+		return errors.New("the server did not report a login name for this connection")
+	}
+	body, hasStatements := BuildGrantScript(GrantScriptInput{
+		Login: si.Login, Instance: si.Name, Version: si.Version, Edition: si.Edition,
+		Checks: checks, Scripts: scripts, NoAccessDatabases: noAccess, Tool: o.Version,
+	})
+	if err := os.WriteFile(o.GrantScript, []byte(body), 0o600); err != nil {
+		return err
+	}
+	if hasStatements {
+		fmt.Printf("\nGrants   : %s — review it, then have a DBA run it\n", o.GrantScript)
+	} else {
+		fmt.Printf("\nGrants   : %s — nothing to grant, and the file says so\n", o.GrantScript)
+	}
+	return nil
+}
+
+// anyDenied reports whether the probe refused anything, which is the only
+// case where suggesting the grant script is useful.
+func anyDenied(checks []CapabilityCheck) bool {
+	for _, c := range checks {
+		if c.Status == "denied" {
+			return true
+		}
+	}
+	return false
 }
 
 // The three read-only calls the pipeline makes outside runUnit, each bounded.

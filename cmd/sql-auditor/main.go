@@ -45,6 +45,12 @@ func run() int {
 		outputDir  = fs.String("output-dir", "", "where to write results")
 		keep       = fs.Bool("keep", false, "keep an existing same-day run folder, suffixing this run")
 		to         = fs.String("to", "", "destination directory for 'queries export'")
+		// Writes a file, never a permission. The collector connects with the
+		// login being measured, which by construction cannot grant anything —
+		// so the output is a script for a DBA to read and run, and the tool
+		// stays a reader of the instance in every mode.
+		grantScript = fs.String("grant-script", "",
+			"write the T-SQL that grants the missing permissions to this file (check only)")
 		// Off by default, and it has to stay that way: this is the only option
 		// that puts the verbatim SQL of live user batches into the archive,
 		// along with the login, host and program names behind them. That text
@@ -119,6 +125,7 @@ func run() int {
 	opts := collect.Options{
 		Config: cfg, Corpus: sqlauditor.Queries, Root: "queries",
 		Now: time.Now(), Keep: *keep, Version: version, Commit: commit,
+		GrantScript: *grantScript,
 		Flags: map[string]bool{
 			collect.FlagIncludeSessionText:  *sessionText,
 			collect.FlagEstimateCompression: *estimateCompression,
@@ -159,6 +166,12 @@ Options (check, collect):
   --queries-dir DIR           run a corpus from disk instead of the embedded one
   --output-dir DIR            where to write results
   --keep                      keep an existing same-day run folder
+  --grant-script FILE         check only. After probing permissions, write the
+                              T-SQL that grants exactly the ones found missing,
+                              for the login the server reports, with the reason
+                              for each. The tool never runs it: the login being
+                              measured cannot grant anything. Give the file to
+                              a DBA.
   --include-session-text      also collect the SQL text of running sessions and
                               the login, host and program names behind them.
                               Off by default: that text can contain application
