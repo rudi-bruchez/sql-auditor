@@ -112,14 +112,25 @@ GROUP BY parent_node_id
 ORDER BY parent_node_id
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* ───────── configuration (instance) ───────── */
-SELECT name AS setting, CAST(value_in_use AS BIGINT) AS value
+/* ───────── configuration (instance) ─────────
+   EVERY setting, not a chosen list. This used to filter on eleven names, and
+   the filter was the defect: an allow-list can only contain what its author
+   thought of, so "fill factor (%)" and "backup compression default" — both
+   ordinary audit questions — were invisible, and nothing said they were
+   missing. sys.configurations has fewer than a hundred rows and costs nothing
+   to take whole; a closed list guarantees the same blind spot again the next
+   time someone asks about a setting nobody listed.
+
+   value and value_in_use are BOTH projected, and their divergence is itself a
+   finding: it means someone ran sp_configure without RECONFIGURE, so the
+   setting a reader sees in a script is not the one the engine is using. */
+SELECT name                          AS setting,
+       CAST(value AS BIGINT)         AS value_configured,
+       CAST(value_in_use AS BIGINT)  AS value_in_use,
+       CASE WHEN value <> value_in_use THEN 1 ELSE 0 END AS pending_reconfigure,
+       CAST(is_dynamic AS INT)       AS is_dynamic,
+       CAST(is_advanced AS INT)      AS is_advanced
 FROM sys.configurations
-WHERE name IN ('max degree of parallelism','cost threshold for parallelism',
-               'min server memory (MB)','max server memory (MB)',
-               'affinity mask','affinity I/O mask','affinity64 mask',
-               'lightweight pooling','priority boost','max worker threads',
-               'optimize for ad hoc workloads')
 ORDER BY name
 OPTION (RECOMPILE, MAXDOP 1);
 
