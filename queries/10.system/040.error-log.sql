@@ -1,5 +1,5 @@
 -- @scope:       instance
--- @resultsets:  root:object, status:object, top_messages:array, by_source:array
+-- @resultsets:  root:object, status:object, top_messages:array, by_source:array, notable:array
 -- @permissions: CONNECT, ERROR LOG
 -- @timeout:     300
 --
@@ -73,6 +73,28 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 /* TOP 40 by count, and the cut is REPORTED above rather than left implicit: a
    truncated list that does not say it is truncated reads as a complete one. */
+--
+-- POURQUOI UN CLASSEMENT PAR FRÉQUENCE NE SUFFIT PAS.
+--
+-- top_messages rend les quarante préfixes les plus fréquents, ce qui est la
+-- bonne question pour « qu'est-ce qui pollue le journal ». C'est la mauvaise
+-- pour « que s'est-il passé ». Sur l'instance qui a motivé ce jeu de
+-- résultats, le journal comptait 5 252 préfixes distincts et deux événements
+-- décisifs étaient uniques, donc invisibles :
+--
+--   Autogrow of file 'X_log' ... was cancelled by user or timed out
+--   Configuration option 'max server memory (MB)' changed from 220000 to 300000
+--
+-- Le second datait du lendemain d'un redémarrage difficile : quelqu'un avait
+-- augmenté la mémoire pour régler un problème de performance. Cela n'a servi à
+-- rien, l'édition plafonnant le buffer pool, mais l'audit devait le savoir et
+-- ne l'a pas su.
+--
+-- D'où ce jeu de résultats : une liste fermée de motifs qui comptent quelle que
+-- soit leur fréquence, rendus par ordre chronologique. Un changement de
+-- configuration, une extension de fichier annulée, une entrée/sortie longue,
+-- une erreur de cohérence ou un CHECKDB se lisent une fois et pèsent lourd.
+
 SELECT TOP (40)
        LEFT(l.Txt, 80)                                            AS [message_prefix],
        COUNT(*)                                                   AS [occurrences],
@@ -94,4 +116,40 @@ SELECT CASE WHEN l.ProcessInfo LIKE 'spid%' THEN 'spid' ELSE l.ProcessInfo END A
 FROM #log AS l
 GROUP BY CASE WHEN l.ProcessInfo LIKE 'spid%' THEN 'spid' ELSE l.ProcessInfo END
 ORDER BY COUNT(*) DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+
+/* Les événements qui comptent une fois. Le cap est de 200 lignes et il est
+   reporté, parce qu'une liste tronquée sans le dire se lit comme une liste
+   complète. L'ordre est chronologique : ce jeu se lit comme un récit, pas
+   comme un classement. */
+WITH frequence AS (
+    /* Un motif notable peut aussi être bavard. « Configuration option 'user
+       options' changed from 0 to 0 » correspond au filtre et apparaît 537 fois
+       sur l'instance auditée : à lui seul il remplissait le cap et chassait les
+       événements uniques, qui sont la raison d'être de ce jeu. Ce qui est
+       fréquent est déjà dans top_messages ; ici on ne garde que le rare. */
+    SELECT LEFT(RTRIM(Txt), 80) AS prefixe, COUNT(*) AS n
+    FROM #log GROUP BY LEFT(RTRIM(Txt), 80))
+SELECT TOP (200)
+       l.LogDate                                                  AS [when],
+       RTRIM(l.ProcessInfo)                                       AS [source],
+       LEFT(RTRIM(l.Txt), 400)                                    AS [message],
+       f.n                                                        AS [occurrences]
+FROM       #log AS l
+JOIN       frequence AS f ON f.prefixe = LEFT(RTRIM(l.Txt), 80)
+WHERE f.n <= 20
+  AND (l.Txt LIKE '%Configuration option%changed from%'
+   OR l.Txt LIKE '%Autogrow of file%'
+   OR l.Txt LIKE '%taking longer than%'
+   OR l.Txt LIKE '%CHECKDB%'
+   OR l.Txt LIKE '%consistency error%'
+   OR l.Txt LIKE '%severe error%'
+   OR l.Txt LIKE '%Recovery is complete%'
+   OR l.Txt LIKE '%Setting database option%'
+   OR l.Txt LIKE '%deadlock%'
+   OR l.Txt LIKE '%stack dump%'
+   OR l.Txt LIKE '%out of memory%'
+   OR l.Txt LIKE '%could not be started%')
+ORDER BY l.LogDate
 OPTION (RECOMPILE, MAXDOP 1);
