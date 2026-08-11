@@ -35,6 +35,20 @@
 -- SQL Server 2012 is the floor. sys.partitions.data_compression predates it.
 -- COLUMNSTORE and COLUMNSTORE_ARCHIVE appear as values on 2012 and later, so
 -- they are reported as they come rather than mapped to a fixed list.
+--
+-- A NOTE ON THE WORD "PARTITION", BECAUSE IT COSTS A CLIENT REPORT.
+--
+-- sys.partitions returns one row per index per table, whether or not anything
+-- is partitioned: a table with three indexes yields four rows. A field named
+-- "partitions" therefore reports a number that has nothing to do with
+-- partitioning, and it will be read as though it does. It was, in an audit of
+-- an estate with 3 799 such rows and not one partitioned table, and the client
+-- asked for the list.
+--
+-- The columns are named storage_units for that reason. The only field here
+-- that speaks about partitioning is partitioned_tables, which counts objects
+-- with partition_number > 1 and is the number to quote when someone asks
+-- whether anything is partitioned.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -46,10 +60,10 @@ SELECT DB_NAME()                                                  AS [database],
        (SELECT COUNT(DISTINCT p.object_id) FROM sys.partitions AS p
         JOIN sys.tables AS t ON t.object_id = p.object_id AND t.is_ms_shipped = 0) AS [counts.tables],
        (SELECT COUNT(*) FROM sys.partitions AS p
-        JOIN sys.tables AS t ON t.object_id = p.object_id AND t.is_ms_shipped = 0) AS [counts.partitions],
+        JOIN sys.tables AS t ON t.object_id = p.object_id AND t.is_ms_shipped = 0) AS [counts.storage_units],
        (SELECT COUNT(*) FROM sys.partitions AS p
         JOIN sys.tables AS t ON t.object_id = p.object_id AND t.is_ms_shipped = 0
-        WHERE p.data_compression <> 0)                            AS [counts.compressed_partitions],
+        WHERE p.data_compression <> 0)                            AS [counts.compressed_storage_units],
        (SELECT COUNT(DISTINCT p.object_id) FROM sys.partitions AS p
         JOIN sys.tables AS t ON t.object_id = p.object_id AND t.is_ms_shipped = 0
         WHERE p.partition_number > 1)                             AS [counts.partitioned_tables],
@@ -60,7 +74,7 @@ OPTION (RECOMPILE, MAXDOP 1);
    compression setting. Reserved size, not row count — the question is about
    storage. */
 SELECT p.data_compression_desc                                    AS [compression],
-       COUNT(*)                                                   AS [partitions],
+       COUNT(*)                                                   AS [storage_units],
        COUNT(DISTINCT p.object_id)                                AS [objects],
        SUM(p.rows)                                                AS [rows],
        CAST(SUM(ps.reserved_page_count) * 8.0 / 1024 AS DECIMAL(18,1)) AS [reserved_mb]
@@ -80,7 +94,7 @@ SELECT TOP (200)
        ISNULL(i.name, '(heap)')                                   AS [index_name],
        p.index_id                                                 AS [index_id],
        i.type_desc                                                AS [index_type],
-       COUNT(*)                                                   AS [partitions],
+       COUNT(*)                                                   AS [storage_units],
        SUM(p.rows)                                                AS [rows],
        CAST(SUM(ps.reserved_page_count) * 8.0 / 1024 AS DECIMAL(18,1)) AS [reserved_mb]
 FROM       sys.partitions AS p
@@ -98,7 +112,7 @@ OPTION (RECOMPILE, MAXDOP 1);
    is almost always an accident rather than a design. */
 SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
        COUNT(DISTINCT p.data_compression_desc)                    AS [distinct_settings],
-       COUNT(*)                                                   AS [partitions],
+       COUNT(*)                                                   AS [storage_units],
        MIN(p.data_compression_desc)                               AS [setting_min],
        MAX(p.data_compression_desc)                               AS [setting_max],
        SUM(p.rows)                                                AS [rows]
