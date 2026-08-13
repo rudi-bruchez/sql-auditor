@@ -17,6 +17,10 @@ type Config struct {
 	ConnectTimeout, QueryTimeout              time.Duration
 	QueriesDir, OutputDir                     string
 	DBInclude, DBExclude                      string
+	QueryStoreDays                            int
+	QueryStoreFrom, QueryStoreTo              string
+	QueryStoreTop                             int
+	QueryStoreDBInclude                       string
 }
 
 // knownKeys is the closed set of recognised settings. Anything else in a
@@ -29,6 +33,8 @@ var knownKeys = map[string]bool{
 	"SQL_CONNECT_TIMEOUT_SEC": true, "SQL_QUERY_TIMEOUT_SEC": true,
 	"SQL_APPLICATION_NAME": true, "QUERIES_DIR": true, "OUTPUT_DIR": true,
 	"DB_INCLUDE": true, "DB_EXCLUDE": true,
+	"QUERY_STORE_DAYS": true, "QUERY_STORE_FROM": true, "QUERY_STORE_TO": true,
+	"QUERY_STORE_TOP": true, "QUERY_STORE_DB_INCLUDE": true,
 }
 
 // renamed maps retired key names to their replacement, so the error can say
@@ -129,6 +135,72 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		}
 		return time.Duration(n) * time.Second
 	}
+	// intOf mirrors secOf but for plain positive counts (no seconds unit),
+	// used by QUERY_STORE_DAYS and QUERY_STORE_TOP.
+	intOf := func(key string, def int) int {
+		raw := get(key, "")
+		if raw == "" {
+			return def
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: invalid value %q, want a positive whole number", key, raw)
+			}
+			return def
+		}
+		return n
+	}
+	// dateShapeOf checks that, when present, a QUERY_STORE_FROM/TO value has
+	// the shape "2006-01-02T15:04" or "2006-01-02". It is deliberately not
+	// resolved to an instant here: Resolve does not know the server's UTC
+	// offset, and doing so would silently bake in the collecting machine's
+	// zone instead. Task 7 turns it into an instant once the probe has
+	// reported the offset.
+	dateShapeOf := func(key string) string {
+		raw := get(key, "")
+		if raw == "" {
+			return ""
+		}
+		if _, err := time.Parse("2006-01-02T15:04", raw); err == nil {
+			return raw
+		}
+		if _, err := time.Parse("2006-01-02", raw); err == nil {
+			return raw
+		}
+		if firstErr == nil {
+			firstErr = fmt.Errorf("%s: invalid value %q, want 2006-01-02T15:04 or 2006-01-02", key, raw)
+		}
+		return raw
+	}
+
+	// QUERY_STORE_DAYS interacts with QUERY_STORE_FROM/TO, and Resolve is the
+	// only place that can see whether QUERY_STORE_DAYS was typed or defaulted
+	// (downstream only ever sees a resolved int). The conflict check must
+	// therefore run here, and before the default of 7 is applied — once the
+	// default is in, a legitimate "--query-store-from" run is indistinguishable
+	// from one that also asked for seven days.
+	rawQSDays := get("QUERY_STORE_DAYS", "")
+	rawQSFrom := get("QUERY_STORE_FROM", "")
+	rawQSTo := get("QUERY_STORE_TO", "")
+	if rawQSDays != "" && (rawQSFrom != "" || rawQSTo != "") {
+		return nil, fmt.Errorf("QUERY_STORE_DAYS cannot be combined with QUERY_STORE_FROM or QUERY_STORE_TO: pick a sliding window or an explicit one, not both")
+	}
+	// The default of 7 applies only when no absolute bound is present. When
+	// a bound is present but QUERY_STORE_DAYS was not explicitly set, it is
+	// left at 0: resolveWindow (Task 7) treats > 0 as the sliding form and
+	// 0 as "use the bounds instead".
+	var queryStoreDays int
+	switch {
+	case rawQSDays != "":
+		queryStoreDays = intOf("QUERY_STORE_DAYS", 7)
+	case rawQSFrom == "" && rawQSTo == "":
+		queryStoreDays = 7
+	default:
+		queryStoreDays = 0
+	}
+	queryStoreFrom := dateShapeOf("QUERY_STORE_FROM")
+	queryStoreTo := dateShapeOf("QUERY_STORE_TO")
 
 	cfg := &Config{
 		Server:         get("SQL_SERVER", ""),
@@ -145,6 +217,12 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		OutputDir:      get("OUTPUT_DIR", "output"),
 		DBInclude:      get("DB_INCLUDE", ""),
 		DBExclude:      get("DB_EXCLUDE", ""),
+
+		QueryStoreDays:      queryStoreDays,
+		QueryStoreFrom:      queryStoreFrom,
+		QueryStoreTo:        queryStoreTo,
+		QueryStoreTop:       intOf("QUERY_STORE_TOP", 50),
+		QueryStoreDBInclude: get("QUERY_STORE_DB_INCLUDE", ""),
 	}
 	if firstErr != nil {
 		return nil, firstErr

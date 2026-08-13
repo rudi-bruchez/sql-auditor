@@ -177,3 +177,67 @@ func TestResolveBoolAndSecValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveQueryStoreDefaults(t *testing.T) {
+	cfg, err := Resolve(map[string]string{"SQL_SERVER": "srv"}, nil, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.QueryStoreDays != 7 {
+		t.Errorf("QueryStoreDays = %d, want 7", cfg.QueryStoreDays)
+	}
+	if cfg.QueryStoreTop != 50 {
+		t.Errorf("QueryStoreTop = %d, want 50", cfg.QueryStoreTop)
+	}
+	if cfg.QueryStoreDBInclude != "" {
+		t.Errorf("QueryStoreDBInclude = %q, want empty", cfg.QueryStoreDBInclude)
+	}
+}
+
+func TestResolveQueryStoreOverrides(t *testing.T) {
+	dotenv := map[string]string{
+		"SQL_SERVER": "srv", "QUERY_STORE_DAYS": "30",
+		"QUERY_STORE_TOP": "10", "QUERY_STORE_DB_INCLUDE": "app*",
+	}
+	cfg, err := Resolve(nil, dotenv, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.QueryStoreDays != 30 || cfg.QueryStoreTop != 10 || cfg.QueryStoreDBInclude != "app*" {
+		t.Errorf("got %d/%d/%q, want 30/10/app*",
+			cfg.QueryStoreDays, cfg.QueryStoreTop, cfg.QueryStoreDBInclude)
+	}
+}
+
+// The trap this test exists for: with the default applied unconditionally,
+// QueryStoreDays would be 7 here too, and nothing downstream could tell this
+// run apart from one that asked for seven days AND a window.
+func TestResolveLeavesDaysUnsetWhenBoundsAreGiven(t *testing.T) {
+	cfg, err := Resolve(nil, map[string]string{
+		"SQL_SERVER": "srv", "QUERY_STORE_FROM": "2026-07-26T14:00",
+	}, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.QueryStoreDays != 0 {
+		t.Errorf("QueryStoreDays = %d, want 0 — the default must not apply when a bound is given", cfg.QueryStoreDays)
+	}
+}
+
+func TestResolveRefusesExplicitDaysWithBounds(t *testing.T) {
+	_, err := Resolve(nil, map[string]string{
+		"SQL_SERVER": "srv", "QUERY_STORE_DAYS": "7",
+		"QUERY_STORE_FROM": "2026-07-26T14:00",
+	}, func(string) string { return "" })
+	if err == nil {
+		t.Fatal("accepted both window forms at once; both readings are defensible and guessing is not")
+	}
+}
+
+func TestResolveRefusesNonPositiveQueryStoreDays(t *testing.T) {
+	_, err := Resolve(nil, map[string]string{"SQL_SERVER": "srv", "QUERY_STORE_DAYS": "0"},
+		func(string) string { return "" })
+	if err == nil {
+		t.Fatal("Resolve accepted QUERY_STORE_DAYS=0; a window of zero days collects nothing and says nothing")
+	}
+}
