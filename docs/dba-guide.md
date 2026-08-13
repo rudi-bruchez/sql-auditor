@@ -17,6 +17,7 @@ the questions you need answered before you do.
 - [`--include-session-text`](#--include-session-text)
 - [`--query-store-detail` and `--query-store-plan-stats`](#--query-store-detail-and---query-store-plan-stats)
 - [`--include-object-definitions`](#--include-object-definitions)
+- [`--include-deadlock-graphs`](#--include-deadlock-graphs)
 - [Authentication](#authentication)
 - [Reproducing a run locally](#reproducing-a-run-locally)
 
@@ -450,7 +451,7 @@ infrastructure documentation rather than public material.
 ```
 
 That paragraph is generated from what the run actually did, not fixed at compile
-time. Each of the four options that widen what the archive holds adds its own
+time. Each of the five options that widen what the archive holds adds its own
 line to it:
 
 - `--include-session-text` discloses the captured statement text and the login,
@@ -464,9 +465,11 @@ line to it:
   instance rather than only the databases listed above;
 - `--include-object-definitions` discloses the source of the views, procedures,
   functions and triggers, and says that this is code written on your side which
-  can name linked servers and carry a credential in clear.
+  can name linked servers and carry a credential in clear;
+- `--include-deadlock-graphs` discloses the deadlock reports, and says that each
+  one carries the SQL of both victims.
 
-Any one of the four also changes the closing paragraph, from "metadata about
+Any one of the five also changes the closing paragraph, from "metadata about
 the estate" to a statement that the archive should be treated as potentially
 containing personal data. Which form was used is a property of the archive:
 whoever receives it can read which options were on without taking anyone's word
@@ -719,8 +722,8 @@ is the usual reason to hit one of these — quote the whole value.
 ## `--include-session-text`
 
 This is the first of the options that change what kind of data the archive
-holds — the other three are `--query-store-detail`, `--query-store-plan-stats`
-and `--include-object-definitions`, below — and it is off by default for that
+holds — the other four are `--query-store-detail`, `--query-store-plan-stats`,
+`--include-object-definitions` and `--include-deadlock-graphs`, below — and it is off by default for that
 reason, not for performance. It costs one extra query.
 
 With it on, one more collector runs: `10.system/052.session-text.sql`. It reads
@@ -1090,6 +1093,49 @@ exists.
 view and the read is metadata only. The cost is in the archive — a database of
 2000 procedures is a few tens of megabytes of text before compression, and it is
 a document to handle carefully rather than a large one.
+
+## `--include-deadlock-graphs`
+
+The narrowest of the options that change what the archive holds, and the one
+with the clearest line: `10.system/060.system-health.sql` already reports, on
+every run and without any flag, how many deadlocks the `system_health` ring
+buffer holds and when each happened. It stops exactly there, because the report
+itself carries the verbatim SQL of both victims. This option collects the
+reports.
+
+With it on, one more collector runs: `10.system/061.deadlock-graphs.sql`. It
+writes one `.xdl` file per deadlock under `10.system/061.deadlock-graphs/`, plus
+an `_index.json`. SSMS opens an `.xdl` as the deadlock diagram rather than as
+XML; the bytes are the same either way.
+
+**Why the graph is worth having.** Wait statistics say sessions waited on locks.
+The counts say how many deadlocks and when. Neither says which two statements,
+on which resource, in which order, or which one the engine chose as victim — and
+that is the difference between an audit that reports "lock contention" and one
+that names the pattern. It is in the graph and nowhere else within reach.
+
+**What it reads, and what it does not touch.** The `system_health` session has
+run by default since SQL Server 2008 and writes to a memory ring of bounded
+size. Reading it costs one query. Nothing is modified, cleared or consumed:
+collecting a graph does not remove it from the ring.
+
+**What the ring does not owe you.** It is a window, not an archive. Old events
+are overwritten and a restart empties it entirely, so what you get is whatever
+it still held at the moment of collection. `_index.json` carries the earliest
+and latest timestamps for exactly that reason — "412 deadlocks" means one thing
+over two days and another over twenty minutes, and "no deadlocks" can mean a
+healthy instance or one restarted an hour ago.
+
+**Three things can leave a graph out, and the index says which:**
+
+| In `_index.json` | What happened |
+| --- | --- |
+| `beyond the cap of 100 graphs` | more than 100 deadlocks in the ring; the most recent were kept |
+| `above the … byte cap` | that one report exceeds 1 MiB |
+| `the ring buffer holds no graph for this event` | the deadlock was recorded and its report was not |
+
+Every deadlock is listed either way, with its timestamp. A cluster of forty in
+one minute is visible even when only the newest hundred carry a file.
 
 ## Authentication
 

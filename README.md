@@ -66,6 +66,7 @@ Options for `check` and `collect`:
 | `--grant-script FILE` | `check` only. Write the T-SQL that grants the permissions found missing, for the login the server reports, with the reason for each. Never executed. |
 | `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
 | `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
+| `--include-deadlock-graphs` | also collect the deadlock reports `system_health` still holds, one `.xdl` file each |
 | `--estimate-compression` | also estimate page-compression savings on the largest uncompressed objects. Off for cost, not for disclosure: it samples real data into tempdb and is slow on large tables |
 | `--query-store-detail` | also collect the full text and the execution plans of the heaviest Query Store queries, per database |
 | `--query-store-plan-stats` | also look for the last profiled plan of each query the option above extracted. Does nothing on its own |
@@ -104,6 +105,13 @@ their addresses, and an `OPENQUERY` or an `EXECUTE AS` can hold a credential in
 clear — most often in the procedure nobody has opened in years, which is
 precisely the kind an audit goes looking for. Encrypted modules are listed but
 their source is not, because the server does not return it.
+
+`--include-deadlock-graphs` is the narrowest of the four. `10.system/060.system-health.sql`
+already reports how many deadlocks the `system_health` ring buffer holds and when
+they happened, on every run and without a flag; it stops there because a deadlock
+report carries the verbatim SQL of both victims. This option crosses exactly that
+line and no other — it writes each report as an `.xdl` file, which SSMS opens as
+the deadlock diagram. Nothing on the instance is modified or cleared to read them.
 
 `--query-store-plan-stats` is a second, separate decision rather than a
 widening of the first. Finding the last profiled plan means reading the plan

@@ -103,6 +103,10 @@ type WriteResult struct {
 	// no Query Store at all would then have MANIFEST.txt announce execution
 	// plans the archive does not hold.
 	DefinitionFiles int
+	// GraphFiles counts deadlock graphs written. A fourth counter for the same
+	// reason there is a third: it latches its own disclosure, and borrowing
+	// another would have MANIFEST.txt announce content the archive does not hold.
+	GraphFiles int
 }
 
 // ScriptWriter turns materialised result sets into files.
@@ -123,6 +127,8 @@ func writerFor(name string) ScriptWriter {
 		return writeQueryStoreProfiled
 	case "object-definitions":
 		return writeObjectDefinitions
+	case "deadlock-graphs":
+		return writeDeadlockGraphs
 	}
 	return nil
 }
