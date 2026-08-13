@@ -83,6 +83,45 @@ SELECT
            AND base.counter_name = 'Buffer cache hit ratio base'
       WHERE bchr.counter_name = 'Buffer cache hit ratio'
         AND bchr.object_name LIKE '%Buffer Manager%')               AS [memory.buffer_cache_hit_ratio_pct],
+
+    -- THROUGHPUT. These four are cumulative counts since the instance started,
+    -- not rates, and they are projected raw for that reason: dividing by the
+    -- uptime beside them gives an average per second, and an average is the
+    -- only honest thing a single sample can produce. Two samples would be
+    -- needed for a real rate, and this collector takes one.
+    --
+    -- They exist because nothing else in the corpus qualifies the workload at
+    -- all. An analysis could establish that a volume was saturated and that
+    -- sessions waited on locks, and had no way to say whether the instance
+    -- served ten batches a second or ten thousand. Compilations against batch
+    -- requests is the ratio that argues for or against
+    -- 'optimize for ad hoc workloads', and it could only be inferred.
+    (SELECT cntr_value FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'Batch Requests/sec'
+        AND object_name LIKE '%SQL Statistics%')                    AS [throughput.batch_requests_total],
+    (SELECT cntr_value FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'SQL Compilations/sec'
+        AND object_name LIKE '%SQL Statistics%')                    AS [throughput.compilations_total],
+    (SELECT cntr_value FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'SQL Re-Compilations/sec'
+        AND object_name LIKE '%SQL Statistics%')                    AS [throughput.recompilations_total],
+    -- Transactions/sec is per database and has a _Total instance. The instance
+    -- row is the one that answers "how busy is this server".
+    (SELECT cntr_value FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'Transactions/sec'
+        AND object_name LIKE '%Databases%'
+        AND instance_name = '_Total')                               AS [throughput.transactions_total],
+    (SELECT cntr_value FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'Log Flushes/sec'
+        AND object_name LIKE '%Databases%'
+        AND instance_name = '_Total')                               AS [throughput.log_flushes_total],
+    (SELECT cntr_value FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'Checkpoint pages/sec'
+        AND object_name LIKE '%Buffer Manager%')                    AS [throughput.checkpoint_pages_total],
+    -- The divisor, restated here so the counters above are usable without
+    -- opening another file.
+    (SELECT DATEDIFF(second, sqlserver_start_time, GETDATE())
+       FROM sys.dm_os_sys_info)                                     AS [throughput.seconds_since_start],
     (SELECT cntr_value FROM sys.dm_os_performance_counters
       WHERE counter_name = 'Page life expectancy'
         AND object_name LIKE '%Buffer Manager%')                    AS [memory.ple_global_measured_sec],

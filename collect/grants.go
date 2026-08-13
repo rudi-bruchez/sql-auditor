@@ -273,6 +273,32 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 		})
 	}
 
+	if denied["agent_job_steps"] {
+		sections = append(sections, grantSection{
+			title:  "Read what the Agent jobs actually run",
+			marker: sectionInMsdb,
+			why: append([]string{
+				"SELECT on one table. SQLAgentReaderRole shows the job inventory but",
+				"not the steps, so without this the report can say a maintenance job",
+				"exists and ran, and nothing about what it did — which index options",
+				"it passed, which databases it targeted, whether it rebuilds or",
+				"reorganises.",
+				"",
+				"Collectors that need it:",
+			}, indentList(collectorsFor(in.Scripts, "agent_job_steps"))...),
+			caveat: []string{
+				"Job step commands are the one place in msdb where a connection string",
+				"or a password is routinely written in clear by whoever wrote the job.",
+				"The collector projects the first 200 characters of T-SQL steps only,",
+				"and for CmdExec, PowerShell or SSIS steps — where an external",
+				"credential actually appears — nothing but the subsystem and the",
+				"length. The grant itself, however, lets the login read every command",
+				"in full. Decide on the login, not on the collector.",
+			},
+			statement: []string{fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.sysjobsteps TO %s;", login)},
+		})
+	}
+
 	if denied["agent_jobs"] {
 		sections = append(sections, grantSection{
 			title:  "Read the Agent job inventory and its history",

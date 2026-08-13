@@ -128,7 +128,15 @@ SELECT
     mf.type_desc                                            AS type,
     mf.physical_name,
     df.state_desc                                           AS state,
-    CAST(mf.size * 8 / 1024.0 AS DECIMAL(14,1))             AS size_mb,
+    -- Current size from sys.database_files, configured size from
+    -- sys.master_files, and both are projected because for tempdb they answer
+    -- different questions. tempdb is recreated at every startup at the size
+    -- master_files holds, then grows under load; database_files is what it has
+    -- grown to. Reading master_files alone reported eight 8 MB files on an
+    -- instance whose used_mb was 11.1 — a file cannot hold more than its size,
+    -- and that impossibility is what gave the defect away.
+    CAST(COALESCE(df.size, mf.size) * 8 / 1024.0 AS DECIMAL(14,1)) AS size_mb,
+    CAST(mf.size * 8 / 1024.0 AS DECIMAL(14,1))             AS configured_size_mb,
     CAST(FILEPROPERTY(mf.name,'SpaceUsed') * 8 / 1024.0 AS DECIMAL(14,1)) AS used_mb,
     CASE WHEN mf.max_size = -1 THEN 'unlimited'
          WHEN mf.max_size = 268435456 THEN 'log_2tb'

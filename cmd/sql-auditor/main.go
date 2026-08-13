@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -15,8 +16,51 @@ import (
 	"github.com/rudi-bruchez/sql-auditor/collect"
 )
 
-var version = "dev"
-var commit = "unknown"
+// version is the source of truth between releases. The release workflow
+// overrides both of these with -ldflags, stamping the tag and the commit it
+// built from, and it refuses to publish a binary whose "version" output
+// disagrees with the tag.
+//
+// Between releases the number still has to mean something: an archive records
+// the tool that produced it, and "dev" told a reader nothing about which
+// collectors were in the corpus. So the number lives here and moves with the
+// corpus, while buildStamp fills in the revision from the build itself.
+var version = "0.11.0"
+var commit = ""
+
+// buildStamp returns what to print after the version. When -ldflags supplied a
+// commit, that wins. Otherwise Go embeds the VCS revision at build time for any
+// build made inside a checkout, which covers the binaries handed round between
+// releases — and it marks a dirty tree, because a binary built from
+// uncommitted work is not the commit it names.
+func buildStamp() string {
+	if commit != "" {
+		return commit
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	rev, dirty := "", false
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return "unknown"
+	}
+	if len(rev) > 8 {
+		rev = rev[:8]
+	}
+	if dirty {
+		return rev + ", modified"
+	}
+	return rev
+}
 
 func main() {
 	os.Exit(run())
@@ -105,7 +149,7 @@ func run() int {
 	_ = fs.Parse(args)
 
 	if cmd == "version" {
-		fmt.Printf("sql-auditor %s (%s)\n", version, commit)
+		fmt.Printf("sql-auditor %s (%s)\n", version, buildStamp())
 		return 0
 	}
 	if cmd == "queries" {
@@ -143,6 +187,13 @@ func run() int {
 		usage()
 		return 2
 	}
+
+	// Which build produced an archive is the first question asked of one that
+	// disagrees with another, so say it before anything can go wrong — ahead of
+	// reading .env, so a refused configuration is still attributable to a
+	// build. On stderr, so redirecting a check's listing to a file leaves this
+	// on the terminal where the operator is looking.
+	fmt.Fprintf(os.Stderr, "sql-auditor %s (%s)\n\n", version, buildStamp())
 
 	dotenv := map[string]string{}
 	if f, err := os.Open(*envFile); err == nil {
@@ -194,7 +245,7 @@ func run() int {
 
 	opts := collect.Options{
 		Config: cfg, Corpus: sqlauditor.Queries, Root: "queries",
-		Now: time.Now(), Keep: *keep, Version: version, Commit: commit,
+		Now: time.Now(), Keep: *keep, Version: version, Commit: buildStamp(),
 		GrantScript: *grantScript,
 		Flags: map[string]bool{
 			collect.FlagIncludeSessionText:  *sessionText,
