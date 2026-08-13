@@ -137,7 +137,8 @@ func run() int {
 			"start of the window, YYYY-MM-DDTHH:MM, in the SERVER's local time")
 		queryStoreTo = fs.String("query-store-to", "",
 			"end of the window, YYYY-MM-DDTHH:MM, in the SERVER's local time "+
-				"(default: the moment of collection)")
+				"(default: the moment of collection); given on its own it implies "+
+				"a seven-day window ending at that bound")
 		queryStoreTop = fs.Int("query-store-top", 0,
 			"how many queries to extract per database, across all four rankings "+
 				"once deduplicated (default 50); queries with a forced plan are added "+
@@ -318,7 +319,8 @@ Options (check, collect):
                               local time. For the incident an average hides: one
                               hour, eighteen days ago.
   --query-store-to T          end of the window, same format and same clock
-                              (default: the moment of collection).
+                              (default: the moment of collection). On its own it
+                              implies a seven-day window ending at that bound.
   --query-store-top N         how many queries per database, across the four
                               rankings once deduplicated (default 50). Queries with
                               a forced plan are added on top of this.
