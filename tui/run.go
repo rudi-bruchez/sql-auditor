@@ -178,10 +178,11 @@ func (e pressEvent) apply(s State) State {
 	return s.Key(e.key)
 }
 
-// connectedEvent is step 1 succeeding. It carries the same-day collision
-// because the connection goroutine is where the resolved server name is first
-// known to be the one the run will use.
-type connectedEvent struct{ collision string }
+// connectedEvent is step 1 succeeding. It carries nothing: the address proved
+// to answer is already on the state, and the same-day collision cannot be
+// answered here — the name the run will use is the one the SERVER gives
+// itself, which only the probe brings back.
+type connectedEvent struct{}
 
 func (e connectedEvent) apply(s State) State {
 	// A result that belongs to an attempt the operator has already cancelled is
@@ -190,7 +191,6 @@ func (e connectedEvent) apply(s State) State {
 	if s.Step != StepConnecting {
 		return s
 	}
-	s.Collision = e.collision
 	s.Step = StepVerifying
 	return s
 }
@@ -210,6 +210,13 @@ func (e connectFailedEvent) apply(s State) State {
 type verifiedEvent struct {
 	result collect.VerifyResult
 	err    error
+	// collision is what an earlier run of the same day already occupies under
+	// the name THIS run will use, or "" when the way is clear. It rides on this
+	// event because the probe is the first moment that name is known, and it
+	// must be on the state before screen 3 draws: asking on entry to that
+	// screen would leave a window in which [enter] starts a run whose prompt
+	// had not appeared yet.
+	collision string
 }
 
 func (e verifiedEvent) apply(s State) State {
@@ -237,6 +244,7 @@ func (e verifiedEvent) apply(s State) State {
 		v.ServerErr = e.err
 	}
 	s.Verify = v
+	s.Collision = e.collision
 	s.Step = StepVerification
 	return s
 }
@@ -432,14 +440,7 @@ func (r *runner) connect(ctx context.Context, s State) {
 	if ctx.Err() != nil {
 		return
 	}
-	// The collision is answered here because this is the first moment the
-	// resolved server name is known to be the one the run will use, and it must
-	// be on the state before screen 3 draws — asking on entry to that screen
-	// would leave a window in which [enter] starts a run whose prompt had not
-	// appeared yet.
-	r.send(connectedEvent{
-		collision: collisionFor(o.Config.OutputDir, o.Config.Server, o.Now, o.Keep),
-	})
+	r.send(connectedEvent{})
 }
 
 func (r *runner) verify(ctx context.Context, s State) {
@@ -448,7 +449,11 @@ func (r *runner) verify(ctx context.Context, s State) {
 	if ctx.Err() != nil {
 		return
 	}
-	r.send(verifiedEvent{result: v, err: err})
+	// The collision is answered here and not at step 1: the folder collect.Run
+	// destroys is named after SERVERPROPERTY('ServerName'), which the probe has
+	// just brought back, and the address the operator typed is not it.
+	s.Verify = v
+	r.send(verifiedEvent{result: v, err: err, collision: collisionFor(s, o)})
 }
 
 func (r *runner) collect(ctx context.Context, s State) {
@@ -458,9 +463,10 @@ func (r *runner) collect(ctx context.Context, s State) {
 	// because Run reports it on stdout only when there is no Observer — under
 	// the wizard that write is suppressed, since it would land in the middle of
 	// a frame. RunFolderFor is deterministic given the same output directory,
-	// server, clock and --keep, and this is the same four values Run itself
-	// will use a microsecond later.
-	folder := collect.RunFolderFor(o.Config.OutputDir, o.Config.Server, o.Now, o.Keep)
+	// server name, clock and --keep, and runFolderFor passes it the same four
+	// values Run itself will use a microsecond later — the probed name among
+	// them, which is the whole point.
+	folder := runFolderFor(s, o)
 	start := time.Now()
 	code, err := collect.Run(ctx, o)
 	e := collectDoneEvent{

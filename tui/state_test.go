@@ -247,10 +247,52 @@ func TestPasswordNeverAppearsInAnyRenderedLine(t *testing.T) {
 	}
 }
 
+// probedAt builds the state and options of an instance the operator reached by
+// address and whose real name the probe brought back. The two spellings differ
+// on purpose: that difference is what every test below is about.
+func probedAt(dir string, now time.Time, keep bool) (State, collect.Options) {
+	s := State{
+		Step: StepOptions,
+		// What the DBA typed. RunFolderFor must never see it.
+		Server: "10.42.7.19,1433",
+		Keep:   keep,
+		Verify: collect.VerifyResult{
+			Probed:     true,
+			Collectors: 47,
+			Server:     collect.ServerInfo{Name: `SQL01\PROD`},
+		},
+	}
+	return s, collect.Options{
+		Config: &collect.Config{OutputDir: dir, Server: s.Server},
+		Now:    now,
+		Keep:   keep,
+	}
+}
+
+// The wizard must ask its question about the path collect.Run will actually
+// use. Run names its folder from SERVERPROPERTY('ServerName'); an address or an
+// FQDN produces a different name, so a wizard that asked about the typed
+// address would find every path free, print no prompt, and let
+// prepareRunFolder delete the previous run's folder and archive in silence.
+func TestTheRunFolderIsNamedAfterTheProbedServerAndNotTheTypedAddress(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC)
+	s, o := probedAt(dir, now, false)
+
+	want := collect.RunFolderFor(dir, s.Verify.Server.Name, now, false)
+	if got := runFolderFor(s, o); got != want {
+		t.Fatalf("runFolderFor = %q, want the path collect.Run will use, %q", got, want)
+	}
+	if typed := collect.RunFolderFor(dir, s.Server, now, false); typed == want {
+		t.Fatal("the two spellings coincide; this test proves nothing as written")
+	}
+}
+
 func TestTheSameDayArchiveIsDetectedBeforeAnythingIsDestroyed(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC)
-	if got := collisionFor(dir, `SQL01\PROD`, now, false); got != "" {
+	s, o := probedAt(dir, now, false)
+	if got := collisionFor(s, o); got != "" {
 		t.Fatalf("collisionFor on an empty directory = %q, want %q", got, "")
 	}
 	// The archive alone is enough. It sits beside the run folder rather than
@@ -259,19 +301,27 @@ func TestTheSameDayArchiveIsDetectedBeforeAnythingIsDestroyed(t *testing.T) {
 	if err := os.WriteFile(zip, []byte("previous run"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := collisionFor(dir, `SQL01\PROD`, now, false)
+	got := collisionFor(s, o)
 	if !strings.Contains(got, zip) {
 		t.Fatalf("collisionFor = %q, want it to name %q", got, zip)
 	}
 	// --keep suffixes its way to a free name, so there is nothing in the way
 	// and nothing to ask about.
-	if kept := collisionFor(dir, `SQL01\PROD`, now, true); kept != "" {
+	ks, ko := probedAt(dir, now, true)
+	if kept := collisionFor(ks, ko); kept != "" {
 		t.Errorf("collisionFor under keep = %q, want %q", kept, "")
+	}
+	// An unprobed instance has no name to build a path from, and screen 3 can
+	// start nothing anyway.
+	unprobed, uo := probedAt(dir, now, false)
+	unprobed.Verify = collect.VerifyResult{}
+	if none := collisionFor(unprobed, uo); none != "" {
+		t.Errorf("collisionFor without a probe = %q, want %q", none, "")
 	}
 
 	// Going back destroys nothing: the state machine never touches the disk,
 	// and the archive is still there for the operator who chose [b].
-	s := State{Step: StepOptions, Collision: got}
+	s.Collision = got
 	if back := s.Key(typed('b')); back.Step != StepVerification {
 		t.Fatalf("[b] led to %v, want StepVerification", back.Step)
 	}

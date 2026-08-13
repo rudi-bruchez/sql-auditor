@@ -397,19 +397,37 @@ func (s State) writeGrantScript(outputDir, tool string, now time.Time) State {
 	return s
 }
 
+// runFolderFor names the folder — and, with ".zip", the archive — that
+// collect.Run will produce for this state.
+//
+// The name comes from what the SERVER calls itself, which the probe brought
+// back in Verify.Server.Name, and NOT from the address the operator typed. Run
+// derives its own folder from SERVERPROPERTY('ServerName') too, and the two
+// spellings coincide only when the DBA types the instance name exactly: with
+// SQL_SERVER=10.42.7.19,1433 or an FQDN they differ. Asking about the typed
+// address answers questions about a path no run will ever touch — the
+// collision prompt never appears and prepareRunFolder deletes the previous
+// run's folder and archive unannounced, and the final screen looks for the
+// archive where there is none and reports that no archive was produced.
+//
+// keep is taken from the resolved Options because RunFolderFor's answer
+// depends on it: under --keep it suffixes until it finds a free name.
+func runFolderFor(s State, o collect.Options) string {
+	return collect.RunFolderFor(o.Config.OutputDir, s.Verify.Server.Name, o.Now, o.Keep)
+}
+
 // collisionFor names what an earlier run of the same day already occupies, or
 // "" when the way is clear. It is the whole of the wizard's guard against the
 // destructive half of prepareRunFolder, and it runs BEFORE collect.Run:
 // afterwards the folder and the archive are already gone.
 //
-// keep is passed through rather than assumed false because RunFolderFor's
-// answer depends on it — under --keep it suffixes until it finds a free name,
-// so there is nothing to warn about — and asking the question about a path the
-// run will not use would produce a prompt about a file nothing was going to
-// touch.
-func collisionFor(outputDir, instance string, now time.Time, keep bool) string {
-	folder := collect.RunFolderFor(outputDir, instance, now, keep)
-	if taken, what := collect.RunNameTaken(folder); taken {
+// An unprobed instance has no resolved name to build a path from, and it can
+// start nothing anyway — canStart() is false — so nothing is asked.
+func collisionFor(s State, o collect.Options) string {
+	if !s.Verify.Probed {
+		return ""
+	}
+	if taken, what := collect.RunNameTaken(runFolderFor(s, o)); taken {
 		return what
 	}
 	return ""
