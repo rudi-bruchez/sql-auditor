@@ -785,7 +785,7 @@ func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
 		RequiresFlag: FlagQueryStoreDetail, Writer: "query-store-detail"}
 
 	t.Run("a plan seen by the choke point", func(t *testing.T) {
-		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20)
 		rw.sawShowplan = true
 		discloseWrites(m, rw, gated, WriteResult{})
 		if !m.Collected.QueryStoreDetail {
@@ -800,7 +800,7 @@ func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
 	})
 
 	t.Run("a plan from an ungated collector", func(t *testing.T) {
-		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20)
 		rw.sawShowplan = true
 		discloseWrites(m, rw, Script{Path: "90.foreign/010.dump.sql"}, WriteResult{})
 		if !m.Collected.QueryStoreDetail {
@@ -812,7 +812,7 @@ func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
 	})
 
 	t.Run("text without a plan", func(t *testing.T) {
-		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20)
 		discloseWrites(m, rw, gated, WriteResult{TextFiles: 3})
 		if !m.Collected.QueryStoreDetail {
 			t.Error("query text was written and the manifest denies it")
@@ -823,7 +823,7 @@ func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
 	})
 
 	t.Run("the profiled writer", func(t *testing.T) {
-		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20)
 		s := Script{Path: "80.workload/022.query-store-profiled.sql",
 			RequiresFlag: FlagQueryStorePlanStats, Writer: "query-store-profiled"}
 		discloseWrites(m, rw, s, WriteResult{PlanFiles: 2})
@@ -838,7 +838,7 @@ func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
 	// the second database, with its Query Store off, would retract the first
 	// database's disclosure and the archive would deny plans it holds.
 	t.Run("a second unit cannot retract the first one's disclosure", func(t *testing.T) {
-		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20)
 
 		rw.sawShowplan = true
 		discloseWrites(m, rw, gated, WriteResult{PlanFiles: 4, TextFiles: 4})
@@ -855,7 +855,7 @@ func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
 	})
 
 	t.Run("a writer that wrote nothing", func(t *testing.T) {
-		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20)
 		discloseWrites(m, rw, gated, WriteResult{})
 		if m.Collected.QueryStoreDetail || m.Collected.QueryStoreProfiledPlans {
 			t.Errorf("collected = %+v, want nothing disclosed: the flag was passed but "+

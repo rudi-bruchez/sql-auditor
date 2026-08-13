@@ -7,7 +7,7 @@ import (
 )
 
 func TestRunWriterCreatesParentsAndCountsBytes(t *testing.T) {
-	w := newRunWriter(t.TempDir(), 1<<20, func(string) {})
+	w := newRunWriter(t.TempDir(), 1<<20)
 	n, err := w.write("80.workload/Sales/021.query-store-detail/query_1.sql", []byte("SELECT 1"))
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +21,7 @@ func TestRunWriterCreatesParentsAndCountsBytes(t *testing.T) {
 }
 
 func TestRunWriterStopsAtTheBudget(t *testing.T) {
-	w := newRunWriter(t.TempDir(), 10, func(string) {})
+	w := newRunWriter(t.TempDir(), 10)
 	if _, err := w.write("a.bin", make([]byte, 8)); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestRunWriterStopsAtTheBudget(t *testing.T) {
 // the budget could refuse them, a truncated archive would carry no account of
 // its own truncation.
 func TestRunWriterWritesTheDescriptionPastTheBudget(t *testing.T) {
-	w := newRunWriter(t.TempDir(), 10, func(string) {})
+	w := newRunWriter(t.TempDir(), 10)
 	if _, err := w.write("a.bin", make([]byte, 10)); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestRunWriterWritesTheDescriptionPastTheBudget(t *testing.T) {
 // Suspending the budget must not suspend the inspection. A plan written this
 // way is still a plan the archive has to admit to holding.
 func TestRunWriterNoticesAPlanWrittenPastTheBudget(t *testing.T) {
-	w := newRunWriter(t.TempDir(), 1, func(string) {})
+	w := newRunWriter(t.TempDir(), 1)
 	plan := []byte(`<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan"/>`)
 	if _, err := w.writeUnbudgeted("plan.sqlplan", plan); err != nil {
 		t.Fatal(err)
@@ -83,8 +83,7 @@ func TestRunWriterNoticesAPlanWrittenPastTheBudget(t *testing.T) {
 }
 
 func TestRunWriterNoticesAPlan(t *testing.T) {
-	var warnings []string
-	w := newRunWriter(t.TempDir(), 1<<20, func(s string) { warnings = append(warnings, s) })
+	w := newRunWriter(t.TempDir(), 1<<20)
 	if _, err := w.write("plain.json", []byte(`{"counts":{"plans":42}}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -98,5 +97,4 @@ func TestRunWriterNoticesAPlan(t *testing.T) {
 	if !w.sawShowplan {
 		t.Error("a plan written straight to disk was not noticed")
 	}
-	_ = warnings
 }

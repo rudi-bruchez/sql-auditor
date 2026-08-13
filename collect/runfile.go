@@ -54,7 +54,6 @@ type runWriter struct {
 	// holds is "a plan was written since the last unit was accounted for".
 	// The run-level fact lives in the manifest, which is set-only.
 	sawShowplan bool
-	warn        func(string)
 }
 
 // takeShowplan reports whether a plan reached disk since the last call, and
@@ -75,10 +74,15 @@ func (w *runWriter) takeShowplan() bool {
 }
 
 // newRunWriter returns a runWriter rooted at root, refusing to write more
-// than budget bytes of collector payloads in total. warn is called for
-// conditions worth surfacing to the operator without failing the write.
-func newRunWriter(root string, budget int, warn func(string)) *runWriter {
-	return &runWriter{root: root, budget: budget, warn: warn}
+// than budget bytes of collector payloads in total.
+//
+// It takes no warning channel. One was carried here for a while and no method
+// ever called it: the writers reach the manifest through WriteRequest.Warn,
+// which is the closure that knows which script and which database is writing.
+// A field with no reader reads as a working feature, so it is gone rather than
+// kept for a caller that never came.
+func newRunWriter(root string, budget int) *runWriter {
+	return &runWriter{root: root, budget: budget}
 }
 
 // write saves payload at rel, relative to the writer's root, using slashes

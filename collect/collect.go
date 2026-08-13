@@ -438,6 +438,20 @@ func Check(ctx context.Context, o Options) (int, error) {
 		}
 	}
 
+	// The window conflict is priced by the flags, so a collection that never
+	// reads the Query Store only warns about it. But check exists to say what
+	// a collection would do, and staying silent here would let an operator
+	// verify a configuration, see nothing, then meet the refusal on the run
+	// they came to prepare for.
+	if o.Config.QueryStoreWindowConflict != "" {
+		fmt.Printf("\n  !! %s\n", o.Config.QueryStoreWindowConflict)
+		if o.Flags[FlagQueryStoreDetail] || o.Flags[FlagQueryStorePlanStats] {
+			fmt.Println("     with the options above, a collection would stop on this.")
+		} else {
+			fmt.Println("     no Query Store option is on, so a collection would warn and continue.")
+		}
+	}
+
 	writable := outputWritable(o.Config.OutputDir)
 	fmt.Printf("\nOutput   : %s", o.Config.OutputDir)
 	if !writable {
@@ -1104,9 +1118,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// so a .sqlplan whose bytes never form a JSON payload is inspected exactly
 	// like one that does. MANIFEST.txt and _run.json stay outside it — they are
 	// the run's own record and must be written even when the budget is gone.
-	rw := newRunWriter(runFolder, maxRunBytes, func(msg string) {
-		m.Warnings = append(m.Warnings, msg)
-	})
+	rw := newRunWriter(runFolder, maxRunBytes)
 
 	for _, p := range plan {
 		s := p.Script
@@ -1249,18 +1261,36 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	// the collector that wrote it finished.
 	discloseWrites(m, rw, s, res)
 	if writeErr != nil {
+		// A writer that fails partway leaves files behind. Disclosing them is
+		// not enough on its own: MANIFEST.txt sizes the archive from the
+		// entries below, so returning here would leave the run holding bytes
+		// it never counted — an archive containing more than it declares,
+		// which is the one thing this whole path exists to prevent. The entry
+		// is recorded with what actually landed and a status that says the
+		// collector did not finish, so the count is right and nobody reads it
+		// as a complete result.
+		if res.Bytes > 0 {
+			m.Results = append(m.Results, ResultEntry{
+				Script: s.Path, Scope: scopeName(s), Target: u.Name, Output: res.Rel,
+				Bytes: res.Bytes, DurationMS: int(time.Since(start).Milliseconds()),
+				Status: "incomplete",
+			})
+		}
 		return writeErr
 	}
 
-	scope := "instance"
-	if s.Scope == ScopeDatabase {
-		scope = "database"
-	}
 	m.Results = append(m.Results, ResultEntry{
-		Script: s.Path, Scope: scope, Target: u.Name, Output: res.Rel,
+		Script: s.Path, Scope: scopeName(s), Target: u.Name, Output: res.Rel,
 		Bytes: res.Bytes, DurationMS: int(time.Since(start).Milliseconds()), Status: "ok",
 	})
 	return nil
+}
+
+func scopeName(s Script) string {
+	if s.Scope == ScopeDatabase {
+		return "database"
+	}
+	return "instance"
 }
 
 // queryStoreArgs supplies the named parameters a writer script declares, and
