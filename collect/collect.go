@@ -485,16 +485,20 @@ func openExitCode(err error) int {
 // production instance, so the script and database lists are printed even when
 // every probe comes back clean.
 func Check(ctx context.Context, o Options) (int, error) {
-	scripts, err := Discover(o.Corpus, o.Root)
-	if err != nil {
-		return 2, corpusError(o.Config, err)
+	// Everything is gathered first and printed afterwards. Check used to
+	// interleave the two, which is exactly why nothing else could reuse any of
+	// it: the facts existed only as text on their way to stdout.
+	v, err := Verify(ctx, o)
+	if v.CorpusErr != nil {
+		// Nothing has been printed on this path, deliberately. The CLI prints
+		// the returned error, and a "Queries (0):" above it would report an
+		// empty corpus where in fact none was found.
+		return 2, err
 	}
-	lintFailures := 0
-	fmt.Printf("Queries (%d):\n", len(scripts))
-	for _, s := range scripts {
+	fmt.Printf("Queries (%d):\n", len(v.Scripts))
+	for _, s := range v.Scripts {
 		switch {
 		case s.LintError != "":
-			lintFailures++
 			fmt.Printf("  !! %-42s %s\n", s.Path, s.LintError)
 		default:
 			fmt.Printf("  %-42s %s\n", s.Path, scriptNote(s, o.Flags))
@@ -515,32 +519,25 @@ func Check(ctx context.Context, o Options) (int, error) {
 		}
 	}
 
-	writable := outputWritable(o.Config.OutputDir)
 	fmt.Printf("\nOutput   : %s", o.Config.OutputDir)
-	if !writable {
+	if !v.OutputWritable {
 		fmt.Print("  !! not writable")
 	}
 	fmt.Println()
 
-	db, err := Open(o.Config)
-	if err != nil {
-		return openExitCode(err), err
+	// The two failures that end the listing, in the order Verify meets them.
+	// Both are handed back so the CLI can print them; the unreachable instance
+	// also says so in words, because "1" alone reads as a query that failed.
+	if v.OpenErr != nil {
+		return openExitCode(v.OpenErr), err
 	}
-	defer db.Close()
-
-	// One connection for everything below. The pool allows exactly one, so a
-	// call taking the *sql.DB while this Conn is held would wait for a
-	// connection that only this function can return.
-	conn, err := db.Conn(ctx)
-	if err != nil {
+	if v.ConnErr != nil {
 		fmt.Fprintln(os.Stderr, "cannot reach the instance")
 		return 1, err
 	}
-	defer conn.Close()
 
 	fmt.Println("\nPermissions:")
-	checks := runPreflightWithDeadline(ctx, conn, o.Config)
-	for _, c := range checks {
+	for _, c := range v.Checks {
 		if c.Status == "ok" {
 			fmt.Printf("  ok      %s\n", c.Name)
 			continue
@@ -548,17 +545,16 @@ func Check(ctx context.Context, o Options) (int, error) {
 		fmt.Printf("  %-7s %s — %s\n", c.Status, c.Name, c.Impact)
 	}
 
-	si, err := probeWithDeadline(ctx, conn, o.Config)
-	if err == nil {
-		fmt.Printf("\nServer   : %s  %s  %s\n", si.Name, si.Version, si.Edition)
-		fmt.Printf("Login    : %s\n", si.Login)
+	if v.Probed {
+		fmt.Printf("\nServer   : %s  %s  %s\n", v.Server.Name, v.Server.Version, v.Server.Edition)
+		fmt.Printf("Login    : %s\n", v.Server.Login)
 	}
 
 	// Advice, not a finding, and it is here rather than in the archive on
 	// purpose: check exists to help an operator prepare a run, while the
 	// archive states what the instance is. It stays silent on an instance with
 	// no lock waits.
-	if lines := BlockingNotice(ProbeBlocking(ctx, conn)); len(lines) > 0 {
+	if lines := BlockingNotice(v.Blocking); len(lines) > 0 {
 		fmt.Println("\nBlocking:")
 		for _, l := range lines {
 			fmt.Printf("  %s\n", l)
@@ -568,32 +564,27 @@ func Check(ctx context.Context, o Options) (int, error) {
 	// The database list is the blast radius. It comes last because it is the
 	// part a reader scrolls back to, and it is printed even when it is empty —
 	// an empty list is itself the finding when VIEW ANY DEFINITION is missing.
-	var noAccess []string
-	cands, cerr := candidatesWithDeadline(ctx, conn, o.Config)
-	if cerr != nil {
-		fmt.Fprintf(os.Stderr, "could not list databases: %v\n", cerr)
-	} else {
-		sel, serr := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude)
-		if serr != nil {
-			fmt.Fprintln(os.Stderr, serr)
-			return 2, nil
-		}
-		fmt.Printf("\nDatabases that would be collected (%d):\n", len(sel.Included))
-		if len(sel.Included) == 0 {
+	switch {
+	case v.CandidatesErr != nil:
+		fmt.Fprintf(os.Stderr, "could not list databases: %v\n", v.CandidatesErr)
+	case v.SelectErr != nil:
+		// A malformed DB_INCLUDE/DB_EXCLUDE is the operator's typo, and it
+		// stops here: reporting the grant advice below on a selection nobody
+		// could compute would name the wrong databases.
+		fmt.Fprintln(os.Stderr, v.SelectErr)
+		return 2, nil
+	default:
+		fmt.Printf("\nDatabases that would be collected (%d):\n", len(v.Selection.Included))
+		if len(v.Selection.Included) == 0 {
 			fmt.Println("  (none)")
 		}
-		for _, f := range ResolveDatabaseFolders(sel.Included) {
+		for _, f := range v.Folders {
 			fmt.Printf("  - %s -> %s/\n", f.Name, f.Folder)
 		}
-		if len(sel.Skipped) > 0 {
-			fmt.Printf("\nDatabases skipped (%d):\n", len(sel.Skipped))
-			for _, s := range sel.Skipped {
+		if len(v.Selection.Skipped) > 0 {
+			fmt.Printf("\nDatabases skipped (%d):\n", len(v.Selection.Skipped))
+			for _, s := range v.Selection.Skipped {
 				fmt.Printf("  - %s (%s)\n", s.Name, s.Reason)
-			}
-		}
-		for _, s := range sel.Skipped {
-			if s.Reason == SkipNoAccess {
-				noAccess = append(noAccess, s.Name)
 			}
 		}
 	}
@@ -605,16 +596,16 @@ func Check(ctx context.Context, o Options) (int, error) {
 	// cannot see, and the one that silently costs two thirds of the
 	// collectors.
 	if o.GrantScript != "" {
-		if werr := writeGrantScript(o, scripts, checks, si, err, noAccess); werr != nil {
+		if werr := writeGrantScript(o, v.Scripts, v.Checks, v.Server, v.ServerErr, v.NoAccess); werr != nil {
 			fmt.Fprintf(os.Stderr, "could not write %s: %v\n", o.GrantScript, werr)
 			return 2, nil
 		}
-	} else if anyDenied(checks) || len(noAccess) > 0 {
+	} else if anyDenied(v.Checks) || len(v.NoAccess) > 0 {
 		fmt.Print("\nSomething is missing above. To generate the T-SQL that grants\n" +
 			"exactly what is missing, and nothing more, for a DBA to review:\n\n" +
 			"  sql-auditor check --grant-script grants.sql\n")
 	}
-	return PreflightExitCode(checks, lintFailures, writable), nil
+	return PreflightExitCode(v.Checks, v.LintFailures, v.OutputWritable), nil
 }
 
 // writeGrantScript builds the permission script and puts it on disk. It is
@@ -659,10 +650,11 @@ func anyDenied(checks []CapabilityCheck) bool {
 	return false
 }
 
-// The three read-only calls the pipeline makes outside runUnit, each bounded.
-// They are wrappers rather than inline WithTimeout blocks because both Run and
-// Check make all three, and a deadline missing from one copy is invisible
-// until an instance hangs.
+// The read-only calls the pipeline makes outside runUnit, each bounded. They
+// are wrappers rather than inline WithTimeout blocks because both Run and
+// Verify make them, and a deadline missing from one copy is invisible until an
+// instance hangs. The fourth, blockingWithDeadline, lives in verify.go beside
+// the caller that revealed it had none.
 func runPreflightWithDeadline(ctx context.Context, c *sql.Conn, cfg *Config) []CapabilityCheck {
 	// One budget for the four probes together: each is a TOP 1 read, so an
 	// instance that cannot answer all four inside a single query timeout is
