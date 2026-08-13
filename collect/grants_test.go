@@ -305,6 +305,24 @@ func TestEveryProbedCapabilityCanBeGranted(t *testing.T) {
 		if !strings.Contains(body, "GRANT ") && !strings.Contains(body, "ALTER ROLE ") {
 			t.Errorf("capability %q produced no grant statement:\n%s", c.Name, body)
 		}
+		// And that every grant names THE PROBED LOGIN. Checking only that the
+		// word GRANT appears is what let a section ship with a hardcoded
+		// "sqlauditor" principal: the script ran green, and on a client instance
+		// that happens to have a login of that name the rights would have landed
+		// on it instead — silently. Every line that grants something must name
+		// the login baseInput says the server reported.
+		// Statement lines only: the prose around them says things like "HOW TO
+		// UNDO IT", and matching on " TO " alone would flag the commentary.
+		for _, line := range strings.Split(body, "\n") {
+			stmt := strings.TrimSpace(line)
+			if !strings.HasPrefix(stmt, "GRANT ") && !strings.HasPrefix(stmt, "ALTER ROLE ") {
+				continue
+			}
+			if !strings.Contains(line, quoteIdent(in.Login)) {
+				t.Errorf("capability %q grants to a principal that is not the probed login:\n  %s",
+					c.Name, stmt)
+			}
+		}
 	}
 }
 

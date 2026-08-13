@@ -18,12 +18,22 @@
 -- and never mistaken for an instance that ships no logs. Those are opposite
 -- findings, and only the probe can tell them apart.
 --
--- THE ELAPSED SECONDS ARE COMPUTED HERE, and that is a departure from what 020
+-- THE ELAPSED MINUTES ARE COMPUTED HERE, and that is a departure from what 020
 -- refuses to do for Always On. The difference is that this is subtraction of two
 -- timestamps rather than division by an instantaneous rate: "the last backup
--- finished 4 200 seconds ago" is a fact, where "the redo queue will take 40
--- seconds to drain" is a prediction. One is arithmetic on measurements, the
--- other is a model.
+-- finished 70 minutes ago" is a fact, where "the redo queue will take 40 seconds
+-- to drain" is a prediction. One is arithmetic on measurements, the other is a
+-- model.
+--
+-- IN UTC, AND IN MINUTES, and both halves were wrong in the first version. Every
+-- monitoring table carries each instant twice, local and _utc; subtracting the
+-- LOCAL one from this instance's GETDATE() is only correct when the monitor is
+-- this machine — and the paragraph below says how often it is not. Off by a
+-- whole timezone, the answer is still plausible, so nobody would ever catch it:
+-- an invented number wearing the clothes of a measurement. Minutes rather than
+-- seconds because the thresholds beside them are in minutes, and because
+-- DATEDIFF(second, ...) overflows past about 68 years, which a sentinel date
+-- reaches.
 --
 -- THE THRESHOLDS ARE COLLECTED AND NEVER APPLIED. backup_threshold and
 -- restore_threshold are the alert values the operator configured, and they are
@@ -61,6 +71,9 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_
        (SELECT COUNT(*) FROM msdb.dbo.log_shipping_monitor_primary)     AS [counts.monitored_primaries],
        (SELECT COUNT(*) FROM msdb.dbo.log_shipping_monitor_secondary)   AS [counts.monitored_secondaries],
        (SELECT COUNT(*) FROM msdb.dbo.log_shipping_monitor_error_detail) AS [counts.recorded_errors],
+       /* The same 200 as the TOP below. Written twice because SQL has nowhere
+          to put it once, and a test would be the only guard — for now, changing
+          one without the other makes the archive lie about its own cap. */
        200                                                        AS [errors_listing_cap]
 OPTION (RECOMPILE, MAXDOP 1);
 
@@ -78,7 +91,7 @@ SELECT p.primary_database                                         AS [database],
        /* Subtraction of two measured instants: see the header on why this is
           computed and the Always On lag is not. NULL when this instance holds
           no monitor record for the database. */
-       DATEDIFF(second, mp.last_backup_date, GETDATE())           AS [seconds_since_last_backup],
+       DATEDIFF(minute, mp.last_backup_date_utc, GETUTCDATE())    AS [minutes_since_last_backup],
        mp.backup_threshold                                        AS [backup_threshold_minutes],
        CAST(mp.threshold_alert_enabled AS int)                    AS [backup_alert_enabled]
 FROM msdb.dbo.log_shipping_primary_databases    AS p
@@ -106,10 +119,10 @@ SELECT s.secondary_database                                       AS [database],
        CAST(s.restore_all AS int)                                 AS [restore_all],
        ms.last_copied_file                                        AS [last_copied_file],
        CONVERT(varchar(23), ms.last_copied_date, 126)             AS [last_copied_at],
-       DATEDIFF(second, ms.last_copied_date, GETDATE())           AS [seconds_since_last_copy],
+       DATEDIFF(minute, ms.last_copied_date_utc, GETUTCDATE())    AS [minutes_since_last_copy],
        ms.last_restored_file                                      AS [last_restored_file],
        CONVERT(varchar(23), ms.last_restored_date, 126)           AS [last_restored_at],
-       DATEDIFF(second, ms.last_restored_date, GETDATE())         AS [seconds_since_last_restore],
+       DATEDIFF(minute, ms.last_restored_date_utc, GETUTCDATE())  AS [minutes_since_last_restore],
        /* The engine's own measure of how stale the restored data is: minutes
           between the backup being taken on the primary and restored here. */
        ms.last_restored_latency                                   AS [last_restored_latency_minutes],
