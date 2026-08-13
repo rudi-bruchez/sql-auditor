@@ -61,6 +61,11 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_
        (SELECT TOP (1) c.quorum_state_desc FROM sys.dm_hadr_cluster AS c) AS [cluster.quorum_state],
        (SELECT COUNT(*) FROM sys.availability_groups)             AS [counts.groups],
        (SELECT COUNT(*) FROM sys.availability_replicas)           AS [counts.replicas],
+       /* Counted from the DMV raw, while the databases result set below reaches
+          the same rows through two JOINs. The two can differ, and the gap is the
+          finding: a row the joins lose is a replica whose group or replica
+          metadata this instance cannot see. Kept for that reason, not as a
+          convenience. */
        (SELECT COUNT(*) FROM sys.dm_hadr_database_replica_states) AS [counts.database_replicas],
        (SELECT COUNT(*) FROM sys.availability_group_listeners)    AS [counts.listeners]
 OPTION (RECOMPILE, MAXDOP 1);
@@ -152,9 +157,20 @@ SELECT g.name                                                     AS [group],
        l.ip_configuration_string_from_cluster                     AS [ip_configuration],
        ls.state_desc                                              AS [tcp_state],
        ls.ip_address                                              AS [ip_address],
-       ls.listener_id                                             AS [listener_id]
+       /* The group listener''s own id, from the catalog view — not
+          dm_tcp_listener_states.listener_id, which is an unrelated internal
+          integer that an earlier version projected under this same name. */
+       l.listener_id                                              AS [listener_id],
+       ls.listener_id                                             AS [tcp_listener_id]
 FROM sys.availability_group_listeners               AS l
 JOIN sys.availability_groups                        AS g  ON g.group_id = l.group_id
-LEFT JOIN sys.dm_tcp_listener_states                AS ls ON ls.port = l.port AND ls.type = 1
+/* type 0 is Transact-SQL, and an availability group listener is registered as
+   one — 1 is Service Broker and 2 is database mirroring. The first version
+   joined on type = 1, which can never match: every listener would have shown a
+   NULL TCP state, and a reader would have concluded a healthy listener was not
+   listening. The join is on the port alone, so it can also bring back the
+   instance's own TSQL listener and one row per IP address; l.dns_name is what
+   identifies the group's listener among them. */
+LEFT JOIN sys.dm_tcp_listener_states                AS ls ON ls.port = l.port AND ls.type = 0
 ORDER BY g.name, l.dns_name
 OPTION (RECOMPILE, MAXDOP 1);

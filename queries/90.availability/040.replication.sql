@@ -59,10 +59,14 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_
           apply, which is the failure docs/verification-2012.md warns about in
           those words. The database flags below are the real answer and they
           come from a catalog view that would have errored on a wrong column. */
-       /* Named so a reader knows this file stopped short on purpose rather than
-          because something failed. Two different reasons, said in one line. */
-       'publications, articles and latency live in the distribution database, whose name is not fixed and which this collector does not reach; the replication agents are in 50.agent/010.jobs.json under their REPL- categories'
-                                                                  AS [not_collected]
+       /* An omission has to be IN the archive — rule 2 — but a paragraph of
+          English in a result set is prose wearing the clothes of data: it
+          repeats the header, it is identical on every run, and the file path
+          inside it drifts the first time something is renamed with nothing to
+          catch it. A stable key plus a pointer, so the analysis layer can match
+          on the first and a human can follow the second. */
+       'distribution_database_name_not_fixed'                     AS [not_collected.reason],
+       '50.agent/010.jobs.sql'                                    AS [not_collected.see]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* Only the databases carrying a replication flag. Every database on the instance

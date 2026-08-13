@@ -90,6 +90,13 @@ type GrantScriptInput struct {
 // and every version-gated decision below treats 0 as "assume the old, wide
 // permission", because asking for a permission the instance does not have
 // produces an error the DBA cannot act on.
+
+// msdbCapabilities are the probes whose grants live inside msdb. Anything that
+// needs a user there belongs in this list: the script creates that user once,
+// and a capability missing from here produces GRANTs against a principal that
+// was never created.
+var msdbCapabilities = []string{"msdb_read", "agent_jobs", "agent_job_steps", "log_shipping"}
+
 func majorVersion(v string) int {
 	head, _, _ := strings.Cut(v, ".")
 	n, err := strconv.Atoi(strings.TrimSpace(head))
@@ -167,7 +174,17 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 	}
 
 	var sections []grantSection
-	needsMsdbUser := denied["msdb_read"] || denied["agent_jobs"]
+	// Derived, not enumerated. This read `msdb_read || agent_jobs` and was
+	// already wrong for agent_job_steps; adding log_shipping as a third term
+	// would have made the same mistake a third time. A login missing ONLY the
+	// new capability produced a script that ran USE msdb and then granted to a
+	// user it had not created, failing on its first statement.
+	needsMsdbUser := false
+	for _, c := range msdbCapabilities {
+		if denied[c] {
+			needsMsdbUser = true
+		}
+	}
 
 	// --- server-level state -------------------------------------------------
 

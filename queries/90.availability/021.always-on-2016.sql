@@ -46,7 +46,10 @@
 --   sys.availability_groups.required_synchronized_secondaries_to_commit (2017)
 --   sys.availability_groups.cluster_type_desc                           (2017)
 --   sys.availability_groups.is_contained             (2022)
---   sys.dm_hadr_database_replica_states.write_lease_remaining_ticks (2019)
+--   (a write_lease_remaining_ticks column was listed here and removed: no
+--    column of that name is documented on that DMV, and an invented exclusion
+--    teaches the next reader something false just as surely as an invented
+--    projection would)
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -60,7 +63,12 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_
        /* The worst lag on the instance right now, so a reader has the headline
           before the detail. NULL when nothing is lagging or nothing applies. */
        (SELECT MAX(drs.secondary_lag_seconds) FROM sys.dm_hadr_database_replica_states AS drs)
-                                                                  AS [max_secondary_lag_seconds]
+                                                                  AS [max_secondary_lag_seconds],
+       /* Beside the MAX because a NULL max has two causes — no rows at all, or
+          rows whose lag is NULL because they are primaries or caught up — and
+          the count is what separates them. */
+       (SELECT COUNT(drs.secondary_lag_seconds) FROM sys.dm_hadr_database_replica_states AS drs)
+                                                                  AS [rows_with_lag]
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT g.name                                                     AS [group],

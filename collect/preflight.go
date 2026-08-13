@@ -107,7 +107,17 @@ func Capabilities() []Capability {
 		// jobs and say nothing about whether it ships logs — which would read as
 		// "no log shipping" when it means "not allowed to look".
 		{Name: "log_shipping", Label: "Read the log shipping tables (msdb.dbo.log_shipping_*)",
-			SQL:    "SELECT TOP 1 primary_id FROM msdb.dbo.log_shipping_primary_databases",
+			// All six tables in one batch, not just the first. 030 fails as a
+			// whole the moment any one of them is refused, so a probe that tested
+			// one would report "ok" and let the collector fail anyway — the very
+			// confusion this capability was added to remove. TOP 0: zero rows is a
+			// real answer here, and the compile is what does the testing.
+			SQL: "SELECT TOP 0 1 FROM msdb.dbo.log_shipping_primary_databases " +
+				"UNION ALL SELECT TOP 0 1 FROM msdb.dbo.log_shipping_secondary_databases " +
+				"UNION ALL SELECT TOP 0 1 FROM msdb.dbo.log_shipping_secondary " +
+				"UNION ALL SELECT TOP 0 1 FROM msdb.dbo.log_shipping_monitor_primary " +
+				"UNION ALL SELECT TOP 0 1 FROM msdb.dbo.log_shipping_monitor_secondary " +
+				"UNION ALL SELECT TOP 0 1 FROM msdb.dbo.log_shipping_monitor_error_detail",
 			Impact: "log shipping configuration and lag not collected — the report must not read this as 'no log shipping'"},
 		// Asked as a permission question rather than by running the procedure:
 		// sp_readerrorlog reads the whole current log, which is minutes of work

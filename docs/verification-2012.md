@@ -45,7 +45,7 @@ change the id again.)
 As recorded, all 14 files parse with zero errors and every result-set count
 matches — including the four that carry the 2012 claim:
 
-> **The corpus has grown since this pass.** It is 50 files today. The 14 below
+> **The corpus has grown since this pass.** It is 55 files today. The 14 below
 > are the ones this run covered, and the number is left as recorded rather than
 > updated, because the record describes a run that happened. The corpus tree
 > hash above is what tells you the artifact is stale; the collectors added since
