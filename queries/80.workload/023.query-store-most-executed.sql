@@ -26,6 +26,17 @@
 -- Their product is the total time, which is arithmetic, not judgement, and it
 -- is what makes a loop worth discussing or not.
 --
+-- executions_per_hour IS ARITHMETIC OVER THE OBSERVED SPAN, and that span can
+-- be short: a query captured only in its most recent, possibly just-opened,
+-- interval can show a few seconds between its first interval and its last
+-- execution. Dividing a large count by a few seconds and multiplying up to an
+-- hour produces a number in the hundreds of thousands without a single thing
+-- being wrong with the arithmetic — it is the observation that is thin, not
+-- the query. No threshold nulls the rate out, the way none exists anywhere
+-- else in this file; instead window.span_seconds and window.intervals are
+-- projected beside it in both result sets, so a rate can be checked against
+-- what backs it before it is quoted.
+--
 -- No root: this is a listing keyed by query and by object, not a single-row
 -- state. On a database whose Query Store is off, both joins below return no
 -- rows and the file is two empty arrays — that is the decision, not an
@@ -46,13 +57,22 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
    TOP (50) by call count, not by cost: this is the RBAR-hunting ranking, and
    a loop's total cost can be unremarkable even while its call count is not.
    window.since and window.last_execution bound the observation for THIS
-   query specifically, and executions_per_hour is the two of them turned into
-   a rate — a query seen once eighteen months ago and one seen once yesterday
-   both show one execution, and only the rate tells them apart. */
+   query specifically; window.span_seconds and window.intervals say how much
+   of that bound is actually backed by data, which is what keeps
+   executions_per_hour honest for a query seen in one freshly-opened
+   interval. The object label distinguishes three different facts that a
+   single ISNULL would collapse into one: no object_id at all (ad hoc), an
+   object_id that no longer resolves (dropped since capture), and a resolved
+   name. */
 SELECT TOP (50)
        q.query_id                                                 AS [query_id],
-       ISNULL(OBJECT_SCHEMA_NAME(q.object_id)
-         + '.' + OBJECT_NAME(q.object_id), '(ad hoc batch)')      AS [object],
+       CASE
+           WHEN q.object_id IS NULL OR q.object_id = 0
+               THEN '(ad hoc batch)'
+           WHEN OBJECT_SCHEMA_NAME(q.object_id) IS NULL
+               THEN '(dropped object, object_id ' + CAST(q.object_id AS VARCHAR(20)) + ')'
+           ELSE OBJECT_SCHEMA_NAME(q.object_id) + '.' + OBJECT_NAME(q.object_id)
+       END                                                         AS [object],
        SUM(rs.count_executions)                                   AS [executions],
        CAST(SUM(rs.avg_duration * rs.count_executions)
             / NULLIF(SUM(rs.count_executions), 0)
@@ -66,6 +86,8 @@ SELECT TOP (50)
        CAST(SUM(rs.avg_cpu_time * rs.count_executions) / 1000.0 AS DECIMAL(18,1)) AS [total.cpu_ms],
        MIN(i.start_time)                                          AS [window.since],
        MAX(rs.last_execution_time)                                AS [window.last_execution],
+       DATEDIFF(SECOND, MIN(i.start_time), MAX(rs.last_execution_time)) AS [window.span_seconds],
+       COUNT(DISTINCT i.runtime_stats_interval_id)                AS [window.intervals],
        CAST(SUM(rs.count_executions)
             / NULLIF(DATEDIFF(SECOND, MIN(i.start_time), MAX(rs.last_execution_time)) / 3600.0, 0)
             AS DECIMAL(18,1))                                     AS [executions_per_hour],
@@ -82,16 +104,31 @@ OPTION (RECOMPILE, MAXDOP 1);
 /* ───────── by_object ─────────
    The same executions grouped by object: a procedure issuing twelve
    statements four million times each reads as one line here and is scattered
-   across twelve in the ranking above. Rows with a NULL object_id — ad hoc
+   across twelve in the ranking above. Rows with no object_id — ad hoc
    batches — group into one row rather than being dropped: GROUP BY treats
-   NULL as a single bucket, and ISNULL below gives that bucket a name instead
-   of a blank one. No cap: the number of distinct objects on an instance is
-   already bounded by what exists, unlike the number of distinct queries. */
-SELECT ISNULL(OBJECT_SCHEMA_NAME(q.object_id)
-         + '.' + OBJECT_NAME(q.object_id), '(ad hoc batch)')      AS [object],
+   NULL as a single bucket, and the CASE below gives that bucket a name
+   instead of a blank one; a non-NULL object_id that no longer resolves (the
+   object was dropped since the Query Store captured it) gets its own label
+   carrying the id, kept out of the ad hoc bucket because the two are
+   different facts about the instance. window.span_seconds and
+   window.intervals are the union across every query grouped into the row, so
+   a busy object is less exposed to the short-span distortion than a single
+   query is in by_query above — but a freshly-created object with one query
+   in one interval is exactly as exposed. No cap: the number of distinct
+   objects on an instance is already bounded by what exists, unlike the
+   number of distinct queries. */
+SELECT CASE
+           WHEN q.object_id IS NULL OR q.object_id = 0
+               THEN '(ad hoc batch)'
+           WHEN OBJECT_SCHEMA_NAME(q.object_id) IS NULL
+               THEN '(dropped object, object_id ' + CAST(q.object_id AS VARCHAR(20)) + ')'
+           ELSE OBJECT_SCHEMA_NAME(q.object_id) + '.' + OBJECT_NAME(q.object_id)
+       END                                                         AS [object],
        COUNT(DISTINCT q.query_id)                                 AS [statements],
        SUM(rs.count_executions)                                   AS [executions],
        CAST(SUM(rs.avg_duration * rs.count_executions) / 1000.0 AS DECIMAL(18,1)) AS [total.duration_ms],
+       DATEDIFF(SECOND, MIN(i.start_time), MAX(rs.last_execution_time)) AS [window.span_seconds],
+       COUNT(DISTINCT i.runtime_stats_interval_id)                AS [window.intervals],
        CAST(SUM(rs.count_executions)
             / NULLIF(DATEDIFF(SECOND, MIN(i.start_time), MAX(rs.last_execution_time)) / 3600.0, 0)
             AS DECIMAL(18,1))                                     AS [executions_per_hour]
