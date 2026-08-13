@@ -403,7 +403,7 @@ the database name filters, and whether session text was collected; any setting
 whose name marks it as a password, token or other secret is replaced with
 "(redacted)" before that block is written.
 `)
-	if m.Collected.SessionText {
+	if m.Collected.SessionText || m.Collected.QueryStoreDetail || m.Collected.QueryStoreProfiledPlans {
 		b.WriteString(`
 Most of this is metadata about the estate rather than the data held in it,
 but the captured statement text can carry values copied from application

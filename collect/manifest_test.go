@@ -597,3 +597,16 @@ func TestManifestTextDisclosesTheInstanceWideCacheRead(t *testing.T) {
 		t.Errorf("MANIFEST.txt does not say the plan cache of the whole instance was read:\n%s", got)
 	}
 }
+
+func TestManifestTextClassifiesQueryStoreDetailAsPersonalData(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "abc")
+	m.Collected.QueryStoreDetail = true
+	// SessionText is false, so if the condition only checks SessionText, this will fail
+	got := flatten(m.Human())
+	if strings.Contains(got, "internal infrastructure documentation rather than public material") {
+		t.Errorf("MANIFEST.txt claims internal infrastructure when QueryStoreDetail was collected:\n%s", m.Human())
+	}
+	if !strings.Contains(got, "potentially containing personal data") {
+		t.Errorf("MANIFEST.txt should classify QueryStoreDetail archives as potentially containing personal data:\n%s", m.Human())
+	}
+}
