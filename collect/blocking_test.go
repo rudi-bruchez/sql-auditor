@@ -123,3 +123,108 @@ func TestLockShareIsZeroRatherThanNaNOnAnIdleInstance(t *testing.T) {
 		t.Errorf("LockShare on an instance with no recorded waits = %v, want 0", got)
 	}
 }
+
+// BlockingCaptureLines answers a different question from BlockingNotice, and
+// the table below is where the difference is pinned down: the wizard describes
+// the capture on every instance it looks at, so every combination has to say
+// something, and the first line is always the status word the screen aligns.
+func TestBlockingCaptureLinesDescribeEveryCombination(t *testing.T) {
+	cases := []struct {
+		name     string
+		mutate   func(*BlockingReadiness)
+		status   string
+		contains []string
+		absent   []string
+	}{
+		{
+			name:     "an unprobed instance is unknown, not negative",
+			mutate:   func(r *BlockingReadiness) { *r = BlockingReadiness{Err: errors.New("VIEW SERVER STATE denied")} },
+			status:   "not checked",
+			contains: []string{"VIEW SERVER STATE denied"},
+			absent:   []string{"not ready", BlockingHowTo},
+		},
+		{
+			name:     "a fully set up capture is ready",
+			mutate:   func(r *BlockingReadiness) {},
+			status:   "ready",
+			contains: []string{"blocked_process_report", "threshold 10 s"},
+			absent:   []string{BlockingHowTo},
+		},
+		{
+			name:     "a zero threshold is named even when every session is right",
+			mutate:   func(r *BlockingReadiness) { r.ThresholdSeconds = 0 },
+			status:   "not ready",
+			contains: []string{"'blocked process threshold (s)' is 0", BlockingHowTo},
+			absent:   []string{"none is running", "ring buffer"},
+		},
+		{
+			name:     "no session at all",
+			mutate:   func(r *BlockingReadiness) { r.SessionsCapturing, r.SessionsRunning, r.WritesToFile = 0, 0, 0 },
+			status:   "not ready",
+			contains: []string{"no Extended Events session subscribes"},
+			absent:   []string{"none is running", "ring buffer"},
+		},
+		{
+			name:     "a session that exists and is stopped",
+			mutate:   func(r *BlockingReadiness) { r.SessionsRunning = 0 },
+			status:   "not ready",
+			contains: []string{"none is running"},
+			absent:   []string{"no Extended Events session subscribes", "ring buffer"},
+		},
+		{
+			name:     "a session that captures to memory only",
+			mutate:   func(r *BlockingReadiness) { r.WritesToFile = 0 },
+			status:   "not ready",
+			contains: []string{"ring buffer"},
+			absent:   []string{"no Extended Events session subscribes", "none is running"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := ready()
+			c.mutate(&r)
+			lines := BlockingCaptureLines(r)
+			if len(lines) == 0 {
+				t.Fatal("no lines at all; every instance gets a description")
+			}
+			if lines[0] != c.status {
+				t.Errorf("status line = %q, want %q", lines[0], c.status)
+			}
+			got := joined(lines)
+			for _, want := range c.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q in:\n%s", want, got)
+				}
+			}
+			for _, no := range c.absent {
+				if strings.Contains(got, no) {
+					t.Errorf("unexpected %q in:\n%s", no, got)
+				}
+			}
+		})
+	}
+}
+
+// The reason this function exists rather than a call to BlockingNotice. Notice
+// returns nil as soon as HasLockWaits() is false — correct where it prints
+// advice, ruinous here: on an instance restarted last night the wait counters
+// are back to zero, and the screen would show an empty block instead of saying
+// that the capture is genuinely absent.
+func TestBlockingCaptureLinesSpeaksWithoutRecordedLockWaits(t *testing.T) {
+	r := ready()
+	r.LockWaitMS, r.LockWaitTasks, r.MaxLockWaitMS, r.TotalWaitMS = 0, 0, 0, 0
+	r.ThresholdSeconds, r.SessionsCapturing, r.SessionsRunning, r.WritesToFile = 0, 0, 0, 0
+	if r.CanCapture() || r.HasLockWaits() {
+		t.Fatal("test premise wrong: this instance should neither capture nor have lock waits")
+	}
+	if BlockingNotice(r) != nil {
+		t.Fatal("test premise wrong: BlockingNotice is expected to stay silent here")
+	}
+	lines := BlockingCaptureLines(r)
+	if len(lines) == 0 {
+		t.Fatal("said nothing where BlockingNotice says nothing; the wizard would show an empty block")
+	}
+	if !strings.Contains(joined(lines), BlockingHowTo) {
+		t.Errorf("described a missing capture without pointing at the setup script:\n%s", joined(lines))
+	}
+}

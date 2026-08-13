@@ -181,3 +181,63 @@ func BlockingNotice(r BlockingReadiness) []string {
 		"This tool will not make either change: both are writes to the server.")
 	return out
 }
+
+// BlockingCaptureLines describes the blocked process capture for the wizard's
+// verification screen: the first line is the status word — "ready", "not
+// ready", "not checked" — and the rest are the facts behind it, one sentence
+// per line, unwrapped. The renderer aligns the first and folds the others.
+//
+// It deliberately does not call BlockingNotice, which returns nil as soon as
+// HasLockWaits() is false. That is a considered decision there and the right
+// one: `check` prints advice, and an instance with no lock waits does not need
+// a paragraph about capturing them. It is ruinous here. The wizard shows this
+// block on every instance, and on one restarted last night — wait counters back
+// to zero — the block would come out empty while the capture is in fact absent.
+// The screen would then be silent about the very thing it was asked to report.
+//
+// Nothing here is a judgement about the instance: the sentences state which of
+// the four preconditions is missing, and the URL points at a script a DBA runs
+// themselves. This tool does not write to a server, and creating an Extended
+// Events session and changing sp_configure are both writes.
+func BlockingCaptureLines(r BlockingReadiness) []string {
+	if !r.Probed {
+		// "not checked", never "not ready" and never 0: an absent measurement
+		// is not a measurement of absence, and a DBA who reads "not ready" here
+		// goes and configures something that may already be configured.
+		if r.Err != nil {
+			return []string{"not checked", fmt.Sprintf("the probe could not run: %v", r.Err)}
+		}
+		return []string{"not checked", "the probe did not run, so nothing is known about this capture"}
+	}
+	if r.CanCapture() {
+		return []string{
+			"ready",
+			fmt.Sprintf("%d session(s) subscribe to blocked_process_report, %d running, %d writing to a file, threshold %d s",
+				r.SessionsCapturing, r.SessionsRunning, r.WritesToFile, r.ThresholdSeconds),
+		}
+	}
+
+	out := []string{"not ready"}
+	// The three session failures are mutually exclusive and get three distinct
+	// sentences, because they cost three different actions: create a session,
+	// start it, or give it an event_file target.
+	switch {
+	case r.SessionsCapturing == 0:
+		out = append(out, "no Extended Events session subscribes to blocked_process_report")
+	case r.SessionsRunning == 0:
+		out = append(out, fmt.Sprintf("%d session(s) subscribe to blocked_process_report, but none is running", r.SessionsCapturing))
+	case r.WritesToFile == 0:
+		// This one looks healthy in SSMS: the events are captured and visible
+		// live, they are simply nowhere on disk, so no collection can bring
+		// them back.
+		out = append(out, "the capturing session writes to a ring buffer only, with no event_file target, "+
+			"so its events cannot be exported (they are visible live in SSMS and nowhere else)")
+	}
+	// Compounding rather than exclusive: every session can be right and the
+	// threshold still be 0, in which case the event has never fired once. An
+	// operator told about only one of the two comes back a second time.
+	if r.ThresholdSeconds == 0 {
+		out = append(out, "'blocked process threshold (s)' is 0, the default, so the event never fires at all")
+	}
+	return append(out, "to set the capture up:", BlockingHowTo)
+}
