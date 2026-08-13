@@ -12,8 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	sqlauditor "github.com/rudi-bruchez/sql-auditor"
 	"github.com/rudi-bruchez/sql-auditor/collect"
+	"github.com/rudi-bruchez/sql-auditor/tui"
 )
 
 // version is the source of truth between releases. The release workflow
@@ -282,11 +285,77 @@ func buildOptions(cmd string, args []string, env func(string) string) (collect.O
 	return opts, 0, nil
 }
 
+// Mode is what an invocation of this program turns out to be.
+type Mode int
+
+const (
+	// ModeSubcommand is every invocation that carries an argument. It is first
+	// because it must be: a command line says what it wants, and a wizard is
+	// never a better answer than the thing that was asked for.
+	ModeSubcommand Mode = iota
+	// ModeTUI is the wizard, and it is reached only when nothing was asked for
+	// and both ends of the terminal are real.
+	ModeTUI
+	// ModeUsage is the help on stderr and exit 2 — the behaviour this program
+	// had for every argument-less invocation before the wizard existed.
+	ModeUsage
+)
+
+// mode decides between the three, in the order the spec fixes.
+//
+// The TTY predicate is injected because no test in this repository can allocate
+// a pseudo-terminal portably, and a switch whose only interesting outcome is
+// untestable is a switch that will be got wrong. With it as a parameter, all
+// four combinations are a table.
+//
+// The order matters more than any single rule. An argument wins over
+// everything, so a scripted `sql-auditor collect` behaves the same whatever the
+// terminal is. Then SQL_AUDITOR_NO_TUI, an escape hatch that must work even on
+// a perfectly good terminal. Then the terminal itself: `sql-auditor > run.log`
+// that quietly started collecting on a production instance would be the worst
+// possible outcome of this whole batch.
+//
+// SQL_AUDITOR_NO_TUI is read from the environment and is deliberately NOT a
+// .env key. That set is closed — an unrecognised key there is a hard failure,
+// because a typo that silently changes behaviour is worse than a refusal — and
+// this is not a connection setting.
+func mode(isTTY func(*os.File) bool, stdin, stdout *os.File, env func(string) string, args []string) Mode {
+	if len(args) > 0 {
+		return ModeSubcommand
+	}
+	if env("SQL_AUDITOR_NO_TUI") != "" {
+		return ModeUsage
+	}
+	if !isTTY(stdin) || !isTTY(stdout) {
+		return ModeUsage
+	}
+	return ModeTUI
+}
+
+// isTerminal is the production predicate. Both ends are asked about
+// separately: a pipe on either one is enough to make a full-screen wizard the
+// wrong answer.
+func isTerminal(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
+
 func run() int {
-	if len(os.Args) < 2 {
+	switch mode(isTerminal, os.Stdin, os.Stdout, os.Getenv, os.Args[1:]) {
+	case ModeUsage:
 		usage()
 		return 2
+	case ModeTUI:
+		// The wizard resolves its configuration exactly as `collect` would,
+		// from .env and the environment, and then lets the operator correct the
+		// server and supply a password on screen 1. A refusal here is a .env
+		// the wizard cannot show, so it is reported the way a subcommand would
+		// report it — before the terminal is taken.
+		o, code, err := buildOptions("collect", nil, os.Getenv)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return code
+		}
+		return tui.Run(o, os.Stdin, os.Stdout)
 	}
+
 	cmd, args := os.Args[1], os.Args[2:]
 	// "queries export" is the one command with a subcommand, and flag.Parse
 	// stops at the first non-flag argument — so parsing os.Args[2:] whole

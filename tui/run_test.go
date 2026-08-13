@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -171,6 +172,30 @@ func TestARefusedConnectionHandsTheKeyboardBackToTheServerField(t *testing.T) {
 		}
 	default:
 		t.Fatal("the connection goroutine reported nothing")
+	}
+}
+
+// A pipe is never a terminal, on either platform, so this exercises the third
+// exit door of the spec: raw mode refused. The wizard must not degrade — without
+// raw mode the password field would echo, and a password left in the scrollback
+// of a shared RDP session is worse than no wizard at all — and it must point at
+// the non-interactive path rather than leaving the operator without a tool.
+func TestRunRefusesATerminalItCannotPutIntoRawMode(t *testing.T) {
+	in, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	defer inW.Close()
+	outR, out, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outR.Close()
+	defer out.Close()
+
+	if code := Run(baseOptions(), in, out); code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
 	}
 }
 

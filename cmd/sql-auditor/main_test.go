@@ -25,6 +25,53 @@ func writeDotEnv(t *testing.T, body string) string {
 // in the shell that runs it.
 func noEnv(string) string { return "" }
 
+func TestModeChoosesBetweenTheSubcommandTheWizardAndTheUsage(t *testing.T) {
+	// The two files are only ever compared by identity here: the injected
+	// predicate is what decides, which is the whole reason it is injected.
+	in, out := os.Stdin, os.Stdout
+	tty := func(want ...*os.File) func(*os.File) bool {
+		return func(f *os.File) bool {
+			for _, w := range want {
+				if f == w {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	noTUI := func(k string) string {
+		if k == "SQL_AUDITOR_NO_TUI" {
+			return "1"
+		}
+		return ""
+	}
+
+	cases := []struct {
+		name  string
+		isTTY func(*os.File) bool
+		env   func(string) string
+		args  []string
+		want  Mode
+	}{
+		// An argument wins over everything, so a scripted collect behaves the
+		// same whatever the terminal is — including when there is a terminal.
+		{"an argument on a terminal", tty(in, out), noEnv, []string{"collect"}, ModeSubcommand},
+		{"an argument with the wizard disabled", tty(in, out), noTUI, []string{"check"}, ModeSubcommand},
+		{"nothing to do on a terminal", tty(in, out), noEnv, nil, ModeTUI},
+		{"the wizard disabled by the environment", tty(in, out), noTUI, nil, ModeUsage},
+		// `sql-auditor > run.log` must not quietly start collecting on a
+		// production instance.
+		{"stdout redirected", tty(in), noEnv, nil, ModeUsage},
+		{"stdin redirected", tty(out), noEnv, nil, ModeUsage},
+		{"neither is a terminal", tty(), noEnv, nil, ModeUsage},
+	}
+	for _, c := range cases {
+		if got := mode(c.isTTY, in, out, c.env, c.args); got != c.want {
+			t.Errorf("%s: mode = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestBuildOptionsPrefersAFlagOverTheDotEnvFile(t *testing.T) {
 	env := writeDotEnv(t, "SQL_SERVER=from-dotenv\n")
 	o, code, err := buildOptions("check", []string{"--env", env, "--server", "from-flag"}, noEnv)
