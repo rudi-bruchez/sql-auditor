@@ -104,7 +104,12 @@ SELECT
     SUM(CASE WHEN bs.is_copy_only = 1 THEN 1 ELSE 0 END)        AS [copy_only_count],
     COUNT(DISTINCT bs.user_name)                                AS [distinct_users],
     MAX(bs.user_name)                                           AS [a_user],
-    MAX(bs.recovery_model)                                      AS [recovery_model]
+    -- Arbitrary like a_user above, and named to say so: the recovery model
+    -- can legitimately change inside the window, and MAX picks the
+    -- alphabetically last rather than the current one. sys.databases holds
+    -- the model in force now; this says what one of the backups was taken
+    -- under.
+    MAX(bs.recovery_model)                                      AS [a_recovery_model]
 FROM msdb.dbo.backupset AS bs
 WHERE bs.backup_finish_date >= @since
 GROUP BY bs.database_name, bs.type
