@@ -16,6 +16,7 @@ the questions you need answered before you do.
   - [`.env` precedence](#env-overrides-exported-environment-variables)
 - [`--include-session-text`](#--include-session-text)
 - [`--query-store-detail` and `--query-store-plan-stats`](#--query-store-detail-and---query-store-plan-stats)
+- [`--include-object-definitions`](#--include-object-definitions)
 - [Authentication](#authentication)
 - [Reproducing a run locally](#reproducing-a-run-locally)
 
@@ -449,7 +450,7 @@ infrastructure documentation rather than public material.
 ```
 
 That paragraph is generated from what the run actually did, not fixed at compile
-time. Each of the three options that widen what the archive holds adds its own
+time. Each of the four options that widen what the archive holds adds its own
 line to it:
 
 - `--include-session-text` discloses the captured statement text and the login,
@@ -460,9 +461,12 @@ line to it:
   literal predicates and the name of every object the query touches;
 - `--query-store-plan-stats` discloses that the last profiled plan was looked
   up as well, and that finding it meant reading the plan cache of the whole
-  instance rather than only the databases listed above.
+  instance rather than only the databases listed above;
+- `--include-object-definitions` discloses the source of the views, procedures,
+  functions and triggers, and says that this is code written on your side which
+  can name linked servers and carry a credential in clear.
 
-Any one of the three also changes the closing paragraph, from "metadata about
+Any one of the four also changes the closing paragraph, from "metadata about
 the estate" to a statement that the archive should be treated as potentially
 containing personal data. Which form was used is a property of the archive:
 whoever receives it can read which options were on without taking anyone's word
@@ -715,9 +719,9 @@ is the usual reason to hit one of these — quote the whole value.
 ## `--include-session-text`
 
 This is the first of the options that change what kind of data the archive
-holds — the other two are `--query-store-detail` and `--query-store-plan-stats`,
-below — and it is off by default for that reason, not for performance. It costs
-one extra query.
+holds — the other three are `--query-store-detail`, `--query-store-plan-stats`
+and `--include-object-definitions`, below — and it is off by default for that
+reason, not for performance. It costs one extra query.
 
 With it on, one more collector runs: `10.system/052.session-text.sql`. It reads
 the five longest-running snapshot transactions open against the instance at the
@@ -1041,6 +1045,51 @@ The one thing that is not free is the archive. Fifty queries per database, each
 with its text, its statistics and one file per plan, is a larger archive than a
 metadata-only run — and the plans are what makes it a document to handle
 carefully rather than a big one.
+
+## `--include-object-definitions`
+
+The fourth option that changes what the archive holds, and the only one whose
+content nobody's query ever produced: this is source code written on your side.
+
+With it on, one more collector runs per database:
+`70.schema/080.modules.sql`. It reads `sys.sql_modules` and writes one `.sql`
+file per view, stored procedure, function and trigger, under
+`70.schema/<database>/080.modules/`, with an `_index.json` listing every module
+— including the ones whose source is not there.
+
+Why it is off by default. A module body is the one artifact in this archive that
+was authored rather than measured. In practice it carries:
+
+- the names and addresses of linked servers, in every `OPENQUERY` and
+  four-part name;
+- values embedded as literals — thresholds, account numbers, email addresses in
+  a `WHERE` clause;
+- occasionally a credential in clear, in an `OPENROWSET` connection string or
+  behind an `EXECUTE AS`. This is not hypothetical, and it is likeliest in the
+  procedure nobody has opened in a decade.
+
+Nothing filters any of it, for the same reason nothing filters session text: the
+collector cannot tell which literal in somebody else's code is sensitive.
+
+**Four things can leave a definition out, and the index says which.** They are
+kept apart deliberately, because reading one as another would make the archive
+state something false about your server:
+
+| In `_index.json` | What happened |
+| --- | --- |
+| `encrypted (WITH ENCRYPTION)` | the server returns no definition and never could |
+| `beyond the per-database cap` | more than 2000 modules; the most recently modified were kept |
+| `above the per-module byte cap` | the definition exceeds 1 MiB |
+| `the catalog holds no definition` | nothing was there to read |
+
+Every module is listed either way, with its type, its size and its dates. A
+module the archive cannot show you is still a module the archive tells you
+exists.
+
+**What it costs the instance.** Almost nothing: `sys.sql_modules` is a catalog
+view and the read is metadata only. The cost is in the archive — a database of
+2000 procedures is a few tens of megabytes of text before compression, and it is
+a document to handle carefully rather than a large one.
 
 ## Authentication
 
