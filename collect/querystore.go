@@ -394,9 +394,11 @@ type profiledPlan struct {
 	// collide on it — a fact the reader needs beside the plan, not buried in
 	// a design document nobody re-reads while triaging an incident.
 	Match string `json:"match"`
-	// Candidates is how many rows shared this query's hash before the tie
-	// was broken. 1 means the match was unambiguous; more than 1 means it
-	// was not, however confidently a single file is named below.
+	// Candidates counts the cached plans sharing THIS plan's query_plan_hash
+	// — the partition is the Query Store plan, not the query. 1 means this
+	// plan's match was unambiguous; it says nothing about the query's other
+	// plans, each of which carries its own count. Above 1 is not a red flag
+	// by itself: a bare recompile adds a plan_id to the same hash.
 	Candidates int64  `json:"candidates"`
 	PlanFile   string `json:"plan_file,omitempty"`
 }
@@ -499,12 +501,12 @@ func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
 		match, _ := stringAt(rows, 0, "match")
 		candidates, _ := int64At(rows, 0, "candidates")
 		plan, present := stringAt(rows, 0, "query_plan")
-		size, hasSize := int64At(rows, 0, "query_plan_bytes")
+		size, _ := int64At(rows, 0, "query_plan_bytes")
 
 		entry := profiledPlan{QueryID: id, PlanID: planID, Match: match, Candidates: candidates}
 
 		switch {
-		case !present && hasSize && size > maxPlanBytes:
+		case !present && size > maxPlanBytes:
 			omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap and was not sent", size, maxPlanBytes), size)
 		case !present:
 			// A single-operator plan for a trivial query and a NULL past the
