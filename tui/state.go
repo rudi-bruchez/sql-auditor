@@ -205,7 +205,11 @@ func (s State) Key(k screen.Key) State {
 		}
 		return s
 	case StepDone:
-		if k.Named == screen.KeyEnter || k.Rune == 'q' {
+		// Ctrl-C ends the wizard here like everywhere else. It carries no rune,
+		// so a case testing only enter and 'q' ignores it — and watchSignals
+		// folds SIGINT and SIGTERM onto the same key, which left an external
+		// kill unanswered on the last screen of the run.
+		if k.Named == screen.KeyEnter || k.Named == screen.KeyCtrlC || k.Rune == 'q' {
 			s.Step = StepQuit
 		}
 		return s

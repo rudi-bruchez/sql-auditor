@@ -186,6 +186,18 @@ func TestTheCollisionDoesNotTakeOverTheKeyboard(t *testing.T) {
 	}
 }
 
+// Ctrl-C ends the wizard on the final screen too. It carries no rune, so a
+// case testing only [enter] and 'q' ignored it — and watchSignals folds SIGINT
+// and SIGTERM onto the same key, so an external kill went unanswered on the
+// screen the operator sits on longest.
+func TestTheFinalScreenAnswersCtrlCLikeEveryOther(t *testing.T) {
+	for _, k := range []screen.Key{named(screen.KeyEnter), named(screen.KeyCtrlC), typed('q')} {
+		if got := (State{Step: StepDone}).Key(k); got.Step != StepQuit {
+			t.Errorf("key %+v on the final screen led to %v, want StepQuit", k, got.Step)
+		}
+	}
+}
+
 func TestTabCyclesOverTheTwoEditableFields(t *testing.T) {
 	s := State{Step: StepConnection}
 	seen := []int{}
