@@ -285,7 +285,14 @@ OPTION (RECOMPILE, MAXDOP 1);
    #table that outlives the batch would collide on the second database; the
    duplication is the price of leaving the server exactly as it was found. A
    selection that drifts between the two statements is harmless — the writer
-   matches intervals to queries by query_id and ignores the rest. */
+   matches intervals to queries by query_id and ignores the rest.
+
+   THE INVARIANT BETWEEN THE TWO COPIES: the four ranking metrics, and the
+   window predicate they are aggregated over, must stay identical to the
+   selected copy above. Nothing else need match — this copy drops the two
+   aggregates that no ranking reads — but a metric changed on one side only
+   would silently select one set of queries and collect the intervals of
+   another. */
 WITH agg AS (
     SELECT q.query_id,
            SUM(rs.avg_duration         * rs.count_executions) AS total_duration,
