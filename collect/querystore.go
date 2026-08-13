@@ -261,6 +261,44 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 		req.Warn(fmt.Sprintf("%s: query %d, plan %d: %s", req.Unit.Name, queryID, planID, reason))
 	}
 
+	// fail writes the index before letting a write error leave this writer. By
+	// the time one occurs — a full disk, a share withdrawn mid-run, permissions
+	// dropped under a running collection — query texts and plans are already on
+	// disk, and returning without an index leaves that directory undescribed:
+	// the very thing _index.json exists to prevent, and the reason it goes
+	// through writeUnbudgeted at all. The budget path has always got this
+	// right; only the error path leaked. The error still propagates.
+	//
+	// A failure of the index write itself is DISCARDED in favour of the
+	// original. The first error is the cause and the second its consequence —
+	// the disk that just refused a plan is the same disk refusing the index —
+	// and a caller told only "could not write _index.json" would look for the
+	// fault in the wrong place. It goes to the manifest as a warning rather
+	// than being lost.
+	fail := func(cause error) (WriteResult, error) {
+		n, err := writeIndex(req, rel, idx)
+		res.Bytes += n
+		if err != nil {
+			req.Warn(fmt.Sprintf("%s: %v", req.Unit.Name, err))
+		}
+		return res, cause
+	}
+
+	// abandon puts the query being written into the index as far as it got, and
+	// then fails. It claims nothing that is not on disk: the statistics file is
+	// written last, so it is never there when this is reached, and the caller
+	// clears the text file when it was that write which failed. Counting it in
+	// Ranked here keeps the count and the list of queries describing the same
+	// set.
+	abandon := func(entry indexedQuery, cause error) (WriteResult, error) {
+		entry.StatsFile = ""
+		if len(entry.Ranks) > 0 {
+			idx.Selection.Ranked++
+		}
+		idx.Queries = append(idx.Queries, entry)
+		return fail(cause)
+	}
+
 	// First-seen order, not sorted: the SQL already emits the round robin's
 	// order, and re-sorting here would hide which metric brought a query in.
 	var ids []int64
@@ -324,7 +362,11 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 			omit(id, 0, entry.TextFile, "the Query Store holds no text for this query_id; the file was written empty", 0)
 		}
 		if n, ok, err := writeFile(req, rel, entry.TextFile, []byte(text)); err != nil {
-			return res, err
+			// The text is the first file written for a query, and this one did
+			// not land: the entry names neither it nor anything after it, and
+			// the queries completed before it stay described.
+			entry.TextFile = ""
+			return abandon(entry, err)
 		} else if ok {
 			res.Bytes += n
 			res.TextFiles++
@@ -364,7 +406,10 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 			default:
 				n, ok, err := writeFile(req, rel, name, []byte(plan))
 				if err != nil {
-					return res, err
+					// The plans written before this one are named; this one is
+					// not, and neither is the statistics file that never got its
+					// turn.
+					return abandon(entry, err)
 				}
 				if !ok {
 					omit(id, planID, name, budgetReason(req.Out.budget), int64(len(plan)))
@@ -385,13 +430,13 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 			{Spec: ResultSpec{Name: "intervals", Shape: ShapeArray}, Set: rowsWhere(intervals, "query_id", id)},
 		})
 		if err != nil {
-			return res, fmt.Errorf("query-store-detail: encoding statistics for query %d: %w", id, err)
+			return abandon(entry, fmt.Errorf("query-store-detail: encoding statistics for query %d: %w", id, err))
 		}
 		for _, w := range warns {
 			req.Warn(fmt.Sprintf("%s: query %d: %s", req.Unit.Name, id, w))
 		}
 		if n, ok, err := writeFile(req, rel, entry.StatsFile, stats); err != nil {
-			return res, err
+			return abandon(entry, err)
 		} else if ok {
 			res.Bytes += n
 		} else {
@@ -570,6 +615,24 @@ func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
 		req.Warn(fmt.Sprintf("%s: query %d, plan %d: %s", req.Unit.Name, queryID, planID, reason))
 	}
 
+	// fail writes the index before a write error leaves this writer, for the
+	// reason the detail writer's own fail states: plans already on disk with no
+	// index over them is the undescribed directory _index.json exists to
+	// prevent. The index's own error is warned rather than returned — the
+	// original is the cause, this one only its consequence.
+	fail := func(entry profiledPlan, cause error) (WriteResult, error) {
+		// The plan this entry names was not written, so it names no file; what
+		// is known about it is still worth carrying.
+		entry.PlanFile = ""
+		idx.Plans = append(idx.Plans, entry)
+		n, err := writeProfiledIndex(req, rel, idx)
+		res.Bytes += n
+		if err != nil {
+			req.Warn(fmt.Sprintf("%s: %v", req.Unit.Name, err))
+		}
+		return res, cause
+	}
+
 	for _, id := range ids {
 		rows := rowsWhere(plans, "query_id", id)
 		if len(rows.Rows) == 0 {
@@ -642,7 +705,7 @@ func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
 			default:
 				n, ok, err := writeFile(req, rel, name, []byte(plan))
 				if err != nil {
-					return res, err
+					return fail(entry, err)
 				}
 				if !ok {
 					omit(id, planID, name, budgetReason(req.Out.budget), int64(len(plan)))
