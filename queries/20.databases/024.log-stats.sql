@@ -35,6 +35,15 @@
 -- rather than degraded into something that answers a narrower question under
 -- the same name.
 --
+-- ON AN AVAILABILITY GROUP SECONDARY THIS RETURNS ALMOST NOTHING. Microsoft
+-- documents that against a secondary replica the function returns only
+-- database_id, recovery_model and log_backup_time; every size and every LSN
+-- comes back NULL. That is the documented behaviour and not a failure, but a
+-- reader who meets a row of NULLs without knowing it will read them as a
+-- broken collector. The replica role is not asked here — it belongs to a
+-- high-availability collector that does not exist yet — so the note has to
+-- carry it.
+--
 -- The VLF geometry is NOT repeated here — 023.log-vlf.sql owns it. Two files
 -- reporting the same count is how they come to disagree.
 

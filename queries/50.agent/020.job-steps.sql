@@ -89,7 +89,11 @@ SELECT
     -- about where diagnostics land when the job fails at 3 a.m.
     s.output_file_name                                          AS [output_file],
     p.name                                                      AS [proxy],
-    CONVERT(varchar(19), s.last_run_date, 126)                  AS [last_run_date_raw],
+    -- Agent stores these as integers, 20260810 and 143005, not as datetime.
+    -- Projected raw and named so, because assembling them into a timestamp
+    -- is the analysis layer's job and a half-conversion here would look
+    -- like a date that failed to parse.
+    s.last_run_date                                             AS [last_run_date_raw],
     s.last_run_duration                                         AS [last_run_duration_raw],
     s.last_run_outcome                                          AS [last_run_outcome_raw]
 FROM msdb.dbo.sysjobsteps AS s

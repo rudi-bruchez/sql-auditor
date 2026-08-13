@@ -26,6 +26,15 @@
 -- of "3 deadlocks" means nothing until a reader knows whether it covers two
 -- days or twenty minutes. A restart empties it entirely.
 --
+-- THE TIMESTAMPS HERE ARE UTC, AND NOTHING ELSE IN THIS ARCHIVE IS. Extended
+-- Events stamps its ring buffer in UTC, while SYSDATETIME, GETDATE and the
+-- error log all record the server's local time. A reader lining a deadlock up
+-- against an error-log entry will be an hour or two out with nothing to warn
+-- them. instance_start is projected in local time from dm_os_sys_info, so the
+-- two conventions sit side by side in one result set on purpose: the offset
+-- between them is readable rather than hidden. The archive's server block
+-- carries the UTC offset for the conversion.
+--
 -- NO JUDGEMENT IS APPLIED. Deadlocks are not defects in themselves — a retry
 -- loop around a deadlock-prone pattern is a legitimate design, and some
 -- workloads are expected to produce them. The count, the rate and the window
