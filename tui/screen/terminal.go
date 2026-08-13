@@ -148,10 +148,11 @@ func (t *Terminal) Draw(lines []string) error {
 
 // ReadKey blocks until one complete keystroke is available. It buffers, because
 // a keystroke is not a byte: an accented character is two bytes and an arrow is
-// three, and either can be split across two reads on a slow link.
+// three, and either can be split across two reads on a slow link. DecodeKey
+// decides where a keystroke ends; this method only feeds it bytes.
 func (t *Terminal) ReadKey() (Key, error) {
 	for {
-		if k, n := decodeKey(t.pending); n > 0 {
+		if k, n := DecodeKey(t.pending); n > 0 {
 			t.pending = t.pending[n:]
 			return k, nil
 		}
@@ -173,30 +174,3 @@ func (t *Terminal) ReadKey() (Key, error) {
 // emit writes a string to the terminal. Wrapped so each escape sequence above
 // reads as one expression, and named away from the io package.
 func emit(f *os.File, s string) (int, error) { return f.WriteString(s) }
-
-// decodeKey turns the head of b into one keystroke, returning the number of
-// bytes consumed, or 0 when b does not yet hold a complete keystroke and the
-// caller must read more.
-func decodeKey(b []byte) (Key, int) {
-	if len(b) == 0 {
-		return Key{}, 0
-	}
-	switch b[0] {
-	case '\r', '\n':
-		return Key{Named: KeyEnter}, 1
-	case '\t':
-		return Key{Named: KeyTab}, 1
-	case ' ':
-		return Key{Named: KeySpace}, 1
-	case 0x03:
-		// Raw mode delivers Ctrl-C as a byte, not as SIGINT. This is the only
-		// place the wizard can see it, which is why the main goroutine must
-		// never sit inside the collection.
-		return Key{Named: KeyCtrlC}, 1
-	case 0x7f, 0x08:
-		return Key{Named: KeyBackspace}, 1
-	case 0x1b:
-		return Key{Named: KeyEsc}, 1
-	}
-	return Key{Rune: rune(b[0])}, 1
-}
