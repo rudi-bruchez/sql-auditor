@@ -109,11 +109,17 @@ SELECT l.name                                                     AS [name],
        CAST(l.is_expiration_checked AS int)                       AS [is_expiration_checked],
        l.modify_date                                              AS [modify_date],
        -- LOGINPROPERTY returns sql_variant whatever is asked of it, and the
-       -- encoder cannot render sql_variant: projected raw, every one of these
-       -- four reached the archive empty, once per login. The base types are
-       -- documented — PasswordLastSetTime is datetime, IsLocked, IsMustChange
-       -- and BadPasswordCount are int — so the conversion asserts nothing the
-       -- function does not already promise.
+       -- encoder has no type to render it by: it falls back to fmt.Sprint and
+       -- warns. The value is not lost, which is worse than losing it — it
+       -- arrives looking fine and is wrong. Measured in a real archive:
+       -- password_last_set came out "2026-04-20 14:04:54.523 +0000 UTC",
+       -- Go's default time format rather than ISO 8601, and carrying an offset
+       -- a SQL datetime does not have; is_locked came out as the string "0"
+       -- rather than a boolean. The base types are documented —
+       -- PasswordLastSetTime is datetime, IsLocked, IsMustChange and
+       -- BadPasswordCount are int — so converting asserts nothing the function
+       -- does not already promise, and it is what routes each value to the
+       -- encoder branch that knows how to write it.
        CONVERT(datetime, LOGINPROPERTY(l.name, 'PasswordLastSetTime'))
                                                                   AS [password_last_set],
        CONVERT(bit,      LOGINPROPERTY(l.name, 'IsLocked'))       AS [is_locked],
