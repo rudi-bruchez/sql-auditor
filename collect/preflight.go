@@ -93,6 +93,14 @@ func Capabilities() []Capability {
 		{Name: "agent_jobs", Label: "Read the Agent job inventory (msdb.dbo.sysjobs_view)",
 			SQL:    "SELECT TOP 1 job_id FROM msdb.dbo.sysjobs_view",
 			Impact: "Agent jobs not collected — the report must not read this as 'no jobs' or 'no failing jobs'"},
+		// The other half of msdb, probed separately for the reason the comment
+		// above gives. SQLAgentReaderRole reads the job inventory and denies
+		// the steps, so an instance can report every job and none of what they
+		// run. Splitting the probe is what lets the manifest say which of the
+		// two happened rather than claiming the jobs are covered.
+		{Name: "agent_job_steps", Label: "Read the Agent job steps (msdb.dbo.sysjobsteps)",
+			SQL:    "SELECT TOP 1 step_id FROM msdb.dbo.sysjobsteps",
+			Impact: "job steps not collected — the report can say a job exists but not what it runs"},
 		// Asked as a permission question rather than by running the procedure:
 		// sp_readerrorlog reads the whole current log, which is minutes of work
 		// on a long-uptime instance and far too expensive for a probe.

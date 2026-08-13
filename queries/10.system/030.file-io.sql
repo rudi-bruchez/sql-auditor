@@ -75,7 +75,27 @@ SELECT vs.volume_mount_point                                      AS [mount_poin
        CAST(SUM(fs.io_stall_read_ms)  * 1.0 / NULLIF(SUM(fs.num_of_reads), 0)  AS DECIMAL(10,1)) AS [latency.avg_read_ms],
        CAST(SUM(fs.io_stall_write_ms) * 1.0 / NULLIF(SUM(fs.num_of_writes), 0) AS DECIMAL(10,1)) AS [latency.avg_write_ms],
        SUM(fs.io_stall_read_ms)                                   AS [latency.total_read_stall_ms],
-       SUM(fs.io_stall_write_ms)                                  AS [latency.total_write_stall_ms]
+       SUM(fs.io_stall_write_ms)                                  AS [latency.total_write_stall_ms],
+       -- The spread across the files on this volume, because the average above
+       -- hides the only distinction that changes what to do about it.
+       --
+       -- A volume whose files all write at 180 ms is misconfigured: a disabled
+       -- write cache or a degraded path penalises everything on it equally. A
+       -- volume where the busy files write at 240 ms and the idle ones on the
+       -- same mount write at 1.5 ms is not misconfigured — it is saturated, and
+       -- the fix is capacity or separation, not settings.
+       --
+       -- Both produce the same volume average. This was read wrong on a real
+       -- audit and only caught by opening the per-file set, which is exactly
+       -- the kind of thing a roll-up should not require.
+       CAST(MIN(fs.io_stall_write_ms * 1.0 / NULLIF(fs.num_of_writes, 0)) AS DECIMAL(10,1))
+                                                                  AS [latency.min_file_write_ms],
+       CAST(MAX(fs.io_stall_write_ms * 1.0 / NULLIF(fs.num_of_writes, 0)) AS DECIMAL(10,1))
+                                                                  AS [latency.max_file_write_ms],
+       CAST(MIN(fs.io_stall_read_ms * 1.0 / NULLIF(fs.num_of_reads, 0)) AS DECIMAL(10,1))
+                                                                  AS [latency.min_file_read_ms],
+       CAST(MAX(fs.io_stall_read_ms * 1.0 / NULLIF(fs.num_of_reads, 0)) AS DECIMAL(10,1))
+                                                                  AS [latency.max_file_read_ms]
 FROM       sys.dm_io_virtual_file_stats(NULL, NULL) AS fs
 JOIN       sys.master_files AS mf
         ON mf.database_id = fs.database_id AND mf.file_id = fs.file_id

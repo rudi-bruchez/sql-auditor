@@ -1,5 +1,5 @@
 -- @scope:       instance
--- @resultsets:  root:object, status:object, top_messages:array, by_source:array, notable:array
+-- @resultsets:  root:object, status:object, top_messages:array, by_source:array, notable:array, database_mounts:array
 -- @permissions: CONNECT, ERROR LOG
 -- @timeout:     300
 --
@@ -152,4 +152,51 @@ WHERE f.n <= 20
    OR l.Txt LIKE '%out of memory%'
    OR l.Txt LIKE '%could not be started%')
 ORDER BY l.LogDate
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* Quand chaque base a été montée, et combien de fois.
+
+   Ce jeu existe pour une question précise qu'aucune autre source ne tranche :
+   une base sans aucune ligne dans sys.dm_db_index_usage_stats est-elle jamais
+   sollicitée, ou ses compteurs ont-ils été remis à zéro ? Ils le sont à chaque
+   montage — donc à chaque démarrage d'instance, mais aussi à chaque restauration,
+   attachement, passage hors ligne puis en ligne, ou changement d'état. Conclure
+   « tous ces index sont inutilisés » sur une base montée il y a deux heures est
+   une erreur, pas un constat.
+
+   Il lui faut son propre jeu plutôt qu'une ligne de plus dans notable : ces
+   messages sont fréquents par nature — un par base et par montage — donc le
+   filtre de rareté de notable les écarte, et le cap de top_messages les noie.
+   Ils sont regroupés par base, ce qui les rend à la fois complets et courts.
+
+   La fenêtre est celle du journal d'erreurs lui-même, qui est recyclé : une base
+   absente d'ici n'a pas forcément échappé à un montage, elle peut simplement
+   avoir été montée avant le plus ancien fichier conservé. first_seen le dit. */
+SELECT
+       LTRIM(RTRIM(REPLACE(REPLACE(
+           SUBSTRING(RTRIM(l.Txt),
+                     CHARINDEX('''', RTRIM(l.Txt)) + 1,
+                     CASE WHEN CHARINDEX('''', RTRIM(l.Txt),
+                                         CHARINDEX('''', RTRIM(l.Txt)) + 1) > 0
+                          THEN CHARINDEX('''', RTRIM(l.Txt),
+                                         CHARINDEX('''', RTRIM(l.Txt)) + 1)
+                               - CHARINDEX('''', RTRIM(l.Txt)) - 1
+                          ELSE 0 END),
+           CHAR(13), ''), CHAR(10), '')))                          AS [database],
+       COUNT(*)                                                    AS [mounts],
+       MIN(l.LogDate)                                              AS [first_seen],
+       MAX(l.LogDate)                                              AS [last_seen]
+FROM #log AS l
+WHERE l.Txt LIKE 'Starting up database %'
+GROUP BY LTRIM(RTRIM(REPLACE(REPLACE(
+           SUBSTRING(RTRIM(l.Txt),
+                     CHARINDEX('''', RTRIM(l.Txt)) + 1,
+                     CASE WHEN CHARINDEX('''', RTRIM(l.Txt),
+                                         CHARINDEX('''', RTRIM(l.Txt)) + 1) > 0
+                          THEN CHARINDEX('''', RTRIM(l.Txt),
+                                         CHARINDEX('''', RTRIM(l.Txt)) + 1)
+                               - CHARINDEX('''', RTRIM(l.Txt)) - 1
+                          ELSE 0 END),
+           CHAR(13), ''), CHAR(10), '')))
+ORDER BY MAX(l.LogDate) DESC
 OPTION (RECOMPILE, MAXDOP 1);
