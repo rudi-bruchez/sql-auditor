@@ -209,7 +209,12 @@ SELECT q.query_id                                                 AS [query_id],
           arrives as a NULL the writer can tell apart from a genuinely absent
           one, because the size beside it says which. The literal is written
           out rather than parameterised so a DBA reading the exported file sees
-          the cap; it is the same constant on the Go side. DATALENGTH counts
+          the cap; it is the same constant on the Go side, maxPlanBytes, and
+          TestPlanCapIsTheSameNumberInTheCorpus reads this line to hold the two
+          together. Raising one alone would make an oversized plan arrive NULL
+          with a size the writer no longer calls oversized, and the archive
+          would then state that the Query Store holds no plan for it — a false
+          fact about the server. DATALENGTH counts
           the nvarchar bytes, two per character, so the guard is conservative
           rather than exact — deliberately, and in the safe direction. */
        CASE WHEN DATALENGTH(p.query_plan) <= 8388608

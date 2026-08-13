@@ -133,7 +133,9 @@ SELECT m.query_id                                                 AS [query_id],
        m.last_execution_time                                      AS [last_execution_time],
        /* The same conditional projection and size column as 021: an oversized
           plan arrives NULL with its size stated, so an omission can be
-          recorded instead of a plan silently going missing. */
+          recorded instead of a plan silently going missing. The literal is the
+          Go constant maxPlanBytes, and TestPlanCapIsTheSameNumberInTheCorpus
+          reads this line as well as 021's to keep the three in step. */
        CASE WHEN DATALENGTH(m.query_plan) <= 8388608
             THEN m.query_plan END                                 AS [query_plan],
        DATALENGTH(m.query_plan)                                   AS [query_plan_bytes]
