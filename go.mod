@@ -18,7 +18,10 @@ go 1.26
 // against their own server never has to know any of the above.
 godebug x509negativeserial=1
 
-require github.com/microsoft/go-mssqldb v1.10.0
+require (
+	github.com/microsoft/go-mssqldb v1.10.0
+	golang.org/x/term v0.45.0
+)
 
 require (
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
@@ -26,5 +29,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 )
