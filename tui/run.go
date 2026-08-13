@@ -40,20 +40,28 @@ func Run(o collect.Options, in, out *os.File) int {
 		fmt.Fprintf(os.Stderr, "%v\nrun `sql-auditor collect` instead: it needs no terminal.\n", err)
 		return 2
 	}
-	// Posted immediately after Open, and inside Run rather than in main: this
-	// is the only function in the program that puts a terminal into raw mode,
-	// so its defer covers everything it calls — including a panic on the main
-	// goroutine — and a failure before this line leaves a perfectly ordinary
-	// terminal behind. Close is safe to call twice; the exit path below calls
-	// it explicitly so that anything written to stderr afterwards is readable.
-	defer t.Close()
-
 	r := &runner{
 		opts:     o,
 		events:   make(chan event),
 		done:     make(chan struct{}),
 		progress: &syncBuffer{},
 	}
+
+	// Posted immediately after Open, and inside Run rather than in main: this
+	// is the only function in the program that puts a terminal into raw mode,
+	// so its defer covers everything it calls — including a panic on the main
+	// goroutine — and a failure before this line leaves a perfectly ordinary
+	// terminal behind. Close is safe to call twice; the exit path below calls
+	// it explicitly so that anything written to stderr afterwards is readable.
+	//
+	// The buffer is emptied in the SAME defer, after the restore, and that is
+	// the whole reason this is not two statements at the end of the function. A
+	// panic in Render, in Draw or in stateChanged unwinds straight through
+	// here, and an in-line flush would be skipped — losing the buffer, which
+	// when lastResort has fired is the only copy of the manifest in existence.
+	// A run that leaves no trace at all is what the entire fallback chain
+	// exists to prevent.
+	defer r.flushOnExit(t, o.Config.OutputDir, o.Now)
 
 	// Every collect writer in this process goes to the buffer, never to the
 	// terminal: a "connection lost; attempting one reconnect" landing in the
@@ -81,21 +89,28 @@ func Run(o collect.Options, in, out *os.File) int {
 		}
 	}()
 
-	// Restore the terminal BEFORE writing anything to stderr: the alternative
-	// is a run log path painted over by the last frame, on a screen still in
-	// raw mode, which is the one place the operator will not read it.
+	_ = final
+	return code
+}
+
+// flushOnExit is the whole of Run's exit path, and it is a function of its own
+// so that it can be deferred as one thing and tested as one thing.
+//
+// The order is fixed: the terminal is restored FIRST, because the final frame
+// is erased by Close and a run log path written before that would be painted
+// over on a screen still in raw mode — the one place the operator will not read
+// it.
+func (r *runner) flushOnExit(t *screen.Terminal, outputDir string, now time.Time) {
 	_ = t.Close()
-	path, ferr := flushProgress(r.progress.snapshot(), o.Config.OutputDir, o.Now)
+	path, err := flushProgress(r.progress.snapshot(), outputDir, now)
 	switch {
-	case ferr != nil:
+	case err != nil:
 		// spill has already put the content on stderr; saying where it failed
 		// is what turns that wall of text into something actionable.
-		fmt.Fprintf(os.Stderr, "the run log above could not be written to %s\n", o.Config.OutputDir)
+		fmt.Fprintf(os.Stderr, "the run log above could not be written to %s\n", outputDir)
 	case path != "":
 		fmt.Fprintf(os.Stderr, "run log: %s\n", path)
 	}
-	_ = final
-	return code
 }
 
 // runner owns everything the wizard starts and has to stop. Every field is

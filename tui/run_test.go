@@ -2,7 +2,10 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -202,3 +205,34 @@ func TestRunRefusesATerminalItCannotPutIntoRawMode(t *testing.T) {
 type errStub struct{}
 
 func (errStub) Error() string { return "refused" }
+
+// The buffer is emptied from a defer, and this is what that buys. flushProgress
+// used to be called in line at the end of Run: a panic in Render, in Draw or in
+// stateChanged unwinds straight past such a call, and the buffer dies with the
+// process. When lastResort has fired — an output directory that is full or
+// read-only — that buffer holds the only copy of the manifest, so the run would
+// leave no trace at all, which is precisely what the whole fallback chain
+// exists to prevent.
+func TestTheRunLogSurvivesAPanicOnTheWayOut(t *testing.T) {
+	dir := t.TempDir()
+	r := &runner{progress: &syncBuffer{}}
+	const lastResortLine = `{"tool":"sql-auditor","run":{"exit_code":0}}`
+	fmt.Fprintln(r.progress, lastResortLine)
+
+	now := time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC)
+	func() {
+		// The recover stands in for the process: what matters is that the defer
+		// below ran while the stack was unwinding.
+		defer func() { _ = recover() }()
+		defer r.flushOnExit(nil, dir, now)
+		panic("the renderer blew up")
+	}()
+
+	written, err := os.ReadFile(filepath.Join(dir, progressFileName(now)))
+	if err != nil {
+		t.Fatalf("the run log was lost with the panic: %v", err)
+	}
+	if !strings.Contains(string(written), lastResortLine) {
+		t.Errorf("run log = %q, want the buffered manifest", written)
+	}
+}
