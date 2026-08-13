@@ -121,6 +121,19 @@ type CollectedKinds struct {
 	// carry literals copied out of application tables, so it is the one thing
 	// the collector gathers that is not purely metadata.
 	SessionText bool `json:"session_text"`
+
+	// QueryStoreDetail marks that the full text and the execution plans of the
+	// heaviest Query Store queries are in the archive. A plan carries more than
+	// the statement: compiled parameter values, literal predicates and the
+	// names of every object it touches. It is therefore a wider disclosure than
+	// SessionText, and it has its own flag rather than sharing one.
+	QueryStoreDetail bool `json:"query_store_detail"`
+
+	// QueryStoreProfiledPlans marks that the last profiled plan was looked up
+	// as well. It is separate because the lookup is not: it reads the plan
+	// cache of the whole instance through sys.dm_exec_query_stats, where every
+	// other per-database collector sees only the database it was pointed at.
+	QueryStoreProfiledPlans bool `json:"query_store_profiled_plans"`
 }
 
 type Manifest struct {
@@ -362,6 +375,20 @@ What is in here that names things:
     contain values from application tables, together with the login,
     host and program names of the sessions running them
 `)
+	}
+	if m.Collected.QueryStoreDetail {
+		fmt.Fprintln(b, "  - The full text of the heaviest queries recorded by the Query Store,")
+		fmt.Fprintln(b, "    their execution plans in XML, and their runtime statistics per")
+		fmt.Fprintln(b, "    interval. A plan carries the compiled parameter values, the literal")
+		fmt.Fprintln(b, "    predicates and the name of every object the query touches.")
+		fmt.Fprintln(b, "    Collected because --query-store-detail was passed.")
+	}
+	if m.Collected.QueryStoreProfiledPlans {
+		fmt.Fprintln(b, "  - For those same queries, the last plan the engine still holds with")
+		fmt.Fprintln(b, "    its real row counts. Finding it reads the plan cache of the whole")
+		fmt.Fprintln(b, "    instance, not only the databases listed above; only the plans")
+		fmt.Fprintln(b, "    belonging to those databases are kept.")
+		fmt.Fprintln(b, "    Collected because --query-store-plan-stats was passed.")
 	}
 	// Scoped deliberately. The redaction this describes applies to the run
 	// settings block and to nothing else, because that is the only place the

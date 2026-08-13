@@ -568,3 +568,32 @@ func TestHumanSummarisesScriptsWithoutRepeatingPerDatabase(t *testing.T) {
 		t.Errorf("the repeat count should be shown:\n%s", h)
 	}
 }
+
+func TestManifestTextDisclosesQueryStoreDetail(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "abc")
+	m.Collected.QueryStoreDetail = true
+	got := m.Human()
+	for _, want := range []string{"execution plan", "parameter values"} {
+		if !strings.Contains(strings.ToLower(got), want) {
+			t.Errorf("MANIFEST.txt does not mention %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestManifestTextSilentWithoutQueryStoreDetail(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "abc")
+	got := strings.ToLower(m.Human())
+	if strings.Contains(got, "execution plan") {
+		t.Errorf("MANIFEST.txt claims plans are present when none were collected:\n%s", got)
+	}
+}
+
+func TestManifestTextDisclosesTheInstanceWideCacheRead(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "abc")
+	m.Collected.QueryStoreDetail = true
+	m.Collected.QueryStoreProfiledPlans = true
+	got := strings.ToLower(m.Human())
+	if !strings.Contains(got, "plan cache") {
+		t.Errorf("MANIFEST.txt does not say the plan cache of the whole instance was read:\n%s", got)
+	}
+}
