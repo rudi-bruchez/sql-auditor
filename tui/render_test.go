@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rudi-bruchez/sql-auditor/collect"
 )
@@ -269,5 +270,145 @@ func TestRenderCutsAFrameToTheTerminalHeight(t *testing.T) {
 	lines := Render(State{Step: StepVerification, Verify: probedVerify()}, testWidth, 5)
 	if len(lines) != 5 {
 		t.Fatalf("got %d lines for a five-line terminal", len(lines))
+	}
+}
+
+// collecting is a run under way: 147 units of 223, on the collector that
+// habitually holds the gauge.
+func collectingState() State {
+	return State{
+		Step: StepCollecting, Verify: probedVerify(), Flags: map[string]bool{},
+		Units: 223, DoneUnits: 147, Databases: 12,
+		Script: "80.workload/021.query-store-detail", Database: "SALESDB",
+		Elapsed: 124 * time.Second, Bytes: 39_950_000,
+		Notes: []string{"denied   50.agent/020.job-steps",
+			"skipped  10.system/072.resource-governor (needs 2016)"},
+	}
+}
+
+func TestCollectingCountsUnitsAndNotScripts(t *testing.T) {
+	lines := Render(collectingState(), testWidth, 0)
+	contains(t, lines, "147/223")
+	contains(t, lines, "65%")
+	// 55 is len(scripts). A gauge wired to it would be wrong by a factor of
+	// four and would read 100% while the run kept going.
+	absent(t, lines, "/55")
+}
+
+func TestCollectingNamesTheCollectorTheDatabaseAndTheElapsedTime(t *testing.T) {
+	lines := Render(collectingState(), testWidth, 0)
+	contains(t, lines, "80.workload/021.query-store-detail")
+	contains(t, lines, "SALESDB")
+	// 2m04s, not 2m4.000001s: the ticker rewrites this line every second and a
+	// value that changes width jitters.
+	contains(t, lines, "elapsed 2m04s")
+	// Bytes, never a count of files: no producer for a file count exists.
+	contains(t, lines, "written  38.1 MB so far")
+	absent(t, lines, "files")
+}
+
+func TestCollectingSaysStoppingUntilTheRunComesBack(t *testing.T) {
+	s := collectingState()
+	s.Stopping = true
+	lines := Render(s, testWidth, 0)
+	contains(t, lines, "stopping")
+	// The offer to stop is gone: it has already been taken.
+	absent(t, lines, "[ctrl-c] stop")
+}
+
+// Go panics on an integer division by zero — there is no NaN to look for in a
+// Go gauge — and bar is asked to draw itself before Planned has arrived on
+// every single run.
+func TestBarSurvivesAZeroTotal(t *testing.T) {
+	got, pct := bar(0, 0, 30)
+	if pct != 0 {
+		t.Fatalf("percentage = %d on an empty plan, want 0", pct)
+	}
+	if got != "["+strings.Repeat("-", 30)+"]" {
+		t.Fatalf("bar = %q", got)
+	}
+	for _, w := range []int{-5, 0, 1} {
+		bar(3, 0, w)
+		bar(3, 7, w)
+	}
+	if _, pct := bar(300, 223, 30); pct != 100 {
+		t.Fatalf("percentage = %d past the end of the plan, want 100", pct)
+	}
+	if g, pct := bar(147, 223, 30); pct != 65 || strings.Count(g, "#") != 19 {
+		t.Fatalf("bar(147,223,30) = %q, %d%%", g, pct)
+	}
+}
+
+func TestDoneKeepsTheArchivePathAloneOnItsLine(t *testing.T) {
+	s := collectingState()
+	s.Step, s.DoneUnits = StepDone, 223
+	s.ZipPath, s.ZipBytes, s.Total = `C:\Users\dba\output\SQL01_PROD-2026-08-13.zip`, 4_404_019, 278*time.Second
+	lines := Render(s, testWidth, 0)
+
+	found := false
+	for _, l := range lines {
+		if strings.TrimSpace(l) == s.ZipPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the archive path shares its line with something else:\n%s", joined(lines))
+	}
+	contains(t, lines, "Send this file to whoever requested the audit:")
+	contains(t, lines, "4.2 MB")
+	contains(t, lines, "100%  223/223")
+	contains(t, lines, "4m38s")
+	// No checksum: it cost a second read of the whole archive, and it would
+	// either need a second file to send or die with the terminal.
+	for _, unwanted := range []string{"sha", "SHA", "Sha", "checksum"} {
+		absent(t, lines, unwanted)
+	}
+}
+
+// The count on the final screen is the PREFLIGHT's, not the units'. A unit can
+// fail for ten reasons that are not a refused permission, and the sentence
+// underneath talks about permissions.
+func TestDoneCountsDeniedPermissionsFromTheVerification(t *testing.T) {
+	s := collectingState()
+	s.Step, s.DoneUnits, s.SkippedCount, s.ErrorCount = StepDone, 219, 4, 0
+	s.ZipPath = `C:\out\a.zip`
+	lines := Render(s, testWidth, 0)
+	contains(t, lines, "219 collected, 4 skipped, 0 errors, 2 permissions denied")
+	contains(t, lines, "Denied permissions are recorded in the archive.")
+
+	// Nothing denied: the reminder has nothing to remind of and goes away.
+	v := probedVerify()
+	for i := range v.Checks {
+		v.Checks[i].Status, v.Checks[i].Impact = "ok", ""
+	}
+	s.Verify = v
+	lines = Render(s, testWidth, 0)
+	contains(t, lines, "0 permissions denied")
+	absent(t, lines, "Denied permissions are recorded")
+}
+
+func TestACancelledRunSaysTheArchiveIsPartial(t *testing.T) {
+	s := collectingState()
+	s.Step, s.Cancelled, s.ZipPath = StepDone, true, `C:\out\SQL01_PROD-2026-08-13.zip`
+	lines := Render(s, testWidth, 0)
+	contains(t, lines, "Collection stopped. This archive is partial:")
+	absent(t, lines, "Send this file")
+	// Everything else still holds for what was collected.
+	contains(t, lines, `C:\out\SQL01_PROD-2026-08-13.zip`)
+	contains(t, lines, "147 collected")
+}
+
+func TestShortDurationMatchesTheMockups(t *testing.T) {
+	for _, c := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"}, {45 * time.Second, "45s"}, {124 * time.Second, "2m04s"},
+		{278 * time.Second, "4m38s"}, {3724 * time.Second, "1h02m04s"},
+		{-time.Second, "0s"},
+	} {
+		if got := shortDuration(c.d); got != c.want {
+			t.Errorf("shortDuration(%v) = %q, want %q", c.d, got, c.want)
+		}
 	}
 }

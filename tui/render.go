@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/rudi-bruchez/sql-auditor/collect"
@@ -35,6 +36,10 @@ func Render(s State, width, height int) []string {
 		lines = renderVerifying(s, width)
 	case StepOptions:
 		lines = renderOptions(s, width)
+	case StepCollecting:
+		lines = renderCollecting(s, width)
+	case StepDone:
+		lines = renderDone(s, width)
 	}
 	if s.ASCII {
 		// The last transformation, applied once to the finished frame rather
@@ -524,4 +529,215 @@ func hang(head string, col int, body string, width int) []string {
 	}
 	first := head + strings.Repeat(" ", gap) + strings.TrimLeft(folded[0], " ")
 	return append([]string{first}, folded[1:]...)
+}
+
+// ---------------------------------------------------------------- screen 4
+
+// barWidth is how many columns the gauge gets, and it shrinks with the
+// terminal rather than overflowing it: the counters to its right are what the
+// operator reads, and a bar that pushed them off the line would cost more than
+// it shows.
+func barWidth(width int) int {
+	const wanted = 30
+	if width <= 0 {
+		return 1
+	}
+	if w := width - 22; w < wanted {
+		if w < 1 {
+			return 1
+		}
+		return w
+	}
+	return wanted
+}
+
+// bar draws the gauge and returns it with the percentage it represents. One
+// signature, and total <= 0 is guarded on the first line: Go panics on an
+// integer division by zero — there is no NaN to look for here — and a gauge is
+// asked to draw itself before Planned has arrived on every single run.
+//
+// The denominator is a number of UNITS, never a number of scripts. The corpus
+// holds 55 files and a run over twelve databases is 223 units; a gauge wired to
+// len(scripts) would be wrong by a factor of four and would sit at 100% while
+// the collection kept going for three more minutes.
+func bar(done, total, width int) (string, int) {
+	if width < 0 {
+		width = 0
+	}
+	if total <= 0 {
+		return "[" + strings.Repeat("-", width) + "]", 0
+	}
+	if done < 0 {
+		done = 0
+	}
+	if done > total {
+		// A gauge that reads 104% is a bug report about the wrong thing.
+		done = total
+	}
+	filled := width * done / total
+	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + "]", done * 100 / total
+}
+
+// gaugeLine is the gauge with its counters, shared by the collection screen and
+// the final one: they are the same screen, and the final one differs only in
+// what is under the gauge.
+func gaugeLine(s State, width int, tail string) string {
+	g, pct := bar(s.DoneUnits, s.Units, barWidth(width))
+	line := fmt.Sprintf("%s%s %3d%%  %d/%d", pad, g, pct, s.DoneUnits, s.Units)
+	if tail != "" {
+		line += "   " + tail
+	}
+	return line
+}
+
+func renderCollecting(s State, width int) []string {
+	out := []string{
+		row(pad+"Collecting", "step 4/4", width),
+		"",
+		gaugeLine(s, width, ""),
+		"",
+	}
+	// The collector, the database and the elapsed time, TRUNCATED rather than
+	// wrapped: they are columns, and this pair of lines is what absorbs the gap
+	// between a percentage of units and a percentage of time. A Query Store
+	// extraction can hold the bar at 65% for two minutes, and these two lines
+	// are how the operator sees WHAT is holding it.
+	out = append(out, pad+screen.Truncate(s.Script, textWidth(width)))
+	out = append(out, row(pad+screen.Truncate(s.Database, textWidth(width)/2), "elapsed "+shortDuration(s.Elapsed), width))
+	out = append(out, "")
+	// A cumulative summary, not a scrolling log: the full log is the manifest's
+	// job and it already does it.
+	for _, n := range s.Notes {
+		out = append(out, pad+screen.Truncate(n, textWidth(width)))
+	}
+	// Bytes, and deliberately not a count of files. UnitDone carries bytes; a
+	// unit writes one file per result set, so a file count would mean
+	// propagating a counter out of six writers — the diffuse change to collect
+	// this whole batch refused to make. Bytes are also the more useful number:
+	// they announce the weight of the archive to send.
+	out = append(out, pad+status("written")+humanBytes(s.Bytes)+" so far", "")
+	if s.Stopping {
+		// Ctrl-C has been pressed and Run has not come back yet. Saying the
+		// collection is over before its manifest and its archive are written
+		// would end with a partial zip presented as a finished one.
+		return append(out, pad+"stopping...")
+	}
+	return append(out, pad+"[ctrl-c] stop")
+}
+
+// textWidth is the room a full-width line has left after the two-column
+// indent, never negative.
+func textWidth(width int) int {
+	w := width - len(pad)
+	if w < 1 {
+		return 1
+	}
+	return w
+}
+
+// renderDone is the same screen turned into a summary. There is no fifth step:
+// the operator ends where the work happened.
+func renderDone(s State, width int) []string {
+	out := []string{
+		row(pad+"Done", "step 4/4", width),
+		"",
+		gaugeLine(s, width, shortDuration(s.Total)),
+		"",
+	}
+	// A cancelled run still produces its archive, and it says so. A run stopped
+	// after three minutes is still worth sending, and the DBA must not discover
+	// its partiality at the other end.
+	if s.Cancelled {
+		out = append(out, pad+"Collection stopped. This archive is partial:")
+	} else {
+		// The recipient is not named: this repository is public, and "whoever
+		// requested the audit" is the only correct wording.
+		out = append(out, pad+"Send this file to whoever requested the audit:")
+	}
+	out = append(out, "")
+	if s.ZipPath == "" {
+		// Nothing to select, so say why rather than print an empty indent.
+		out = append(out, fieldPad+"  no archive was produced")
+	} else {
+		// The path ALONE on its line, indented: this is what a DBA drags with
+		// the mouse to paste into a mail, and anything else on the line comes
+		// with it. There is no checksum anywhere on this screen — it cost a
+		// second read of the whole archive and either a second file to send or
+		// a string that dies with the terminal.
+		out = append(out, fieldPad+"  "+s.ZipPath)
+		out = append(out, "", fieldPad+"  "+humanBytes(s.ZipBytes))
+	}
+	out = append(out, "", pad+summaryLine(s))
+	if deniedPermissions(s) > 0 {
+		// The reminder saves the round trip where the archive arrives and the
+		// missing permissions have to be asked for again.
+		out = append(out, pad+"Denied permissions are recorded in the archive.")
+	}
+	return append(out, "", pad+"[enter] quit")
+}
+
+func summaryLine(s State) string {
+	return fmt.Sprintf("%s, %s, %s, %s",
+		plural(s.DoneUnits, "collected", "collected"),
+		plural(s.SkippedCount, "skipped", "skipped"),
+		plural(s.ErrorCount, "error", "errors"),
+		plural(deniedPermissions(s), "permission denied", "permissions denied"))
+}
+
+// deniedPermissions counts the capabilities the PREFLIGHT refused, which is
+// what the sentence on the final screen says and what the line under it is
+// about. It is not the number of units that failed: a unit can fail for ten
+// reasons that are not a refused permission, and the two numbers answer two
+// different questions.
+func deniedPermissions(s State) int {
+	n := 0
+	for _, c := range s.Verify.Checks {
+		if c.Status != "ok" {
+			n++
+		}
+	}
+	return n
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, one)
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
+
+// shortDuration writes an elapsed time the way the mock-ups do — 2m04s, 4m38s —
+// which is not what time.Duration.String gives (2m4.003s). Seconds are padded
+// so the value does not jitter under a ticker refreshing it every second.
+func shortDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	total := int(d / time.Second)
+	h, m, sec := total/3600, (total/60)%60, total%60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh%02dm%02ds", h, m, sec)
+	case m > 0:
+		return fmt.Sprintf("%dm%02ds", m, sec)
+	}
+	return fmt.Sprintf("%ds", sec)
+}
+
+// humanBytes is the same spelling collect's manifest uses, kept here because
+// the collect one is unexported and this batch does not widen collect's API for
+// a format string. If the two ever disagree the archive and the screen would
+// report different sizes for the same file, so the shape is deliberately
+// identical.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d bytes", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
 }
