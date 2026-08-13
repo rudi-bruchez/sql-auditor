@@ -116,6 +116,11 @@ type Options struct {
 	// one rather than a panic, because the two @writer scripts are the only
 	// things that consult it and a run without them must behave as before.
 	QueryStore *QueryStoreState
+	// Observer watches the run go by, for a caller that displays progress.
+	// Nil is the ordinary case and means exactly the behaviour this package
+	// had before the interface existed: every call site goes through the
+	// nil-safe wrapper, so there is no second code path to keep in step.
+	Observer Observer
 }
 
 // prepareRunFolder creates the run folder, clearing it and the archive beside
@@ -972,6 +977,9 @@ func Run(ctx context.Context, o Options) (int, error) {
 	if o.QueryStore == nil {
 		o.QueryStore = NewQueryStoreState()
 	}
+	// Wrapped once, here, so every callback below can be written unguarded.
+	// A nil Observer — every command-line run — makes all of them no-ops.
+	obs := observer{Observer: o.Observer}
 	m := NewManifest("sql-auditor", o.Version, o.Commit)
 	m.Config = map[string]string{
 		"queries_dir":          o.Config.QueriesDir,
@@ -1239,9 +1247,22 @@ func Run(ctx context.Context, o Options) (int, error) {
 	units, planSkipped := planUnits(plan, folders, o.Config)
 	m.Skipped = append(m.Skipped, planSkipped...)
 
+	// The total is announced before the first unit runs, and it is the same
+	// list the loop below walks — not a product of scripts and databases.
+	obs.Planned(len(units), len(folders))
+	for _, s := range planSkipped {
+		obs.ScriptSkipped(s.Script, s.Target, s.Reason)
+	}
+
 	for _, u := range units {
 		s, target := u.Script, u.Target
+		obs.UnitStarted(s.Path, target.Name)
+		before, started := rw.Spent(), time.Now()
 		err := runUnit(ctx, conn, o, m, rw, s, target)
+		// The bytes of this unit are the difference across a run-level total,
+		// which is what the writer offers. A unit that failed still reports
+		// what it managed to write before failing.
+		obs.UnitDone(s.Path, target.Name, int64(rw.Spent()-before), time.Since(started), err)
 		if err == nil {
 			continue
 		}
@@ -1271,6 +1292,11 @@ func Run(ctx context.Context, o Options) (int, error) {
 		}
 	}
 
+	// The two phases after the loop are announced because they are the only
+	// stretches where the gauge is full and the tool is still working: a
+	// screen showing 223/223 and nothing else reads as a hang while a large
+	// run folder is being zipped.
+	obs.Phase("writing manifest")
 	code, ferr := finish(runFolder, exit)
 	if ferr != nil {
 		return code, ferr
@@ -1279,6 +1305,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// here leaves the run folder intact and readable; only the transport
 	// packaging is missing, which is a partial failure, not a fatal one.
 	zipPath := runFolder + ".zip"
+	obs.Phase("archiving")
 	if err := Zip(runFolder, zipPath); err != nil {
 		return 2, err
 	}

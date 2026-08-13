@@ -73,6 +73,14 @@ func (w *runWriter) takeShowplan() bool {
 	return saw
 }
 
+// Spent reports the running total of collector payload bytes written so far.
+//
+// It is a run-level total on purpose, unlike sawShowplan: an observer wanting
+// what one unit wrote takes the difference across it. Counting per unit inside
+// the writer would mean a second reset-after-read field, and a caller that
+// forgot to read it would silently attribute one unit's bytes to the next.
+func (w *runWriter) Spent() int { return w.spent }
+
 // newRunWriter returns a runWriter rooted at root, refusing to write more
 // than budget bytes of collector payloads in total.
 //

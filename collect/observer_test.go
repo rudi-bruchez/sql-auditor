@@ -176,3 +176,59 @@ func TestPlanUnitsKeepsTheManifestSkipOrder(t *testing.T) {
 		t.Errorf("skip order changed:\n got %+v\nwant %+v", skipped, want)
 	}
 }
+
+// The invariant the gauge rests on: the number announced by Planned is the
+// number of UnitStarted calls the loop will make. It holds by construction
+// since planUnits became the single source of both, and this test is what
+// keeps it holding — a denominator that disagrees with the numerator is the
+// one bug a progress bar cannot survive.
+//
+// It cannot be written red-then-green: no harness in this repository reaches
+// the loop inside Run, since no Go test here opens a connection. It is a
+// characterisation of the invariant, and the wiring itself is checked by
+// reading it.
+func TestPlannedCountMatchesTheUnitsThatWillRun(t *testing.T) {
+	folders := []DatabaseFolder{
+		{Name: "SALESDB", Folder: "SALESDB"},
+		{Name: "RH", Folder: "RH"},
+		{Name: "FACTURATION", Folder: "FACTURATION"},
+	}
+	plan := []plannedScript{
+		{Script: Script{Path: "10.system/010.version.sql", Scope: ScopeInstance}},
+		{Script: Script{Path: "20.databases/022.query-store.sql", Scope: ScopeDatabase}},
+		{Script: Script{Path: "80.workload/021.query-store-detail.sql",
+			Scope: ScopeDatabase, Writer: "query-store-detail"}},
+		{Script: Script{Path: "10.system/072.resource-governor.sql", Scope: ScopeInstance},
+			Skip: "needs 2016"},
+		{Script: Script{Path: "10.system/099.broken.sql", Scope: ScopeInstance,
+			LintError: "missing @resultsets"}},
+	}
+	cfg := &Config{QueryStoreDBInclude: "SALES*"}
+
+	units, skipped := planUnits(plan, folders, cfg)
+
+	rec := &recordingObserver{}
+	obs := observer{Observer: rec}
+	obs.Planned(len(units), len(folders))
+	for _, s := range skipped {
+		obs.ScriptSkipped(s.Script, s.Target, s.Reason)
+	}
+	// Exactly the loop Run walks, minus the database work.
+	for _, u := range units {
+		obs.UnitStarted(u.Script.Path, u.Target.Name)
+		obs.UnitDone(u.Script.Path, u.Target.Name, 0, 0, nil)
+	}
+
+	if len(rec.started) != len(units) {
+		t.Fatalf("UnitStarted called %d times for %d units", len(rec.started), len(units))
+	}
+	if got := rec.planned[0]; got != fmtPair(len(units), len(folders)) {
+		t.Fatalf("Planned announced %s, the loop ran %d units", got, len(rec.started))
+	}
+	// Skips never reach the loop, so they must never be counted into the
+	// denominator: a gauge that stops at 5/9 because four scripts were gated
+	// off reads as four collectors that hung.
+	if len(rec.skipped) != len(skipped) {
+		t.Errorf("skips = %d, want %d", len(rec.skipped), len(skipped))
+	}
+}
