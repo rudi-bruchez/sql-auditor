@@ -45,7 +45,7 @@ change the id again.)
 As recorded, all 14 files parse with zero errors and every result-set count
 matches — including the four that carry the 2012 claim:
 
-> **The corpus has grown since this pass.** It is 30 files today. The 14 below
+> **The corpus has grown since this pass.** It is 38 files today. The 14 below
 > are the ones this run covered, and the number is left as recorded rather than
 > updated, because the record describes a run that happened. The corpus tree
 > hash above is what tells you the artifact is stale; the collectors added since
@@ -78,15 +78,33 @@ provides. The gated files and their floors:
 
 | File | `@min_version` | Version |
 | --- | --- | --- |
-| `10.system/012.soft-numa.sql` | `13` | SQL Server 2016 |
 | `10.system/013.memory-model.sql` | `13.0.4001` | SQL Server 2016 SP1 |
-| `10.system/014.cpu-topology.sql` | `13.0.5026` | SQL Server 2016 SP2 |
+| `10.system/014.cpu-topology.sql` | `13.0` | SQL Server 2016 |
+| `10.system/020.host-services.sql` | `13.0.4001` | SQL Server 2016 SP1 |
 | `10.system/051.version-store.sql` | `13.0.5026` | SQL Server 2016 SP2 |
 | `20.databases/011.all-databases-2014.sql` | `12` | SQL Server 2014 |
 | `20.databases/012.all-databases-query-store.sql` | `13` | SQL Server 2016 |
 | `20.databases/021.properties-2014.sql` | `12` | SQL Server 2014 |
 | `20.databases/022.query-store.sql` | `13` | SQL Server 2016 |
 | `20.databases/023.log-vlf.sql` | `13.0.5026` | SQL Server 2016 SP2 |
+| `20.databases/024.log-stats.sql` | `13.0.5026` | SQL Server 2016 SP2 |
+| `80.workload/020.query-store.sql` | `13.0` | SQL Server 2016 |
+| `80.workload/023.query-store-most-executed.sql` | `13` | SQL Server 2016 |
+
+Two more carry a floor and a flag both, so on a 2012 instance without the flag
+they are skipped for the flag rather than for the version — the flag gate is
+tested first:
+
+| File | `@min_version` | Version | Flag |
+| --- | --- | --- | --- |
+| `80.workload/021.query-store-detail.sql` | `13` | SQL Server 2016 | `--query-store-detail` |
+| `80.workload/022.query-store-profiled.sql` | `15.0` | SQL Server 2019 | `--query-store-plan-stats` |
+
+`10.system/012.soft-numa.sql` used to be in this table and no longer exists: it
+was merged into `10.system/014.cpu-topology.sql`, because the two each held half
+of one answer and the split was read wrongly on a real audit. `014` declares
+`13.0` today, where this table used to record `13.0.5026`; its header states the
+floor it now claims and why — 2016 is where `softnuma_configuration` arrives.
 
 The gate compares dotted versions rather than the major component alone,
 because a major-only gate would let 2016 RTM attempt columns that arrived in
@@ -99,9 +117,27 @@ instance will not collect a column it does in fact have.
 
 ## What has not been verified
 
-**No collection has ever been executed against SQL Server 2012, or against any
-version other than SQL Server 2022 (16.0).** Everything above is static
-analysis: a parse and a documentation check. Neither can detect
+**No collection has ever been executed against SQL Server 2012.** That is the
+gap this file exists to record, and nothing below closes it.
+
+Collections have been executed against three versions, none of them 2012:
+
+| `ProductVersion` | Edition | Instance |
+| --- | --- | --- |
+| 13.0.6435.1 | Enterprise Edition (64-bit) | `EU01SDP155` |
+| 14.0.1000.169 | Standard Edition (64-bit) | `SRV-BI\MSSQLBI2` |
+| 16.0.4250.1 | Standard Edition (64-bit) | `EU01SDP178` |
+
+That is SQL Server 2016 SP3, 2017 RTM and 2022. Those runs exercise the corpus
+against real instances and against the version gate — a collector wrongly gated
+shows up as a skip on an instance that should have run it — but they say
+nothing about 2012, which is two major versions below the lowest of them. The
+2012 floor remains what it has always been: a static claim, verified by parsing
+every file under the 2012 grammar and by checking every column against
+Microsoft's documentation, and never by a run.
+
+Everything supporting that claim is static analysis: a parse and a
+documentation check. Neither can detect
 
 - a DMV that exists on 2012 but returns a different shape or type than expected;
 - a `SERVERPROPERTY` name that is valid on 2022 and returns `NULL` on 2012
@@ -148,6 +184,13 @@ These four carry no `@min_version` and therefore must run on 2012. Each is the
 subject of the claim. Record, for each: did it complete, how many result sets
 came back, and whether the output JSON is well-formed and populated.
 
+> **This table was drawn up against the 14-file corpus and has not been
+> extended.** Twenty-two collectors are ungated today, and every one of them is
+> equally the subject of the 2012 claim. Whoever runs the pass should re-derive
+> the list from the `@min_version` directives on the day rather than trust these
+> four rows to still be the whole of it; the four below are kept because they
+> are the ones the parse pass covered.
+
 | Query | Ran without error | Result sets (expect) | Result sets (actual) | Output non-empty | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `10.system/010.properties.sql` | | 6 | | | |
@@ -157,17 +200,22 @@ came back, and whether the output JSON is well-formed and populated.
 
 ### The gated collectors
 
-On a 2012 instance all nine should be skipped, each with a reason recorded in
-`MANIFEST.txt` under "Queries not run" of the form `needs SQL Server 12 or
-later; this instance reports 11.0.7001.0` — the gate on the left, the
-instance's own `ProductVersion` on the right. Confirm none of them ran and none
-produced an error.
+On a 2012 instance all twelve of the version-only gated collectors should be
+skipped, each with a reason recorded in `MANIFEST.txt` under "Queries not run"
+of the form `needs SQL Server 12 or later; this instance reports 11.0.7001.0` —
+the gate on the left, the instance's own `ProductVersion` on the right. Confirm
+none of them ran and none produced an error.
+
+The four flag-gated collectors are skipped for the flag instead, whatever the
+version, because the flag gate is tested first. Two of them also carry a floor,
+so their skip line will name the flag and not the version — that is correct, not
+a missed gate.
 
 | Check | Result |
 | --- | --- |
-| All nine version-gated collectors appear under "Queries not run" | |
+| All twelve version-only gated collectors appear under "Queries not run" | |
 | None of them appears under "Errors" | |
-| `10.system/052.session-text.sql` skipped as flag-gated (run without `--include-session-text`) | |
+| The four flag-gated collectors are skipped with the flag as the reason (run with no flags) | |
 
 ### Cross-checks
 

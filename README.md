@@ -29,6 +29,11 @@ go build ./cmd/sql-auditor
 go install github.com/rudi-bruchez/sql-auditor/cmd/sql-auditor@latest
 ```
 
+With no version tagged yet, `@latest` resolves to the tip of the default branch,
+so it gives you whatever has been merged and not necessarily what this file
+describes. Until the first release, `git clone` and `go build` are the way to
+get a binary you can tie to a commit you have read.
+
 What is not there yet is everything about a *downloaded* binary. Releases are
 meant to carry a SHA-256 for every asset and a build provenance attestation
 tying each binary to the commit and workflow that produced it; until a release

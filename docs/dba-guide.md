@@ -567,19 +567,35 @@ trouble rather than merely busy.
 There is one thing it does **not** bound, and it is the one you probably came
 here for. Each collector declares its own timeout in the query file, and a
 declared timeout wins over `SQL_QUERY_TIMEOUT_SEC` outright. Every file in the
-shipped corpus declares one. Most are 60 seconds; the schema-heavy and
-workload-heavy ones are 120 or 300, and
-`70.schema/041.compression-savings.sql`, which is opt-in and samples real data,
-declares 1800. So raising `SQL_QUERY_TIMEOUT_SEC` will not give a slow collector
-longer to finish.
+shipped corpus declares one, across five tiers:
 
-The collector that will run out of time first is
-`20.databases/020.properties.sql`, the same one already given 300 seconds. It is
-the schema-heavy one: index fragmentation, largest objects, and missing and
-unused indexes are all result sets inside that single file, and all of them walk
-every object in the database. It runs once per database, so its 300 seconds is
-per database rather than for the run. A database with tens of thousands of
-objects, or a heavily fragmented one, can pass even that mark.
+| `@timeout` | Files |
+| --- | --- |
+| 30 s | 2 |
+| 60 s | 19 |
+| 120 s | 11 |
+| 300 s | 5 |
+| 1800 s | 1 |
+
+So raising `SQL_QUERY_TIMEOUT_SEC` will not give a slow collector longer to
+finish.
+
+Two collectors are the candidates to run out of time first, for different
+reasons.
+
+`20.databases/020.properties.sql` has 300 seconds and is the schema-heavy one:
+index fragmentation, largest objects, and missing and unused indexes are all
+result sets inside that single file, and all of them walk every object in the
+database. It runs once per database, so its 300 seconds is per database rather
+than for the run. A database with tens of thousands of objects, or a heavily
+fragmented one, can pass even that mark.
+
+`70.schema/041.compression-savings.sql` has the corpus's longest timeout at 1800
+seconds and is the only collector that samples real data —
+`sp_estimate_data_compression_savings` copies rows into tempdb to measure them.
+It runs only under `--estimate-compression`, and half an hour per database is
+what it was given because the objects worth asking about are the large ones.
+That is a collector to run deliberately, not one to leave on.
 
 A collector that times out is recorded as an error, the run continues to the
 next one, and the process exits `2`; the archive is written either way, missing
@@ -881,9 +897,13 @@ must all hold:
 - the cached plan matches a Query Store plan by `query_plan_hash`.
 
 Any one of them being false gives you `matched_plans: 0`. The index reports
-`last_query_plan_stats` beside that zero precisely so the two explanations can
-be told apart: a database with the feature switched off and a plan cache holding
-nothing look identical otherwise.
+`last_query_plan_stats` beside that zero precisely so the commonest two
+explanations can be told apart: a database with the feature switched off and a
+plan cache holding nothing look identical otherwise. Read that field for what it
+is — the value of the database scoped configuration and nothing more, read from
+`sys.database_scoped_configurations`. An instance running trace flag 2451 shows
+it off there while plans arrive anyway. Off with plans beside it means the trace
+flag is doing the work; off with no plans means either explanation.
 
 The match is made on `query_plan_hash`, which is an MD5, so it is declared and
 never asserted: each row records `"match": "plan_hash"` and a `candidates`
@@ -903,7 +923,11 @@ the documentation's failure and not the file's.
 ### Choosing the window
 
 Two forms, and they are mutually exclusive — asking for both stops the run
-rather than silently picking one.
+rather than silently picking one. The refusal is decided on `QUERY_STORE_DAYS`
+being *present*, not on its value, so a `.env` carrying `QUERY_STORE_DAYS=7`
+makes every run that passes a bound fail with `QUERY_STORE_DAYS cannot be
+combined with QUERY_STORE_FROM or QUERY_STORE_TO`. Delete or comment the line;
+absent already means seven days.
 
 **Sliding**, which is the default: `--query-store-days N`, seven days counting
 back from the moment of collection. This is the right form for "what does this
