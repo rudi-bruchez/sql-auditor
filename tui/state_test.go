@@ -2,21 +2,24 @@ package tui
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rudi-bruchez/sql-auditor/collect"
 	"github.com/rudi-bruchez/sql-auditor/tui/screen"
 )
 
+// errConnRefusedForTest stands in for what the driver hands back. Nothing here
+// opens a connection: the tests of this package never touch a network, and no
+// test in this file has an address to resolve.
+var errConnRefusedForTest = errors.New("login failed for user 'AUDIT_RO'")
+
 // named and typed keep the transition tables readable: every case in this file
 // is "one keystroke applied to one state", and spelling out screen.Key on each
 // line would bury the interesting half.
-// errConnRefusedForTest stands in for what the driver hands back. Nothing here
-// opens a connection: the tests of this package never touch a network, and the
-// address they carry is in the RFC 2606 reserved TLD so nothing would resolve
-// if one ever did.
-var errConnRefusedForTest = errors.New("login failed for user 'AUDIT_RO'")
-
 func named(n screen.NamedKey) screen.Key { return screen.Key{Named: n} }
 func typed(r rune) screen.Key            { return screen.Key{Rune: r} }
 
@@ -241,6 +244,39 @@ func TestPasswordNeverAppearsInAnyRenderedLine(t *testing.T) {
 	}
 	if s.Server == secret || s.ConnError.Error() == secret {
 		t.Error("the password leaked into a field the screens print")
+	}
+}
+
+func TestTheSameDayArchiveIsDetectedBeforeAnythingIsDestroyed(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC)
+	if got := collisionFor(dir, `SQL01\PROD`, now, false); got != "" {
+		t.Fatalf("collisionFor on an empty directory = %q, want %q", got, "")
+	}
+	// The archive alone is enough. It sits beside the run folder rather than
+	// inside it, and it is the file that was mailed onward.
+	zip := filepath.Join(dir, collect.RunFolderName(`SQL01\PROD`, now)+".zip")
+	if err := os.WriteFile(zip, []byte("previous run"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := collisionFor(dir, `SQL01\PROD`, now, false)
+	if !strings.Contains(got, zip) {
+		t.Fatalf("collisionFor = %q, want it to name %q", got, zip)
+	}
+	// --keep suffixes its way to a free name, so there is nothing in the way
+	// and nothing to ask about.
+	if kept := collisionFor(dir, `SQL01\PROD`, now, true); kept != "" {
+		t.Errorf("collisionFor under keep = %q, want %q", kept, "")
+	}
+
+	// Going back destroys nothing: the state machine never touches the disk,
+	// and the archive is still there for the operator who chose [b].
+	s := State{Step: StepOptions, Collision: got}
+	if back := s.Key(typed('b')); back.Step != StepVerification {
+		t.Fatalf("[b] led to %v, want StepVerification", back.Step)
+	}
+	if _, err := os.Stat(zip); err != nil {
+		t.Errorf("the archive did not survive the prompt: %v", err)
 	}
 }
 

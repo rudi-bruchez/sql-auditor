@@ -159,14 +159,14 @@ func (o Options) progress() io.Writer {
 // watched finish.
 func prepareRunFolder(path string, keep bool, progress io.Writer) error {
 	if keep {
-		// --keep must never land on an occupied name. runFolderFor already
+		// --keep must never land on an occupied name. RunFolderFor already
 		// looks for a free one, but if it ever hands back a taken path the
 		// two runs would merge into one folder: this run's manifest beside
 		// the previous run's result files, describing an archive it does not
 		// match. A run collected under --include-session-text merging into a
 		// run collected without it puts session text inside an archive whose
 		// own MANIFEST.txt says there is none. Refuse loudly instead.
-		if taken, what := runNameTaken(path); taken {
+		if taken, what := RunNameTaken(path); taken {
 			return fmt.Errorf("--keep: %s already exists; this run would be written into "+
 				"the same place as an earlier one and the two would be indistinguishable", what)
 		}
@@ -184,11 +184,19 @@ func prepareRunFolder(path string, keep bool, progress io.Writer) error {
 	return os.MkdirAll(path, 0o755)
 }
 
-// runNameTaken reports whether anything from an earlier run already occupies
+// RunNameTaken and RunFolderFor are exported for one caller and one reason:
+// the wizard has to ask before this package destroys anything. Without --keep,
+// prepareRunFolder does os.RemoveAll on the folder AND removes the .zip beside
+// it, warning only on stderr — which a full-screen wizard has covered up. An
+// operator rerunning the same day to add one option would lose the archive
+// just mailed. The wizard calls these two before Run and puts the answer on
+// screen; nothing is deleted without a keystroke that names the choice.
+//
+// RunNameTaken reports whether anything from an earlier run already occupies
 // this name. The archive counts: it sits beside the folder rather than inside
 // it, so a folder that was moved away while its .zip stayed still leaves a
 // name that a second run would appear to have produced.
-func runNameTaken(path string) (bool, string) {
+func RunNameTaken(path string) (bool, string) {
 	_, dirErr := os.Stat(path)
 	_, zipErr := os.Stat(path + ".zip")
 	switch {
@@ -208,7 +216,7 @@ func runNameTaken(path string) (bool, string) {
 // named for the same server and day, and an operator told only about the
 // folder has no reason to expect it gone.
 func replacingRunWarning(path string) string {
-	taken, what := runNameTaken(path)
+	taken, what := RunNameTaken(path)
 	if !taken {
 		return ""
 	}
@@ -216,7 +224,7 @@ func replacingRunWarning(path string) string {
 		"\npass --keep to write this run alongside it instead"
 }
 
-// runFolderFor applies the collision policy: a same-day rerun replaces the
+// RunFolderFor applies the collision policy: a same-day rerun replaces the
 // previous one, unless --keep, in which case this run is suffixed with the
 // time and both survive. The archive follows the folder, so there is one rule
 // to explain rather than two.
@@ -229,18 +237,18 @@ func replacingRunWarning(path string) string {
 // everybody's output files. A run collected without --include-session-text
 // ended up shipping a zip containing session text under a MANIFEST.txt that
 // denied it.
-func runFolderFor(outputDir, server string, now time.Time, keep bool) string {
+func RunFolderFor(outputDir, server string, now time.Time, keep bool) string {
 	base := filepath.Join(outputDir, RunFolderName(server, now))
 	if !keep {
 		return base
 	}
-	if taken, _ := runNameTaken(base); !taken {
+	if taken, _ := RunNameTaken(base); !taken {
 		return base
 	}
 	withTime := base + "-" + now.Format("1504")
 	candidate := withTime
 	for i := 2; ; i++ {
-		if taken, _ := runNameTaken(candidate); !taken {
+		if taken, _ := RunNameTaken(candidate); !taken {
 			return candidate
 		}
 		candidate = fmt.Sprintf("%s-%d", withTime, i)
@@ -1233,7 +1241,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// collision, or a path the process may not create — so it exits 2 like the
 	// other configuration refusals rather than 1, which claims the instance was
 	// unreachable when it has in fact just been read successfully.
-	runFolder := runFolderFor(o.Config.OutputDir, si.Name, o.Now, o.Keep)
+	runFolder := RunFolderFor(o.Config.OutputDir, si.Name, o.Now, o.Keep)
 	if err := prepareRunFolder(runFolder, o.Keep, o.progress()); err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)

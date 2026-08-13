@@ -350,6 +350,24 @@ func (s State) canContinue() bool { return s.Verify.Probed }
 // only its manifest is a round trip the wizard exists to save.
 func (s State) canStart() bool { return s.Verify.Probed && s.Verify.Collectors > 0 }
 
+// collisionFor names what an earlier run of the same day already occupies, or
+// "" when the way is clear. It is the whole of the wizard's guard against the
+// destructive half of prepareRunFolder, and it runs BEFORE collect.Run:
+// afterwards the folder and the archive are already gone.
+//
+// keep is passed through rather than assumed false because RunFolderFor's
+// answer depends on it — under --keep it suffixes until it finds a free name,
+// so there is nothing to warn about — and asking the question about a path the
+// run will not use would produce a prompt about a file nothing was going to
+// touch.
+func collisionFor(outputDir, instance string, now time.Time, keep bool) string {
+	folder := collect.RunFolderFor(outputDir, instance, now, keep)
+	if taken, what := collect.RunNameTaken(folder); taken {
+		return what
+	}
+	return ""
+}
+
 // toggleFlag flips one opt-in and enforces the one dependency between them. It
 // returns a new map: states are values here, and a shared map would let a
 // keystroke reach backwards into every state already handed out.
