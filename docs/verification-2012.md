@@ -45,7 +45,7 @@ change the id again.)
 As recorded, all 14 files parse with zero errors and every result-set count
 matches — including the four that carry the 2012 claim:
 
-> **The corpus has grown since this pass.** It is 38 files today. The 14 below
+> **The corpus has grown since this pass.** It is 45 files today. The 14 below
 > are the ones this run covered, and the number is left as recorded rather than
 > updated, because the record describes a run that happened. The corpus tree
 > hash above is what tells you the artifact is stale; the collectors added since
@@ -192,7 +192,7 @@ subject of the claim. Record, for each: did it complete, how many result sets
 came back, and whether the output JSON is well-formed and populated.
 
 > **This table was drawn up against the 14-file corpus and has not been
-> extended.** Twenty-two collectors are ungated today, and every one of them is
+> extended.** 24 collectors are ungated today, and every one of them is
 > equally the subject of the 2012 claim. Whoever runs the pass should re-derive
 > the list from the `@min_version` directives on the day rather than trust these
 > four rows to still be the whole of it; the four below are kept because they
@@ -213,7 +213,7 @@ of the form `needs SQL Server 12 or later; this instance reports 11.0.7001.0` �
 the gate on the left, the instance's own `ProductVersion` on the right. Confirm
 none of them ran and none produced an error.
 
-The four flag-gated collectors are skipped for the flag instead, whatever the
+The seven flag-gated collectors are skipped for the flag instead, whatever the
 version, because the flag gate is tested first. Two of them also carry a floor,
 so their skip line will name the flag and not the version — that is correct, not
 a missed gate.
@@ -222,7 +222,7 @@ a missed gate.
 | --- | --- |
 | All twelve version-only gated collectors appear under "Queries not run" | |
 | None of them appears under "Errors" | |
-| The four flag-gated collectors are skipped with the flag as the reason (run with no flags) | |
+| The seven flag-gated collectors are skipped with the flag as the reason (run with no flags) | |
 
 ### Cross-checks
 

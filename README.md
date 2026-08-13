@@ -67,6 +67,7 @@ Options for `check` and `collect`:
 | `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
 | `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
 | `--include-deadlock-graphs` | also collect the deadlock reports `system_health` still holds, one `.xdl` file each |
+| `--include-blocked-process-reports` | also collect the blocked process reports an Extended Events session captured, one `.xml` file each |
 | `--estimate-compression` | also estimate page-compression savings on the largest uncompressed objects. Off for cost, not for disclosure: it samples real data into tempdb and is slow on large tables |
 | `--query-store-detail` | also collect the full text and the execution plans of the heaviest Query Store queries, per database |
 | `--query-store-plan-stats` | also look for the last profiled plan of each query the option above extracted. Does nothing on its own |
@@ -112,6 +113,21 @@ they happened, on every run and without a flag; it stops there because a deadloc
 report carries the verbatim SQL of both victims. This option crosses exactly that
 line and no other — it writes each report as an `.xdl` file, which SSMS opens as
 the deadlock diagram. Nothing on the instance is modified or cleared to read them.
+
+`--include-blocked-process-reports` is the fifth, and the only option in this
+tool that reads the server's file system. The reports live in an Extended Events
+session's `.xel` files, which `sys.fn_xe_file_target_read_file` opens as the SQL
+Server service account rather than as the login you connected with. A report
+names the blocked session and the one blocking it, with the SQL of both — the
+blocker included, which was doing nothing but holding a lock.
+
+It only produces anything if somebody turned the capture on: `blocked process
+threshold (s)` must be non-zero, and a session must subscribe to
+`blocked_process_report` and write to a file. `sql-auditor check` tests all of
+that and tells you which piece is missing, with a link to a script that sets it
+up. `10.system/062.xe-sessions.sql` records the same facts in every archive,
+without any flag, so an empty result can always be told apart from a capture
+that was never running.
 
 `--query-store-plan-stats` is a second, separate decision rather than a
 widening of the first. Finding the last profiled plan means reading the plan
