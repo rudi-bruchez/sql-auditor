@@ -41,13 +41,16 @@
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
--- SERVERPROPERTY returns sql_variant, always. Projected raw, the driver hands
--- the encoder a type it cannot render and the value is dropped with a warning,
--- so the column reaches the archive empty. Converting is not cosmetic: it is
--- what makes the value survive the trip. InstanceName carried the same defect
--- without ever warning, because it is NULL on a default instance and a NULL
--- sql_variant has no base type to complain about — it would have surfaced on
--- the first named instance instead.
+-- SERVERPROPERTY returns sql_variant, always. Projected raw, the encoder has
+-- no type to render it by: it falls back to fmt.Sprint and warns. The value
+-- survives, which is the trap — is_clustered reached a real archive as the
+-- string "0" rather than a boolean, true enough to read past and wrong enough
+-- to break anything that tests it. Converting routes each value to the encoder
+-- branch that knows how to write it.
+--
+-- InstanceName carried the same defect without ever warning, because it is
+-- NULL on a default instance and a NULL sql_variant has no base type to
+-- complain about. It would have surfaced on the first named instance instead.
 SELECT CONVERT(sysname,  SERVERPROPERTY('MachineName'))           AS [machine_name],
        CONVERT(sysname,  SERVERPROPERTY('ComputerNamePhysicalNetBIOS'))
                                                                   AS [physical_name],
