@@ -1122,3 +1122,91 @@ func TestPlanCapIsTheSameNumberInTheCorpus(t *testing.T) {
 		}
 	}
 }
+
+// A write can fail for reasons that have nothing to do with the budget: a full
+// disk, a share withdrawn under a running collection, permissions dropped
+// mid-run. By then query text and plans are already on disk, and a writer that
+// returned the error without writing _index.json would leave exactly the
+// undescribed directory the index exists to prevent — the failure the budget
+// path has always handled and only the error path leaked.
+//
+// The failure is provoked with a DIRECTORY sitting where a plan file must go:
+// os.WriteFile refuses that on every platform this runs on, after the query's
+// text file has already landed.
+func TestDetailWriterLeavesAnIndexWhenAWriteFails(t *testing.T) {
+	root := t.TempDir()
+	rel := "80.workload/Sales/021.query-store-detail"
+	if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(rel), "query_11.plan_101.sqlplan"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := writerFor("query-store-detail")(WriteRequest{
+		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Script: Script{Path: "80.workload/021.query-store-detail.sql", Dir: "80.workload", Base: "021.query-store-detail"},
+		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
+		Sets:   detailSets(),
+		State:  NewQueryStoreState(),
+		Warn:   func(string) {},
+	})
+	if err == nil {
+		t.Fatal("a failed write must still be an error")
+	}
+	dir := filepath.Join(root, filepath.FromSlash(res.Rel))
+	if _, err := os.Stat(filepath.Join(dir, "query_11.sql")); err != nil {
+		t.Fatalf("the text file that did land is missing, so this tests nothing: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "_index.json"))
+	if err != nil {
+		t.Fatalf("a directory of query text and plans was left with no index: %v", err)
+	}
+	var idx struct {
+		Queries []struct {
+			QueryID   int64    `json:"query_id"`
+			TextFile  string   `json:"text_file"`
+			StatsFile string   `json:"stats_file"`
+			PlanFiles []string `json:"plan_files"`
+		} `json:"queries"`
+	}
+	if err := json.Unmarshal(b, &idx); err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.Queries) != 1 || idx.Queries[0].QueryID != 11 {
+		t.Fatalf("_index.json lists %+v, want the query whose text is on disk", idx.Queries)
+	}
+	if idx.Queries[0].TextFile != "query_11.sql" {
+		t.Errorf("text_file = %q, want the file that is actually there", idx.Queries[0].TextFile)
+	}
+	// Nothing the writer never wrote is claimed: the plan write is what failed,
+	// and the statistics file never got its turn.
+	if len(idx.Queries[0].PlanFiles) != 0 || idx.Queries[0].StatsFile != "" {
+		t.Errorf("query 11 = %+v, want no plan file and no statistics file named", idx.Queries[0])
+	}
+}
+
+// The profiled writer's half of the same finding.
+func TestProfiledWriterLeavesAnIndexWhenAWriteFails(t *testing.T) {
+	root := t.TempDir()
+	rel := "80.workload/Sales/022.query-store-profiled"
+	if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(rel), "query_11.plan_101.actual.sqlplan"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := NewQueryStoreState()
+	st.Selected["Sales"] = []int64{11}
+	res, err := writerFor("query-store-profiled")(WriteRequest{
+		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
+		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
+		Sets:   profiledSets(),
+		State:  st,
+		Warn:   func(string) {},
+	})
+	if err == nil {
+		t.Fatal("a failed write must still be an error")
+	}
+	plans := profiledIndexPlans(t, root, res.Rel)
+	if len(plans) != 1 || plans[0].PlanID != 101 {
+		t.Fatalf("_index.json lists %+v, want the plan it was writing when the disk refused it", plans)
+	}
+	if plans[0].PlanFile != "" {
+		t.Errorf("plan_file = %q, but that write is what failed", plans[0].PlanFile)
+	}
+}
