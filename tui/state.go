@@ -99,6 +99,20 @@ type State struct {
 	// other than what the screen displays.
 	ServerOverridden bool
 	Field            int
+	// The three facts screen 1 shows and does not edit. They come from the
+	// resolved configuration — flag, then .env, then environment, then default
+	// — and stay read-only because the wizard displays the effect of .env and
+	// never rewrites it. Catalog is the initial catalog of the connection, not
+	// the database a collector is currently reading, which is Database below.
+	Catalog            string
+	User               string
+	Integrated         bool
+	Encrypt, TrustCert bool
+	// Source says where those values came from, in the operator's terms
+	// ("read from .env"). It is a sentence rather than a flag because the
+	// answer is a mixture, and naming the file the DBA edited is the part that
+	// helps.
+	Source string
 	// ConnError is the refusal from screen 1, which is the one error in this
 	// wizard that does not end it: the operator stays on the screen, with the
 	// cursor back in the server field.
