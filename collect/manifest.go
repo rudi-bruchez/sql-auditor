@@ -25,6 +25,12 @@ type RunInfo struct {
 	FinishedUTC string `json:"finished_utc"`
 	DurationSec int    `json:"duration_sec"`
 	ExitCode    int    `json:"exit_code"`
+	// Cancelled marks a run the operator stopped. It matters because such a
+	// run still produces its archive: without this field a short archive and a
+	// complete one are indistinguishable, and exit_code 0 would read as "the
+	// instance simply had little to give". Omitted when false so every
+	// manifest written before this field existed stays byte-identical.
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 type ServerBlock struct {

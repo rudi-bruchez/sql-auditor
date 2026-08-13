@@ -1283,10 +1283,22 @@ func Run(ctx context.Context, o Options) (int, error) {
 		if err == nil {
 			continue
 		}
-		m.Errors = append(m.Errors, ErrorEntry{
-			Script: s.Path, Target: target.Name, Message: err.Error(), SQLError: sqlErrorNumber(err),
-		})
-		exit = 2
+		// The context is consulted before a single word is written down. Were
+		// this after the ErrorEntry, a stopped run would carry the phantom
+		// "context canceled" failure for ever; were it after the reconnect
+		// below, it would never be reached at all, because a ping on a dead
+		// context cannot succeed.
+		code, cancelled := recordUnitFailure(ctx, m, s.Path, target.Name, err)
+		if cancelled {
+			// Out of the loop, but not out of the function: the manifest and
+			// the archive are still written below. A DBA who stopped after
+			// three minutes keeps what those three minutes collected, and the
+			// manifest's cancelled flag is what says the archive is partial.
+			// exit is left as it stands — 0 for the ordinary stop, still 2 if
+			// a lint error had already failed the run on its own.
+			break
+		}
+		exit = code
 
 		// One reconnect attempt on a dead connection. The replacement is
 		// reset before the next unit uses it — the PowerShell version
