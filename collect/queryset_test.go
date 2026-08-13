@@ -411,3 +411,42 @@ func TestDiscoverAcceptsExplicitInstanceScope(t *testing.T) {
 		t.Errorf("scope = %v, timeout = %d", got[0].Scope, got[0].TimeoutSec)
 	}
 }
+
+func TestParseScriptAcceptsKnownWriter(t *testing.T) {
+	sql := `-- @scope:       database
+-- @resultsets:  root:object
+-- @writer:      query-store-detail
+` + contractPreamble + "SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);\n"
+	s := parseScript("80.workload/021.query-store-detail.sql", sql)
+	if s.LintError != "" {
+		t.Fatalf("LintError = %q, want none", s.LintError)
+	}
+	if s.Writer != "query-store-detail" {
+		t.Errorf("Writer = %q, want query-store-detail", s.Writer)
+	}
+}
+
+func TestParseScriptRefusesUnknownWriter(t *testing.T) {
+	sql := `-- @resultsets: root:object
+-- @writer:     query-store-detials
+` + contractPreamble + "SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);\n"
+	s := parseScript("80.workload/021.x.sql", sql)
+	if !strings.Contains(s.LintError, "unknown writer") {
+		t.Fatalf("LintError = %q, want it to mention an unknown writer", s.LintError)
+	}
+	if s.Writer != "" {
+		t.Errorf("Writer = %q, want empty on a rejected name", s.Writer)
+	}
+}
+
+func TestKnownFlagsCarriesTheQueryStoreFlags(t *testing.T) {
+	want := map[string]string{
+		"query_store_detail":     "--query-store-detail",
+		"query_store_plan_stats": "--query-store-plan-stats",
+	}
+	for k, v := range want {
+		if KnownFlags[k] != v {
+			t.Errorf("KnownFlags[%s] = %q, want %q", k, KnownFlags[k], v)
+		}
+	}
+}

@@ -34,15 +34,32 @@ type Script struct {
 	// has to be "not collected" and the gate has to be visible in the file
 	// itself rather than in a list held somewhere else.
 	RequiresFlag string
-	LintError    string
+	// Writer names the Go writer that turns this script's result sets into
+	// files, instead of the one JSON document every other collector produces.
+	// Empty means the ordinary encoder. The vocabulary is closed for the same
+	// reason @requires_flag's is: a misspelt name would silently fall back to
+	// the encoder and emit a single JSON file where a directory of plans was
+	// expected, with nothing anywhere saying so.
+	Writer    string
+	LintError string
 }
 
 // KnownFlags is the closed set of names @requires_flag accepts. A typo would
 // otherwise gate a script on a flag no command line can ever set, silently
 // dropping a collector from every run.
 var KnownFlags = map[string]string{
-	"include_session_text": "--include-session-text",
-	"estimate_compression": "--estimate-compression",
+	"include_session_text":   "--include-session-text",
+	"estimate_compression":   "--estimate-compression",
+	"query_store_detail":     "--query-store-detail",
+	"query_store_plan_stats": "--query-store-plan-stats",
+}
+
+// KnownWriters is the closed set of names @writer accepts, mapped to the
+// one-line description `check` prints. Task 7 wires it into scriptNote; a
+// description no command ever shows would be a comment pretending to be data.
+var KnownWriters = map[string]string{
+	"query-store-detail":   "one directory per database: query text, plans and per-interval statistics",
+	"query-store-profiled": "the last profiled plan, when the instance still holds one",
 }
 
 var (
@@ -202,6 +219,14 @@ func parseScript(rel, sql string) Script {
 				continue
 			}
 			s.RequiresFlag = name
+		case "writer":
+			name := strings.ToLower(strings.TrimSpace(val))
+			if _, ok := KnownWriters[name]; !ok {
+				setLint(fmt.Sprintf("@writer: unknown writer %q; expected one of %s",
+					val, strings.Join(knownWriterNames(), ", ")))
+				continue
+			}
+			s.Writer = name
 		case "correlated":
 			setLint("correlated result sets are not supported: a result set must not " +
 				"reference a column of another; split it into its own query")
@@ -216,6 +241,15 @@ func parseScript(rel, sql string) Script {
 func knownFlagNames() []string {
 	names := make([]string, 0, len(KnownFlags))
 	for n := range KnownFlags {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func knownWriterNames() []string {
+	names := make([]string, 0, len(KnownWriters))
+	for n := range KnownWriters {
 		names = append(names, n)
 	}
 	sort.Strings(names)
