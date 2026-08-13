@@ -2,6 +2,7 @@ package collect
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -77,5 +78,101 @@ func TestObserverForwardsToTheWrappedImplementation(t *testing.T) {
 	}
 	if len(rec.phases) != 1 || rec.phases[0] != "writing manifest" {
 		t.Fatalf("Phase not forwarded: %v", rec.phases)
+	}
+}
+
+// The narrowing has to happen once, before the loop, or the total announced to
+// the gauge is a multiplication that over-counts: three databases and a pattern
+// matching one give one unit for a @writer script, not three.
+func TestPlanUnitsAppliesQueryStoreNarrowingBeforeTheLoop(t *testing.T) {
+	folders := []DatabaseFolder{
+		{Name: "SALESDB", Folder: "SALESDB"},
+		{Name: "RH", Folder: "RH"},
+		{Name: "FACTURATION", Folder: "FACTURATION"},
+	}
+	plan := []plannedScript{
+		{Script: Script{Path: "10.system/010.version.sql", Scope: ScopeInstance}},
+		{Script: Script{Path: "20.databases/022.query-store.sql", Scope: ScopeDatabase}},
+		{Script: Script{Path: "80.workload/021.query-store-detail.sql",
+			Scope: ScopeDatabase, Writer: "query-store-detail"}},
+		{Script: Script{Path: "10.system/072.resource-governor.sql", Scope: ScopeInstance},
+			Skip: "needs 2016"},
+	}
+	cfg := &Config{QueryStoreDBInclude: "SALES*"}
+
+	units, skipped := planUnits(plan, folders, cfg)
+
+	// 1 instance + 3 databases + 1 narrowed writer. Seven would be the answer
+	// of a total computed by multiplying scripts by databases.
+	if len(units) != 5 {
+		t.Fatalf("units = %d, want 5: %+v", len(units), units)
+	}
+	var targeted []SkippedScript
+	for _, s := range skipped {
+		if s.Target != "" {
+			targeted = append(targeted, s)
+		}
+	}
+	if len(targeted) != 2 {
+		t.Fatalf("targeted skips = %+v, want one per database removed", targeted)
+	}
+	if targeted[0].Target != "RH" || targeted[1].Target != "FACTURATION" {
+		t.Errorf("targeted skips do not name their databases: %+v", targeted)
+	}
+}
+
+func TestPlanUnitsExcludesScriptsThatWillNotRun(t *testing.T) {
+	folders := []DatabaseFolder{{Name: "SALESDB", Folder: "SALESDB"}}
+	plan := []plannedScript{
+		{Script: Script{Path: "10.system/072.resource-governor.sql", Scope: ScopeInstance},
+			Skip: "needs 2016"},
+		{Script: Script{Path: "10.system/099.broken.sql", Scope: ScopeInstance,
+			LintError: "missing @resultsets"}},
+	}
+
+	units, skipped := planUnits(plan, folders, &Config{})
+
+	if len(units) != 0 {
+		t.Fatalf("units = %+v, want none: neither entry will run", units)
+	}
+	// A lint error is an error, not a skip: it belongs to m.Errors and sets
+	// exit 2, so planUnits must not quietly turn it into a skip line.
+	if len(skipped) != 1 || skipped[0].Script != "10.system/072.resource-governor.sql" {
+		t.Fatalf("skipped = %+v, want only the version gate", skipped)
+	}
+}
+
+// m.Skipped is the list a human reads to write the audit up, and it fills in
+// plan order today: a script's own skip, then its per-database skips, then the
+// next script. Nothing else in the package pins that order down, so piling the
+// targeted skips ahead of the global ones would regress it in silence.
+func TestPlanUnitsKeepsTheManifestSkipOrder(t *testing.T) {
+	folders := []DatabaseFolder{
+		{Name: "SALESDB", Folder: "SALESDB"},
+		{Name: "RH", Folder: "RH"},
+		{Name: "FACTURATION", Folder: "FACTURATION"},
+	}
+	plan := []plannedScript{
+		{Script: Script{Path: "10.system/072.resource-governor.sql", Scope: ScopeInstance},
+			Skip: "needs 2016"},
+		{Script: Script{Path: "80.workload/021.query-store-detail.sql",
+			Scope: ScopeDatabase, Writer: "query-store-detail"}},
+		{Script: Script{Path: "80.workload/022.query-store-profiled.sql", Scope: ScopeInstance},
+			Skip: "not collected by default"},
+	}
+	cfg := &Config{QueryStoreDBInclude: "SALES*"}
+
+	_, skipped := planUnits(plan, folders, cfg)
+
+	want := []SkippedScript{
+		{Script: "10.system/072.resource-governor.sql", Reason: "needs 2016"},
+		{Script: "80.workload/021.query-store-detail.sql", Target: "RH",
+			Reason: "not matched by QUERY_STORE_DB_INCLUDE"},
+		{Script: "80.workload/021.query-store-detail.sql", Target: "FACTURATION",
+			Reason: "not matched by QUERY_STORE_DB_INCLUDE"},
+		{Script: "80.workload/022.query-store-profiled.sql", Reason: "not collected by default"},
+	}
+	if !reflect.DeepEqual(skipped, want) {
+		t.Errorf("skip order changed:\n got %+v\nwant %+v", skipped, want)
 	}
 }

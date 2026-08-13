@@ -1221,51 +1221,52 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// the run's own record and must be written even when the budget is gone.
 	rw := newRunWriter(runFolder, maxRunBytes)
 
+	// A lint error stops its own script and nothing else, so it is recorded
+	// ahead of the loop rather than inside it. planUnits has already left
+	// those scripts out of the unit list, and a broken collector is an error
+	// the operator can act on before the run's first result arrives.
 	for _, p := range plan {
-		s := p.Script
-		if s.LintError != "" {
-			m.Errors = append(m.Errors, ErrorEntry{Script: s.Path, Message: s.LintError})
+		if p.Script.LintError != "" {
+			m.Errors = append(m.Errors, ErrorEntry{Script: p.Script.Path, Message: p.Script.LintError})
 			exit = 2
-			continue
 		}
-		if p.Skip != "" {
-			m.Skipped = append(m.Skipped, SkippedScript{Script: s.Path, Reason: p.Skip})
-			continue
-		}
-		units := []DatabaseFolder{{}}
-		if s.Scope == ScopeDatabase {
-			var narrowed []SkippedScript
-			units, narrowed = queryStoreUnits(o.Config, s, folders)
-			m.Skipped = append(m.Skipped, narrowed...)
-		}
-		for _, u := range units {
-			err := runUnit(ctx, conn, o, m, rw, s, u)
-			if err == nil {
-				continue
-			}
-			m.Errors = append(m.Errors, ErrorEntry{
-				Script: s.Path, Target: u.Name, Message: err.Error(), SQLError: sqlErrorNumber(err),
-			})
-			exit = 2
+	}
 
-			// One reconnect attempt on a dead connection. The replacement is
-			// reset before the next unit uses it — the PowerShell version
-			// skipped that step and quietly broke its own invariant.
-			if !connAlive(ctx, conn, o.Config) {
-				fmt.Fprintln(os.Stderr, "connection lost; attempting one reconnect")
-				conn.Close()
-				fresh, cerr := db.Conn(ctx)
-				if cerr != nil {
-					cerr = fmt.Errorf("reconnect failed: %w", cerr)
-					m.Errors = append(m.Errors, ErrorEntry{Message: cerr.Error()})
-					return finishWith(runFolder, 1, cerr)
-				}
-				conn = fresh
-				if rerr := resetWithDeadline(ctx, conn, o.Config); rerr != nil {
-					rerr = fmt.Errorf("session reset after reconnect failed: %w", rerr)
-					m.Errors = append(m.Errors, ErrorEntry{Message: rerr.Error()})
-					return finishWith(runFolder, 1, rerr)
-				}
+	// The whole plan is unfolded before anything runs. The list of units is
+	// what the loop walks and what a total can be stated from; the skips come
+	// back in plan order, so appending them wholesale leaves the manifest
+	// reading exactly as it did when they were collected along the way.
+	units, planSkipped := planUnits(plan, folders, o.Config)
+	m.Skipped = append(m.Skipped, planSkipped...)
+
+	for _, u := range units {
+		s, target := u.Script, u.Target
+		err := runUnit(ctx, conn, o, m, rw, s, target)
+		if err == nil {
+			continue
+		}
+		m.Errors = append(m.Errors, ErrorEntry{
+			Script: s.Path, Target: target.Name, Message: err.Error(), SQLError: sqlErrorNumber(err),
+		})
+		exit = 2
+
+		// One reconnect attempt on a dead connection. The replacement is
+		// reset before the next unit uses it — the PowerShell version
+		// skipped that step and quietly broke its own invariant.
+		if !connAlive(ctx, conn, o.Config) {
+			fmt.Fprintln(os.Stderr, "connection lost; attempting one reconnect")
+			conn.Close()
+			fresh, cerr := db.Conn(ctx)
+			if cerr != nil {
+				cerr = fmt.Errorf("reconnect failed: %w", cerr)
+				m.Errors = append(m.Errors, ErrorEntry{Message: cerr.Error()})
+				return finishWith(runFolder, 1, cerr)
+			}
+			conn = fresh
+			if rerr := resetWithDeadline(ctx, conn, o.Config); rerr != nil {
+				rerr = fmt.Errorf("session reset after reconnect failed: %w", rerr)
+				m.Errors = append(m.Errors, ErrorEntry{Message: rerr.Error()})
+				return finishWith(runFolder, 1, rerr)
 			}
 		}
 	}

@@ -33,6 +33,48 @@ type unit struct {
 	Target DatabaseFolder
 }
 
+// planUnits unfolds a resolved plan into the exact list of units the run will
+// execute, and the skips that unfolding produced.
+//
+// It exists because the narrowing used to happen inside the execution loop,
+// script by script, which left nobody able to state a total before the first
+// unit ran. A total obtained by multiplying scripts by databases over-counts
+// the moment a @writer script is narrowed: twelve databases and a pattern
+// matching one give one unit, not twelve.
+//
+// The second return is ordered exactly as the plan is — a script's own skip
+// first, then the per-database skips it produced, then the next script — so it
+// can be appended to m.Skipped in one go without changing the list a human
+// reads to write the audit up. Grouping the targeted skips together would read
+// as a different run.
+func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]unit, []SkippedScript) {
+	var units []unit
+	var skipped []SkippedScript
+	for _, p := range plan {
+		s := p.Script
+		// A lint error is an error, not a skip. It is recorded by the caller,
+		// where it can also set exit 2; turning it into a skip line here would
+		// report a broken collector as a deliberate omission.
+		if s.LintError != "" {
+			continue
+		}
+		if p.Skip != "" {
+			skipped = append(skipped, SkippedScript{Script: s.Path, Reason: p.Skip})
+			continue
+		}
+		targets := []DatabaseFolder{{}}
+		if s.Scope == ScopeDatabase {
+			var narrowed []SkippedScript
+			targets, narrowed = queryStoreUnits(cfg, s, folders)
+			skipped = append(skipped, narrowed...)
+		}
+		for _, t := range targets {
+			units = append(units, unit{Script: s, Target: t})
+		}
+	}
+	return units, skipped
+}
+
 // observer is the nil-safe wrapper every call site inside this package uses.
 // Keeping the nil test here rather than at the twenty sites is the whole
 // point: a forgotten guard would panic on the default path — the one with no
