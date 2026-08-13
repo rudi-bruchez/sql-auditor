@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -190,6 +192,7 @@ func TestDetailWriterCapsAnOversizedPlanThatReachedTheWriter(t *testing.T) {
 type indexOmission struct {
 	QueryID int64  `json:"query_id"`
 	PlanID  int64  `json:"plan_id"`
+	File    string `json:"file"`
 	Reason  string `json:"reason"`
 	Bytes   int64  `json:"bytes"`
 }
@@ -243,6 +246,56 @@ func TestDetailWriterWritesOnlyAnIndexWhenTheStoreIsOff(t *testing.T) {
 	if !strings.Contains(string(b), "OFF") {
 		t.Errorf("_index.json does not say the Query Store was off:\n%s", b)
 	}
+}
+
+// A database on which the Query Store was never enabled returns NO row in
+// sys.database_query_store_options, and 021's LEFT JOIN from sys.databases
+// therefore delivers state.actual as NULL. The SQL says so in as many words —
+// "the writer reads exactly like OFF" — and this pins that promise: a writer
+// testing for the literal "OFF" alone takes the full path here and writes an
+// index whose state is null, over a database it never actually read.
+func TestDetailWriterReadsANullStateAsOff(t *testing.T) {
+	sets := detailSets()
+	rt, _ := setByName(sets, "root")
+	rt.Rows[0][1] = nil // state.actual, the LEFT JOIN's NULL
+	sel, _ := setByName(sets, "selected")
+	sel.Rows = nil
+	root, rel, st, _ := runDetailWriter(t, sets)
+	entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "_index.json" {
+		t.Fatalf("got %d entries, want only _index.json — a NULL state was read as a running store", len(entries))
+	}
+	assertSelectionPublishedEmpty(t, st)
+}
+
+// assertSelectionPublishedEmpty pins the invariant queryStoreArgs relies on: an
+// entry that is empty means 021 ran here and retained nothing, which its own
+// index already records; NO entry at all means 021 delivered nothing, and the
+// manifest carries a warning saying so. A writer that ran, wrote its index and
+// left no entry makes that warning accuse a collector which did its job.
+func assertSelectionPublishedEmpty(t *testing.T, st *QueryStoreState) {
+	t.Helper()
+	got, ok := st.Selected["Sales"]
+	if !ok {
+		t.Error("the writer ran and wrote its index but published no selection at all; the manifest will warn that 021 delivered nothing")
+		return
+	}
+	if len(got) != 0 {
+		t.Errorf("Selected[Sales] = %v, want an empty selection", got)
+	}
+}
+
+func TestDetailWriterPublishesAnEmptySelectionWhenTheStoreIsOff(t *testing.T) {
+	sets := detailSets()
+	rt, _ := setByName(sets, "root")
+	rt.Rows[0][1] = "OFF"
+	sel, _ := setByName(sets, "selected")
+	sel.Rows = nil
+	_, _, st, _ := runDetailWriter(t, sets)
+	assertSelectionPublishedEmpty(t, st)
 }
 
 func TestDetailWriterRecordsTheRankPerMetric(t *testing.T) {
@@ -379,13 +432,23 @@ func TestDetailWriterRecordsWhatTheBudgetRefused(t *testing.T) {
 	}
 
 	var refused int
+	// The files the budget refused are named one by one: a refusal on
+	// query_11.stats.json and one on query_22.sql are different losses, and
+	// query id 11 with plan id 0 says neither of them.
+	refusedFiles := map[string]bool{}
 	for _, o := range indexOmissions(t, root, res.Rel) {
-		if o.Reason == budgetReason {
+		if o.Reason == budgetReason(out.budget) {
 			refused++
+			refusedFiles[o.File] = true
 		}
 	}
 	if refused == 0 {
 		t.Error("_index.json records nothing about the files the budget refused")
+	}
+	for _, name := range []string{"query_11.stats.json", "query_22.sql"} {
+		if !refusedFiles[name] {
+			t.Errorf("no budget omission names %s: %+v", name, indexOmissions(t, root, res.Rel))
+		}
 	}
 	if len(warnings) == 0 {
 		t.Error("the truncation never reached the manifest's warnings")
@@ -778,6 +841,7 @@ func TestProfiledWriterRecordsARepeatedPlanIDAsAnOmission(t *testing.T) {
 func profiledIndexPlans(t *testing.T, root, rel string) []struct {
 	QueryID       int64  `json:"query_id"`
 	PlanID        int64  `json:"plan_id"`
+	Match         string `json:"match"`
 	Candidates    int64  `json:"candidates"`
 	LastExecution string `json:"last_execution"`
 	PlanFile      string `json:"plan_file"`
@@ -791,6 +855,7 @@ func profiledIndexPlans(t *testing.T, root, rel string) []struct {
 		Plans []struct {
 			QueryID       int64  `json:"query_id"`
 			PlanID        int64  `json:"plan_id"`
+			Match         string `json:"match"`
 			Candidates    int64  `json:"candidates"`
 			LastExecution string `json:"last_execution"`
 			PlanFile      string `json:"plan_file"`
@@ -949,7 +1014,7 @@ func TestProfiledWriterRecordsWhatTheBudgetRefused(t *testing.T) {
 	}
 	found := false
 	for _, o := range indexOmissions(t, root, res.Rel) {
-		if o.PlanID == 101 && o.Reason == budgetReason {
+		if o.PlanID == 101 && o.Reason == budgetReason(out.budget) {
 			found = true
 		}
 	}
@@ -958,5 +1023,102 @@ func TestProfiledWriterRecordsWhatTheBudgetRefused(t *testing.T) {
 	}
 	if len(warnings) == 0 {
 		t.Error("the budget refusal never reached the manifest's warnings")
+	}
+}
+
+// TestProfiledIndexKeepsAnEntryForAPlanItCouldNotWrite is finding 1 of the
+// final review: a plan that was NULL, oversized or refused by the budget used
+// to be dropped from `plans` entirely, so the rows most in need of explaining
+// were the ones the index said nothing about. `match`, `candidates` and above
+// all `last_execution` — which says whether the cached plan is the one from
+// the incident — exist per plan and nowhere else, and the omission beside it
+// carries none of them. The entry goes in either way, with plan_file empty.
+func TestProfiledIndexKeepsAnEntryForAPlanItCouldNotWrite(t *testing.T) {
+	sets := profiledSets()
+	sets[1].Set.Rows[0][5] = nil // query_plan: the DMF returned none
+	root, res, _ := runProfiledWriter(t, sets, []int64{11})
+	plans := profiledIndexPlans(t, root, res.Rel)
+	if len(plans) != 1 {
+		t.Fatalf("_index.json lists %d plans, want the unwritten plan listed with what is known about it", len(plans))
+	}
+	p := plans[0]
+	if p.PlanFile != "" {
+		t.Errorf("plan_file = %q, but no file was written", p.PlanFile)
+	}
+	if p.PlanID != 101 || p.Match != "plan_hash" || p.Candidates != 3 {
+		t.Errorf("plan = %+v, want plan 101 with its match and its 3 candidates", p)
+	}
+	if p.LastExecution != "2026-08-13T09:30:00" {
+		t.Errorf("last_execution = %q, want the time the cached plan last ran", p.LastExecution)
+	}
+	// The omission stays: the two carry different things, and only it says why
+	// there is no file.
+	found := false
+	for _, o := range indexOmissions(t, root, res.Rel) {
+		if o.PlanID == 101 && o.Reason == "no plan XML returned for this plan_id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the entry replaced the omission instead of joining it: %+v", indexOmissions(t, root, res.Rel))
+	}
+}
+
+// TestProfiledWriterDoesNotWarnAboutAnOrdinaryNoMatch is finding 4. 022's own
+// header states that the four conditions the DMF needs being false is the
+// ordinary case and not a fault, and LAST_QUERY_PLAN_STATS is off by default:
+// warning per query puts one line per selected query per database in the
+// manifest — a thousand of them on a twenty-database run at the default cap —
+// all restating what root.last_query_plan_stats says once. It belongs in the
+// index, which is what this asserts, and not in the operator's warnings.
+func TestProfiledWriterDoesNotWarnAboutAnOrdinaryNoMatch(t *testing.T) {
+	root, res, warnings := runProfiledWriter(t, profiledSets(), []int64{11, 22})
+	found := false
+	for _, o := range indexOmissions(t, root, res.Rel) {
+		if o.QueryID == 22 && o.Reason == "no profiled plan matched this query_id by query_plan_hash" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("query 22's no-match left no trace in _index.json: %+v", indexOmissions(t, root, res.Rel))
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "no profiled plan matched") {
+			t.Errorf("the ordinary no-match reached the manifest: %q", w)
+		}
+	}
+}
+
+// TestPlanCapIsTheSameNumberInTheCorpus binds maxPlanBytes to the literal in
+// 021 and 022. The three are one rule written three times, and a comment
+// saying so is not enforcement: raise the Go constant alone and an oversized
+// plan arrives NULL with a size the writer no longer considers oversized, so
+// the archive states "the Query Store holds no plan XML for this plan_id" —
+// a false fact about the server, which is the failure the omissions exist to
+// prevent. Lower it alone and every large plan is refused twice over with the
+// wrong size reported. The corpus is read from disk, like Discover's own test
+// does, because that is the file a DBA exports and reads.
+func TestPlanCapIsTheSameNumberInTheCorpus(t *testing.T) {
+	guard := regexp.MustCompile(`DATALENGTH\(\w+\.query_plan\) <= (\d+)`)
+	for _, name := range []string{
+		"021.query-store-detail.sql",
+		"022.query-store-profiled.sql",
+	} {
+		b, err := os.ReadFile(filepath.Join("..", "queries", "80.workload", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := guard.FindAllStringSubmatch(string(b), -1)
+		if len(m) != 1 {
+			t.Errorf("%s has %d DATALENGTH guards on query_plan, want exactly 1", name, len(m))
+			continue
+		}
+		got, err := strconv.Atoi(m[0][1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != maxPlanBytes {
+			t.Errorf("%s caps the plan at %d bytes, maxPlanBytes is %d — the two are one rule and have drifted", name, got, maxPlanBytes)
+		}
 	}
 }

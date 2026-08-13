@@ -22,6 +22,16 @@ import (
 // rather than options because an operator has no way to pick a good value
 // before seeing the plans, and an omission is recorded rather than silently
 // applied: a truncation nobody is told about reads as "everything is here".
+//
+// The SAME NUMBER is written out as a literal in 021 and 022, in their
+// DATALENGTH guard, so a DBA reading the exported file sees the cap. That
+// duplication is load-bearing and is not left to a comment to enforce:
+// TestPlanCapIsTheSameNumberInTheCorpus reads both files and fails on any
+// drift. It has to, because a Go constant raised above a stale SQL literal
+// makes an oversized plan arrive as a NULL with no size beside it, and the
+// writer would then state "the Query Store holds no plan XML for this
+// plan_id" — a false fact about the server, which is the exact failure the
+// omissions exist to prevent.
 const maxPlanBytes = 8 << 20
 
 // WriteRequest is everything a writer is given. It is deliberately not a
@@ -106,17 +116,26 @@ func NewQueryStoreState() *QueryStoreState {
 // file that is simply absent — is indistinguishable from a collector that never
 // looked.
 type omission struct {
-	QueryID int64  `json:"query_id"`
-	PlanID  int64  `json:"plan_id"`
-	Reason  string `json:"reason"`
+	QueryID int64 `json:"query_id"`
+	PlanID  int64 `json:"plan_id"`
+	// File names the file this omission is about, when one file is at stake:
+	// a budget refusal on query_11.sql and one on query_11.stats.json are
+	// different losses, and the query and plan ids alone do not tell them
+	// apart. Empty when no single file is — a query for which nothing at all
+	// was found names none.
+	File   string `json:"file,omitempty"`
+	Reason string `json:"reason"`
 	// Bytes is the plan's size when the server reported one, and 0 when nobody
 	// knows it — a plan the Query Store does not hold has no size.
 	Bytes int64 `json:"bytes,omitempty"`
 }
 
 type indexedQuery struct {
-	QueryID int64   `json:"query_id"`
-	Plans   []int64 `json:"plans"`
+	QueryID int64 `json:"query_id"`
+	// PlanIDs, not Plans: it sits beside plan_files and carries plan ids,
+	// while the profiled index's plans carries objects. One archive must not
+	// use one name for two shapes.
+	PlanIDs []int64 `json:"plan_ids"`
 	// Ranks holds this query's position in each of the four rankings, keyed by
 	// duration, cpu, logical_reads, executions. All four are always present and
 	// none is capped: a query can be retained on one metric while sitting far
@@ -196,7 +215,9 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 
 	state, _ := stringAt(root, 0, "state.actual")
 	cap64, _ := int64At(root, 0, "selection.cap")
-	stateRaw, windowRaw, err := indexHeader(root)
+	stateRaw, windowRaw, err := indexHeader(root, func(msg string) {
+		req.Warn(fmt.Sprintf("%s: _index.json: %s", req.Unit.Name, msg))
+	})
 	if err != nil {
 		return WriteResult{}, err
 	}
@@ -210,17 +231,33 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 		Omissions: []omission{},
 	}
 
+	// From here on this writer has run against this database and will leave an
+	// _index.json behind, so the selection is published even when it is empty.
+	// The manifest reads a MISSING entry as "021 delivered nothing at all" and
+	// warns about it; an empty entry as "021 ran here and retained nothing,
+	// which its own index already records". Leaving the OFF path or a mid-way
+	// error without an entry accuses a collector that did exactly its job. The
+	// real selection replaces this at the end.
+	req.State.Selected[req.Unit.Name] = []int64{}
+
 	// A database whose Query Store is switched off is a skip, not a failure and
 	// not an empty success. The index still has to be written, or the analysis
 	// layer cannot tell the two apart.
-	if state == "OFF" || len(root.Rows) == 0 {
+	//
+	// A MISSING or empty state is read as OFF, which is what 021 says it will
+	// be: its root row comes from a LEFT JOIN from sys.databases, so a database
+	// on which the Query Store has never been enabled returns no row in
+	// sys.database_query_store_options and state.actual arrives NULL. Testing
+	// "OFF" alone would take the full path on exactly those databases and write
+	// an index whose state is null.
+	if state == "" || state == "OFF" || len(root.Rows) == 0 {
 		n, err := writeIndex(req, rel, idx)
 		res.Bytes += n
 		return res, err
 	}
 
-	omit := func(queryID, planID int64, reason string, size int64) {
-		idx.Omissions = append(idx.Omissions, omission{QueryID: queryID, PlanID: planID, Reason: reason, Bytes: size})
+	omit := func(queryID, planID int64, file, reason string, size int64) {
+		idx.Omissions = append(idx.Omissions, omission{QueryID: queryID, PlanID: planID, File: file, Reason: reason, Bytes: size})
 		req.Warn(fmt.Sprintf("%s: query %d, plan %d: %s", req.Unit.Name, queryID, planID, reason))
 	}
 
@@ -241,7 +278,7 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 		rows := rowsWhere(selected, "query_id", id)
 		entry := indexedQuery{
 			QueryID:   id,
-			Plans:     []int64{},
+			PlanIDs:   []int64{},
 			Ranks:     map[string]int64{},
 			TextFile:  queryFileStem(id) + ".sql",
 			StatsFile: queryFileStem(id) + ".stats.json",
@@ -284,7 +321,7 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 			// never looked. But an empty .sql and a query whose text the Query
 			// Store no longer holds are different facts, and without this line
 			// the index would claim a text file that carries no text.
-			omit(id, 0, "the Query Store holds no text for this query_id; the file was written empty", 0)
+			omit(id, 0, entry.TextFile, "the Query Store holds no text for this query_id; the file was written empty", 0)
 		}
 		if n, ok, err := writeFile(req, rel, entry.TextFile, []byte(text)); err != nil {
 			return res, err
@@ -292,7 +329,7 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 			res.Bytes += n
 			res.TextFiles++
 		} else {
-			omit(id, 0, budgetReason, 0)
+			omit(id, 0, entry.TextFile, budgetReason(req.Out.budget), 0)
 			entry.TextFile = ""
 		}
 
@@ -307,30 +344,30 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 				continue
 			}
 			seenPlan[planID] = true
-			entry.Plans = append(entry.Plans, planID)
+			entry.PlanIDs = append(entry.PlanIDs, planID)
 
 			size, _ := int64At(rows, r, "query_plan_bytes")
 			plan, present := stringAt(rows, r, "query_plan")
+			name := planFileName(id, planID, "")
 			switch {
 			case !present && size > maxPlanBytes:
 				// The SQL's DATALENGTH guard nulled it out before it crossed the
 				// wire. Reported apart from a plan that never existed, because
 				// conflating them turns a plan we chose not to fetch into one the
 				// server does not have.
-				omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap and was not sent", size, maxPlanBytes), size)
+				omit(id, planID, name, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap and was not sent", size, maxPlanBytes), size)
 			case !present:
-				omit(id, planID, "the Query Store holds no plan XML for this plan_id", 0)
+				omit(id, planID, name, "the Query Store holds no plan XML for this plan_id", 0)
 			case len(plan) > maxPlanBytes:
 				// The backstop, for when the SQL guard has been edited away.
-				omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap", len(plan), maxPlanBytes), int64(len(plan)))
+				omit(id, planID, name, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap", len(plan), maxPlanBytes), int64(len(plan)))
 			default:
-				name := planFileName(id, planID, "")
 				n, ok, err := writeFile(req, rel, name, []byte(plan))
 				if err != nil {
 					return res, err
 				}
 				if !ok {
-					omit(id, planID, budgetReason, int64(len(plan)))
+					omit(id, planID, name, budgetReason(req.Out.budget), int64(len(plan)))
 					continue
 				}
 				res.Bytes += n
@@ -358,7 +395,7 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 		} else if ok {
 			res.Bytes += n
 		} else {
-			omit(id, 0, budgetReason, int64(len(stats)))
+			omit(id, 0, entry.StatsFile, budgetReason(req.Out.budget), int64(len(stats)))
 			entry.StatsFile = ""
 		}
 
@@ -382,7 +419,19 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 // budgetReason is the one sentence for a refusal by the run budget. It names
 // the cap rather than saying "too large", because the file itself may be small
 // and the reader would otherwise look for the fault in the wrong place.
-const budgetReason = "the run reached the 256 MiB extraction cap"
+//
+// It DERIVES the number from the budget instead of writing it out: the budget
+// is a runWriter field, and a sentence carrying 256 MiB states a size the
+// archive did not actually run under the moment that field says otherwise.
+// The cap is not the Query Store's either — it bounds every collector in the
+// run together — so it is no longer called an extraction cap.
+func budgetReason(budget int) string {
+	const mib = 1 << 20
+	if budget >= mib && budget%mib == 0 {
+		return fmt.Sprintf("the run reached the %d MiB cap on what the whole collection may write", budget/mib)
+	}
+	return fmt.Sprintf("the run reached the %d byte cap on what the whole collection may write", budget)
+}
 
 // writeFile puts one payload in the directory. It reports false, without an
 // error, when the run budget cannot take it: an exhausted budget is a recorded
@@ -510,8 +559,14 @@ func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
 		return res, err
 	}
 
-	omit := func(queryID, planID int64, reason string, size int64) {
-		idx.Omissions = append(idx.Omissions, omission{QueryID: queryID, PlanID: planID, Reason: reason, Bytes: size})
+	// record puts an omission in this directory's index; omit also raises it in
+	// the manifest. They are separate because not every omission here is worth
+	// an operator's attention — see the no-match case below.
+	record := func(queryID, planID int64, file, reason string, size int64) {
+		idx.Omissions = append(idx.Omissions, omission{QueryID: queryID, PlanID: planID, File: file, Reason: reason, Bytes: size})
+	}
+	omit := func(queryID, planID int64, file, reason string, size int64) {
+		record(queryID, planID, file, reason, size)
 		req.Warn(fmt.Sprintf("%s: query %d, plan %d: %s", req.Unit.Name, queryID, planID, reason))
 	}
 
@@ -524,7 +579,16 @@ func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
 			// four read the same from here: nothing came back. One reason
 			// covers them, because distinguishing them is a diagnosis this
 			// writer has no evidence to make.
-			omit(id, 0, "no profiled plan matched this query_id by query_plan_hash", 0)
+			//
+			// RECORDED, NOT WARNED. This file's header states that any of the
+			// four being false is the ordinary case and not a fault, and
+			// LAST_QUERY_PLAN_STATS is off by default: twenty databases at the
+			// default cap of fifty would put a thousand identical lines in the
+			// manifest, restating per query what root.last_query_plan_stats
+			// already says once per database. The index still carries every
+			// one of them, which is where a reader asking about a specific
+			// query looks.
+			record(id, 0, "", "no profiled plan matched this query_id by query_plan_hash", 0)
 			continue
 		}
 
@@ -547,7 +611,7 @@ func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
 				// happen unless that ranking is edited away. Named rather than
 				// dropped silently, because a repeated plan_id would otherwise
 				// overwrite a file and count it twice.
-				omit(id, planID, "a further row was returned for this plan_id and was not written", 0)
+				omit(id, planID, "", "a further row was returned for this plan_id and was not written", 0)
 				continue
 			}
 			seenPlan[planID] = true
@@ -564,31 +628,39 @@ func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
 				}),
 			}
 
+			name := planFileName(id, planID, ".actual")
 			switch {
 			case !present && size > maxPlanBytes:
-				omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap and was not sent", size, maxPlanBytes), size)
+				omit(id, planID, name, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap and was not sent", size, maxPlanBytes), size)
 			case !present:
 				// A single-operator plan for a trivial query and a NULL past the
 				// 128-nesting-level ceiling are indistinguishable from here: the
 				// DMF does not say which happened, so neither is claimed.
-				omit(id, planID, "no plan XML returned for this plan_id", 0)
+				omit(id, planID, name, "no plan XML returned for this plan_id", 0)
 			case len(plan) > maxPlanBytes:
-				omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap", len(plan), maxPlanBytes), int64(len(plan)))
+				omit(id, planID, name, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap", len(plan), maxPlanBytes), int64(len(plan)))
 			default:
-				name := planFileName(id, planID, ".actual")
 				n, ok, err := writeFile(req, rel, name, []byte(plan))
 				if err != nil {
 					return res, err
 				}
 				if !ok {
-					omit(id, planID, budgetReason, int64(len(plan)))
+					omit(id, planID, name, budgetReason(req.Out.budget), int64(len(plan)))
 				} else {
 					res.Bytes += n
 					res.PlanFiles++
 					entry.PlanFile = name
-					idx.Plans = append(idx.Plans, entry)
 				}
 			}
+
+			// The entry goes in WHATEVER happened to the file, which is why
+			// PlanFile is omitempty: match, candidates and last_execution are
+			// what a reader needs most for a plan that was not written, and a
+			// row dropped from plans takes them with it. The omission beside it
+			// says why there is no file; it does not say when the cached plan
+			// last ran or how many plans shared its hash, and it is not the
+			// place to repeat that.
+			idx.Plans = append(idx.Plans, entry)
 		}
 	}
 
@@ -643,12 +715,22 @@ func encodedAt(s ResultSet, row int, col string, warn func(string)) json.RawMess
 // indexHeader borrows the corpus encoder for the state and window blocks, so
 // the timestamps in _index.json are rendered by the same code as every other
 // DATETIME2 in the archive rather than by a second, drifting convention here.
-func indexHeader(root ResultSet) (state, window json.RawMessage, err error) {
-	doc, _, err := Encode([]NamedResultSet{
+//
+// warn takes the encoder's warnings for the reason encodedAt states: one
+// raised while writing an index nobody re-encodes would otherwise be raised to
+// no one. The row encoded here holds the four datetimeoffset window bounds,
+// which are exactly the values the encoder has something to say about.
+func indexHeader(root ResultSet, warn func(string)) (state, window json.RawMessage, err error) {
+	doc, warns, err := Encode([]NamedResultSet{
 		{Spec: ResultSpec{Name: RootSetName, Shape: ShapeObject}, Set: root},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("query-store-detail: encoding the index header: %w", err)
+	}
+	for _, w := range warns {
+		if warn != nil {
+			warn(w)
+		}
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(doc, &fields); err != nil {
