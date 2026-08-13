@@ -555,13 +555,23 @@ func TestRunLeavesAManifestWhenTheCorpusCannotBeRead(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "output")
 	missing := filepath.Join(dir, "no-such-corpus")
+	rec := &recordingObserver{}
 	if _, err := Run(context.Background(), Options{
-		Config: &Config{Server: "localhost", OutputDir: out, QueriesDir: missing},
-		Corpus: os.DirFS(missing),
-		Root:   ".",
-		Now:    time.Now(),
+		Config:   &Config{Server: "localhost", OutputDir: out, QueriesDir: missing},
+		Corpus:   os.DirFS(missing),
+		Root:     ".",
+		Now:      time.Now(),
+		Observer: rec,
 	}); err == nil {
 		t.Fatal("want an error")
+	}
+	// Finished is announced from the same place the manifest's own flag is
+	// settled, so it reaches a caller on every exit path — this one included,
+	// which returns before a single unit has run. A caller left without it
+	// would have to guess from its own context, and a context says a key was
+	// pressed rather than that anything was cut short.
+	if len(rec.finished) != 1 || rec.finished[0] != "complete" {
+		t.Errorf("Finished = %v, want one 'complete': this run was not cancelled", rec.finished)
 	}
 	if _, err := os.Stat(filepath.Join(out, "_run.json")); err == nil {
 		t.Error("the manifest was written into the output directory itself")

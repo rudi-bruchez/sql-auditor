@@ -266,18 +266,22 @@ func (e verifiedEvent) apply(s State) State {
 
 // collectDoneEvent is collect.Run returning, however it returned.
 type collectDoneEvent struct {
-	code      int
-	err       error
-	total     time.Duration
-	cancelled bool
-	zipPath   string
-	zipBytes  int64
+	code  int
+	err   error
+	total time.Duration
+	// ctxCancelled says the wizard's context was cancelled, which decides the
+	// EXIT CODE and nothing else. What the final screen says about the archive
+	// comes from finishedEvent, which carries the run's own verdict: the two
+	// answers differ when ctrl-c lands after the last unit, and only the run
+	// knows whether anything was actually cut short.
+	ctxCancelled bool
+	zipPath      string
+	zipBytes     int64
 }
 
 func (e collectDoneEvent) apply(s State) State {
 	s.Step = StepDone
 	s.Stopping = false
-	s.Cancelled = e.cancelled
 	s.Total = e.total
 	s.ZipPath, s.ZipBytes = e.zipPath, e.zipBytes
 	if e.err != nil {
@@ -296,7 +300,7 @@ func (e collectDoneEvent) apply(s State) State {
 // script wrapping the wizard must not be told the collection broke because
 // somebody decided they had waited long enough.
 func (e collectDoneEvent) exitStatus() int {
-	if e.cancelled {
+	if e.ctxCancelled {
 		return 0
 	}
 	return e.code
@@ -490,10 +494,10 @@ func (r *runner) collect(ctx context.Context, s State) {
 	start := time.Now()
 	code, err := collect.Run(ctx, o)
 	e := collectDoneEvent{
-		code:      code,
-		err:       err,
-		total:     time.Since(start),
-		cancelled: ctx.Err() != nil,
+		code:         code,
+		err:          err,
+		total:        time.Since(start),
+		ctxCancelled: ctx.Err() != nil,
 	}
 	// The size comes from the file itself, not from a counter: what the
 	// operator is about to attach is the archive on disk, and a total of the

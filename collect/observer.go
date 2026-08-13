@@ -23,6 +23,14 @@ type Observer interface {
 	// the same reason: N identical lines naming no database is not a report.
 	ScriptSkipped(script, database, reason string)
 	Phase(name string)
+	// Finished reports the run's own verdict on whether the operator stopped
+	// it, at the moment the manifest carrying that verdict is written. A caller
+	// cannot derive it: its context being cancelled says a key was pressed, not
+	// that anything was cut short — a Ctrl-C after the last unit fails no unit,
+	// and the archive is whole. Calling an archive partial when the manifest
+	// inside it says otherwise leaves the two documents of one run
+	// contradicting each other.
+	Finished(cancelled bool)
 }
 
 // unit is a script paired with the target it will run against. Instance scope
@@ -108,5 +116,11 @@ func (o observer) ScriptSkipped(script, database, reason string) {
 func (o observer) Phase(name string) {
 	if o.Observer != nil {
 		o.Observer.Phase(name)
+	}
+}
+
+func (o observer) Finished(cancelled bool) {
+	if o.Observer != nil {
+		o.Observer.Finished(cancelled)
 	}
 }

@@ -1049,6 +1049,14 @@ func Run(ctx context.Context, o Options) (int, error) {
 		m.Run.FinishedUTC = nowUTC()
 		m.Run.DurationSec = int(time.Since(started).Seconds())
 		m.Run.ExitCode = code
+		// Announced from here, where the manifest's own flag is settled, so
+		// that a caller displaying the outcome and the manifest recording it
+		// cannot disagree. A caller deriving it from its own cancelled context
+		// does disagree: a Ctrl-C pressed after the last unit, while the
+		// manifest and the archive are being written, fails no unit at all —
+		// the archive is whole and the manifest says so, while the screen would
+		// call it partial.
+		obs.Finished(m.Run.Cancelled)
 		dest := runFolder
 		if dest == "" {
 			stamp := o.Now

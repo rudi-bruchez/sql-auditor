@@ -58,6 +58,8 @@ func (o observer) ScriptSkipped(script, database, reason string) {
 
 func (o observer) Phase(name string) { o.send(phaseEvent{name: name}) }
 
+func (o observer) Finished(cancelled bool) { o.send(finishedEvent{cancelled: cancelled}) }
+
 // plannedEvent carries the gauge's denominator. It arrives once, before the
 // first unit, because planUnits resolves the whole plan up front — which is
 // exactly why the wizard can show 12/223 rather than a spinner.
@@ -124,6 +126,22 @@ type phaseEvent struct{ name string }
 
 func (e phaseEvent) apply(s State) State {
 	s.Script, s.Database = e.name, ""
+	return s
+}
+
+// finishedEvent is the run's own verdict on whether it was cut short, taken
+// from the manifest it has just written.
+//
+// It is the ONLY source of the word "partial" on the final screen. Deriving it
+// from the wizard's cancelled context looks equivalent and is not: a ctrl-c
+// pressed after the last unit, while finish() and Zip() run, fails no unit, so
+// the manifest inside the archive says cancelled=false and the run exits 0 —
+// while the screen would tell the DBA the archive is partial. Two documents of
+// one run contradicting each other is worse than either answer alone.
+type finishedEvent struct{ cancelled bool }
+
+func (e finishedEvent) apply(s State) State {
+	s.Cancelled = e.cancelled
 	return s
 }
 

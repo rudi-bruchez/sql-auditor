@@ -17,6 +17,8 @@ type recordingObserver struct {
 	done    []string
 	skipped []string
 	phases  []string
+	// finished holds one entry per Finished call: "cancelled" or "complete".
+	finished []string
 }
 
 func (r *recordingObserver) Planned(units, databases int) {
@@ -37,6 +39,14 @@ func (r *recordingObserver) ScriptSkipped(script, database, reason string) {
 
 func (r *recordingObserver) Phase(name string) { r.phases = append(r.phases, name) }
 
+func (r *recordingObserver) Finished(cancelled bool) {
+	word := "complete"
+	if cancelled {
+		word = "cancelled"
+	}
+	r.finished = append(r.finished, word)
+}
+
 func fmtPair(a, b int) string {
 	return string(rune('0'+a)) + "/" + string(rune('0'+b))
 }
@@ -51,6 +61,7 @@ func TestObserverCallbacksAreSafeOnTheZeroValue(t *testing.T) {
 	o.UnitDone("10.system/010.foo.sql", "", 42, time.Second, errors.New("boom"))
 	o.ScriptSkipped("10.system/010.foo.sql", "RH", "not matched")
 	o.Phase("archiving")
+	o.Finished(true)
 }
 
 func TestObserverForwardsToTheWrappedImplementation(t *testing.T) {
@@ -62,6 +73,7 @@ func TestObserverForwardsToTheWrappedImplementation(t *testing.T) {
 	o.UnitDone("80.workload/020.query-store.sql", "SALESDB", 10, time.Second, nil)
 	o.ScriptSkipped("80.workload/021.query-store-detail.sql", "RH", "not matched by QUERY_STORE_DB_INCLUDE")
 	o.Phase("writing manifest")
+	o.Finished(true)
 
 	if len(rec.planned) != 1 || rec.planned[0] != "5/3" {
 		t.Fatalf("Planned not forwarded: %v", rec.planned)
@@ -78,6 +90,9 @@ func TestObserverForwardsToTheWrappedImplementation(t *testing.T) {
 	}
 	if len(rec.phases) != 1 || rec.phases[0] != "writing manifest" {
 		t.Fatalf("Phase not forwarded: %v", rec.phases)
+	}
+	if len(rec.finished) != 1 || rec.finished[0] != "cancelled" {
+		t.Fatalf("Finished not forwarded: %v", rec.finished)
 	}
 }
 

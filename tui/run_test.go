@@ -130,7 +130,7 @@ func TestAStaleConnectionResultDoesNotDragTheOperatorBackIntoTheProbe(t *testing
 }
 
 func TestACancelledCollectionExitsZero(t *testing.T) {
-	e := collectDoneEvent{code: 2, cancelled: true}
+	e := collectDoneEvent{code: 2, ctxCancelled: true}
 	if e.exitStatus() != 0 {
 		t.Errorf("exit status = %d, want 0 for an operator's stop", e.exitStatus())
 	}
@@ -138,9 +138,34 @@ func TestACancelledCollectionExitsZero(t *testing.T) {
 		t.Error("a genuine failure lost its exit code")
 	}
 	s := e.apply(State{Step: StepCollecting, Stopping: true})
-	if s.Step != StepDone || !s.Cancelled || s.Stopping {
+	if s.Step != StepDone || s.Stopping {
 		t.Errorf("final state = %+v", s)
 	}
+}
+
+// The word "partial" on the final screen is the RUN's, never the wizard's.
+//
+// A ctrl-c pressed after the last unit — while finish() writes the manifest and
+// Zip builds the archive — cancels the wizard's context but fails no unit: the
+// manifest inside the archive says cancelled=false and the run exits 0. A
+// screen deriving the flag from its own context would call that archive partial
+// and contradict the document inside it.
+func TestThePartialArchiveIsAnnouncedOnlyByTheRunItself(t *testing.T) {
+	late := collectDoneEvent{ctxCancelled: true, zipPath: `C:\out\a.zip`}
+	if s := late.apply(State{Step: StepCollecting}); s.Cancelled {
+		t.Error("the wizard called the archive partial on its own authority")
+	}
+
+	// And when the run does say so, the screen says so.
+	stopped := late.apply(finishedEvent{cancelled: true}.apply(State{Step: StepCollecting}))
+	if !stopped.Cancelled {
+		t.Error("the run reported a stop and the screen did not carry it")
+	}
+	contains(t, Render(stopped, testWidth, 0), "Collection stopped. This archive is partial:")
+
+	// A complete run keeps the ordinary sentence even though ctrl-c was pressed.
+	whole := late.apply(finishedEvent{cancelled: false}.apply(State{Step: StepCollecting}))
+	contains(t, Render(whole, testWidth, 0), "Send this file to whoever requested the audit:")
 }
 
 // TestARefusedConnectionHandsTheKeyboardBackToTheServerField is the offline
