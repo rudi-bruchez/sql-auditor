@@ -51,6 +51,12 @@
 -- between two files of the same corpus is a defect waiting to be quoted in a
 -- report.
 --
+-- AT MOST THREE PLANS PER QUERY CARRY THEIR XML. Every plan is still returned,
+-- with its metadata, its size and its per-interval statistics; only the XML of
+-- the fourth and beyond is nulled out, and the writer records each one as a
+-- named omission. Nothing is filtered: a plan the reader cannot open is still a
+-- plan the archive says exists.
+--
 -- NO JUDGEMENT IS APPLIED. Nothing here is labelled a regression, and no
 -- ranking is a verdict: comparing two intervals and deciding a plan got worse
 -- is analysis, and it needs the deployment calendar to be worth anything.
@@ -199,6 +205,35 @@ selection AS (
         FROM forced AS f
     ) AS u(query_id, sort_rn, sort_metric, is_forced_selection)
     GROUP BY u.query_id
+),
+/* Every plan of every selected query, numbered. Nothing here removes a row:
+   this rank is read by the projection below, which NULLs the plan XML past the
+   third plan and leaves the plan's metadata, its size and its per-interval
+   statistics exactly where they were. A query in a thirty-day store accumulates
+   a plan per recompile, and each of them carries up to 8 MiB of XML that is
+   materialised in memory before a byte is written — that is what is bounded,
+   and only that.
+
+   is_forced_plan FIRST, and it is not decoration. A query can be in the
+   selection BECAUSE one of its plans is forced, and evicting that plan's XML
+   would erase the evidence for its own selection. The Query Store forces at
+   most one plan per query, so one slot always suffices for it and the remaining
+   two still go to the most recently executed.
+
+   plan_id DESC is the tie-break, for the reason query_id is one in the round
+   robin above: without it two consecutive collections of an unchanged store can
+   keep different plans with nothing anywhere saying so. last_execution_time is
+   NULL for a plan compiled but never executed, and those sort last under DESC,
+   which is where they belong. */
+planRank AS (
+    SELECT p.plan_id,
+           ROW_NUMBER() OVER (PARTITION BY p.query_id
+                              ORDER BY p.is_forced_plan       DESC,
+                                       p.last_execution_time  DESC,
+                                       p.plan_id              DESC) AS plan_rank,
+           COUNT(*) OVER (PARTITION BY p.query_id)                  AS plan_count
+    FROM sys.query_store_plan AS p
+    JOIN selection            AS s ON s.query_id = p.query_id
 )
 SELECT q.query_id                                                 AS [query_id],
        p.plan_id                                                  AS [plan_id],
@@ -216,8 +251,19 @@ SELECT q.query_id                                                 AS [query_id],
           would then state that the Query Store holds no plan for it — a false
           fact about the server. DATALENGTH counts
           the nvarchar bytes, two per character, so the guard is conservative
-          rather than exact — deliberately, and in the safe direction. */
+          rather than exact — deliberately, and in the safe direction.
+
+          The per-query plan cap is the SECOND condition of the same CASE, and
+          it is here rather than in a WHERE for the reason above: the row stays,
+          only the XML goes. Both conditions in one CASE so a plan that is both
+          oversized and beyond the cap arrives NULL exactly once, with
+          [plan.rank] and [plan.count] beside it saying which of the two it was
+          and how many plans the query has. 3 is written out for the same reason
+          8388608 is — a DBA reading the exported corpus must see the number —
+          and maxPlansPerQuery on the Go side is held to it by
+          TestPlanCountCapIsTheSameNumberInTheCorpus. */
        CASE WHEN DATALENGTH(p.query_plan) <= 8388608
+             AND pr.plan_rank <= 3
             THEN p.query_plan END                                 AS [query_plan],
        DATALENGTH(p.query_plan)                                   AS [query_plan_bytes],
        p.is_forced_plan                                           AS [is_forced],
@@ -239,6 +285,11 @@ SELECT q.query_id                                                 AS [query_id],
        OBJECT_SCHEMA_NAME(q.object_id)
          + '.' + OBJECT_NAME(q.object_id)                         AS [object],
        q.query_parameterization_type_desc                         AS [parameterization],
+       /* Always projected, for every plan including the ones whose XML was
+          nulled: rank 4 of 9 is what tells a reader that the file is absent by
+          decision and not because the store has nothing. */
+       pr.plan_rank                                               AS [plan.rank],
+       pr.plan_count                                              AS [plan.count],
        p.plan_group_id                                            AS [plan.group_id],
        p.engine_version                                           AS [plan.engine_version],
        p.compatibility_level                                      AS [plan.compatibility_level],
@@ -271,6 +322,7 @@ FROM       selection                      AS sel
 JOIN       sys.query_store_query          AS q  ON q.query_id = sel.query_id
 JOIN       sys.query_store_query_text     AS qt ON qt.query_text_id = q.query_text_id
 JOIN       sys.query_store_plan           AS p  ON p.query_id = q.query_id
+JOIN       planRank                       AS pr ON pr.plan_id = p.plan_id
 /* LEFT, both of them: a query selected only because one of its plans is forced
    need not have run inside the window at all, and dropping it here would keep
    it in the selection and out of the output. */
@@ -297,7 +349,15 @@ OPTION (RECOMPILE, MAXDOP 1);
    selected copy above. Nothing else need match — this copy drops the two
    aggregates that no ranking reads — but a metric changed on one side only
    would silently select one set of queries and collect the intervals of
-   another. */
+   another.
+
+   NO PLAN CAP HERE, deliberately, and the asymmetry is the point. What the cap
+   above bounds is plan XML — up to 8 MiB a plan, held in memory before a byte
+   is written. This statement carries no XML at all, only numbers, and its rows
+   are what say how a plan behaved over the window. Restricting it to the three
+   plans whose XML was written would delete the per-interval shape of exactly
+   the plans the reader can no longer open, leaving them named in the index and
+   described nowhere. */
 WITH agg AS (
     SELECT q.query_id,
            SUM(rs.avg_duration         * rs.count_executions) AS total_duration,
