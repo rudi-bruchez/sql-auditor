@@ -18,6 +18,7 @@ the questions you need answered before you do.
 - [`--query-store-detail` and `--query-store-plan-stats`](#--query-store-detail-and---query-store-plan-stats)
 - [`--include-object-definitions`](#--include-object-definitions)
 - [`--include-deadlock-graphs`](#--include-deadlock-graphs)
+- [`--include-blocked-process-reports`](#--include-blocked-process-reports)
 - [Authentication](#authentication)
 - [Reproducing a run locally](#reproducing-a-run-locally)
 
@@ -42,14 +43,24 @@ can write them out and read them before you run anything:
 sql-auditor queries export --to ./queries-to-review
 ```
 
-The corpus is 38 files. The archive records the SHA-256 of the exact corpus that
+The corpus is 45 files. The archive records the SHA-256 of the exact corpus that
 was used, so a run can be tied to the questions it asked.
 
-Four of those files are opt-in and produce nothing unless you ask for them:
-`10.system/052.session-text.sql`, `70.schema/041.compression-savings.sql`,
-`80.workload/021.query-store-detail.sql` and
-`80.workload/022.query-store-profiled.sql`. Three of the four change what kind
-of data ends up in the archive, and those have sections of their own below.
+Seven of those files are opt-in and produce nothing unless you ask for them:
+
+| File | Option |
+| --- | --- |
+| `10.system/052.session-text.sql` | `--include-session-text` |
+| `10.system/061.deadlock-graphs.sql` | `--include-deadlock-graphs` |
+| `10.system/063.blocked-process-reports.sql` | `--include-blocked-process-reports` |
+| `70.schema/041.compression-savings.sql` | `--estimate-compression` |
+| `70.schema/080.modules.sql` | `--include-object-definitions` |
+| `80.workload/021.query-store-detail.sql` | `--query-store-detail` |
+| `80.workload/022.query-store-profiled.sql` | `--query-store-plan-stats` |
+
+Six of the seven change what kind of data ends up in the archive and have
+sections of their own below; `--estimate-compression` is opt-in for cost rather
+than for disclosure.
 
 It collects; it does not judge. There are no thresholds and no recommendations
 in the tool or in its output. It gathers facts and records what it could not
@@ -451,7 +462,7 @@ infrastructure documentation rather than public material.
 ```
 
 That paragraph is generated from what the run actually did, not fixed at compile
-time. Each of the five options that widen what the archive holds adds its own
+time. Each of the six options that widen what the archive holds adds its own
 line to it:
 
 - `--include-session-text` discloses the captured statement text and the login,
@@ -467,9 +478,12 @@ line to it:
   functions and triggers, and says that this is code written on your side which
   can name linked servers and carry a credential in clear;
 - `--include-deadlock-graphs` discloses the deadlock reports, and says that each
-  one carries the SQL of both victims.
+  one carries the SQL of both victims;
+- `--include-blocked-process-reports` discloses the blocked process reports, says
+  that each names both sessions and carries their SQL, and states that they were
+  read off the server's own file system without any file being modified.
 
-Any one of the five also changes the closing paragraph, from "metadata about
+Any one of the six also changes the closing paragraph, from "metadata about
 the estate" to a statement that the archive should be treated as potentially
 containing personal data. Which form was used is a property of the archive:
 whoever receives it can read which options were on without taking anyone's word
@@ -722,8 +736,9 @@ is the usual reason to hit one of these — quote the whole value.
 ## `--include-session-text`
 
 This is the first of the options that change what kind of data the archive
-holds — the other four are `--query-store-detail`, `--query-store-plan-stats`,
-`--include-object-definitions` and `--include-deadlock-graphs`, below — and it is off by default for that
+holds — the other five are `--query-store-detail`, `--query-store-plan-stats`,
+`--include-object-definitions`, `--include-deadlock-graphs` and
+`--include-blocked-process-reports`, below — and it is off by default for that
 reason, not for performance. It costs one extra query.
 
 With it on, one more collector runs: `10.system/052.session-text.sql`. It reads
