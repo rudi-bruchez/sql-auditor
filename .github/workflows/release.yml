@@ -56,7 +56,11 @@ jobs:
       - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/sql-auditor-*
+      # A semver pre-release carries a hyphen: v1.0.0-rc.1. Without this, such a
+      # tag would be published as an ordinary release and become the "Latest"
+      # that /releases/latest/download serves — the link handed to clients.
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
