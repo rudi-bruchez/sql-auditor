@@ -280,6 +280,63 @@ func TestTheSameDayArchiveIsDetectedBeforeAnythingIsDestroyed(t *testing.T) {
 	}
 }
 
+func TestBackGoesUpOneStepAndNoFurtherThanTheFirst(t *testing.T) {
+	if got := (State{Step: StepVerification}).Key(typed('b')); got.Step != StepConnection {
+		t.Errorf("from step 2: Step = %v, want StepConnection", got.Step)
+	}
+	if got := (State{Step: StepOptions}).Key(typed('b')); got.Step != StepVerification {
+		t.Errorf("from step 3: Step = %v, want StepVerification", got.Step)
+	}
+	// On screen 1 there is nowhere to go back to, and 'b' is a character in a
+	// server name like any other, so it is typed rather than obeyed.
+	got := (State{Step: StepConnection}).Key(typed('b'))
+	if got.Step != StepConnection {
+		t.Errorf("from step 1: Step = %v, want StepConnection", got.Step)
+	}
+	if got.Server != "b" {
+		t.Errorf("Server = %q, want the keystroke to have been typed", got.Server)
+	}
+}
+
+func TestReProbeReturnsToTheWaitingStep(t *testing.T) {
+	s := State{Step: StepVerification, Verify: collect.VerifyResult{Probed: true}}
+	got := s.Key(typed('r'))
+	// StepVerifying, not StepVerification: the probe is the slow thing, and
+	// its screen is the one with the activity indicator.
+	if got.Step != StepVerifying {
+		t.Fatalf("Step = %v, want StepVerifying", got.Step)
+	}
+}
+
+func TestWritingTheGrantScriptKeepsTheOperatorOnTheVerificationScreen(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 8, 13, 14, 5, 0, 0, time.UTC)
+	s := State{Step: StepVerification, Verify: verifyForGrants()}
+
+	ok := s.writeGrantScript(dir, "0.18.0", now)
+	if ok.Step != StepVerification {
+		t.Fatalf("Step = %v, want StepVerification", ok.Step)
+	}
+	if ok.GrantPath == "" || ok.GrantError != nil {
+		t.Fatalf("GrantPath = %q, GrantError = %v", ok.GrantPath, ok.GrantError)
+	}
+
+	// A failure is shown in full on the same screen: the operator can still
+	// continue without the grant script, which is only an aid.
+	bad := s
+	bad.Verify.Probed = false
+	failed := bad.writeGrantScript(dir, "0.18.0", now)
+	if failed.Step != StepVerification {
+		t.Fatalf("Step = %v after a failure, want StepVerification", failed.Step)
+	}
+	if failed.GrantError == nil {
+		t.Error("GrantError is nil after a refused write")
+	}
+	if failed.GrantPath != "" {
+		t.Errorf("GrantPath = %q after a failure, want empty", failed.GrantPath)
+	}
+}
+
 func TestFlagOrderListsTheSevenOptInsInScreenOrder(t *testing.T) {
 	want := []string{
 		collect.FlagIncludeSessionText,

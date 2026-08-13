@@ -276,9 +276,22 @@ func (s State) connectFailed(err error) State {
 	return s
 }
 
-// keyVerification handles screen 2. [r], [b] and [g] arrive in task 14.
+// keyVerification handles screen 2.
+//
+// [g] is absent from this switch on purpose: it writes a file, and Key is
+// pure. The loop calls writeGrantScript for it, which is where the file name,
+// the directory and the failure all live — and where they can be tested
+// without a keyboard.
 func (s State) keyVerification(k screen.Key) State {
 	switch {
+	case k.Rune == 'r':
+		// Back into the wait, not into a second copy of this screen: the
+		// probe is the slow part, and its own step is the one that shows an
+		// activity indicator and takes Ctrl-C.
+		s.Step = StepVerifying
+	case k.Rune == 'b':
+		s.Step = StepConnection
+		s.Field = fieldServer
 	case k.Named == screen.KeyEnter:
 		// A probe that did not succeed disables the continuation, and this is
 		// where that is enforced rather than only drawn. Starting a collection
@@ -349,6 +362,26 @@ func (s State) canContinue() bool { return s.Verify.Probed }
 // instance, or a corpus that could not be read — and an archive containing
 // only its manifest is a round trip the wizard exists to save.
 func (s State) canStart() bool { return s.Verify.Probed && s.Verify.Collectors > 0 }
+
+// writeGrantScript is the impure half of [g], kept out of Key so that the
+// state machine remains a pure function of keystrokes and the file writing
+// remains testable without one.
+//
+// It never leaves screen 2, in either outcome. On success the operator has a
+// path to hand to whoever grants permissions; on failure they have the reason
+// in full, and they can still continue — a missing grant script does not stop
+// a degraded collection, which the repository counts as a success.
+func (s State) writeGrantScript(outputDir, tool string, now time.Time) State {
+	if s.Step != StepVerification {
+		return s
+	}
+	path, err := writeGrants(s.Verify, outputDir, tool, now)
+	s.GrantPath, s.GrantError = path, err
+	if err != nil {
+		s.GrantPath = ""
+	}
+	return s
+}
 
 // collisionFor names what an earlier run of the same day already occupies, or
 // "" when the way is clear. It is the whole of the wizard's guard against the
