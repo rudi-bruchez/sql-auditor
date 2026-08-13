@@ -25,7 +25,7 @@ import (
 // the tool that produced it, and "dev" told a reader nothing about which
 // collectors were in the corpus. So the number lives here and moves with the
 // corpus, while buildStamp fills in the revision from the build itself.
-var version = "0.12.0"
+var version = "0.13.0"
 var commit = ""
 
 // buildStamp returns what to print after the version. When -ldflags supplied a
@@ -104,9 +104,6 @@ func run() int {
 		sessionText = fs.Bool("include-session-text", false,
 			"also collect the SQL text of sessions running during collection, "+
 				"with their login, host and program names — this may contain application data")
-		// Off by default for cost, not for privacy. The estimate samples real
-		// data into tempdb, and the objects worth asking about are the large
-		// ones — which is precisely when it hurts.
 		// Off by default, and for privacy rather than cost: this exports the
 		// client's own code. A view or a procedure names linked servers, can
 		// embed values as literals, and now and then holds a credential in
@@ -115,6 +112,9 @@ func run() int {
 		objectDefinitions = fs.Bool("include-object-definitions", false,
 			"also collect the source of views, procedures, functions and triggers — "+
 				"this is code written on this server and may contain credentials")
+		// Off by default for cost, not for privacy. The estimate samples real
+		// data into tempdb, and the objects worth asking about are the large
+		// ones — which is precisely when it hurts.
 		estimateCompression = fs.Bool("estimate-compression", false,
 			"also estimate page-compression savings on the largest uncompressed objects — "+
 				"this samples data into tempdb and is slow on large tables")
