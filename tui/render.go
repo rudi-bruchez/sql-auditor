@@ -457,18 +457,27 @@ func renderOptions(s State, width int) []string {
 	}
 
 	if s.Collision != "" {
+		// A banner above the keys, not a screen of its own. The checkboxes stay
+		// reachable, because rerunning the same day TO TICK ONE is what puts a
+		// collision on the screen in the first place.
+		//
 		// Nothing is deleted without a keystroke that names the choice: without
 		// --keep, the run removes both the folder of the day and the archive
 		// beside it, which may be the one just mailed.
-		out = append(out, pad+"A run of the same day already exists:", fieldPad+"  "+s.Collision, "")
-		return append(out, pad+"[enter] replace it   [k] keep both   [b] back")
+		out = append(out, pad+"A run of the same day already exists:", fieldPad+"  "+s.Collision)
+		out = append(out, screen.Wrap("[enter] replaces it; [k] writes this run beside it.", width, pad)...)
+		out = append(out, "")
 	}
 	if !s.canStart() {
 		out = append(out, screen.Wrap("Nothing to collect: "+nothingReason(s), width, pad)...)
 		out = append(out, "")
 		return append(out, pad+"[b] back   [q] quit")
 	}
-	return append(out, pad+"[tab] next   [space] toggle   [enter] start collection   [b] back   [q] quit")
+	start := "[enter] start collection"
+	if s.Collision != "" {
+		start = "[enter] replace it   [k] keep both"
+	}
+	return append(out, pad+"[tab] next   [space] toggle   "+start+"   [b] back   [q] quit")
 }
 
 // nothingReason says which of the two empty plans this is. They are not the

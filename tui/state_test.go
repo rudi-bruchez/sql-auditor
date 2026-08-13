@@ -137,6 +137,55 @@ func TestTheCollisionPromptRequiresAKeystrokeThatNamesTheChoice(t *testing.T) {
 	}
 }
 
+// The collision must not become a mode. It used to return early, which cost
+// three things at once — and all three land on the operator this wizard exists
+// for, on the one run they will make.
+func TestTheCollisionDoesNotTakeOverTheKeyboard(t *testing.T) {
+	base := State{
+		Step:      StepOptions,
+		Collision: `C:\out\SQL01_PROD-2026-08-13.zip`,
+		Verify:    collect.VerifyResult{Probed: true, Collectors: 47},
+		Flags:     map[string]bool{},
+	}
+
+	// [tab] and [space] keep working. Rerunning the same day TO TICK AN OPTION
+	// is the scenario the collision exists for; a prompt that swallowed them
+	// would make it unreachable.
+	moved := base.Key(named(screen.KeyTab))
+	if moved.FlagIndex != 1 || moved.Step != StepOptions {
+		t.Errorf("[tab] under a collision: FlagIndex = %d, Step = %v", moved.FlagIndex, moved.Step)
+	}
+	if ticked := base.Key(named(screen.KeySpace)); !ticked.Flags[flagOrder[0]] {
+		t.Error("[space] under a collision toggled nothing")
+	}
+
+	// Ctrl-C still quits. watchSignals folds SIGINT and SIGTERM onto this key,
+	// so a screen that ate it would leave the process killable only by -9,
+	// which leaves the terminal in raw mode.
+	if got := base.Key(named(screen.KeyCtrlC)); got.Step != StepQuit {
+		t.Errorf("ctrl-c under a collision led to %v, want StepQuit", got.Step)
+	}
+
+	// And [enter] still obeys the gate. On a 2012 instance where every version
+	// gate closes, replacing an archive to produce one holding nothing but a
+	// manifest is the round trip canStart() exists to remove.
+	empty := base
+	empty.Verify.Collectors = 0
+	for _, k := range []screen.Key{named(screen.KeyEnter), typed('k')} {
+		if got := empty.Key(k); got.Step != StepOptions {
+			t.Errorf("key %+v with nothing to collect led to %v, want StepOptions", k, got.Step)
+		}
+	}
+
+	// [k] means nothing when nothing asked: outside a collision it must not
+	// quietly turn --keep on.
+	free := base
+	free.Collision = ""
+	if got := free.Key(typed('k')); got.Keep || got.Step != StepOptions {
+		t.Errorf("[k] with no collision: Keep = %v, Step = %v", got.Keep, got.Step)
+	}
+}
+
 func TestTabCyclesOverTheTwoEditableFields(t *testing.T) {
 	s := State{Step: StepConnection}
 	seen := []int{}

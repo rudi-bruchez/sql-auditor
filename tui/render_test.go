@@ -186,13 +186,29 @@ func TestOptionsRefusesToStartWithNothingToCollect(t *testing.T) {
 	absent(t, lines, "[enter] start collection")
 }
 
-func TestOptionsShowsTheSameDayCollisionInsteadOfStarting(t *testing.T) {
+// The collision is a banner over the keys, not a screen of its own. Hiding the
+// checkboxes behind it locks out the very operator it is drawn for: rerunning
+// the same day TO TICK AN OPTION is the scenario that produces it.
+func TestOptionsShowsTheSameDayCollisionAboveTheKeysItKeeps(t *testing.T) {
 	lines := Render(State{Step: StepOptions, Verify: probedVerify(), Flags: map[string]bool{},
 		Collision: `C:\out\SQL01_PROD-2026-08-13.zip`}, testWidth, 0)
 	contains(t, lines, "A run of the same day already exists:")
 	contains(t, lines, `C:\out\SQL01_PROD-2026-08-13.zip`)
-	contains(t, lines, "[enter] replace it   [k] keep both   [b] back")
+	contains(t, lines, "[tab] next   [space] toggle   [enter] replace it   [k] keep both   [b] back   [q] quit")
+	contains(t, lines, "[ ] session text")
 	absent(t, lines, "[enter] start collection")
+}
+
+// A collision does not survive an instance with nothing to collect: the screen
+// refuses to start, and offering "[enter] replace it" there would promise a run
+// that cannot happen and name a file it would destroy on the way.
+func TestOptionsWithNothingToCollectRefusesEvenUnderACollision(t *testing.T) {
+	v := probedVerify()
+	v.Collectors = 0
+	lines := Render(State{Step: StepOptions, Verify: v, Flags: map[string]bool{},
+		Collision: `C:\out\SQL01_PROD-2026-08-13.zip`}, testWidth, 0)
+	contains(t, lines, "[b] back   [q] quit")
+	absent(t, lines, "[enter] replace it")
 }
 
 func TestOptionsTicksTheFlagsThatAreOn(t *testing.T) {

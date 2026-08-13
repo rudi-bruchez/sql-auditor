@@ -320,28 +320,18 @@ func (s State) keyVerification(k screen.Key) State {
 	return s
 }
 
-// keyOptions handles screen 3, including the same-day collision prompt, which
-// takes over the keyboard while it is up.
+// keyOptions handles screen 3, including the same-day collision, which is a
+// banner above the key line and NOT a mode that owns the keyboard.
+//
+// It was one, and being one cost three things. It started a collection without
+// consulting canStart(), so on a 2012 instance where every gate closes [enter]
+// produced an archive holding nothing but a manifest — the exact round trip
+// canStart() exists to remove. It swallowed [tab] and [space], so the operator
+// rerunning the same day TO TICK AN OPTION, which is the scenario the collision
+// exists for, could never reach a checkbox. And it swallowed ctrl-c, which
+// watchSignals folds SIGINT and SIGTERM onto, leaving the process unkillable
+// short of a kill -9 that leaves the terminal in raw mode.
 func (s State) keyOptions(k screen.Key) State {
-	if s.Collision != "" {
-		// Nothing is destroyed without a keystroke that names the choice. Any
-		// key that is not one of the three does nothing at all — in
-		// particular, no key "defaults" to replacing, because the thing being
-		// replaced may be the archive the operator has just mailed.
-		switch {
-		case k.Named == screen.KeyEnter:
-			s.Keep = false
-			s.Collision = ""
-			s.Step = StepCollecting
-		case k.Rune == 'k':
-			s.Keep = true
-			s.Collision = ""
-			s.Step = StepCollecting
-		case k.Rune == 'b':
-			s.Step = StepVerification
-		}
-		return s
-	}
 	switch {
 	case k.Named == screen.KeySpace:
 		if s.FlagIndex >= 0 && s.FlagIndex < len(flagOrder) {
@@ -353,9 +343,25 @@ func (s State) keyOptions(k screen.Key) State {
 		// tab is what moves the selection, as it does on screen 1.
 		s.FlagIndex = (s.FlagIndex + 1) % len(flagOrder)
 	case k.Named == screen.KeyEnter:
-		if s.canStart() {
-			s.Step = StepCollecting
+		if !s.canStart() {
+			return s
 		}
+		// With a collision up, [enter] carries the answer "replace it" as well
+		// as "start" — the banner says so above this line. Nothing is destroyed
+		// without a keystroke that names the choice, and no key defaults to
+		// replacing: the thing replaced may be the archive just mailed.
+		s.Collision = ""
+		s.Keep = false
+		s.Step = StepCollecting
+	case k.Rune == 'k':
+		// [k] is the second answer, and it means nothing when there is no
+		// question: outside a collision it must not silently turn --keep on.
+		if s.Collision == "" || !s.canStart() {
+			return s
+		}
+		s.Collision = ""
+		s.Keep = true
+		s.Step = StepCollecting
 	case k.Rune == 'b':
 		s.Step = StepVerification
 	case k.Rune == 'q', k.Named == screen.KeyCtrlC:
