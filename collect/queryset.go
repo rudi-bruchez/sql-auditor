@@ -48,12 +48,13 @@ type Script struct {
 // otherwise gate a script on a flag no command line can ever set, silently
 // dropping a collector from every run.
 var KnownFlags = map[string]string{
-	"include_session_text":   "--include-session-text",
-	"estimate_compression":   "--estimate-compression",
-	"query_store_detail":     "--query-store-detail",
-	"query_store_plan_stats": "--query-store-plan-stats",
-	"object_definitions":     "--include-object-definitions",
-	"deadlock_graphs":        "--include-deadlock-graphs",
+	"include_session_text":    "--include-session-text",
+	"estimate_compression":    "--estimate-compression",
+	"query_store_detail":      "--query-store-detail",
+	"query_store_plan_stats":  "--query-store-plan-stats",
+	"object_definitions":      "--include-object-definitions",
+	"deadlock_graphs":         "--include-deadlock-graphs",
+	"blocked_process_reports": "--include-blocked-process-reports",
 }
 
 // KnownWriters is the closed set of names @writer accepts, mapped to the
@@ -91,6 +92,11 @@ var KnownWriters = map[string]WriterSpec{
 		Description: "one .xdl file per deadlock system_health still holds",
 		Scope:       ScopeInstance,
 		ScopeReason: "the system_health ring buffer belongs to the instance, so a per-database run would collect the same graphs once per database",
+	},
+	"blocked-process-reports": {
+		Description: "one .xml file per blocked process report, read from the capturing session's .xel files",
+		Scope:       ScopeInstance,
+		ScopeReason: "an Extended Events session and its files belong to the instance, so a per-database run would read the same files once per database",
 	},
 }
 

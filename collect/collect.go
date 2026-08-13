@@ -71,6 +71,22 @@ const FlagObjectDefinitions = "object_definitions"
 // which is what makes this a separate opt-in rather than a widening of it.
 const FlagDeadlockGraphs = "deadlock_graphs"
 
+// FlagBlockedProcessReports gates the export of blocked process reports out of
+// whatever Extended Events session captures them.
+//
+// A fifth decision, and it is not the deadlock one. A deadlock report describes
+// a conflict the engine resolved by killing somebody; a blocked process report
+// describes one still in progress when the threshold expired, and it names the
+// blocker — the session that was doing nothing wrong and holding a lock. Both
+// carry statement text, so both are gated, and separately because an operator
+// who agreed to one has not agreed to the other.
+//
+// It reads the file system, through sys.fn_xe_file_target_read_file and as the
+// SQL Server service account rather than as the connected login. That is a
+// wider reach than any other collector in this corpus and is a second reason
+// the decision is its own.
+const FlagBlockedProcessReports = "blocked_process_reports"
+
 // FlagQueryStorePlanStats gates the search for the last profiled plan of each
 // extracted query.
 //
@@ -533,6 +549,17 @@ func Check(ctx context.Context, o Options) (int, error) {
 		fmt.Printf("Login    : %s\n", si.Login)
 	}
 
+	// Advice, not a finding, and it is here rather than in the archive on
+	// purpose: check exists to help an operator prepare a run, while the
+	// archive states what the instance is. It stays silent on an instance with
+	// no lock waits.
+	if lines := BlockingNotice(ProbeBlocking(ctx, conn)); len(lines) > 0 {
+		fmt.Println("\nBlocking:")
+		for _, l := range lines {
+			fmt.Printf("  %s\n", l)
+		}
+	}
+
 	// The database list is the blast radius. It comes last because it is the
 	// part a reader scrolls back to, and it is printed even when it is empty —
 	// an empty list is itself the finding when VIEW ANY DEFINITION is missing.
@@ -933,6 +960,9 @@ func discloseWrites(m *Manifest, rw *runWriter, s Script, res WriteResult) {
 	// holds no deadlock discloses nothing, because it collected nothing.
 	if res.GraphFiles > 0 {
 		m.Collected.DeadlockGraphs = true
+	}
+	if res.ReportFiles > 0 {
+		m.Collected.BlockedProcessReports = true
 	}
 }
 

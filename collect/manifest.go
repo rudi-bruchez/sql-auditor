@@ -153,6 +153,13 @@ type CollectedKinds struct {
 	// content as SessionText reached from a different source: the always-on
 	// system_health ring buffer rather than a live session.
 	DeadlockGraphs bool `json:"deadlock_graphs"`
+
+	// BlockedProcessReports marks that blocked process reports are in the
+	// archive. Like a deadlock graph it carries the SQL of the sessions
+	// involved — including the blocker's, which is a session doing nothing
+	// wrong — and unlike everything else in this corpus it was read off the
+	// file system rather than out of a view.
+	BlockedProcessReports bool `json:"blocked_process_reports"`
 }
 
 type Manifest struct {
@@ -426,6 +433,16 @@ What is in here that names things:
 		fmt.Fprintln(b, "    tables. Nothing on the instance was modified or cleared to read")
 		fmt.Fprintln(b, "    them. Collected because --include-deadlock-graphs was passed.")
 	}
+	if m.Collected.BlockedProcessReports {
+		fmt.Fprintln(b, "  - The blocked process reports captured by an Extended Events session")
+		fmt.Fprintln(b, "    on this instance, one .xml file each. A report names the blocked")
+		fmt.Fprintln(b, "    session and the session blocking it, with the SQL of both — the")
+		fmt.Fprintln(b, "    blocker included, which was doing nothing but holding a lock.")
+		fmt.Fprintln(b, "    These were read from the session's .xel files on the server's own")
+		fmt.Fprintln(b, "    file system, by the SQL Server service account; no file was")
+		fmt.Fprintln(b, "    modified, moved or removed.")
+		fmt.Fprintln(b, "    Collected because --include-blocked-process-reports was passed.")
+	}
 	// Scoped deliberately. The redaction this describes applies to the run
 	// settings block and to nothing else, because that is the only place the
 	// collector masks anything. An unqualified "secrets are masked" would be a
@@ -441,7 +458,8 @@ setting whose name marks it as a password, token or other secret is replaced
 with "(redacted)" before that block is written.
 `)
 	if m.Collected.SessionText || m.Collected.QueryStoreDetail || m.Collected.QueryStoreProfiledPlans ||
-		m.Collected.ObjectDefinitions || m.Collected.DeadlockGraphs {
+		m.Collected.ObjectDefinitions || m.Collected.DeadlockGraphs ||
+		m.Collected.BlockedProcessReports {
 		b.WriteString(`
 Most of this is metadata about the estate rather than the data held in it,
 but the captured statement text can carry values copied from application

@@ -119,6 +119,13 @@ func run() int {
 		deadlockGraphs = fs.Bool("include-deadlock-graphs", false,
 			"also collect the deadlock reports system_health still holds, one .xdl "+
 				"file each — these carry the SQL of both victims")
+		// Off by default. It is the only collector that reads the server's file
+		// system — through sys.fn_xe_file_target_read_file, as the SQL Server
+		// service account — and a report names the blocking session's SQL as
+		// well as the blocked one's.
+		blockedProcessReports = fs.Bool("include-blocked-process-reports", false,
+			"also collect the blocked process reports captured by an Extended Events "+
+				"session, one .xml file each — these name both sessions and carry their SQL")
 		// Off by default for cost, not for privacy. The estimate samples real
 		// data into tempdb, and the objects worth asking about are the large
 		// ones — which is precisely when it hurts.
@@ -270,12 +277,13 @@ func run() int {
 		Now: time.Now(), Keep: *keep, Version: version, Commit: buildStamp(),
 		GrantScript: *grantScript,
 		Flags: map[string]bool{
-			collect.FlagIncludeSessionText:  *sessionText,
-			collect.FlagEstimateCompression: *estimateCompression,
-			collect.FlagQueryStoreDetail:    *queryStoreDetail,
-			collect.FlagQueryStorePlanStats: *queryStorePlanStats,
-			collect.FlagObjectDefinitions:   *objectDefinitions,
-			collect.FlagDeadlockGraphs:      *deadlockGraphs,
+			collect.FlagIncludeSessionText:    *sessionText,
+			collect.FlagEstimateCompression:   *estimateCompression,
+			collect.FlagQueryStoreDetail:      *queryStoreDetail,
+			collect.FlagQueryStorePlanStats:   *queryStorePlanStats,
+			collect.FlagObjectDefinitions:     *objectDefinitions,
+			collect.FlagDeadlockGraphs:        *deadlockGraphs,
+			collect.FlagBlockedProcessReports: *blockedProcessReports,
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -333,6 +341,12 @@ Options (check, collect):
                               still holds, one .xdl file each. Off by default:
                               a report carries the SQL of both victims.
                               MANIFEST.txt discloses it when it is on.
+  --include-blocked-process-reports
+                              also collect the blocked process reports an
+                              Extended Events session captured, one .xml each.
+                              Off by default: a report carries the SQL of the
+                              blocked session and of the one blocking it, and
+                              reading it touches the server's file system.
   --estimate-compression      also estimate page-compression savings on the largest
                               uncompressed objects. Off by default for cost: it
                               samples data into tempdb and is slow on big tables.
