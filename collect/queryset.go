@@ -232,6 +232,15 @@ func parseScript(rel, sql string) Script {
 				"reference a column of another; split it into its own query")
 		}
 	}
+	// A writer needs a database to write for. An instance-scope @writer script
+	// reaches runUnit with an empty DatabaseFolder: the empty Folder collapses
+	// its directory onto the non-per-database path, and the empty Name makes
+	// QueryStoreState.Selected[""] a bucket every such script would share. Both
+	// are silent, and neither is what anyone declaring @writer meant.
+	if s.Writer != "" && s.Scope != ScopeDatabase {
+		setLint(fmt.Sprintf("@writer: %q needs @scope: database; a writer produces one "+
+			"directory per database and has nowhere to put it otherwise", s.Writer))
+	}
 	if s.LintError == "" {
 		s.LintError = lint(sql, s.Results)
 	}
