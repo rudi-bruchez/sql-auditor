@@ -30,16 +30,19 @@ func detailSets() []NamedResultSet {
 	// Raw ranks, always present, never capped: the round robin can retain a
 	// query whose best rank exceeds the cap, and nulling those out would show
 	// "not ranked" for the very metric that let it in.
+	// is_forced_selection is last, and the tests that poke at this fixture by
+	// column position depend on that: it says why the QUERY is in the
+	// selection, where is_forced says what one PLAN is.
 	selected := ResultSet{
 		Columns: []string{"query_id", "plan_id", "text", "query_plan", "query_plan_bytes", "is_forced",
-			"rank.duration", "rank.cpu", "rank.logical_reads", "rank.executions"},
-		Types: []string{"BIGINT", "BIGINT", "NVARCHAR", "NVARCHAR", "BIGINT", "BIT", "BIGINT", "BIGINT", "BIGINT", "BIGINT"},
+			"rank.duration", "rank.cpu", "rank.logical_reads", "rank.executions", "is_forced_selection"},
+		Types: []string{"BIGINT", "BIGINT", "NVARCHAR", "NVARCHAR", "BIGINT", "BIT", "BIGINT", "BIGINT", "BIGINT", "BIGINT", "BIT"},
 		Rows: [][]any{
-			{int64(11), int64(101), "SELECT a FROM t", "<ShowPlanXML>a</ShowPlanXML>", int64(28), false, int64(1), int64(2), int64(40), int64(900)},
-			{int64(11), int64(102), "SELECT a FROM t", "<ShowPlanXML>b</ShowPlanXML>", int64(28), true, int64(1), int64(2), int64(40), int64(900)},
+			{int64(11), int64(101), "SELECT a FROM t", "<ShowPlanXML>a</ShowPlanXML>", int64(28), false, int64(1), int64(2), int64(40), int64(900), true},
+			{int64(11), int64(102), "SELECT a FROM t", "<ShowPlanXML>b</ShowPlanXML>", int64(28), true, int64(1), int64(2), int64(40), int64(900), true},
 			// query_plan NULL with query_plan_bytes 0: the Query Store holds no
 			// plan at all, which is not the same as one dropped by the cap.
-			{int64(22), int64(201), "SELECT b FROM u", nil, int64(0), false, int64(77), int64(3), int64(5), int64(12)},
+			{int64(22), int64(201), "SELECT b FROM u", nil, int64(0), false, int64(77), int64(3), int64(5), int64(12), false},
 		},
 	}
 	intervals := ResultSet{
@@ -406,6 +409,65 @@ func TestDetailWriterRecordsWhatTheBudgetRefused(t *testing.T) {
 	}
 }
 
+// detailIndexSelection reads back the two fields of _index.json that say why a
+// query is in the archive at all.
+func detailIndexSelection(t *testing.T, root, rel string) (forced int, byQuery map[int64]bool) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel), "_index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx struct {
+		Selection struct {
+			Forced int `json:"forced"`
+		} `json:"selection"`
+		Queries []struct {
+			QueryID int64 `json:"query_id"`
+			Forced  bool  `json:"forced"`
+		} `json:"queries"`
+	}
+	if err := json.Unmarshal(b, &idx); err != nil {
+		t.Fatal(err)
+	}
+	byQuery = map[int64]bool{}
+	for _, q := range idx.Queries {
+		byQuery[q.QueryID] = q.Forced
+	}
+	return idx.Selection.Forced, byQuery
+}
+
+// TestDetailWriterReadsForcedFromTheSelection is the case is_forced cannot
+// answer: query 33 has one plan with is_forced_plan = 0, and it is in the
+// archive only because force_failure_count > 0 put it there — a forcing
+// decision that has silently stopped being applied, which is precisely why the
+// forced CTE exists. Reading the flag from the plan row would file it as an
+// ordinary query and count it nowhere.
+//
+// Query 11, forced with TWO plans, pins the other half: the count is of
+// queries, not of plan rows.
+func TestDetailWriterReadsForcedFromTheSelection(t *testing.T) {
+	sets := detailSets()
+	sel := &sets[1].Set
+	sel.Rows = append(sel.Rows,
+		[]any{int64(33), int64(301), "SELECT c FROM v", "<ShowPlanXML>c</ShowPlanXML>", int64(28),
+			false, nil, nil, nil, nil, true})
+	root, rel, _, _ := runDetailWriter(t, sets)
+
+	forced, byQuery := detailIndexSelection(t, root, rel)
+	if !byQuery[33] {
+		t.Error("query 33 is recorded as not forced, but it is in the selection only because a plan of its own can no longer be forced")
+	}
+	if !byQuery[11] {
+		t.Error("query 11 is recorded as not forced although one of its plans is")
+	}
+	if byQuery[22] {
+		t.Error("query 22 is recorded as forced; it entered on its ranks alone")
+	}
+	if forced != 2 {
+		t.Errorf("selection.forced = %d, want 2 — it counts queries, and query 11's two plans are one query", forced)
+	}
+}
+
 func TestDetailWriterPublishesTheSelection(t *testing.T) {
 	_, _, st, _ := runDetailWriter(t, detailSets())
 	got := st.Selected["Sales"]
@@ -421,10 +483,11 @@ func profiledSets() []NamedResultSet {
 		Rows:    [][]any{{"Sales", int64(2), int64(1), "ON"}},
 	}
 	plans := ResultSet{
-		Columns: []string{"query_id", "plan_id", "match", "candidates", "query_plan"},
-		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "BIGINT", "NVARCHAR"},
+		Columns: []string{"query_id", "plan_id", "match", "candidates", "last_execution_time", "query_plan"},
+		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "BIGINT", "DATETIMEOFFSET", "NVARCHAR"},
 		Rows: [][]any{
-			{int64(11), int64(101), "plan_hash", int64(3), "<ShowPlanXML>profiled</ShowPlanXML>"},
+			{int64(11), int64(101), "plan_hash", int64(3),
+				time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC), "<ShowPlanXML>profiled</ShowPlanXML>"},
 		},
 	}
 	return []NamedResultSet{
@@ -553,44 +616,99 @@ func TestProfiledWriterRecordsAQueryWithNoMatchAsAnOmission(t *testing.T) {
 	}
 }
 
-// TestProfiledWriterRecordsExtraCandidatesAsOmissions pins the >1-row branch:
-// a second plan_id for the same query, sharing the hash (a recompile, or a
-// genuine collision), is named as an omission rather than silently dropped,
-// and only the first row's plan is ever written to disk.
-func TestProfiledWriterRecordsExtraCandidatesAsOmissions(t *testing.T) {
+// TestProfiledWriterWritesEveryDistinctPlanOfAQuery pins the >1-row branch. The
+// result set's grain is one row per (query_id, plan_id), so a second row for
+// query 11 is a SECOND QUERY STORE PLAN still resident in cache — a different
+// plan for the same query, which is the whole finding when a query has two.
+// It is written, like the detail writer writes every plan of a query.
+//
+// The hash-collision case is a different one and never reaches here: several
+// cached plan_handles for ONE plan_id are counted by `candidates`, inside the
+// SQL, and only the most recently executed of them is returned.
+func TestProfiledWriterWritesEveryDistinctPlanOfAQuery(t *testing.T) {
 	sets := profiledSets()
 	sets[1].Set.Rows = append(sets[1].Set.Rows,
-		[]any{int64(11), int64(102), "plan_hash", int64(2), "<ShowPlanXML>other</ShowPlanXML>"})
-	root := t.TempDir()
-	st := NewQueryStoreState()
-	st.Selected["Sales"] = []int64{11}
-	res, err := writerFor("query-store-profiled")(WriteRequest{
-		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
-		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
-		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
-		Sets:   sets,
-		State:  st,
-		Warn:   func(string) {},
-	})
-	if err != nil {
-		t.Fatalf("writer: %v", err)
+		[]any{int64(11), int64(102), "plan_hash", int64(2),
+			time.Date(2026, 8, 13, 9, 45, 0, 0, time.UTC), "<ShowPlanXML>other</ShowPlanXML>"})
+	root, rel, _ := runProfiledWriter(t, sets, []int64{11})
+	dir := filepath.Join(root, filepath.FromSlash(rel))
+	for _, name := range []string{"query_11.plan_101.actual.sqlplan", "query_11.plan_102.actual.sqlplan"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("missing %s: a distinct plan_id was discarded: %v", name, err)
+		}
 	}
-	dir := filepath.Join(root, filepath.FromSlash(res.Rel))
-	if _, err := os.Stat(filepath.Join(dir, "query_11.plan_101.actual.sqlplan")); err != nil {
-		t.Errorf("missing the written candidate's file: %v", err)
+	if o := indexOmissions(t, root, rel); len(o) != 0 {
+		t.Errorf("a distinct plan was recorded as an omission: %+v", o)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "query_11.plan_102.actual.sqlplan")); err == nil {
-		t.Error("wrote a file for the candidate that should have been recorded as an omission")
+	if got := len(profiledIndexPlans(t, root, rel)); got != 2 {
+		t.Errorf("_index.json lists %d plans, want both", got)
+	}
+}
+
+// A repeated plan_id cannot come out of the SQL as written — it keeps one
+// cached plan per plan_id — so this pins the guard for the day that ranking is
+// edited away: the file is written once and the repeat is named, rather than
+// overwriting a file and being counted twice.
+func TestProfiledWriterRecordsARepeatedPlanIDAsAnOmission(t *testing.T) {
+	sets := profiledSets()
+	sets[1].Set.Rows = append(sets[1].Set.Rows,
+		[]any{int64(11), int64(101), "plan_hash", int64(3),
+			time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC), "<ShowPlanXML>again</ShowPlanXML>"})
+	root, rel, _ := runProfiledWriter(t, sets, []int64{11})
+	if got := len(profiledIndexPlans(t, root, rel)); got != 1 {
+		t.Errorf("_index.json lists %d plans for one plan_id", got)
 	}
 	found := false
-	for _, o := range indexOmissions(t, root, res.Rel) {
-		if o.QueryID == 11 && o.PlanID == 102 &&
-			strings.Contains(o.Reason, "an additional candidate plan matched the same query_plan_hash and was not written") {
+	for _, o := range indexOmissions(t, root, rel) {
+		if o.QueryID == 11 && o.PlanID == 101 &&
+			strings.Contains(o.Reason, "a second row was returned for this plan_id") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("_index.json does not record plan 102 as an unwritten extra candidate: %+v", indexOmissions(t, root, res.Rel))
+		t.Errorf("the repeated plan_id was dropped without a trace: %+v", indexOmissions(t, root, rel))
+	}
+}
+
+// profiledIndexPlans reads back the plans array of a profiled _index.json.
+func profiledIndexPlans(t *testing.T, root, rel string) []struct {
+	QueryID       int64  `json:"query_id"`
+	PlanID        int64  `json:"plan_id"`
+	Candidates    int64  `json:"candidates"`
+	LastExecution string `json:"last_execution"`
+	PlanFile      string `json:"plan_file"`
+} {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel), "_index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx struct {
+		Plans []struct {
+			QueryID       int64  `json:"query_id"`
+			PlanID        int64  `json:"plan_id"`
+			Candidates    int64  `json:"candidates"`
+			LastExecution string `json:"last_execution"`
+			PlanFile      string `json:"plan_file"`
+		} `json:"plans"`
+	}
+	if err := json.Unmarshal(b, &idx); err != nil {
+		t.Fatal(err)
+	}
+	return idx.Plans
+}
+
+// A profiled plan comes out of a live cache, and when it last ran is what says
+// whether it is the plan from the incident being investigated. It is rendered
+// by the corpus encoder, like every other timestamp in the archive.
+func TestProfiledIndexRecordsWhenTheCachedPlanLastRan(t *testing.T) {
+	root, rel, _ := runProfiledWriter(t, profiledSets(), []int64{11})
+	plans := profiledIndexPlans(t, root, rel)
+	if len(plans) != 1 {
+		t.Fatalf("got %d plans in the index, want 1", len(plans))
+	}
+	if plans[0].LastExecution != "2026-08-13T09:30:00Z" {
+		t.Errorf("last_execution = %q, want the DATETIMEOFFSET the encoder renders", plans[0].LastExecution)
 	}
 }
 

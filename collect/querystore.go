@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strings"
 	"time"
 )
 
@@ -234,6 +235,19 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 			StatsFile: queryFileStem(id) + ".stats.json",
 			PlanFiles: []string{},
 		}
+		// Forced is a property of the SELECTION, not of a plan row, and it is
+		// read from the column the SQL projects for exactly this. Deriving it
+		// from is_forced — that is, from p.is_forced_plan — misses the case the
+		// forced CTE exists to catch: a plan with force_failure_count > 0 and
+		// is_forced_plan = 0 is a forcing decision that has silently stopped
+		// being applied, which is the whole reason it is collected, and it would
+		// have been recorded here as not forced at all. Counting per query
+		// rather than per plan matters for the same reason the cap does: one
+		// query with two forced plans is one query.
+		if boolAt(rows, 0, "is_forced_selection") {
+			entry.Forced = true
+			idx.Selection.Forced++
+		}
 		for _, metric := range rankMetrics {
 			if v, ok := int64At(rows, 0, "rank."+metric); ok {
 				// int64At leaves a NULL out of the map rather than storing zero,
@@ -282,10 +296,6 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 			}
 			seenPlan[planID] = true
 			entry.Plans = append(entry.Plans, planID)
-			if boolAt(rows, r, "is_forced") {
-				entry.Forced = true
-				idx.Selection.Forced++
-			}
 
 			size, _ := int64At(rows, r, "query_plan_bytes")
 			plan, present := stringAt(rows, r, "query_plan")
@@ -399,8 +409,14 @@ type profiledPlan struct {
 	// plan's match was unambiguous; it says nothing about the query's other
 	// plans, each of which carries its own count. Above 1 is not a red flag
 	// by itself: a bare recompile adds a plan_id to the same hash.
-	Candidates int64  `json:"candidates"`
-	PlanFile   string `json:"plan_file,omitempty"`
+	Candidates int64 `json:"candidates"`
+	// LastExecution is when the cached plan last ran, rendered by the corpus
+	// encoder like every other timestamp in the archive. It is the field that
+	// says whether this plan is the one from the incident being investigated:
+	// a profiled plan is pulled from a live cache, and one that last ran three
+	// weeks ago answers a different question from one that ran a minute ago.
+	LastExecution json.RawMessage `json:"last_execution,omitempty"`
+	PlanFile      string          `json:"plan_file,omitempty"`
 }
 
 // profiledIndex is the profiled-plan directory's table of contents. It always
@@ -486,48 +502,64 @@ func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
 			continue
 		}
 
-		if len(rows.Rows) > 1 {
-			// A query_plan_hash collision, or the DMF surfacing more than one
-			// cached plan for the same query. The SQL's own row order picks
-			// the one that gets written; the rest are named as omissions
-			// rather than dropped without a trace.
-			for extra := 1; extra < len(rows.Rows); extra++ {
-				extraPlanID, _ := int64At(rows, extra, "plan_id")
-				omit(id, extraPlanID, "an additional candidate plan matched the same query_plan_hash and was not written", 0)
+		// Every row, not just the first. The result set's grain is one row per
+		// (query_id, plan_id): a query with three Query Store plans still in
+		// cache produces three DISTINCT plans, and they are three different
+		// answers to "what does this query actually do". Writing one and
+		// calling the rest extra candidates would discard real plans under a
+		// reason describing something else entirely — the collision case is one
+		// plan_id with several cached plan_handles, and that is what
+		// `candidates` counts, entirely inside the SQL.
+		//
+		// This also makes 022 agree with 021, which has always written one file
+		// per plan for a query.
+		seenPlan := map[int64]bool{}
+		for r := range rows.Rows {
+			planID, _ := int64At(rows, r, "plan_id")
+			if seenPlan[planID] {
+				// The SQL keeps one cached plan per plan_id, so this cannot
+				// happen unless that ranking is edited away. Named rather than
+				// dropped silently, because a repeated plan_id would otherwise
+				// overwrite a file and count it twice.
+				omit(id, planID, "a second row was returned for this plan_id and was not written", 0)
+				continue
 			}
-		}
+			seenPlan[planID] = true
 
-		planID, _ := int64At(rows, 0, "plan_id")
-		match, _ := stringAt(rows, 0, "match")
-		candidates, _ := int64At(rows, 0, "candidates")
-		plan, present := stringAt(rows, 0, "query_plan")
-		size, _ := int64At(rows, 0, "query_plan_bytes")
+			match, _ := stringAt(rows, r, "match")
+			candidates, _ := int64At(rows, r, "candidates")
+			plan, present := stringAt(rows, r, "query_plan")
+			size, _ := int64At(rows, r, "query_plan_bytes")
 
-		entry := profiledPlan{QueryID: id, PlanID: planID, Match: match, Candidates: candidates}
-
-		switch {
-		case !present && size > maxPlanBytes:
-			omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap and was not sent", size, maxPlanBytes), size)
-		case !present:
-			// A single-operator plan for a trivial query and a NULL past the
-			// 128-nesting-level ceiling are indistinguishable from here: the
-			// DMF does not say which happened, so neither is claimed.
-			omit(id, planID, "no plan XML returned for this plan_id", 0)
-		case len(plan) > maxPlanBytes:
-			omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap", len(plan), maxPlanBytes), int64(len(plan)))
-		default:
-			name := planFileName(id, planID, ".actual")
-			n, ok, err := writeFile(req, rel, name, []byte(plan))
-			if err != nil {
-				return res, err
+			entry := profiledPlan{
+				QueryID: id, PlanID: planID, Match: match, Candidates: candidates,
+				LastExecution: encodedAt(rows, r, "last_execution_time"),
 			}
-			if !ok {
-				omit(id, planID, budgetReason, int64(len(plan)))
-			} else {
-				res.Bytes += n
-				res.PlanFiles++
-				entry.PlanFile = name
-				idx.Plans = append(idx.Plans, entry)
+
+			switch {
+			case !present && size > maxPlanBytes:
+				omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap and was not sent", size, maxPlanBytes), size)
+			case !present:
+				// A single-operator plan for a trivial query and a NULL past the
+				// 128-nesting-level ceiling are indistinguishable from here: the
+				// DMF does not say which happened, so neither is claimed.
+				omit(id, planID, "no plan XML returned for this plan_id", 0)
+			case len(plan) > maxPlanBytes:
+				omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap", len(plan), maxPlanBytes), int64(len(plan)))
+			default:
+				name := planFileName(id, planID, ".actual")
+				n, ok, err := writeFile(req, rel, name, []byte(plan))
+				if err != nil {
+					return res, err
+				}
+				if !ok {
+					omit(id, planID, budgetReason, int64(len(plan)))
+				} else {
+					res.Bytes += n
+					res.PlanFiles++
+					entry.PlanFile = name
+					idx.Plans = append(idx.Plans, entry)
+				}
 			}
 		}
 	}
@@ -548,6 +580,28 @@ func writeProfiledIndex(req WriteRequest, rel string, idx profiledIndex) (int, e
 	}
 	b = append(b, '\n')
 	return req.Out.writeUnbudgeted(path.Join(rel, "_index.json"), b)
+}
+
+// encodedAt renders one cell with the corpus encoder, for the same reason
+// indexHeader does it for a whole result set: a timestamp in _index.json has to
+// be formatted by the code that formats every other timestamp in the archive,
+// not by a second convention that drifts from it. It returns nil for an absent
+// or NULL cell, which the omitempty on the field then drops — a plan whose last
+// execution time the DMF did not report must not carry a zero one.
+func encodedAt(s ResultSet, row int, col string) json.RawMessage {
+	v, ok := valueAt(s, row, col)
+	if !ok || v == nil {
+		return nil
+	}
+	sqlType := ""
+	if i := colIndex(s, col); i >= 0 && i < len(s.Types) {
+		sqlType = strings.ToUpper(s.Types[i])
+	}
+	raw, _ := encodeValue(v, sqlType)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	return raw
 }
 
 // indexHeader borrows the corpus encoder for the state and window blocks, so

@@ -52,6 +52,15 @@
 -- writes an index saying nothing matched. That is a clean degradation and it
 -- needs no coordination code on either side.
 --
+-- THE PLAN CACHE IS READ TWICE, once for matched_plans in root and once for
+-- the rows themselves, and the cache is a live structure: a plan can age out
+-- between the two statements. THE ROWS ARE AUTHORITATIVE — they are what
+-- produced the files on disk — and matched_plans is the count as it stood a
+-- moment earlier. The second pass exists because a count agreeing with itself
+-- by construction would say nothing: it is what makes a matched_plans of zero
+-- explicable rather than merely observed. A small disagreement between the two
+-- is the cache moving, not a defect.
+--
 -- The id list is read with CHARINDEX over a comma-wrapped string and NOT with
 -- STRING_SPLIT. STRING_SPLIT needs database compatibility level 130, or the
 -- ALLOW_BUILTIN_TVF_IN_ALL_COMPAT_LEVELS scoped configuration, and a database
