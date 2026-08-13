@@ -44,10 +44,19 @@
 -- answered from inside SQL Server, so the collector reports the facts and the
 -- analysis layer is expected to say so.
 --
--- SQL Server 2016 is the floor for softnuma_configuration; the file is gated
--- accordingly. Everything else predates 2012.
+-- SQL Server 2016 SP2 IS THE FLOOR, AND IT IS NOT softnuma_configuration THAT
+-- SETS IT. Four columns of sys.dm_os_sys_info are documented as "SQL Server
+-- 2016 (13.x) SP2 and later": socket_count, cores_per_socket, numa_node_count
+-- and softnuma_configuration. They sit in the root SELECT, so on 2016 RTM or
+-- SP1 the batch does not lose a column — it fails outright with an invalid
+-- column name, and the collector produces nothing at all.
+--
+-- The floor said 13.0 until this was checked. That is one build family below
+-- what the columns need, and the gap is invisible on any instance from SP2
+-- upwards: the 2016 SP3 and 2017 instances this corpus has been run against
+-- would never have shown it. Everything else here predates 2012.
 
--- @min_version: 13.0
+-- @min_version: 13.0.5026
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
