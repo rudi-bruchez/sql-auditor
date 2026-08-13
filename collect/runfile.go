@@ -83,6 +83,39 @@ func (w *runWriter) write(rel string, payload []byte) (int, error) {
 	return len(payload), nil
 }
 
+// writeUnbudgeted saves payload the way write does — same root, same slash
+// conversion, same directory creation, same Showplan inspection, same running
+// byte total — but neither consults nor is refused by the budget.
+//
+// It exists for the files that describe what a run contains: MANIFEST.txt,
+// _run.json, and a collector directory's _index.json. The reasoning above
+// applies unchanged to all three. An archive that cannot describe itself is
+// worse than a truncated one, and a budget that dies one file before the index
+// would leave query texts and execution plans on disk with nothing saying they
+// are there — exactly the undescribed directory the index exists to prevent.
+// Its bytes still count towards spent, so the total the manifest reports stays
+// the total actually written; it just cannot be turned away.
+//
+// This is not a second write path. It is the same choke point with the budget
+// suspended, and it must stay that way: the Showplan inspection is the reason
+// the choke point is single, and skipping it here would put a plan on disk that
+// the archive never admits to holding.
+func (w *runWriter) writeUnbudgeted(rel string, payload []byte) (int, error) {
+	full := filepath.Join(w.root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return 0, fmt.Errorf("runWriter: creating directory for %s: %w", rel, err)
+	}
+	if err := os.WriteFile(full, payload, 0o644); err != nil {
+		return 0, fmt.Errorf("runWriter: writing %s: %w", rel, err)
+	}
+
+	w.spent += len(payload)
+	if containsShowplan(payload) {
+		w.sawShowplan = true
+	}
+	return len(payload), nil
+}
+
 // overBudget reports whether the writer has spent its full budget.
 func (w *runWriter) overBudget() bool {
 	return w.spent >= w.budget

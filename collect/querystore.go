@@ -50,6 +50,11 @@ type WriteRequest struct {
 // and either case still leaves the verbatim SQL of a production workload in the
 // archive. An archive whose manifest says it holds none would be the very
 // defect the disclosure section exists to prevent, reached from the other side.
+//
+// The counts and Bytes are valid even when the writer returns a non-nil error.
+// A writer that fails halfway has already put files on disk, and a caller that
+// discarded the counts on error would compute the disclosure from a subset of
+// what the archive actually holds. Accumulate them either way.
 type WriteResult struct {
 	Rel       string
 	Bytes     int
@@ -60,13 +65,21 @@ type WriteResult struct {
 // ScriptWriter turns materialised result sets into files.
 type ScriptWriter func(WriteRequest) (WriteResult, error)
 
-// writerFor resolves an @writer name to its implementation, and returns nil for
-// a name it does not know so the caller can refuse the script rather than fall
+// writerFor resolves an @writer name to its implementation. It returns nil both
+// for a name it does not know and for a name that is declared in KnownWriters
+// but not yet implemented, so the caller can refuse the script rather than fall
 // back to the encoder and quietly emit a document where a directory was meant.
+//
+// The two sets are meant to stay in step, and TestWriterForCoversKnownWriters
+// fails the moment they drift, listing the one gap that is expected today.
 func writerFor(name string) ScriptWriter {
 	switch name {
 	case "query-store-detail":
 		return writeQueryStoreDetail
+	case "query-store-profiled":
+		// Task 6 owns this one. Declared here rather than left to the default
+		// so the gap is a stated absence instead of an unrecognised name.
+		return nil
 	}
 	return nil
 }
@@ -234,11 +247,20 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 		// The text: the first non-NULL one. Every row of a query carries the
 		// same text, one row per plan.
 		text := ""
+		haveText := false
 		for r := range rows.Rows {
 			if s, ok := stringAt(rows, r, "text"); ok {
-				text = s
+				text, haveText = s, true
 				break
 			}
+		}
+		if !haveText {
+			// The file is still written, empty: over-disclosure is the safe
+			// direction and a missing file would be read as a collector that
+			// never looked. But an empty .sql and a query whose text the Query
+			// Store no longer holds are different facts, and without this line
+			// the index would claim a text file that carries no text.
+			omit(id, 0, "the Query Store holds no text for this query_id; the file was written empty", 0)
 		}
 		if n, ok, err := writeFile(req, rel, entry.TextFile, []byte(text)); err != nil {
 			return res, err
@@ -250,8 +272,17 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 			entry.TextFile = ""
 		}
 
+		// Deduplicated like the query ids above. A repeated (query_id, plan_id)
+		// would write the same filename twice, count the plan and its bytes
+		// twice, and list the name twice in the index — three lies about the
+		// same file.
+		seenPlan := map[int64]bool{}
 		for r := range rows.Rows {
 			planID, _ := int64At(rows, r, "plan_id")
+			if seenPlan[planID] {
+				continue
+			}
+			seenPlan[planID] = true
 			entry.Plans = append(entry.Plans, planID)
 			if boolAt(rows, r, "is_forced") {
 				entry.Forced = true
@@ -341,16 +372,17 @@ func writeFile(req WriteRequest, rel, name string, payload []byte) (int, bool, e
 	return n, true, nil
 }
 
-// writeIndex writes _index.json last, so it describes what is actually there.
-// It goes through the budget check like everything else, but its refusal is an
-// error: a directory without its index cannot be read at all.
+// writeIndex writes _index.json last, so it describes what is actually there,
+// and outside the budget, so it is written at all. The budget is what produces
+// the truncation the index has to report; letting it refuse the report as well
+// would leave query texts and execution plans on disk with nothing naming them.
 func writeIndex(req WriteRequest, rel string, idx detailIndex) (int, error) {
 	b, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("query-store-detail: encoding _index.json: %w", err)
 	}
 	b = append(b, '\n')
-	return req.Out.write(path.Join(rel, "_index.json"), b)
+	return req.Out.writeUnbudgeted(path.Join(rel, "_index.json"), b)
 }
 
 // indexHeader borrows the corpus encoder for the state and window blocks, so
