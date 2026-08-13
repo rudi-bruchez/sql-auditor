@@ -137,7 +137,13 @@ CROSS APPLY (SELECT SUM(CASE WHEN p.index_id IN (0, 1) THEN p.row_count         
              FROM sys.dm_db_partition_stats AS p
              WHERE p.object_id = t.object_id) AS ps
 WHERE t.is_ms_shipped = 0
-ORDER BY ps.row_count DESC
+/* object_id is the tie-break, and 060.columns.sql repeats this ORDER BY
+   verbatim. Two tables with equal row counts — empty ones, of which a real
+   database has many — would otherwise be ordered by nothing in particular, and
+   the 200th place could go to a different table in each of the two statements.
+   The archive would then carry the columns of a table it does not list, and
+   list a table whose columns are missing, with nothing anywhere saying why. */
+ORDER BY ps.row_count DESC, t.object_id
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* Untrusted and disabled are reported separately because they are different

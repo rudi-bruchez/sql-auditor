@@ -96,6 +96,13 @@ type WriteResult struct {
 	Bytes     int
 	PlanFiles int
 	TextFiles int
+	// DefinitionFiles counts module bodies written by the object-definitions
+	// writer. It is a third counter rather than a reuse of TextFiles because
+	// the two drive DIFFERENT disclosures: TextFiles latches
+	// Collected.QueryStoreDetail, and a run that collected view definitions and
+	// no Query Store at all would then have MANIFEST.txt announce execution
+	// plans the archive does not hold.
+	DefinitionFiles int
 }
 
 // ScriptWriter turns materialised result sets into files.
@@ -114,6 +121,8 @@ func writerFor(name string) ScriptWriter {
 		return writeQueryStoreDetail
 	case "query-store-profiled":
 		return writeQueryStoreProfiled
+	case "object-definitions":
+		return writeObjectDefinitions
 	}
 	return nil
 }

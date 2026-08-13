@@ -140,6 +140,13 @@ type CollectedKinds struct {
 	// cache of the whole instance through sys.dm_exec_query_stats, where every
 	// other per-database collector sees only the database it was pointed at.
 	QueryStoreProfiledPlans bool `json:"query_store_profiled_plans"`
+
+	// ObjectDefinitions marks that the source of views, procedures, functions
+	// and triggers is in the archive. It is the client's own code rather than
+	// anything the server derived: it can name linked servers and their
+	// addresses, embed literals, and — in the old procedures this exports
+	// alongside the new — carry a credential in clear inside an OPENQUERY.
+	ObjectDefinitions bool `json:"object_definitions"`
 }
 
 type Manifest struct {
@@ -396,6 +403,15 @@ What is in here that names things:
 		fmt.Fprintln(b, "    belonging to those databases are kept.")
 		fmt.Fprintln(b, "    Collected because --query-store-plan-stats was passed.")
 	}
+	if m.Collected.ObjectDefinitions {
+		fmt.Fprintln(b, "  - The source of the database's views, stored procedures, functions and")
+		fmt.Fprintln(b, "    triggers, one file each. This is code written here rather than")
+		fmt.Fprintln(b, "    anything the server derived: it can name linked servers and their")
+		fmt.Fprintln(b, "    addresses, embed values as literals, and carry a credential in clear")
+		fmt.Fprintln(b, "    inside an OPENQUERY or an EXECUTE AS. Encrypted modules are listed")
+		fmt.Fprintln(b, "    but their source is not, because the server does not return it.")
+		fmt.Fprintln(b, "    Collected because --include-object-definitions was passed.")
+	}
 	// Scoped deliberately. The redaction this describes applies to the run
 	// settings block and to nothing else, because that is the only place the
 	// collector masks anything. An unqualified "secrets are masked" would be a
@@ -410,7 +426,8 @@ the window and per-database limits the Query Store extraction was given; any
 setting whose name marks it as a password, token or other secret is replaced
 with "(redacted)" before that block is written.
 `)
-	if m.Collected.SessionText || m.Collected.QueryStoreDetail || m.Collected.QueryStoreProfiledPlans {
+	if m.Collected.SessionText || m.Collected.QueryStoreDetail || m.Collected.QueryStoreProfiledPlans ||
+		m.Collected.ObjectDefinitions {
 		b.WriteString(`
 Most of this is metadata about the estate rather than the data held in it,
 but the captured statement text can carry values copied from application

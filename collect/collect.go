@@ -49,6 +49,18 @@ const FlagEstimateCompression = "estimate_compression"
 // and every object name the statement touched.
 const FlagQueryStoreDetail = "query_store_detail"
 
+// FlagObjectDefinitions gates the export of module source: the body of every
+// view, stored procedure, function and trigger.
+//
+// It is a third decision and not a widening of either of the others, because
+// what it discloses comes from somewhere else again. Session text is what was
+// running; the Query Store is what has run; a module body is code the client
+// wrote and that no execution needs to have touched at all. It routinely names
+// linked servers, and an OPENQUERY or an EXECUTE AS can carry a credential in
+// clear — in a procedure nobody has opened in years, which is exactly the kind
+// this exports first.
+const FlagObjectDefinitions = "object_definitions"
+
 // FlagQueryStorePlanStats gates the search for the last profiled plan of each
 // extracted query.
 //
@@ -386,6 +398,26 @@ func collectsSessionText(plan []plannedScript) []string {
 // longer reads this, and prose must not trip the disclosure.
 func readsSessionText(s Script) bool {
 	return strings.Contains(strings.ToLower(StripSQLComments(s.SQL)), "dm_exec_sql_text")
+}
+
+// readsObjectDefinitions looks for the two ways a script can obtain the body of
+// a module. It exists for the reason readsSessionText does: --queries-dir
+// accepts a corpus this project has never seen, and a file there selecting
+// sys.sql_modules.definition without declaring @requires_flag would put the
+// client's own code into an archive whose manifest says object_definitions:
+// false.
+//
+// It only produces a WARNING, never the disclosure. The disclosure is latched
+// from the definition files actually written, because reading is not emitting:
+// 010.objects.sql could one day count modules by joining sys.sql_modules
+// without exporting a line of one, and a matcher alone would have MANIFEST.txt
+// announce source code the archive does not hold.
+//
+// Comments are stripped first, so a file explaining in prose why it does not
+// read definitions does not trip the warning.
+func readsObjectDefinitions(s Script) bool {
+	sql := strings.ToLower(StripSQLComments(s.SQL))
+	return strings.Contains(sql, "sql_modules") || strings.Contains(sql, "object_definition")
 }
 
 // corpusError names the directory the operator actually typed. os.DirFS roots
@@ -881,6 +913,12 @@ func discloseWrites(m *Manifest, rw *runWriter, s Script, res WriteResult) {
 	if s.Writer == "query-store-profiled" && res.PlanFiles > 0 {
 		m.Collected.QueryStoreProfiledPlans = true
 	}
+	// Same rule, third disclosure: from the definitions written, never from the
+	// flag passed. A run with the option on against a database of nothing but
+	// tables discloses no module source, because it collected none.
+	if res.DefinitionFiles > 0 {
+		m.Collected.ObjectDefinitions = true
+	}
 }
 
 // Run executes the full pipeline. It returns an exit code rather than
@@ -896,6 +934,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		"db_include":           o.Config.DBInclude,
 		"db_exclude":           o.Config.DBExclude,
 		"include_session_text": fmt.Sprint(o.Flags[FlagIncludeSessionText]),
+		"object_definitions":   fmt.Sprint(o.Flags[FlagObjectDefinitions]),
 
 		"query_store_detail":     fmt.Sprint(o.Flags[FlagQueryStoreDetail]),
 		"query_store_plan_stats": fmt.Sprint(o.Flags[FlagQueryStorePlanStats]),
@@ -1101,6 +1140,22 @@ func Run(ctx context.Context, o Options) (int, error) {
 				"This archive contains session statement text and says so, but the "+
 				"query should carry the gate so the default run does not collect it.",
 			path, FlagIncludeSessionText))
+	}
+	// The same check for module source. Only a warning: the disclosure itself
+	// is latched from the files written, in discloseWrites.
+	for _, p := range plan {
+		if p.Skip != "" || p.Script.LintError != "" || p.Script.RequiresFlag == FlagObjectDefinitions {
+			continue
+		}
+		if !readsObjectDefinitions(p.Script) {
+			continue
+		}
+		m.Warnings = append(m.Warnings, fmt.Sprintf(
+			"%s reads module definitions without declaring @requires_flag: %s. "+
+				"If it exports them, this archive holds source code written here — which "+
+				"can name linked servers and embed credentials — and the query should carry "+
+				"the gate so the default run does not collect it.",
+			p.Script.Path, FlagObjectDefinitions))
 	}
 
 	// A run folder that cannot be prepared is the operator's to fix — a --keep

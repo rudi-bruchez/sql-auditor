@@ -107,6 +107,14 @@ func run() int {
 		// Off by default for cost, not for privacy. The estimate samples real
 		// data into tempdb, and the objects worth asking about are the large
 		// ones — which is precisely when it hurts.
+		// Off by default, and for privacy rather than cost: this exports the
+		// client's own code. A view or a procedure names linked servers, can
+		// embed values as literals, and now and then holds a credential in
+		// clear inside an OPENQUERY. Turning it on changes what MANIFEST.txt
+		// discloses, so the archive says so.
+		objectDefinitions = fs.Bool("include-object-definitions", false,
+			"also collect the source of views, procedures, functions and triggers — "+
+				"this is code written on this server and may contain credentials")
 		estimateCompression = fs.Bool("estimate-compression", false,
 			"also estimate page-compression savings on the largest uncompressed objects — "+
 				"this samples data into tempdb and is slow on large tables")
@@ -259,6 +267,7 @@ func run() int {
 			collect.FlagEstimateCompression: *estimateCompression,
 			collect.FlagQueryStoreDetail:    *queryStoreDetail,
 			collect.FlagQueryStorePlanStats: *queryStorePlanStats,
+			collect.FlagObjectDefinitions:   *objectDefinitions,
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -306,6 +315,12 @@ Options (check, collect):
                               the login, host and program names behind them.
                               Off by default: that text can contain application
                               data. MANIFEST.txt discloses it when it is on.
+  --include-object-definitions
+                              also collect the source of views, procedures,
+                              functions and triggers, one file each. Off by
+                              default: this is code written on this server and
+                              can hold credentials inside an OPENQUERY.
+                              MANIFEST.txt discloses it when it is on.
   --estimate-compression      also estimate page-compression savings on the largest
                               uncompressed objects. Off by default for cost: it
                               samples data into tempdb and is slow on big tables.

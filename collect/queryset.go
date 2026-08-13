@@ -52,6 +52,7 @@ var KnownFlags = map[string]string{
 	"estimate_compression":   "--estimate-compression",
 	"query_store_detail":     "--query-store-detail",
 	"query_store_plan_stats": "--query-store-plan-stats",
+	"object_definitions":     "--include-object-definitions",
 }
 
 // KnownWriters is the closed set of names @writer accepts, mapped to the
@@ -60,6 +61,7 @@ var KnownFlags = map[string]string{
 var KnownWriters = map[string]string{
 	"query-store-detail":   "one directory per database: query text, plans and per-interval statistics",
 	"query-store-profiled": "the last profiled plan, when the instance still holds one",
+	"object-definitions":   "one directory per database: the source of each view, procedure, function and trigger",
 }
 
 var (
