@@ -56,73 +56,86 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_at],
        (SELECT COUNT(*) FROM msdb.dbo.log_shipping_primary_databases)   AS [counts.primary_databases],
        (SELECT COUNT(*) FROM msdb.dbo.log_shipping_secondary_databases) AS [counts.secondary_databases],
-       /* Whether this instance is the monitor for anything. When it is not, the
-          timestamps below are NULL and that is why. */
+       /* Whether this instance holds monitor records. When it does not, every
+          timestamp below is NULL and this is why. */
        (SELECT COUNT(*) FROM msdb.dbo.log_shipping_monitor_primary)     AS [counts.monitored_primaries],
        (SELECT COUNT(*) FROM msdb.dbo.log_shipping_monitor_secondary)   AS [counts.monitored_secondaries],
        (SELECT COUNT(*) FROM msdb.dbo.log_shipping_monitor_error_detail) AS [counts.recorded_errors],
        200                                                        AS [errors_listing_cap]
 OPTION (RECOMPILE, MAXDOP 1);
 
+/* The primary side. monitor_server is on the configuration table, and the
+   backup timestamps on the monitor table — they are two different tables and
+   an earlier version of this file took both from the second, which does not
+   have the first. */
 SELECT p.primary_database                                         AS [database],
        p.backup_directory                                         AS [backup_directory],
        p.backup_share                                             AS [backup_share],
        p.backup_retention_period                                  AS [retention_minutes],
-       p.backup_compression                                       AS [compression],
+       p.monitor_server                                           AS [monitor_server],
        mp.last_backup_file                                        AS [last_backup_file],
        CONVERT(varchar(23), mp.last_backup_date, 126)             AS [last_backup_at],
        /* Subtraction of two measured instants: see the header on why this is
-          computed and the Always On lag is not. NULL when the monitor for this
-          database lives on another instance. */
+          computed and the Always On lag is not. NULL when this instance holds
+          no monitor record for the database. */
        DATEDIFF(second, mp.last_backup_date, GETDATE())           AS [seconds_since_last_backup],
        mp.backup_threshold                                        AS [backup_threshold_minutes],
-       CAST(mp.is_backup_alert_enabled AS int)                    AS [backup_alert_enabled],
-       mp.monitor_server                                          AS [monitor_server]
-FROM msdb.dbo.log_shipping_primary_databases  AS p
-LEFT JOIN msdb.dbo.log_shipping_monitor_primary AS mp
-       ON mp.primary_id = p.primary_id
+       CAST(mp.threshold_alert_enabled AS int)                    AS [backup_alert_enabled]
+FROM msdb.dbo.log_shipping_primary_databases    AS p
+LEFT JOIN msdb.dbo.log_shipping_monitor_primary AS mp ON mp.primary_id = p.primary_id
 ORDER BY p.primary_database
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* Copy and restore are two separate lags and two separate failures: a secondary
-   can be copying files it never restores, which looks healthy from the primary's
-   side and is not. Both are projected. */
+/* The secondary side, and it takes THREE tables rather than two.
+   log_shipping_secondary_databases holds the per-database restore settings and
+   does NOT hold the primary it follows; log_shipping_secondary holds that, one
+   row per secondary_id; the monitor table holds the timestamps. Joining the
+   first to the monitor on a primary name the first does not have was the defect
+   this file shipped with, and it could not compile anywhere.
+
+   Copy and restore are two separate lags and two separate failures: a secondary
+   can be copying files it never restores, which looks healthy from the
+   primary's side and is not. Both are projected. */
 SELECT s.secondary_database                                       AS [database],
-       s.primary_server                                           AS [primary_server],
-       s.primary_database                                         AS [primary_database],
+       sec.primary_server                                         AS [primary_server],
+       sec.primary_database                                       AS [primary_database],
+       sec.monitor_server                                         AS [monitor_server],
        s.restore_delay                                            AS [restore_delay_minutes],
        s.restore_mode                                             AS [restore_mode],
        CAST(s.disconnect_users AS int)                            AS [disconnect_users],
+       CAST(s.restore_all AS int)                                 AS [restore_all],
        ms.last_copied_file                                        AS [last_copied_file],
        CONVERT(varchar(23), ms.last_copied_date, 126)             AS [last_copied_at],
        DATEDIFF(second, ms.last_copied_date, GETDATE())           AS [seconds_since_last_copy],
        ms.last_restored_file                                      AS [last_restored_file],
        CONVERT(varchar(23), ms.last_restored_date, 126)           AS [last_restored_at],
        DATEDIFF(second, ms.last_restored_date, GETDATE())         AS [seconds_since_last_restore],
+       /* The engine's own measure of how stale the restored data is: minutes
+          between the backup being taken on the primary and restored here. */
+       ms.last_restored_latency                                   AS [last_restored_latency_minutes],
        ms.restore_threshold                                       AS [restore_threshold_minutes],
-       CAST(ms.is_restore_alert_enabled AS int)                   AS [restore_alert_enabled],
-       ms.monitor_server                                          AS [monitor_server]
-FROM msdb.dbo.log_shipping_secondary_databases AS s
-LEFT JOIN msdb.dbo.log_shipping_secondary      AS sec
-       ON sec.primary_server = s.primary_server AND sec.primary_database = s.primary_database
+       CAST(ms.threshold_alert_enabled AS int)                    AS [restore_alert_enabled]
+FROM msdb.dbo.log_shipping_secondary_databases    AS s
+JOIN msdb.dbo.log_shipping_secondary              AS sec ON sec.secondary_id = s.secondary_id
 LEFT JOIN msdb.dbo.log_shipping_monitor_secondary AS ms
-       ON ms.secondary_database = s.secondary_database
-      AND ms.primary_server = s.primary_server
-      AND ms.primary_database = s.primary_database
+       ON ms.secondary_id = s.secondary_id
+      AND ms.secondary_database = s.secondary_database
 ORDER BY s.secondary_database
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* The 200 most recent errors. Capped, and the cap is projected in the root: a
-   log shipping chain that has been failing for months would otherwise fill the
-   archive with the same message. */
+   chain failing for months would otherwise fill the archive with one message.
+   agent_id, agent_type and session_id together identify a session, which is how
+   the documentation says to group these rows. */
 SELECT TOP (200)
        e.database_name                                            AS [database],
        e.agent_type                                               AS [agent_type],
+       e.agent_id                                                 AS [agent_id],
        e.session_id                                               AS [session_id],
-       e.message_id                                               AS [message_id],
+       e.sequence_number                                          AS [sequence_number],
        e.message                                                  AS [message],
-       CONVERT(varchar(23), e.log_time, 126)                      AS [logged_at],
-       e.source                                                   AS [source]
+       e.source                                                   AS [source],
+       CONVERT(varchar(23), e.log_time, 126)                      AS [logged_at]
 FROM msdb.dbo.log_shipping_monitor_error_detail AS e
-ORDER BY e.log_time DESC
+ORDER BY e.log_time DESC, e.sequence_number DESC
 OPTION (RECOMPILE, MAXDOP 1);

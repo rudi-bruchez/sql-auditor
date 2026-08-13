@@ -37,6 +37,12 @@
 -- SYNCHRONIZING on an asynchronous replica is the normal steady state, not a
 -- problem, and the collector has no way to know which the reader is looking at.
 --
+-- db_failover WAS PROJECTED HERE AND IS NOT ANY MORE. It is SQL Server 2016,
+-- and one column newer than the declared floor fails the WHOLE batch with
+-- "Invalid column name" — so keeping it would have cost every 2012 and 2014
+-- instance the databases result set this file exists for, to gain one flag. It
+-- is in 021 with the rest of what 2016 added.
+--
 -- SQL Server 2012 is the floor and every column below is 2012. What 2016 added
 -- is in 021.always-on-2016.sql, in its own file, so that this one keeps working
 -- on 2012 and 2014.
@@ -66,8 +72,7 @@ SELECT g.name                                                     AS [group],
        ags.synchronization_health_desc                            AS [synchronization_health],
        g.failure_condition_level                                  AS [failure_condition_level],
        g.health_check_timeout                                     AS [health_check_timeout_ms],
-       g.automated_backup_preference_desc                         AS [backup_preference],
-       CAST(g.db_failover AS int)                                 AS [database_level_failover]
+       g.automated_backup_preference_desc                         AS [backup_preference]
 FROM sys.availability_groups                        AS g
 LEFT JOIN sys.dm_hadr_availability_group_states     AS ags ON ags.group_id = g.group_id
 ORDER BY g.name

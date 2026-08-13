@@ -285,13 +285,21 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 				"",
 				"Collectors that need it:",
 			}, indentList(collectorsFor(in.Scripts, "log_shipping"))...),
+			// OBJECT::dbo.x and the PROBED login, exactly like the backup
+			// history section above. A first version of this wrote three-part
+			// names and a hardcoded "sqlauditor": GRANT does not accept a
+			// database-qualified name at all, and the hardcoded principal would
+			// have granted the rights to whatever unrelated login happens to
+			// carry that name on the client's instance — silently, since the
+			// script runs green either way. The login here is the one the
+			// server itself reported through SUSER_SNAME.
 			statement: []string{
-				"GRANT SELECT ON msdb.dbo.log_shipping_primary_databases TO sqlauditor;",
-				"GRANT SELECT ON msdb.dbo.log_shipping_secondary_databases TO sqlauditor;",
-				"GRANT SELECT ON msdb.dbo.log_shipping_secondary TO sqlauditor;",
-				"GRANT SELECT ON msdb.dbo.log_shipping_monitor_primary TO sqlauditor;",
-				"GRANT SELECT ON msdb.dbo.log_shipping_monitor_secondary TO sqlauditor;",
-				"GRANT SELECT ON msdb.dbo.log_shipping_monitor_error_detail TO sqlauditor;",
+				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.log_shipping_primary_databases TO %s;", login),
+				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.log_shipping_secondary_databases TO %s;", login),
+				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.log_shipping_secondary TO %s;", login),
+				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.log_shipping_monitor_primary TO %s;", login),
+				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.log_shipping_monitor_secondary TO %s;", login),
+				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.log_shipping_monitor_error_detail TO %s;", login),
 			},
 		})
 	}
