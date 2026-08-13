@@ -14,6 +14,41 @@ func sampleSet() ResultSet {
 	}
 }
 
+func TestSetByNameFindsByName(t *testing.T) {
+	sets := []NamedResultSet{
+		{Spec: ResultSpec{Name: "queries"}, Set: sampleSet()},
+	}
+	s, ok := setByName(sets, "queries")
+	if !ok {
+		t.Fatal("setByName(queries) not found")
+	}
+	if len(s.Columns) != 4 {
+		t.Errorf("got %d columns, want 4", len(s.Columns))
+	}
+	if _, ok := setByName(sets, "absent"); ok {
+		t.Error("setByName(absent) reported found")
+	}
+}
+
+func TestBoolAt(t *testing.T) {
+	s := sampleSet()
+	if v := boolAt(s, 0, "forced"); !v {
+		t.Errorf("boolAt(0,forced) = %v, want true", v)
+	}
+	if v := boolAt(s, 1, "forced"); v {
+		t.Errorf("boolAt(1,forced) = %v, want false", v)
+	}
+	// A NULL BIT and an explicit 0 are indistinguishable through this
+	// signature by design; both must report false rather than panicking or
+	// returning an "ok" flag the brief's signature doesn't have.
+	if v := boolAt(s, 1, "text"); v {
+		t.Errorf("boolAt on a NULL column = %v, want false", v)
+	}
+	if v := boolAt(s, 0, "absent"); v {
+		t.Errorf("boolAt on a missing column = %v, want false", v)
+	}
+}
+
 func TestColIndex(t *testing.T) {
 	s := sampleSet()
 	if got := colIndex(s, "query_plan"); got != 2 {
