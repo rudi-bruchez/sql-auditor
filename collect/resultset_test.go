@@ -82,6 +82,24 @@ func TestRowsWhereKeepsColumnsAndTypes(t *testing.T) {
 	}
 }
 
+// rowsWhere resolves the column once and then reads the cell directly, so the
+// guards int64At applied per row have to be applied here instead: a row shorter
+// than the header, a NULL cell, and a value of another type are all "not a
+// match", never a panic and never a kept row.
+func TestRowsWhereGuardsTheRowsTheHelpersGuarded(t *testing.T) {
+	s := sampleSet()
+	s.Rows = append(s.Rows,
+		[]any{},         // short row: no query_id at all
+		[]any{nil},      // NULL query_id
+		[]any{"1"},      // a string where a BIGINT was declared
+		[]any{int32(1)}, // a narrower integer, which int64At widened
+	)
+	got := rowsWhere(s, "query_id", 1)
+	if len(got.Rows) != 3 {
+		t.Fatalf("got %d rows, want the two int64 matches and the int32 one: %v", len(got.Rows), got.Rows)
+	}
+}
+
 func TestWithoutColumnsDropsValuesAndTypes(t *testing.T) {
 	s := withoutColumns(sampleSet(), "text", "query_plan")
 	want := []string{"query_id", "forced"}

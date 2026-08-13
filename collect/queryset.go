@@ -55,8 +55,8 @@ var KnownFlags = map[string]string{
 }
 
 // KnownWriters is the closed set of names @writer accepts, mapped to the
-// one-line description `check` prints. Task 7 wires it into scriptNote; a
-// description no command ever shows would be a comment pretending to be data.
+// one-line description `check` prints. scriptNote reads it; a description no
+// command ever shows would be a comment pretending to be data.
 var KnownWriters = map[string]string{
 	"query-store-detail":   "one directory per database: query text, plans and per-interval statistics",
 	"query-store-profiled": "the last profiled plan, when the instance still holds one",

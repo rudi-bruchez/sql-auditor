@@ -635,34 +635,45 @@ const defaultQueryStoreDays = 7
 // types what the client said, "between 14:00 and 15:00 on the 26th", which is
 // neither the auditor's laptop's time nor UTC.
 //
-// It translates; it does not re-litigate. The days-versus-bounds conflict was
-// refused by Resolve, on the raw keys, where "typed" and "defaulted" can still
-// be told apart. The two refusals here are the ones that only become visible
-// once the values are instants, and both produce a run that looks successful
-// and answers nothing.
+// It translates, and it reports the one conflict Resolve could see but could
+// not price: QUERY_STORE_DAYS typed alongside a bound. Resolve detects that on
+// the raw keys, where "typed" and "defaulted" can still be told apart, and
+// leaves the sentence on the Config; the decision about what it costs is
+// windowForRun's, exactly like the two refusals below — which only become
+// visible once the values are instants, and which both produce a run that looks
+// successful and answers nothing.
 func resolveWindow(cfg *Config, now time.Time, loc *time.Location) (time.Time, time.Time, error) {
-	if now.IsZero() {
-		now = time.Now()
-	}
-	if cfg.QueryStoreDays > 0 {
-		return now.Add(-time.Duration(cfg.QueryStoreDays) * 24 * time.Hour), now, nil
+	if cfg.QueryStoreWindowConflict != "" {
+		return time.Time{}, time.Time{}, errors.New(cfg.QueryStoreWindowConflict)
 	}
 
-	to := now
-	if cfg.QueryStoreTo != "" {
-		t, err := parseServerLocal(cfg.QueryStoreTo, loc)
-		if err != nil {
-			return time.Time{}, time.Time{}, fmt.Errorf("QUERY_STORE_TO: %w", err)
+	var from, to time.Time
+	if cfg.QueryStoreDays > 0 {
+		// The sliding form falls through to the refusals below rather than
+		// returning here. A days count large enough to overflow the duration
+		// arithmetic yields a start after the end, and a branch that returned
+		// early handed that window on as usable — ahead of the very checks
+		// written to catch it. Resolve now caps the value (maxQueryStoreDays),
+		// so this is the second lock on the same door, not the only one.
+		to = now
+		from = now.Add(-time.Duration(cfg.QueryStoreDays) * 24 * time.Hour)
+	} else {
+		to = now
+		if cfg.QueryStoreTo != "" {
+			t, err := parseServerLocal(cfg.QueryStoreTo, loc)
+			if err != nil {
+				return time.Time{}, time.Time{}, fmt.Errorf("QUERY_STORE_TO: %w", err)
+			}
+			to = t
 		}
-		to = t
-	}
-	from := to.Add(-defaultQueryStoreDays * 24 * time.Hour)
-	if cfg.QueryStoreFrom != "" {
-		f, err := parseServerLocal(cfg.QueryStoreFrom, loc)
-		if err != nil {
-			return time.Time{}, time.Time{}, fmt.Errorf("QUERY_STORE_FROM: %w", err)
+		from = to.Add(-defaultQueryStoreDays * 24 * time.Hour)
+		if cfg.QueryStoreFrom != "" {
+			f, err := parseServerLocal(cfg.QueryStoreFrom, loc)
+			if err != nil {
+				return time.Time{}, time.Time{}, fmt.Errorf("QUERY_STORE_FROM: %w", err)
+			}
+			from = f
 		}
-		from = f
 	}
 
 	if !from.Before(to) {
@@ -708,6 +719,12 @@ func serverNow(si ServerInfo, local time.Time) time.Time {
 // left in a .env would be a refusal about a feature the operator did not ask
 // for. The run carries on and the warning says why the setting was ignored, so
 // the next run with the flag on is not a surprise.
+//
+// This is the one place where every reason a window can be unusable is priced,
+// the days-versus-bounds conflict included. Resolve detects that conflict but
+// no longer refuses it: a refusal taken before any flag is read cost an
+// ordinary collection, and a check, over a setting nothing in either was going
+// to consult.
 func windowForRun(cfg *Config, flags map[string]bool, now time.Time, loc *time.Location) (time.Time, time.Time, string, error) {
 	from, to, err := resolveWindow(cfg, now, loc)
 	if err == nil {
@@ -815,15 +832,30 @@ func queryStoreUnits(cfg *Config, s Script, folders []DatabaseFolder) ([]Databas
 func discloseWrites(m *Manifest, rw *runWriter, s Script, res WriteResult) {
 	if rw.takeShowplan() {
 		m.Collected.QueryStoreDetail = true
-		// A gated collector is expected to emit plans. An ungated one means the
-		// corpus is collecting more than its own header claims, and the operator
-		// needs to know — the archive is disclosed correctly either way.
+		// The latch stays as it is, and the instruction goes.
+		//
+		// The check is over the bytes written, and it is deliberately coarse:
+		// over-disclosure is the safe side, so a payload that merely carries the
+		// Showplan namespace latches the disclosure. But the namespace reaches a
+		// payload two ways. It is in a plan, and it is also in captured
+		// application SQL — 020 and 023 put up to 500 characters of collected
+		// query text into their JSON, and a query written with the standard
+		// WITH XMLNAMESPACES('…/showplan' AS p) idiom, common in exactly the
+		// workloads whose Query Store is being read, puts those bytes there
+		// verbatim. Telling the operator to add @requires_flag to a collector
+		// that emits no plan is an instruction that cannot be right in that
+		// case, and it names the wrong file. So the warning reports the
+		// observation and leaves the reading of it to whoever knows the corpus.
 		if s.RequiresFlag == "" {
 			m.Warnings = append(m.Warnings, fmt.Sprintf(
-				"%s writes execution plan XML without declaring @requires_flag: %s. "+
-					"This archive contains execution plans and says so, but the query "+
-					"should carry the gate so the default run does not collect them.",
-				s.Path, FlagQueryStoreDetail))
+				"%s: a payload written by this collector carries the Showplan XML namespace, "+
+					"and the script declares no @requires_flag. The archive discloses execution "+
+					"plans on that basis, which is the safe side of the check. Two things look "+
+					"alike here: the collector really emits plan XML, or it collected query text "+
+					"that itself mentions the namespace (WITH XMLNAMESPACES over a plan is an "+
+					"ordinary thing for an audited query to do). Read the file before concluding "+
+					"the corpus emits plans by default.",
+				s.Path))
 		}
 	}
 	if res.PlanFiles > 0 || res.TextFiles > 0 {
@@ -1144,9 +1176,6 @@ func Run(ctx context.Context, o Options) (int, error) {
 func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	rw *runWriter, s Script, u DatabaseFolder) error {
 
-	if o.QueryStore == nil {
-		o.QueryStore = NewQueryStoreState()
-	}
 	if err := resetWithDeadline(ctx, conn, o.Config); err != nil {
 		return err
 	}

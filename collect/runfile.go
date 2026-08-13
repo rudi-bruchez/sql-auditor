@@ -92,7 +92,16 @@ func (w *runWriter) write(rel string, payload []byte) (int, error) {
 	if w.spent+len(payload) > w.budget {
 		return 0, fmt.Errorf("runWriter: writing %s would exceed the %d byte budget (%d already spent)", rel, w.budget, w.spent)
 	}
+	return w.put(rel, payload)
+}
 
+// put is the choke point itself: the bytes reach disk here and nowhere else,
+// and the Showplan inspection and the running total are applied here for both
+// callers. It is one method rather than a body copied into each because the
+// duplicate could not be enforced by the comment that asked for it — and the
+// anonymisation hook a later version needs is exactly this body, which must not
+// have to be added twice.
+func (w *runWriter) put(rel string, payload []byte) (int, error) {
 	full := filepath.Join(w.root, filepath.FromSlash(rel))
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return 0, fmt.Errorf("runWriter: creating directory for %s: %w", rel, err)
@@ -121,24 +130,13 @@ func (w *runWriter) write(rel string, payload []byte) (int, error) {
 // Its bytes still count towards spent, so the total the manifest reports stays
 // the total actually written; it just cannot be turned away.
 //
-// This is not a second write path. It is the same choke point with the budget
-// suspended, and it must stay that way: the Showplan inspection is the reason
-// the choke point is single, and skipping it here would put a plan on disk that
-// the archive never admits to holding.
+// This is not a second write path, and that is now true by construction rather
+// than by assertion: it calls the same put as write does, with the budget test
+// left out. The Showplan inspection is the reason the choke point is single,
+// and a copy of the body could have lost it here without anything failing —
+// putting a plan on disk that the archive never admits to holding.
 func (w *runWriter) writeUnbudgeted(rel string, payload []byte) (int, error) {
-	full := filepath.Join(w.root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		return 0, fmt.Errorf("runWriter: creating directory for %s: %w", rel, err)
-	}
-	if err := os.WriteFile(full, payload, 0o644); err != nil {
-		return 0, fmt.Errorf("runWriter: writing %s: %w", rel, err)
-	}
-
-	w.spent += len(payload)
-	if containsShowplan(payload) {
-		w.sawShowplan = true
-	}
-	return len(payload), nil
+	return w.put(rel, payload)
 }
 
 // overBudget reports whether the writer has spent its full budget.

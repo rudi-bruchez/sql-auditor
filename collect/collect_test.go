@@ -945,3 +945,53 @@ func TestTheProfiledCollectorSaysWhenItWasGivenNothing(t *testing.T) {
 		t.Errorf("detail args = %v, note = %q; want its three parameters and no warning", args, note)
 	}
 }
+
+// The overflow that bypassed both refusals. time.Duration(days) * 24 * time.Hour
+// wraps int64 for a large enough count and yields a NEGATIVE duration, so
+// now.Add(-d) lands after now: the window is inverted, the extraction matches
+// nothing, and the run reads as a clean collection of a quiet instance. The
+// sliding branch used to return before either refusal could see it.
+func TestResolveWindowRefusesASlidingWindowThatOverflows(t *testing.T) {
+	now := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	// Resolve caps the value (maxQueryStoreDays); this is the second lock, on a
+	// Config built by hand as a foreign caller could.
+	if _, _, err := resolveWindow(&Config{QueryStoreDays: 999999}, now, time.UTC); err == nil {
+		t.Error("999999 days was accepted: the duration overflowed and the inverted window went through unrefused")
+	}
+	from, to, err := resolveWindow(&Config{QueryStoreDays: maxQueryStoreDays}, now, time.UTC)
+	if err != nil {
+		t.Fatalf("the capped maximum was refused: %v", err)
+	}
+	if !from.Before(to) || to.Sub(from) != maxQueryStoreDays*24*time.Hour {
+		t.Errorf("window = %s .. %s, want the %d days ending now", from, to, maxQueryStoreDays)
+	}
+}
+
+// The days-versus-bounds conflict is priced where every other unusable window
+// is priced. Resolve records it — it is the only place that can tell a typed
+// QUERY_STORE_DAYS from a defaulted one — and refusing it there aborted a plain
+// collect, and a check, over a setting nothing in either was going to read.
+func TestTheDaysBoundsConflictOnlyStopsARunThatReadsTheWindow(t *testing.T) {
+	now := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	cfg, err := Resolve(nil, map[string]string{
+		"SQL_SERVER": "srv", "QUERY_STORE_DAYS": "7", "QUERY_STORE_TO": "2026-08-10T14:00",
+	}, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	_, _, note, err := windowForRun(cfg, map[string]bool{}, now, time.UTC)
+	if err != nil {
+		t.Fatalf("a collection that reads no Query Store was killed by the conflict: %v", err)
+	}
+	if !strings.Contains(note, "ignored") || !strings.Contains(note, "QUERY_STORE_DAYS") {
+		t.Errorf("note = %q, want it to say the conflicting setting was ignored and name it", note)
+	}
+
+	for _, flag := range []string{FlagQueryStoreDetail, FlagQueryStorePlanStats} {
+		if _, _, _, err := windowForRun(cfg, map[string]bool{flag: true}, now, time.UTC); err == nil {
+			t.Errorf("%s is on and the conflict was accepted: the collection would have read "+
+				"one of two windows with no way to say which", flag)
+		}
+	}
+}
