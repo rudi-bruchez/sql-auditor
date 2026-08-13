@@ -44,12 +44,18 @@ jobs:
           GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/sql-auditor
           GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/sql-auditor
       # The embedded corpus has to survive the round trip to disk, because
-      # --queries-dir runs it that way.
+      # --queries-dir runs it that way. Compare the export against the tree it
+      # was embedded from rather than against a constant: a literal count goes
+      # stale the first time a collector is added, and it goes stale by passing
+      # nothing — it fails a run that was fine, which teaches everyone to edit
+      # the number rather than read the failure.
       - name: queries export round trip
         run: |
           go run ./cmd/sql-auditor queries export --to "$RUNNER_TEMP/corpus"
-          find "$RUNNER_TEMP/corpus" -name '*.sql' | sort
-          test "$(find "$RUNNER_TEMP/corpus" -name '*.sql' | wc -l)" -eq 14
+          (cd queries && find . -name '*.sql' | sort) > "$RUNNER_TEMP/embedded.txt"
+          (cd "$RUNNER_TEMP/corpus" && find . -name '*.sql' | sort) > "$RUNNER_TEMP/exported.txt"
+          diff -u "$RUNNER_TEMP/embedded.txt" "$RUNNER_TEMP/exported.txt"
+          test -s "$RUNNER_TEMP/embedded.txt"
 
   integration:
     runs-on: ubuntu-latest
@@ -118,5 +124,22 @@ jobs:
           for f in 020.properties 021.properties-2014 022.query-store 023.log-vlf; do
             test -f "$run_dir/20.databases/ci_probe/$f.json"
           done
-          # 13 of the 14 scripts run; 052.session-text is opt-in and stays off.
-          test "$(find "$run_dir" -name '*.json' ! -name '_run.json' | wc -l)" -eq 13
+          # The run must have produced something, and _run.json must describe
+          # what is actually on disk. That is the property worth guarding — an
+          # archive whose record disagrees with its contents is the one failure
+          # this tool exists to make impossible — and unlike a literal count it
+          # stays true as the corpus grows.
+          ok=$(jq '[.results[] | select(.status == "ok")] | length' "$run_dir/_run.json")
+          echo "results recorded ok: $ok"
+          test "$ok" -gt 0
+          # Process substitution, not a pipe: a `while` on the right of a pipe
+          # runs in a subshell, so its `exit 1` would leave the step green.
+          while read -r rel; do
+            test -e "$run_dir/$rel" || { echo "recorded but missing: $rel" >&2; exit 1; }
+          done < <(jq -r '.results[] | select(.status == "ok") | .output' "$run_dir/_run.json")
+          # One file per ok result. This equality holds because no collector in
+          # this run writes a directory; the Query Store writers do, and they
+          # are off here. Turning one on in CI means counting differently.
+          on_disk=$(find "$run_dir" -name '*.json' ! -name '_run.json' | wc -l)
+          echo "json files on disk: $on_disk"
+          test "$on_disk" -eq "$ok"
