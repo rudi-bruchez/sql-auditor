@@ -86,7 +86,21 @@ OPTION (RECOMPILE, MAXDOP 1);
 /* The 200 largest tables by row count, with the two structural facts that a
    row count alone cannot supply. A heap of nine rows and a heap of nine
    hundred million are the same fact and completely different problems, which
-   is why this is ordered by size rather than by name. */
+   is why this is ordered by size rather than by name.
+
+   FOUR SIZES, NOT ONE, and the split is the whole point. This used to project a
+   single [size.reserved_mb] summed over index_id IN (0, 1) — the heap or the
+   clustered index and nothing else. That number reads as "the size of this
+   table" and is not: on a table carrying eight nonclustered indexes the indexes
+   can outweigh the data, and the archive stated half the footprint under a name
+   that claimed all of it. A collector may report a partial figure; it may not
+   name a partial figure as if it were the whole.
+
+   So the data and the indexes are now separate columns, each saying which it
+   is, and the total is projected rather than left to be added up — a reader
+   summing two columns to get the number they wanted is a reader who can forget
+   to. used is kept for the data only: free space inside a nonclustered index is
+   a fragmentation question, and 030 and 050 already own that ground. */
 SELECT TOP (200)
        SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
        CASE WHEN EXISTS (SELECT 1 FROM sys.indexes AS i
@@ -99,14 +113,29 @@ SELECT TOP (200)
         WHERE i.object_id = t.object_id AND i.index_id > 1)       AS [structure.nonclustered_indexes],
        (SELECT COUNT(*) FROM sys.columns AS c WHERE c.object_id = t.object_id) AS [structure.columns],
        ps.row_count                                               AS [size.rows],
-       CAST(ps.reserved_page_count * 8.0 / 1024 AS DECIMAL(18,2)) AS [size.reserved_mb],
+       CAST(ps.data_reserved  * 8.0 / 1024 AS DECIMAL(18,2))      AS [size.data_reserved_mb],
+       CAST(ps.data_used      * 8.0 / 1024 AS DECIMAL(18,2))      AS [size.data_used_mb],
+       CAST(ps.index_reserved * 8.0 / 1024 AS DECIMAL(18,2))      AS [size.index_reserved_mb],
+       CAST(ps.total_reserved * 8.0 / 1024 AS DECIMAL(18,2))      AS [size.total_reserved_mb],
        t.create_date                                              AS [create_date],
        t.modify_date                                              AS [modify_date]
 FROM sys.tables AS t
-CROSS APPLY (SELECT SUM(p.row_count)           AS row_count,
-                    SUM(p.reserved_page_count) AS reserved_page_count
+/* One pass over every partition of the table, split by index_id in the SELECT
+   rather than filtered in the WHERE: the totals have to come from the same
+   read, or a table written between two passes would report an index footprint
+   that does not belong to the data footprint beside it.
+
+   index_id 0 is the heap and 1 the clustered index — a table has one or the
+   other, never both — and everything above 1 is a nonclustered index. ELSE 0,
+   not NULL: a table with no nonclustered index has an index footprint of zero,
+   which is a measurement, whereas NULL would read as "not collected". */
+CROSS APPLY (SELECT SUM(CASE WHEN p.index_id IN (0, 1) THEN p.row_count            ELSE 0 END) AS row_count,
+                    SUM(CASE WHEN p.index_id IN (0, 1) THEN p.reserved_page_count  ELSE 0 END) AS data_reserved,
+                    SUM(CASE WHEN p.index_id IN (0, 1) THEN p.used_page_count      ELSE 0 END) AS data_used,
+                    SUM(CASE WHEN p.index_id  > 1      THEN p.reserved_page_count  ELSE 0 END) AS index_reserved,
+                    SUM(p.reserved_page_count)                                                 AS total_reserved
              FROM sys.dm_db_partition_stats AS p
-             WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)) AS ps
+             WHERE p.object_id = t.object_id) AS ps
 WHERE t.is_ms_shipped = 0
 ORDER BY ps.row_count DESC
 OPTION (RECOMPILE, MAXDOP 1);

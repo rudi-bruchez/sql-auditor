@@ -87,13 +87,25 @@ FROM sys.database_files AS df
 ORDER BY df.type, df.file_id
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* ───────── largest_objects: top 20 by reserved size ───────── */
+/* ───────── largest_objects: top 20 by reserved size ─────────
+
+   DATA ONLY, and the column names say so. The WHERE keeps index_id 0 and 1 —
+   the heap or the clustered index — so a table's nonclustered indexes are not
+   in these megabytes. They can outweigh the data, so this is a ranking of where
+   the rows are, not a ranking of what occupies the disk; 70.schema/010 carries
+   the four-way split and the total, and 70.schema/020 the size of every index
+   one by one.
+
+   The storage column used to carry an ELSE branch labelling anything outside
+   index_id 0 and 1 as 'HEAP/CLUSTERED'. The WHERE below already guarantees
+   there is nothing outside it, so the branch was unreachable and its label was
+   the opposite of what it described. */
 SELECT TOP (20)
        SCHEMA_NAME(t.schema_id) + '.' + t.name              AS [table],
-       CASE WHEN i.index_id IN (0,1) THEN i.type_desc ELSE 'HEAP/CLUSTERED' END AS storage,
+       i.type_desc                                          AS storage,
        SUM(ps.row_count)                                    AS [rows],
-       CAST(SUM(ps.reserved_page_count) * 8 / 1024.0 AS DECIMAL(14,1)) AS reserved_mb,
-       CAST(SUM(ps.used_page_count)     * 8 / 1024.0 AS DECIMAL(14,1)) AS used_mb
+       CAST(SUM(ps.reserved_page_count) * 8 / 1024.0 AS DECIMAL(14,1)) AS data_reserved_mb,
+       CAST(SUM(ps.used_page_count)     * 8 / 1024.0 AS DECIMAL(14,1)) AS data_used_mb
 FROM sys.dm_db_partition_stats AS ps
 JOIN sys.tables  AS t ON t.object_id = ps.object_id
 JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
