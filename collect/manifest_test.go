@@ -242,7 +242,7 @@ func TestWriteManifestFallsBackWhenRunFolderUnwritable(t *testing.T) {
 	m := &Manifest{}
 	// A path that cannot exist forces the fallback. The run must still leave
 	// a manifest somewhere, or it cannot be reasoned about afterwards.
-	path, err := WriteManifestWithFallback(m, filepath.Join(t.TempDir(), "nope", "deeper"))
+	path, err := WriteManifestWithFallback(m, filepath.Join(t.TempDir(), "nope", "deeper"), os.Stderr)
 	if err != nil {
 		t.Fatalf("fallback failed entirely: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestWriteManifestWritesBothFilesInTheRunFolder(t *testing.T) {
 	dir := t.TempDir()
 	m := &Manifest{}
 	m.Server.Name = "SRV01"
-	got, err := WriteManifestWithFallback(m, dir)
+	got, err := WriteManifestWithFallback(m, dir, os.Stderr)
 	if err != nil {
 		t.Fatalf("WriteManifestWithFallback: %v", err)
 	}

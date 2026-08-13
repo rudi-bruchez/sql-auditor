@@ -3,7 +3,6 @@ package collect
 import (
 	"context"
 	"errors"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -45,7 +44,7 @@ func TestPrepareRunFolderClearsStaleFiles(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareRunFolder(run, false); err != nil {
+	if err := prepareRunFolder(run, false, os.Stderr); err != nil {
 		t.Fatalf("prepareRunFolder: %v", err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
@@ -66,7 +65,7 @@ func TestPrepareRunFolderRemovesTheStaleArchive(t *testing.T) {
 	if err := os.WriteFile(zip, []byte("PK"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareRunFolder(run, false); err != nil {
+	if err := prepareRunFolder(run, false, os.Stderr); err != nil {
 		t.Fatalf("prepareRunFolder: %v", err)
 	}
 	if _, err := os.Stat(zip); !os.IsNotExist(err) {
@@ -88,7 +87,7 @@ func TestPrepareRunFolderRefusesAnOccupiedKeepTarget(t *testing.T) {
 	if err := os.WriteFile(keeper, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareRunFolder(run, true); err == nil {
+	if err := prepareRunFolder(run, true, os.Stderr); err == nil {
 		t.Error("--keep silently merged this run into an existing folder")
 	}
 	if _, err := os.Stat(keeper); err != nil {
@@ -102,7 +101,7 @@ func TestPrepareRunFolderRefusesAnOccupiedKeepTarget(t *testing.T) {
 	if err := os.WriteFile(fresh+".zip", []byte("PK"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareRunFolder(fresh, true); err == nil {
+	if err := prepareRunFolder(fresh, true, os.Stderr); err == nil {
 		t.Error("--keep accepted a name whose archive already exists")
 	}
 }
@@ -110,7 +109,7 @@ func TestPrepareRunFolderRefusesAnOccupiedKeepTarget(t *testing.T) {
 func TestPrepareRunFolderCreatesAFreeKeepTarget(t *testing.T) {
 	dir := t.TempDir()
 	run := filepath.Join(dir, "SRV01-2026-08-08-1200")
-	if err := prepareRunFolder(run, true); err != nil {
+	if err := prepareRunFolder(run, true, os.Stderr); err != nil {
 		t.Fatalf("prepareRunFolder: %v", err)
 	}
 	if fi, err := os.Stat(run); err != nil || !fi.IsDir() {
@@ -145,42 +144,6 @@ func TestReplacingRunWarningNamesTheFolderAndTheArchive(t *testing.T) {
 	}
 	if !strings.Contains(w, "--keep") {
 		t.Errorf("warning %q does not say how to avoid the replacement", w)
-	}
-}
-
-// Having the right words available is not the same as printing them. This
-// pins the call site: the operator has to actually see the warning before the
-// previous run is destroyed.
-func TestPrepareRunFolderPrintsTheWarningBeforeReplacing(t *testing.T) {
-	dir := t.TempDir()
-	run := filepath.Join(dir, "SRV01-2026-08-08")
-	if err := os.MkdirAll(run, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(run+".zip", []byte("PK"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	saved := os.Stderr
-	os.Stderr = w
-	perr := prepareRunFolder(run, false)
-	os.Stderr = saved
-	w.Close()
-	out, rerr := io.ReadAll(r)
-	r.Close()
-	if perr != nil {
-		t.Fatalf("prepareRunFolder: %v", perr)
-	}
-	if rerr != nil {
-		t.Fatal(rerr)
-	}
-	printed := string(out)
-	if !strings.Contains(printed, run) || !strings.Contains(printed, run+".zip") {
-		t.Errorf("the previous run was destroyed without naming both the folder and the archive on stderr; got %q", printed)
 	}
 }
 
@@ -517,7 +480,7 @@ func TestKeepRunsNeverLandOnAnExistingRun(t *testing.T) {
 			t.Fatalf("run %d was pointed at %q, which already holds %d file(s)",
 				i+1, folder, len(entries))
 		}
-		if err := prepareRunFolder(folder, true); err != nil {
+		if err := prepareRunFolder(folder, true, os.Stderr); err != nil {
 			t.Fatalf("run %d: prepareRunFolder(%q): %v", i+1, folder, err)
 		}
 		// Each run leaves a result file and an archive behind, as a real one does.

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -121,6 +122,30 @@ type Options struct {
 	// had before the interface existed: every call site goes through the
 	// nil-safe wrapper, so there is no second code path to keep in step.
 	Observer Observer
+	// Progress is where this package's running commentary goes: the run
+	// replacement warning, the reconnect notice, and the manifest's fallback
+	// chain down to lastResort. Nil means os.Stderr, so a subcommand behaves
+	// exactly as before.
+	//
+	// It captures ONLY what already went to stderr. It is deliberately not a
+	// general output hook: check writes its listing to stdout because
+	// `sql-auditor check > report.txt` is how an operator keeps it, and Run
+	// writes the archive path to stdout because `sql-auditor collect | tail -1`
+	// is how a script reads it. Routing either here would empty a file a user
+	// asked for. cmd/sql-auditor/main.go states the same distinction in words
+	// where it prints the build stamp.
+	Progress io.Writer
+}
+
+// progress is the single place that decides where the commentary goes, so the
+// twenty-odd call sites can be written without a nil test. io.Discard is
+// deliberately NOT the nil default: lastResort's output is sometimes the only
+// surviving record of a run, and silence would destroy it.
+func (o Options) progress() io.Writer {
+	if o.Progress == nil {
+		return os.Stderr
+	}
+	return o.Progress
 }
 
 // prepareRunFolder creates the run folder, clearing it and the archive beside
@@ -132,7 +157,7 @@ type Options struct {
 // results is worse than deleting it: it is named for the same server and day,
 // so whoever picks it up has no way to tell it is not the run they just
 // watched finish.
-func prepareRunFolder(path string, keep bool) error {
+func prepareRunFolder(path string, keep bool, progress io.Writer) error {
 	if keep {
 		// --keep must never land on an occupied name. runFolderFor already
 		// looks for a free one, but if it ever hands back a taken path the
@@ -148,7 +173,7 @@ func prepareRunFolder(path string, keep bool) error {
 		return os.MkdirAll(path, 0o755)
 	}
 	if warning := replacingRunWarning(path); warning != "" {
-		fmt.Fprintln(os.Stderr, warning)
+		fmt.Fprintln(progress, warning)
 	}
 	if err := os.RemoveAll(path); err != nil {
 		return err
@@ -532,7 +557,7 @@ func Check(ctx context.Context, o Options) (int, error) {
 		return openExitCode(v.OpenErr), err
 	}
 	if v.ConnErr != nil {
-		fmt.Fprintln(os.Stderr, "cannot reach the instance")
+		fmt.Fprintln(o.progress(), "cannot reach the instance")
 		return 1, err
 	}
 
@@ -1025,7 +1050,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 			dest = filepath.Join(o.Config.OutputDir, FailedRunFolderName(stamp))
 			_ = os.MkdirAll(dest, 0o755)
 		}
-		if _, err := WriteManifestWithFallback(m, dest); err != nil {
+		if _, err := WriteManifestWithFallback(m, dest, o.progress()); err != nil {
 			return code, err
 		}
 		return code, nil
@@ -1209,7 +1234,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// other configuration refusals rather than 1, which claims the instance was
 	// unreachable when it has in fact just been read successfully.
 	runFolder := runFolderFor(o.Config.OutputDir, si.Name, o.Now, o.Keep)
-	if err := prepareRunFolder(runFolder, o.Keep); err != nil {
+	if err := prepareRunFolder(runFolder, o.Keep, o.progress()); err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)
 	}
@@ -1267,7 +1292,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// reset before the next unit uses it — the PowerShell version
 		// skipped that step and quietly broke its own invariant.
 		if !connAlive(ctx, conn, o.Config) {
-			fmt.Fprintln(os.Stderr, "connection lost; attempting one reconnect")
+			fmt.Fprintln(o.progress(), "connection lost; attempting one reconnect")
 			conn.Close()
 			fresh, cerr := db.Conn(ctx)
 			if cerr != nil {
@@ -1301,8 +1326,16 @@ func Run(ctx context.Context, o Options) (int, error) {
 	if err := Zip(runFolder, zipPath); err != nil {
 		return 2, err
 	}
-	fmt.Printf("%d result(s), %d skipped, %d error(s)\n%s\n",
-		len(m.Results), len(m.Skipped), len(m.Errors), zipPath)
+	// Silenced under an Observer, not redirected. `sql-auditor collect | tail -1`
+	// is how a script picks up the archive path, so on the command line these
+	// two lines must keep going to stdout exactly where they always went. A
+	// caller that owns the screen counted every unit through the Observer and
+	// derives the same path from RunFolderName, so printing these would smear
+	// its frame with facts it already holds.
+	if o.Observer == nil {
+		fmt.Printf("%d result(s), %d skipped, %d error(s)\n%s\n",
+			len(m.Results), len(m.Skipped), len(m.Errors), zipPath)
+	}
 	return code, nil
 }
 

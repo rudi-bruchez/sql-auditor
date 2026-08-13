@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -251,13 +252,18 @@ func redactConfig(in map[string]string) map[string]string {
 // returns where it landed.
 //
 // MANIFEST.txt is written alongside in both cases. A failure to write it is
-// reported on stderr but is not fatal: _run.json carries a superset of the
+// reported on progress but is not fatal: _run.json carries a superset of the
 // same facts, and refusing the whole write because the prose copy failed would
 // throw away the record of the run.
-func WriteManifestWithFallback(m *Manifest, runFolder string) (string, error) {
+//
+// progress is where this chain narrates itself; it is os.Stderr for every
+// command-line caller. It is a parameter rather than a package-level default
+// because the caller that most needs to read this narration — one that has
+// taken over the terminal — is exactly the one that cannot see stderr.
+func WriteManifestWithFallback(m *Manifest, runFolder string, progress io.Writer) (string, error) {
 	if err := m.WriteJSON(runFolder); err == nil {
 		if herr := m.WriteHuman(runFolder); herr != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", manifestHumanName, herr)
+			fmt.Fprintf(progress, "warning: could not write %s: %v\n", manifestHumanName, herr)
 		}
 		return filepath.Join(runFolder, manifestJSONName), nil
 	}
@@ -267,26 +273,30 @@ func WriteManifestWithFallback(m *Manifest, runFolder string) (string, error) {
 	}
 	dir, err := os.MkdirTemp("", "sql-auditor-run-*")
 	if err != nil {
-		return "", lastResort(b, err)
+		return "", lastResort(b, err, progress)
 	}
 	path := filepath.Join(dir, manifestJSONName)
 	if err := os.WriteFile(path, b, 0o644); err != nil {
-		return "", lastResort(b, err)
+		return "", lastResort(b, err, progress)
 	}
 	if herr := m.WriteHuman(dir); herr != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", manifestHumanName, herr)
 	}
-	fmt.Fprintf(os.Stderr, "output directory unwritable; manifest written to %s\n", path)
+	fmt.Fprintf(progress, "output directory unwritable; manifest written to %s\n", path)
 	return path, nil
 }
 
-// lastResort prints the manifest to stderr when no filesystem the process can
-// reach will take it. Both the run folder and the temp directory being
+// lastResort prints the manifest to progress when no filesystem the process
+// can reach will take it. Both the run folder and the temp directory being
 // unwritable is a strange machine, but the point of the fallback chain is that
 // a run always leaves a record, and a record on the operator's terminal can
 // still be copied out. Returning the error alone would leave nothing anywhere.
-func lastResort(manifestJSON []byte, cause error) error {
-	fmt.Fprintf(os.Stderr, "cannot write the manifest anywhere (%v); it follows on stderr:\n%s\n", cause, manifestJSON)
+//
+// This is the reason progress must never be io.Discard: on this path what it
+// receives is the only copy of the manifest in existence. A caller that
+// substitutes a buffer owes it a flush to somewhere durable.
+func lastResort(manifestJSON []byte, cause error, progress io.Writer) error {
+	fmt.Fprintf(progress, "cannot write the manifest anywhere (%v); it follows on stderr:\n%s\n", cause, manifestJSON)
 	return cause
 }
 
