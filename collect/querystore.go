@@ -34,6 +34,31 @@ import (
 // omissions exist to prevent.
 const maxPlanBytes = 8 << 20
 
+// maxPlansPerQuery bounds how many plans of one query have their XML collected.
+// Every recompile adds a plan, so a query living in a thirty-day store can carry
+// dozens, each up to maxPlanBytes — and 021's result sets are fully materialised
+// in memory before a single file is written.
+//
+// It caps the XML, NOT the row. Every plan still arrives, with its metadata, its
+// size and its per-interval statistics: stats.json carries the plan block for
+// every plan of the query, and dropping the rows would erase the record that
+// those plans exist at all. The ones past the cap arrive with a NULL plan and
+// are named in the omissions, which is what makes the loss a stated fact rather
+// than a silence.
+//
+// Which three are kept is decided in the SQL: the forced plan first, then the
+// most recently executed. Forced first because a query can be selected BECAUSE
+// one of its plans is forced, and evicting that plan would drop the evidence for
+// its own selection.
+//
+// Like maxPlanBytes, the SAME NUMBER is written out as a literal in 021, beside
+// the DATALENGTH guard in the same CASE, and
+// TestPlanCountCapIsTheSameNumberInTheCorpus fails on any drift. A Go constant
+// raised above a stale SQL literal would make the fourth plan arrive NULL and be
+// reported as a plan the Query Store does not hold — a false fact about the
+// server.
+const maxPlansPerQuery = 3
+
 // WriteRequest is everything a writer is given. It is deliberately not a
 // directory path.
 type WriteRequest struct {
@@ -163,10 +188,19 @@ type indexedQuery struct {
 // it is a member of both. Ranked + Forced is therefore not the number of
 // queries in the index — len(queries) is, and it is right there beside these
 // three.
+//
+// PlansBeyondCap counts the plans whose XML was not collected because their
+// query has more than maxPlansPerQuery of them. It sits here rather than in a
+// block of its own because it is a property of the selection — how much of what
+// was selected actually came back — and a reader comparing plan_files against
+// the plan_ids of every query needs it in the same place as the cap. Zero on
+// almost every run; a large number says the workload recompiles, which is a
+// finding the omissions spell out one plan at a time.
 type selectionCounts struct {
-	Cap    int64 `json:"cap"`
-	Ranked int   `json:"ranked"`
-	Forced int   `json:"forced"`
+	Cap            int64 `json:"cap"`
+	Ranked         int   `json:"ranked"`
+	Forced         int   `json:"forced"`
+	PlansBeyondCap int   `json:"plans_beyond_cap"`
 }
 
 // detailIndex is the directory's table of contents. It exists even when nothing
@@ -390,8 +424,25 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 
 			size, _ := int64At(rows, r, "query_plan_bytes")
 			plan, present := stringAt(rows, r, "query_plan")
+			// plan.rank and plan.count come from 021's planRank CTE and are the
+			// only thing that tells the per-query cap apart from the two other
+			// reasons a query_plan arrives NULL. haveRank is tested rather than
+			// assumed: a result set without the column — an older exported set
+			// replayed through this writer — must fall through to the reasons
+			// below rather than treat a missing rank as rank 0.
+			rank, haveRank := int64At(rows, r, "plan.rank")
+			total, _ := int64At(rows, r, "plan.count")
 			name := planFileName(id, planID, "")
 			switch {
+			case haveRank && rank > maxPlansPerQuery:
+				// FIRST, before the two NULL reasons below. Without this branch
+				// a plan past the cap reads as one the Query Store does not
+				// hold, which is a false fact about the server and the exact
+				// failure the omissions exist to prevent. The size is carried:
+				// the DATALENGTH beside the nulled XML is still projected, so
+				// the reader learns how large the plan they cannot open was.
+				idx.Selection.PlansBeyondCap++
+				omit(id, planID, name, fmt.Sprintf("plan %d of %d for this query: beyond the per-query cap of %d plans, so the plan XML was not collected; the forced plan and the most recently executed were kept", rank, total, maxPlansPerQuery), size)
 			case !present && size > maxPlanBytes:
 				// The SQL's DATALENGTH guard nulled it out before it crossed the
 				// wire. Reported apart from a plan that never existed, because

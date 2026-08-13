@@ -185,6 +185,101 @@ func TestDetailWriterCapsAnOversizedPlanThatReachedTheWriter(t *testing.T) {
 	assertPlanOmitted(t, sets, "query_11.plan_101.sqlplan", 101, "exceeds the 8388608 byte per-plan cap")
 }
 
+// detailSetsWithPlanRanks is detailSets with 021's planRank columns attached and
+// query 11 grown to four plans, the last of which sits past the per-query cap.
+//
+// The columns are appended rather than added to detailSets itself because the
+// tests that reach into that fixture by column position document
+// is_forced_selection as its last column.
+func detailSetsWithPlanRanks() []NamedResultSet {
+	sets := detailSets()
+	sel, _ := setByName(sets, "selected")
+	sel.Columns = append(sel.Columns, "plan.rank", "plan.count")
+	sel.Types = append(sel.Types, "BIGINT", "BIGINT")
+	// query 11 has four plans now, query 22 still one.
+	ranks := [][]any{{int64(1), int64(4)}, {int64(2), int64(4)}, {int64(1), int64(1)}}
+	for r := range sel.Rows {
+		sel.Rows[r] = append(sel.Rows[r], ranks[r]...)
+	}
+	sel.Rows = append(sel.Rows,
+		[]any{int64(11), int64(103), "SELECT a FROM t", "<ShowPlanXML>c</ShowPlanXML>", int64(28), false,
+			int64(1), int64(2), int64(40), int64(900), true, int64(3), int64(4)},
+		// Rank 4 of 4: the XML nulled by the SQL's CASE, the size still reported.
+		[]any{int64(11), int64(104), "SELECT a FROM t", nil, int64(4096), false,
+			int64(1), int64(2), int64(40), int64(900), true, int64(4), int64(4)},
+	)
+	for i := range sets {
+		if sets[i].Spec.Name == "selected" {
+			sets[i].Set = sel
+		}
+	}
+	return sets
+}
+
+// A plan past the per-query cap arrives with the same NULL query_plan as a plan
+// the Query Store does not hold, and the two must never be reported as the same
+// thing: one is a decision this collector took, the other a fact about the
+// server. The rank is what separates them, and this is the test that says so.
+func TestDetailWriterRecordsAPlanBeyondThePerQueryCap(t *testing.T) {
+	root, rel, _, _ := runDetailWriter(t, detailSetsWithPlanRanks())
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel), "query_11.plan_104.sqlplan")); err == nil {
+		t.Error("wrote a .sqlplan for a plan beyond the per-query cap")
+	}
+	var got indexOmission
+	for _, o := range indexOmissions(t, root, rel) {
+		if o.PlanID == 104 {
+			got = o
+		}
+		if o.PlanID == 104 && strings.Contains(o.Reason, "holds no plan XML") {
+			t.Errorf("a plan dropped by the per-query cap is reported as one the Query Store does not hold: %q", o.Reason)
+		}
+	}
+	if got.PlanID != 104 {
+		t.Fatalf("_index.json records no omission for plan 104: %+v", indexOmissions(t, root, rel))
+	}
+	if !strings.Contains(got.Reason, fmt.Sprintf("per-query cap of %d plans", maxPlansPerQuery)) {
+		t.Errorf("omission reason does not name the cap: %q", got.Reason)
+	}
+	if got.Bytes != 4096 {
+		t.Errorf("bytes = %d, want the size the server reported for the plan that was not fetched", got.Bytes)
+	}
+	// The plan stays in the index with no file: dropping the row would erase the
+	// record that the plan exists.
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel), "_index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx struct {
+		Selection struct {
+			PlansBeyondCap int `json:"plans_beyond_cap"`
+		} `json:"selection"`
+		Queries []struct {
+			QueryID   int64    `json:"query_id"`
+			PlanIDs   []int64  `json:"plan_ids"`
+			PlanFiles []string `json:"plan_files"`
+		} `json:"queries"`
+	}
+	if err := json.Unmarshal(b, &idx); err != nil {
+		t.Fatal(err)
+	}
+	if idx.Selection.PlansBeyondCap != 1 {
+		t.Errorf("selection.plans_beyond_cap = %d, want 1", idx.Selection.PlansBeyondCap)
+	}
+	for _, q := range idx.Queries {
+		if q.QueryID != 11 {
+			continue
+		}
+		if len(q.PlanIDs) != 4 {
+			t.Errorf("query 11 lists %v, want all four plan ids including the one with no file", q.PlanIDs)
+		}
+		for _, f := range q.PlanFiles {
+			if strings.Contains(f, "plan_104") {
+				t.Errorf("plan_files names %s, which was never written", f)
+			}
+		}
+	}
+}
+
 // indexOmissions reads back the omissions _index.json records. Matching on the
 // raw text would not do: every index carries "selection": {"cap": …}
 // unconditionally, so a substring check for "cap" passes against a writer that
@@ -1120,6 +1215,34 @@ func TestPlanCapIsTheSameNumberInTheCorpus(t *testing.T) {
 		if got != maxPlanBytes {
 			t.Errorf("%s caps the plan at %d bytes, maxPlanBytes is %d — the two are one rule and have drifted", name, got, maxPlanBytes)
 		}
+	}
+}
+
+// The sibling of the test above, for the other literal in the same CASE. Only
+// 021 carries it: 022 fetches one cached plan per Query Store plan the detail
+// writer already selected, so there is no per-query population there to cap.
+//
+// The drift this catches is the same one, reached the other way: maxPlansPerQuery
+// raised above a stale SQL literal makes the fourth plan arrive NULL and be
+// reported as a plan the Query Store does not hold, which is a false fact about
+// the server.
+func TestPlanCountCapIsTheSameNumberInTheCorpus(t *testing.T) {
+	const name = "021.query-store-detail.sql"
+	b, err := os.ReadFile(filepath.Join("..", "queries", "80.workload", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := regexp.MustCompile(`\w+\.plan_rank <= (\d+)`)
+	m := guard.FindAllStringSubmatch(string(b), -1)
+	if len(m) != 1 {
+		t.Fatalf("%s has %d plan_rank guards, want exactly 1", name, len(m))
+	}
+	got, err := strconv.Atoi(m[0][1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != maxPlansPerQuery {
+		t.Errorf("%s keeps %d plans per query, maxPlansPerQuery is %d — the two are one rule and have drifted", name, got, maxPlansPerQuery)
 	}
 }
 
