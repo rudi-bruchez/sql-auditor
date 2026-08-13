@@ -61,6 +61,16 @@ const FlagQueryStoreDetail = "query_store_detail"
 // this exports first.
 const FlagObjectDefinitions = "object_definitions"
 
+// FlagDeadlockGraphs gates the export of the deadlock reports system_health
+// still holds.
+//
+// A fourth decision, and the narrowest of them: a graph names two statements
+// and the resource they fought over, and it carries their SQL verbatim — the
+// same literals --include-session-text exists for. 060.system-health.sql
+// collects the count and the timestamps by default and stops exactly there,
+// which is what makes this a separate opt-in rather than a widening of it.
+const FlagDeadlockGraphs = "deadlock_graphs"
+
 // FlagQueryStorePlanStats gates the search for the last profiled plan of each
 // extracted query.
 //
@@ -664,7 +674,7 @@ func scriptNote(s Script, enabled map[string]bool) string {
 	// text, plans and per-interval statistics" is the sentence that lets them
 	// decide; the file name alone does not.
 	if s.Writer != "" {
-		notes = append(notes, KnownWriters[s.Writer])
+		notes = append(notes, KnownWriters[s.Writer].Description)
 	}
 	return strings.Join(notes, ", ")
 }
@@ -919,6 +929,11 @@ func discloseWrites(m *Manifest, rw *runWriter, s Script, res WriteResult) {
 	if res.DefinitionFiles > 0 {
 		m.Collected.ObjectDefinitions = true
 	}
+	// And the fourth. A run with the option on against an instance whose ring
+	// holds no deadlock discloses nothing, because it collected nothing.
+	if res.GraphFiles > 0 {
+		m.Collected.DeadlockGraphs = true
+	}
 }
 
 // Run executes the full pipeline. It returns an exit code rather than
@@ -935,6 +950,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		"db_exclude":           o.Config.DBExclude,
 		"include_session_text": fmt.Sprint(o.Flags[FlagIncludeSessionText]),
 		"object_definitions":   fmt.Sprint(o.Flags[FlagObjectDefinitions]),
+		"deadlock_graphs":      fmt.Sprint(o.Flags[FlagDeadlockGraphs]),
 
 		"query_store_detail":     fmt.Sprint(o.Flags[FlagQueryStoreDetail]),
 		"query_store_plan_stats": fmt.Sprint(o.Flags[FlagQueryStorePlanStats]),

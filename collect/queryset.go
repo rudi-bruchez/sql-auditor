@@ -53,15 +53,52 @@ var KnownFlags = map[string]string{
 	"query_store_detail":     "--query-store-detail",
 	"query_store_plan_stats": "--query-store-plan-stats",
 	"object_definitions":     "--include-object-definitions",
+	"deadlock_graphs":        "--include-deadlock-graphs",
 }
 
 // KnownWriters is the closed set of names @writer accepts, mapped to the
 // one-line description `check` prints. scriptNote reads it; a description no
 // command ever shows would be a comment pretending to be data.
-var KnownWriters = map[string]string{
-	"query-store-detail":   "one directory per database: query text, plans and per-interval statistics",
-	"query-store-profiled": "the last profiled plan, when the instance still holds one",
-	"object-definitions":   "one directory per database: the source of each view, procedure, function and trigger",
+// Scope is here rather than being one rule for all writers because it is a
+// property of what the writer reads. A writer over the Query Store or over a
+// database's catalog needs a database; one over the instance's system_health
+// ring buffer must NOT have one, or it would collect the same events once per
+// database. ScopeReason is the second half of the lint message, so a file that
+// gets it wrong is told why rather than only that.
+type WriterSpec struct {
+	Description string
+	Scope       Scope
+	ScopeReason string
+}
+
+var KnownWriters = map[string]WriterSpec{
+	"query-store-detail": {
+		Description: "one directory per database: query text, plans and per-interval statistics",
+		Scope:       ScopeDatabase,
+		ScopeReason: "it produces one directory per database and keys its selection by database name",
+	},
+	"query-store-profiled": {
+		Description: "the last profiled plan, when the instance still holds one",
+		Scope:       ScopeDatabase,
+		ScopeReason: "it reads the selection 021 keyed by database name",
+	},
+	"object-definitions": {
+		Description: "one directory per database: the source of each view, procedure, function and trigger",
+		Scope:       ScopeDatabase,
+		ScopeReason: "modules belong to a database and it produces one directory per database",
+	},
+	"deadlock-graphs": {
+		Description: "one .xdl file per deadlock system_health still holds",
+		Scope:       ScopeInstance,
+		ScopeReason: "the system_health ring buffer belongs to the instance, so a per-database run would collect the same graphs once per database",
+	},
+}
+
+func scopeWord(s Scope) string {
+	if s == ScopeDatabase {
+		return "database"
+	}
+	return "instance"
 }
 
 var (
@@ -234,14 +271,23 @@ func parseScript(rel, sql string) Script {
 				"reference a column of another; split it into its own query")
 		}
 	}
-	// A writer needs a database to write for. An instance-scope @writer script
-	// reaches runUnit with an empty DatabaseFolder: the empty Folder collapses
-	// its directory onto the non-per-database path, and the empty Name makes
-	// QueryStoreState.Selected[""] a bucket every such script would share. Both
-	// are silent, and neither is what anyone declaring @writer meant.
-	if s.Writer != "" && s.Scope != ScopeDatabase {
-		setLint(fmt.Sprintf("@writer: %q needs @scope: database; a writer produces one "+
-			"directory per database and has nowhere to put it otherwise", s.Writer))
+	// The scope a writer needs is the writer's own property, declared beside it
+	// in KnownWriters, and this checks the file against it.
+	//
+	// It used to require @scope: database of every writer, which was true of the
+	// only two that existed and is not a rule. What is true is that a writer
+	// naming a database — one whose directory is per database, or one that keys
+	// QueryStoreState.Selected by database name — reaches runUnit with an empty
+	// DatabaseFolder when the script is instance-scoped: the empty Folder
+	// collapses its directory onto the non-per-database path, and Selected[""]
+	// becomes a bucket every such script would share. Both are silent. An
+	// instance-scoped writer that names neither, like deadlock-graphs reading a
+	// ring buffer that belongs to the instance, has no such problem — and
+	// forcing it to @scope: database would have collected the same graphs once
+	// per database instead.
+	if spec, ok := KnownWriters[s.Writer]; ok && s.Scope != spec.Scope {
+		setLint(fmt.Sprintf("@writer: %q needs @scope: %s; %s", s.Writer,
+			scopeWord(spec.Scope), spec.ScopeReason))
 	}
 	if s.LintError == "" {
 		s.LintError = lint(sql, s.Results)

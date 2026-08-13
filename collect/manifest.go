@@ -147,6 +147,12 @@ type CollectedKinds struct {
 	// addresses, embed literals, and — in the old procedures this exports
 	// alongside the new — carry a credential in clear inside an OPENQUERY.
 	ObjectDefinitions bool `json:"object_definitions"`
+
+	// DeadlockGraphs marks that deadlock reports are in the archive. A graph
+	// carries the verbatim SQL of both victims, so it is the same class of
+	// content as SessionText reached from a different source: the always-on
+	// system_health ring buffer rather than a live session.
+	DeadlockGraphs bool `json:"deadlock_graphs"`
 }
 
 type Manifest struct {
@@ -412,6 +418,14 @@ What is in here that names things:
 		fmt.Fprintln(b, "    but their source is not, because the server does not return it.")
 		fmt.Fprintln(b, "    Collected because --include-object-definitions was passed.")
 	}
+	if m.Collected.DeadlockGraphs {
+		fmt.Fprintln(b, "  - The deadlock reports the system_health session still held, one")
+		fmt.Fprintln(b, "    .xdl file each. A report names the two statements that deadlocked")
+		fmt.Fprintln(b, "    and the resource they contended for, and it carries their SQL")
+		fmt.Fprintln(b, "    verbatim — which can hold literals copied out of application")
+		fmt.Fprintln(b, "    tables. Nothing on the instance was modified or cleared to read")
+		fmt.Fprintln(b, "    them. Collected because --include-deadlock-graphs was passed.")
+	}
 	// Scoped deliberately. The redaction this describes applies to the run
 	// settings block and to nothing else, because that is the only place the
 	// collector masks anything. An unqualified "secrets are masked" would be a
@@ -427,7 +441,7 @@ setting whose name marks it as a password, token or other secret is replaced
 with "(redacted)" before that block is written.
 `)
 	if m.Collected.SessionText || m.Collected.QueryStoreDetail || m.Collected.QueryStoreProfiledPlans ||
-		m.Collected.ObjectDefinitions {
+		m.Collected.ObjectDefinitions || m.Collected.DeadlockGraphs {
 		b.WriteString(`
 Most of this is metadata about the estate rather than the data held in it,
 but the captured statement text can carry values copied from application

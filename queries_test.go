@@ -14,8 +14,8 @@ func TestEmbeddedCorpusIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	if len(scripts) != 41 {
-		t.Fatalf("got %d scripts, want 41", len(scripts))
+	if len(scripts) != 43 {
+		t.Fatalf("got %d scripts, want 43", len(scripts))
 	}
 	for _, s := range scripts {
 		if s.LintError != "" {
@@ -47,15 +47,18 @@ func TestEmbeddedCorpusClaimsEveryWriter(t *testing.T) {
 			continue
 		}
 		claimed[s.Writer] = append(claimed[s.Writer], s.Path)
-		// A writer produces a directory per database and has nowhere to put one
-		// otherwise. parseScript lints this; asserting it on the real corpus is
-		// what makes the lint's coverage of the shipped files evident.
-		if s.Scope != collect.ScopeDatabase {
-			t.Errorf("%s: @writer %q without @scope: database", s.Path, s.Writer)
+		// Each writer declares the scope it needs, because the scope follows
+		// from what the writer reads: a per-database directory needs a
+		// database, and a read of the instance's system_health ring buffer must
+		// not have one or it would collect the same graphs once per database.
+		// parseScript lints this; asserting it on the real corpus is what makes
+		// the lint's coverage of the shipped files evident.
+		if want := collect.KnownWriters[s.Writer].Scope; s.Scope != want {
+			t.Errorf("%s: @writer %q declares a scope its writer does not want", s.Path, s.Writer)
 		}
-		// Both writers emit query text and execution plans, which is the
-		// disclosure the flag exists for. A writer script that lost its flag
-		// would collect them on every run.
+		// Every writer emits something the archive has to disclose — query
+		// text, plans, module source, deadlock reports. A writer script that
+		// lost its flag would collect it on every run.
 		if s.RequiresFlag == "" {
 			t.Errorf("%s: @writer %q without a @requires_flag", s.Path, s.Writer)
 		}

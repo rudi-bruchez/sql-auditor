@@ -112,6 +112,13 @@ func run() int {
 		objectDefinitions = fs.Bool("include-object-definitions", false,
 			"also collect the source of views, procedures, functions and triggers — "+
 				"this is code written on this server and may contain credentials")
+		// Off by default, and the narrowest of the disclosure options: a
+		// deadlock graph carries the verbatim SQL of both victims.
+		// 060.system-health.sql collects the count and the timestamps by
+		// default and stops there, which is the line this option crosses.
+		deadlockGraphs = fs.Bool("include-deadlock-graphs", false,
+			"also collect the deadlock reports system_health still holds, one .xdl "+
+				"file each — these carry the SQL of both victims")
 		// Off by default for cost, not for privacy. The estimate samples real
 		// data into tempdb, and the objects worth asking about are the large
 		// ones — which is precisely when it hurts.
@@ -268,6 +275,7 @@ func run() int {
 			collect.FlagQueryStoreDetail:    *queryStoreDetail,
 			collect.FlagQueryStorePlanStats: *queryStorePlanStats,
 			collect.FlagObjectDefinitions:   *objectDefinitions,
+			collect.FlagDeadlockGraphs:      *deadlockGraphs,
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -320,6 +328,10 @@ Options (check, collect):
                               functions and triggers, one file each. Off by
                               default: this is code written on this server and
                               can hold credentials inside an OPENQUERY.
+                              MANIFEST.txt discloses it when it is on.
+  --include-deadlock-graphs   also collect the deadlock reports system_health
+                              still holds, one .xdl file each. Off by default:
+                              a report carries the SQL of both victims.
                               MANIFEST.txt discloses it when it is on.
   --estimate-compression      also estimate page-compression savings on the largest
                               uncompressed objects. Off by default for cost: it
