@@ -215,11 +215,17 @@ func run() int {
 			flags[k] = v
 		}
 	}
-	// The two integers default to 0 above, not to 7 and 50: Resolve owns the
-	// defaults, and a flag carrying its own would beat a .env value the operator
-	// set. They reach the map only when the operator actually typed one, exactly
-	// as --server does.
-	if *queryStoreDays > 0 {
+	// Which flags the operator actually typed, from the flag set itself rather
+	// than from their values. The two integers default to 0 above, not to 7 and
+	// 50 — Resolve owns the defaults, and a flag carrying its own would beat a
+	// .env value the operator set — and asking the flag set preserves that
+	// while giving a typed value the same answer whatever it is. Testing
+	// "> 0" instead dropped --query-store-days -3 on the floor: the run took
+	// the default of 7 and the manifest recorded 7 as though it had been
+	// chosen, while the same -3 in a .env was refused.
+	typed := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { typed[f.Name] = true })
+	if typed["query-store-days"] {
 		flags["QUERY_STORE_DAYS"] = strconv.Itoa(*queryStoreDays)
 	}
 	if *queryStoreFrom != "" {
@@ -228,7 +234,7 @@ func run() int {
 	if *queryStoreTo != "" {
 		flags["QUERY_STORE_TO"] = *queryStoreTo
 	}
-	if *queryStoreTop > 0 {
+	if typed["query-store-top"] {
 		flags["QUERY_STORE_TOP"] = strconv.Itoa(*queryStoreTop)
 	}
 	if *queryStoreDBs != "" {

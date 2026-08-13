@@ -21,7 +21,28 @@ type Config struct {
 	QueryStoreFrom, QueryStoreTo              string
 	QueryStoreTop                             int
 	QueryStoreDBInclude                       string
+	// QueryStoreWindowConflict is set when QUERY_STORE_DAYS was typed
+	// alongside QUERY_STORE_FROM or QUERY_STORE_TO. Resolve is the only place
+	// that can see the conflict — downstream only ever sees a resolved int, so
+	// "typed" and "defaulted" are no longer distinguishable — but it is not the
+	// place that can price it: whether an unusable window is fatal depends on
+	// the Query Store flags, which Resolve never sees. So the fact travels and
+	// resolveWindow reports it, where windowForRun already decides what an
+	// unusable window costs.
+	QueryStoreWindowConflict string
 }
+
+// maxQueryStoreDays caps QUERY_STORE_DAYS at ten years. The Query Store's own
+// retention is configured in days (stale_query_threshold_days) and is measured
+// in weeks or months on real instances, so nothing above this is a window
+// anybody meant to ask for.
+//
+// The ceiling is not tidiness. The sliding window multiplies the value by 24
+// hours into a time.Duration, and a large enough count overflows int64 into a
+// NEGATIVE duration: the start of the window then lands after its end, the
+// extraction matches nothing, and the run reads as a clean collection of a
+// quiet instance — exactly what the window refusals exist to prevent.
+const maxQueryStoreDays = 3650
 
 // knownKeys is the closed set of recognised settings. Anything else in a
 // .env file is a typo, and a typo that silently changes behaviour (SQL_LOGIN
@@ -136,16 +157,24 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		return time.Duration(n) * time.Second
 	}
 	// intOf mirrors secOf but for plain positive counts (no seconds unit),
-	// used by QUERY_STORE_DAYS and QUERY_STORE_TOP.
-	intOf := func(key string, def int) int {
+	// used by QUERY_STORE_DAYS and QUERY_STORE_TOP. max is the largest value
+	// accepted, or 0 for no ceiling: a count that is only ever compared stays
+	// unbounded, a count that becomes a duration must not be.
+	intOf := func(key string, def, max int) int {
 		raw := get(key, "")
 		if raw == "" {
 			return def
 		}
 		n, err := strconv.Atoi(raw)
-		if err != nil || n <= 0 {
+		switch {
+		case err != nil || n <= 0:
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s: invalid value %q, want a positive whole number", key, raw)
+			}
+			return def
+		case max > 0 && n > max:
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: invalid value %q, want a whole number between 1 and %d", key, raw, max)
 			}
 			return def
 		}
@@ -155,7 +184,7 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 	// the shape "2006-01-02T15:04" or "2006-01-02". It is deliberately not
 	// resolved to an instant here: Resolve does not know the server's UTC
 	// offset, and doing so would silently bake in the collecting machine's
-	// zone instead. Task 7 turns it into an instant once the probe has
+	// zone instead. resolveWindow turns it into an instant once the probe has
 	// reported the offset.
 	dateShapeOf := func(key string) string {
 		raw := get(key, "")
@@ -176,24 +205,32 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 
 	// QUERY_STORE_DAYS interacts with QUERY_STORE_FROM/TO, and Resolve is the
 	// only place that can see whether QUERY_STORE_DAYS was typed or defaulted
-	// (downstream only ever sees a resolved int). The conflict check must
-	// therefore run here, and before the default of 7 is applied — once the
-	// default is in, a legitimate "--query-store-from" run is indistinguishable
-	// from one that also asked for seven days.
+	// (downstream only ever sees a resolved int). The conflict is therefore
+	// DETECTED here, and before the default of 7 is applied — once the default
+	// is in, a legitimate "--query-store-from" run is indistinguishable from one
+	// that also asked for seven days.
+	//
+	// It is recorded rather than refused. Resolve runs before any flag is
+	// consulted, so refusing here killed a plain "collect" — and even a
+	// "check" — over a stale QUERY_STORE_TO left in a .env for a feature the
+	// operator did not ask for. The refusal belongs where the window's other
+	// refusals live, in windowForRun, which knows whether anything is going to
+	// read the window.
 	rawQSDays := get("QUERY_STORE_DAYS", "")
 	rawQSFrom := get("QUERY_STORE_FROM", "")
 	rawQSTo := get("QUERY_STORE_TO", "")
+	conflict := ""
 	if rawQSDays != "" && (rawQSFrom != "" || rawQSTo != "") {
-		return nil, fmt.Errorf("QUERY_STORE_DAYS cannot be combined with QUERY_STORE_FROM or QUERY_STORE_TO: pick a sliding window or an explicit one, not both")
+		conflict = "QUERY_STORE_DAYS cannot be combined with QUERY_STORE_FROM or QUERY_STORE_TO: pick a sliding window or an explicit one, not both"
 	}
 	// The default of 7 applies only when no absolute bound is present. When
 	// a bound is present but QUERY_STORE_DAYS was not explicitly set, it is
-	// left at 0: resolveWindow (Task 7) treats > 0 as the sliding form and
-	// 0 as "use the bounds instead".
+	// left at 0: resolveWindow treats > 0 as the sliding form and 0 as "use
+	// the bounds instead".
 	var queryStoreDays int
 	switch {
 	case rawQSDays != "":
-		queryStoreDays = intOf("QUERY_STORE_DAYS", 7)
+		queryStoreDays = intOf("QUERY_STORE_DAYS", 7, maxQueryStoreDays)
 	case rawQSFrom == "" && rawQSTo == "":
 		queryStoreDays = 7
 	default:
@@ -221,8 +258,10 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		QueryStoreDays:      queryStoreDays,
 		QueryStoreFrom:      queryStoreFrom,
 		QueryStoreTo:        queryStoreTo,
-		QueryStoreTop:       intOf("QUERY_STORE_TOP", 50),
+		QueryStoreTop:       intOf("QUERY_STORE_TOP", 50, 0),
 		QueryStoreDBInclude: get("QUERY_STORE_DB_INCLUDE", ""),
+
+		QueryStoreWindowConflict: conflict,
 	}
 	if firstErr != nil {
 		return nil, firstErr

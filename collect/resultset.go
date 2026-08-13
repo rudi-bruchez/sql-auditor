@@ -59,6 +59,13 @@ func int64At(s ResultSet, row int, col string) (int64, bool) {
 	if !ok {
 		return 0, false
 	}
+	return asInt64(v)
+}
+
+// asInt64 is the widening int64At applies, split out so a caller that already
+// holds the cell — rowsWhere, walking one known column over every row — can
+// reuse it without resolving the column name again.
+func asInt64(v any) (int64, bool) {
 	switch t := v.(type) {
 	case int64:
 		return t, true
@@ -87,15 +94,24 @@ func boolAt(s ResultSet, row int, col string) bool {
 // rowsWhere keeps the rows whose col equals want, and every column and type.
 // The result is still a valid ResultSet, so it can be handed straight to
 // Encode.
+//
+// The column is resolved once and the index is then used directly, rather than
+// going back through int64At per row: the name walk is case-insensitive over
+// every column, and this runs over the whole extraction of every database. The
+// two guards int64At applies are kept — a row shorter than the header, and a
+// NULL cell — because a truncated row must be skipped here as it is there.
 func rowsWhere(s ResultSet, col string, want int64) ResultSet {
 	out := ResultSet{Columns: s.Columns, Types: s.Types}
 	i := colIndex(s, col)
 	if i < 0 {
 		return out
 	}
-	for r := range s.Rows {
-		if v, ok := int64At(s, r, col); ok && v == want {
-			out.Rows = append(out.Rows, s.Rows[r])
+	for _, row := range s.Rows {
+		if i >= len(row) || row[i] == nil {
+			continue
+		}
+		if v, ok := asInt64(row[i]); ok && v == want {
+			out.Rows = append(out.Rows, row)
 		}
 	}
 	return out

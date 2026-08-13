@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -224,13 +225,44 @@ func TestResolveLeavesDaysUnsetWhenBoundsAreGiven(t *testing.T) {
 	}
 }
 
-func TestResolveRefusesExplicitDaysWithBounds(t *testing.T) {
-	_, err := Resolve(nil, map[string]string{
+// Both window forms at once is a conflict — both readings are defensible and
+// guessing is not — but Resolve runs before any flag is read, so refusing here
+// killed a plain collect, and a check, over a stale bound in a .env for a
+// feature the run never touches. Resolve reports it; windowForRun prices it.
+func TestResolveReportsTheDaysBoundsConflictWithoutRefusingIt(t *testing.T) {
+	cfg, err := Resolve(nil, map[string]string{
 		"SQL_SERVER": "srv", "QUERY_STORE_DAYS": "7",
 		"QUERY_STORE_FROM": "2026-07-26T14:00",
 	}, func(string) string { return "" })
-	if err == nil {
-		t.Fatal("accepted both window forms at once; both readings are defensible and guessing is not")
+	if err != nil {
+		t.Fatalf("Resolve refused a configuration nothing in this run reads: %v", err)
+	}
+	if cfg.QueryStoreWindowConflict == "" {
+		t.Fatal("the conflict was not recorded; only Resolve can see that QUERY_STORE_DAYS was typed rather than defaulted")
+	}
+	if !strings.Contains(cfg.QueryStoreWindowConflict, "QUERY_STORE_DAYS") {
+		t.Errorf("conflict = %q, want it to name the setting", cfg.QueryStoreWindowConflict)
+	}
+}
+
+// A days count large enough to overflow the duration arithmetic used to produce
+// a NEGATIVE window: from landed after to, the extraction matched nothing, and
+// the run read as a clean collection of a quiet instance. The value is bounded
+// where it is read.
+func TestResolveRefusesAnAbsurdQueryStoreDays(t *testing.T) {
+	for _, raw := range []string{"999999", strconv.Itoa(maxQueryStoreDays + 1)} {
+		_, err := Resolve(nil, map[string]string{"SQL_SERVER": "srv", "QUERY_STORE_DAYS": raw},
+			func(string) string { return "" })
+		if err == nil {
+			t.Errorf("QUERY_STORE_DAYS=%s was accepted; no Query Store holds that history and the "+
+				"multiplication into a duration overflows", raw)
+		}
+	}
+	cfg, err := Resolve(nil, map[string]string{
+		"SQL_SERVER": "srv", "QUERY_STORE_DAYS": strconv.Itoa(maxQueryStoreDays),
+	}, func(string) string { return "" })
+	if err != nil || cfg.QueryStoreDays != maxQueryStoreDays {
+		t.Errorf("the ceiling itself was refused: %v", err)
 	}
 }
 
