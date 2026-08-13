@@ -24,6 +24,25 @@ import (
 //
 // It returns the final state and the process's exit code.
 func loop(events <-chan event, draw func([]string), size func() (int, int), s State) (State, int) {
+	return loopWith(events, draw, size, s, nil)
+}
+
+// loopWith is loop plus the one hook run.go needs, and the reason the two are
+// separate functions is that the hook has no meaning without a terminal: it is
+// what starts the connection, the probe, the collection and the ticker when the
+// state enters a step that needs them, and stops them when it leaves.
+//
+// It cannot be expressed as an event, because an event is applied by this
+// goroutine and a producer sending from here would block on a channel this
+// goroutine is no longer reading. It cannot be expressed through draw either,
+// which sees rendered lines and not the state. So it is a callback, invoked on
+// THIS goroutine after every apply and before the frame is painted — which is
+// also what makes it free of locks: everything it touches is reached from here
+// and nowhere else.
+//
+// hook is nil for every test of the loop itself, which is the whole point of
+// keeping loop's signature as the plan fixed it.
+func loopWith(events <-chan event, draw func([]string), size func() (int, int), s State, hook func(prev, next State)) (State, int) {
 	// The code the last event that knew one reported. It is remembered rather
 	// than returned on the spot because the run's outcome arrives while the
 	// operator is still looking at the final screen: collect.Run comes back
@@ -44,7 +63,15 @@ func loop(events <-chan event, draw func([]string), size func() (int, int), s St
 		if c, ok := e.(coded); ok {
 			code = c.exitStatus()
 		}
+		prev := s
 		s = e.apply(s)
+		if hook != nil {
+			// Before the quit test, so that entering StepQuit is the transition
+			// that stops the ticker and cancels whatever is still running. A
+			// hook called only on the surviving paths would leave a ticker
+			// ticking into a channel nobody reads.
+			hook(prev, s)
+		}
 		if s.Step == StepQuit {
 			// No last frame: the next thing on this terminal is the operator's
 			// shell prompt, and painting a screen that is about to be erased
