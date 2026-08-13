@@ -273,6 +273,29 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 		})
 	}
 
+	if denied["log_shipping"] {
+		sections = append(sections, grantSection{
+			title:  "Read whether this instance ships transaction logs",
+			marker: sectionInMsdb,
+			why: append([]string{
+				"SELECT on the six log shipping tables. Neither MSDB READ nor",
+				"SQLAgentReaderRole reaches them, so without this the archive cannot",
+				"tell log shipping that is absent from log shipping it may not look",
+				"at — and those are opposite findings.",
+				"",
+				"Collectors that need it:",
+			}, indentList(collectorsFor(in.Scripts, "log_shipping"))...),
+			statement: []string{
+				"GRANT SELECT ON msdb.dbo.log_shipping_primary_databases TO sqlauditor;",
+				"GRANT SELECT ON msdb.dbo.log_shipping_secondary_databases TO sqlauditor;",
+				"GRANT SELECT ON msdb.dbo.log_shipping_secondary TO sqlauditor;",
+				"GRANT SELECT ON msdb.dbo.log_shipping_monitor_primary TO sqlauditor;",
+				"GRANT SELECT ON msdb.dbo.log_shipping_monitor_secondary TO sqlauditor;",
+				"GRANT SELECT ON msdb.dbo.log_shipping_monitor_error_detail TO sqlauditor;",
+			},
+		})
+	}
+
 	if denied["agent_job_steps"] {
 		sections = append(sections, grantSection{
 			title:  "Read what the Agent jobs actually run",
