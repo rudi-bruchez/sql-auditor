@@ -11,6 +11,7 @@ package tui
 
 import (
 	"time"
+	"unicode/utf8"
 
 	"github.com/rudi-bruchez/sql-auditor/collect"
 	"github.com/rudi-bruchez/sql-auditor/tui/screen"
@@ -85,10 +86,17 @@ type State struct {
 	// Screen 1. Password is held here and nowhere else: it is never written
 	// to disk, never rendered, and never leaves the process.
 	Server, Password string
+	// ServerFromFlag records where the initial address came from, and exists
+	// only so ServerOverridden can be set on the first edit. A value out of
+	// .env or of the environment is not worth mentioning; one typed on the
+	// command line half a minute ago is.
+	ServerFromFlag bool
 	// ServerOverridden records that the operator typed over a value that came
 	// from a --server flag. The screen says so, because somebody who typed a
 	// command line and then edited the field must not be surprised by where
-	// the connection went.
+	// the connection went. The typing wins: it is the last thing the operator
+	// did, and a flag quietly beating it would send the connection somewhere
+	// other than what the screen displays.
 	ServerOverridden bool
 	Field            int
 	// ConnError is the refusal from screen 1, which is the one error in this
@@ -191,8 +199,18 @@ func (s State) Key(k screen.Key) State {
 	return s
 }
 
-// keyConnection handles screen 1. Task 12 fills in the editing; what lives
-// here is the pair of decisions that are not editing.
+// keyConnection handles screen 1, the only editable screen and the only
+// capability the wizard adds over the command line.
+//
+// It exists for the password. The repository deliberately refuses a
+// --password flag, since it would end up in ps and in the shell history, so a
+// DBA who was handed a binary and no .env has no way to supply one at all —
+// and that operator is exactly who this wizard is for. The value is held in
+// memory, shown as stars, and never written to disk.
+//
+// This is also why the screen quits on Esc rather than on [q]: every printable
+// rune belongs to the field being edited, and a server named QUALIF or a
+// password containing a q must not close the program.
 func (s State) keyConnection(k screen.Key) State {
 	switch k.Named {
 	case screen.KeyEnter:
@@ -204,7 +222,57 @@ func (s State) keyConnection(k screen.Key) State {
 	case screen.KeyCtrlC, screen.KeyEsc:
 		s.Step = StepQuit
 		return s
+	case screen.KeyTab:
+		// Moving the cursor is not an edit, so it does not claim an override.
+		s.Field = (s.Field + 1) % fieldCount
+		return s
+	case screen.KeyBackspace:
+		return s.editField(func(v string) string {
+			// By rune, not by byte. A password of "clé" is four bytes and
+			// three runes; dropping the last byte leaves invalid UTF-8 in the
+			// connection string and a refusal nothing on screen explains,
+			// since the field shows only stars.
+			if v == "" {
+				return v
+			}
+			_, size := utf8.DecodeLastRuneInString(v)
+			return v[:len(v)-size]
+		})
+	case screen.KeySpace:
+		return s.editField(func(v string) string { return v + " " })
 	}
+	if k.Rune >= 0x20 && k.Rune != 0x7f {
+		return s.editField(func(v string) string { return v + string(k.Rune) })
+	}
+	return s
+}
+
+// editField applies one edit to whichever of the two fields has the cursor,
+// and records the override on the way through so the three call sites above
+// cannot each forget it.
+func (s State) editField(edit func(string) string) State {
+	if s.Field == fieldPassword {
+		s.Password = edit(s.Password)
+		return s
+	}
+	if s.ServerFromFlag {
+		s.ServerOverridden = true
+	}
+	s.Server = edit(s.Server)
+	return s
+}
+
+// connectFailed is the one error in this wizard that does not end a step. A
+// refused connection reprints the server's own message and hands the keyboard
+// back to the server field, because the address is both the likeliest thing to
+// be wrong and the one a wrong password does not explain.
+//
+// It is a method rather than an event type so that the decision — which field,
+// which step — is testable without a channel, a goroutine or a driver.
+func (s State) connectFailed(err error) State {
+	s.Step = StepConnection
+	s.ConnError = err
+	s.Field = fieldServer
 	return s
 }
 
