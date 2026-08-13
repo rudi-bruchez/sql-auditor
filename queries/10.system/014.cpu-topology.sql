@@ -59,11 +59,19 @@ SELECT
     si.hyperthread_ratio                            AS [processors.hyperthread_ratio],
     si.scheduler_count                              AS [processors.schedulers],
 
+    -- The counts live under [numa.…], not [nodes.…], and the name is load
+    -- bearing: the second result set is called "nodes", the encoder builds its
+    -- nested objects from these dotted prefixes, and a prefix that matches a
+    -- result-set name makes the same key an object and an array at once. The
+    -- encoder refuses that, so the collector produced nothing at all until the
+    -- prefix moved. "numa" is also the truer name — these are counts about
+    -- NUMA, while "nodes" is the per-node evidence beneath them.
+    --
     -- What SQLOS calls NUMA nodes. This counts soft nodes as well, which is
     -- exactly why it must never be read alone.
-    si.numa_node_count                              AS [nodes.sqlos_node_count],
-    si.softnuma_configuration                       AS [nodes.softnuma_configuration],
-    si.softnuma_configuration_desc                  AS [nodes.softnuma_configuration_desc],
+    si.numa_node_count                              AS [numa.sqlos_node_count],
+    si.softnuma_configuration                       AS [numa.softnuma_configuration],
+    si.softnuma_configuration_desc                  AS [numa.softnuma_configuration_desc],
 
     -- The hardware answer, and it has to be asked carefully.
     --
@@ -79,11 +87,11 @@ SELECT
     -- so it cannot inflate it. Both are projected: when they differ, the
     -- difference is a fact about the instance rather than something to hide.
     (SELECT COUNT(DISTINCT n.memory_node_id) FROM sys.dm_os_nodes AS n
-      WHERE n.node_state_desc NOT LIKE '%DAC%')     AS [nodes.memory_node_count],
+      WHERE n.node_state_desc NOT LIKE '%DAC%')     AS [numa.memory_node_count],
     (SELECT COUNT(*) FROM sys.dm_os_memory_nodes
-      WHERE memory_node_id <> 64)                   AS [nodes.memory_nodes_reported],
+      WHERE memory_node_id <> 64)                   AS [numa.memory_nodes_reported],
     (SELECT COUNT(*) FROM sys.dm_os_nodes
-      WHERE node_state_desc NOT LIKE '%DAC%')       AS [nodes.scheduler_node_count],
+      WHERE node_state_desc NOT LIKE '%DAC%')       AS [numa.scheduler_node_count],
 
     -- The conclusion, computed here so nobody has to reach it twice. True means
     -- the reported nodes are scheduler groups over a single memory node, so
@@ -93,19 +101,19 @@ SELECT
                WHERE node_state_desc NOT LIKE '%DAC%')
            > (SELECT COUNT(DISTINCT n.memory_node_id) FROM sys.dm_os_nodes AS n
                WHERE n.node_state_desc NOT LIKE '%DAC%')
-        THEN 1 ELSE 0 END)                          AS [nodes.soft_numa_in_effect],
+        THEN 1 ELSE 0 END)                          AS [numa.soft_numa_in_effect],
     CONVERT(bit, CASE
         WHEN (SELECT COUNT(DISTINCT n.memory_node_id) FROM sys.dm_os_nodes AS n
                WHERE n.node_state_desc NOT LIKE '%DAC%') > 1
-        THEN 1 ELSE 0 END)                          AS [nodes.hardware_numa_present],
+        THEN 1 ELSE 0 END)                          AS [numa.hardware_numa_present],
 
     -- The value Microsoft's guidance lands on, for the analysis layer to
     -- compare against what is configured. Eight, or the logical processor
     -- count when that is smaller.
     CASE WHEN si.cpu_count <= 8 THEN si.cpu_count ELSE 8 END
-                                                    AS [nodes.maxdop_guidance],
+                                                    AS [numa.maxdop_guidance],
     (SELECT CONVERT(int, value_in_use) FROM sys.configurations
-      WHERE name = 'max degree of parallelism')     AS [nodes.maxdop_configured],
+      WHERE name = 'max degree of parallelism')     AS [numa.maxdop_configured],
 
     CONVERT(bit, si.virtual_machine_type)           AS [machine.is_virtual],
     si.virtual_machine_type_desc                    AS [machine.virtual_machine_type]

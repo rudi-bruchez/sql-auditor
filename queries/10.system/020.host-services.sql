@@ -41,10 +41,18 @@
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT SERVERPROPERTY('MachineName')                              AS [machine_name],
-       SERVERPROPERTY('ComputerNamePhysicalNetBIOS')              AS [physical_name],
-       SERVERPROPERTY('InstanceName')                             AS [instance_name],
-       SERVERPROPERTY('IsClustered')                              AS [is_clustered],
+-- SERVERPROPERTY returns sql_variant, always. Projected raw, the driver hands
+-- the encoder a type it cannot render and the value is dropped with a warning,
+-- so the column reaches the archive empty. Converting is not cosmetic: it is
+-- what makes the value survive the trip. InstanceName carried the same defect
+-- without ever warning, because it is NULL on a default instance and a NULL
+-- sql_variant has no base type to complain about — it would have surfaced on
+-- the first named instance instead.
+SELECT CONVERT(sysname,  SERVERPROPERTY('MachineName'))           AS [machine_name],
+       CONVERT(sysname,  SERVERPROPERTY('ComputerNamePhysicalNetBIOS'))
+                                                                  AS [physical_name],
+       CONVERT(sysname,  SERVERPROPERTY('InstanceName'))          AS [instance_name],
+       CONVERT(bit,      SERVERPROPERTY('IsClustered'))           AS [is_clustered],
        si.sqlserver_start_time                                    AS [instance_start],
        DATEDIFF(second, si.sqlserver_start_time, GETDATE())       AS [seconds_since_instance_start],
        (SELECT COUNT(*) FROM sys.dm_server_services)              AS [services_reported],
