@@ -405,9 +405,10 @@ What is in here that names things:
 	b.WriteString(`
 The password of the login used for this run is recorded nowhere in this
 archive. The run settings in _run.json are the query and output directories,
-the database name filters, and whether session text was collected; any setting
-whose name marks it as a password, token or other secret is replaced with
-"(redacted)" before that block is written.
+the database name filters, which optional collections were switched on, and
+the window and per-database limits the Query Store extraction was given; any
+setting whose name marks it as a password, token or other secret is replaced
+with "(redacted)" before that block is written.
 `)
 	if m.Collected.SessionText || m.Collected.QueryStoreDetail || m.Collected.QueryStoreProfiledPlans {
 		b.WriteString(`

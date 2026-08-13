@@ -103,8 +103,15 @@ tested first:
 `10.system/012.soft-numa.sql` used to be in this table and no longer exists: it
 was merged into `10.system/014.cpu-topology.sql`, because the two each held half
 of one answer and the split was read wrongly on a real audit. `014` declares
-`13.0` today, where this table used to record `13.0.5026`; its header states the
-floor it now claims and why — 2016 is where `softnuma_configuration` arrives.
+`13.0.5026`, and the reason is not the one the merge left behind. It briefly
+declared `13.0`, justified by `softnuma_configuration` alone. Four of its
+columns are documented as SQL Server 2016 **SP2** and later — `socket_count`,
+`cores_per_socket`, `numa_node_count` and `softnuma_configuration` — and all
+four sit in the root SELECT, so on 2016 RTM or SP1 the batch fails on an
+invalid column name and the collector produces nothing at all. The floor is
+back where the columns put it. The gap was invisible on every instance this
+corpus has been run against, all of which are SP2 or later; it was found by
+reading this table against the file.
 
 The gate compares dotted versions rather than the major component alone,
 because a major-only gate would let 2016 RTM attempt columns that arrived in

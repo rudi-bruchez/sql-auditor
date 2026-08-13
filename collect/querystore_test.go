@@ -79,7 +79,7 @@ func runDetailWriter(t *testing.T, sets []NamedResultSet) (root, rel string, st 
 	root = t.TempDir()
 	st = NewQueryStoreState()
 	req := WriteRequest{
-		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Out:    newRunWriter(root, maxRunBytes),
 		Script: Script{Path: "80.workload/021.query-store-detail.sql", Dir: "80.workload", Base: "021.query-store-detail"},
 		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
 		Sets:   sets,
@@ -342,7 +342,7 @@ func TestDetailWriterCountsTextFilesEvenWithNoPlans(t *testing.T) {
 	}
 	root := t.TempDir()
 	res, err := writerFor("query-store-detail")(WriteRequest{
-		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Out:    newRunWriter(root, maxRunBytes),
 		Script: Script{Path: "80.workload/021.query-store-detail.sql", Dir: "80.workload", Base: "021.query-store-detail"},
 		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
 		Sets:   sets,
@@ -399,7 +399,7 @@ func TestWriterForCoversKnownWriters(t *testing.T) {
 func TestDetailWriterRecordsWhatTheBudgetRefused(t *testing.T) {
 	root := t.TempDir()
 	// Room for the first query's text and nothing else.
-	out := newRunWriter(root, len("SELECT a FROM t"), func(string) {})
+	out := newRunWriter(root, len("SELECT a FROM t"))
 	var warnings []string
 	res, err := writerFor("query-store-detail")(WriteRequest{
 		Out:    out,
@@ -644,7 +644,7 @@ func TestProfiledWriterNamesTheFileAfterQueryAndPlan(t *testing.T) {
 	st := NewQueryStoreState()
 	st.Selected["Sales"] = []int64{11, 22}
 	res, err := writerFor("query-store-profiled")(WriteRequest{
-		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Out:    newRunWriter(root, maxRunBytes),
 		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
 		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
 		Sets:   profiledSets(),
@@ -698,7 +698,7 @@ func TestProfiledWriterSkipsWhenNothingWasSelected(t *testing.T) {
 	sets := profiledSets()
 	sets[1].Set.Rows = nil
 	res, err := writerFor("query-store-profiled")(WriteRequest{
-		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Out:    newRunWriter(root, maxRunBytes),
 		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
 		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
 		Sets:   sets,
@@ -734,7 +734,7 @@ func TestProfiledWriterRecordsAQueryWithNoMatchAsAnOmission(t *testing.T) {
 	st := NewQueryStoreState()
 	st.Selected["Sales"] = []int64{11, 22} // only 11 has a matching row in profiledSets
 	res, err := writerFor("query-store-profiled")(WriteRequest{
-		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Out:    newRunWriter(root, maxRunBytes),
 		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
 		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
 		Sets:   profiledSets(),
@@ -914,7 +914,7 @@ func runProfiledWriter(t *testing.T, sets []NamedResultSet, ids []int64) (root s
 	st := NewQueryStoreState()
 	st.Selected["Sales"] = ids
 	res, err := writerFor("query-store-profiled")(WriteRequest{
-		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Out:    newRunWriter(root, maxRunBytes),
 		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
 		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
 		Sets:   sets,
@@ -990,7 +990,7 @@ func TestProfiledWriterRecordsANullPlanAsAnOmission(t *testing.T) {
 // warned.
 func TestProfiledWriterRecordsWhatTheBudgetRefused(t *testing.T) {
 	root := t.TempDir()
-	out := newRunWriter(root, 4, func(string) {}) // room for no plan at all
+	out := newRunWriter(root, 4) // room for no plan at all
 	st := NewQueryStoreState()
 	st.Selected["Sales"] = []int64{11}
 	var warnings []string
@@ -1140,7 +1140,7 @@ func TestDetailWriterLeavesAnIndexWhenAWriteFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := writerFor("query-store-detail")(WriteRequest{
-		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Out:    newRunWriter(root, maxRunBytes),
 		Script: Script{Path: "80.workload/021.query-store-detail.sql", Dir: "80.workload", Base: "021.query-store-detail"},
 		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
 		Sets:   detailSets(),
@@ -1192,7 +1192,7 @@ func TestProfiledWriterLeavesAnIndexWhenAWriteFails(t *testing.T) {
 	st := NewQueryStoreState()
 	st.Selected["Sales"] = []int64{11}
 	res, err := writerFor("query-store-profiled")(WriteRequest{
-		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Out:    newRunWriter(root, maxRunBytes),
 		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
 		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
 		Sets:   profiledSets(),
