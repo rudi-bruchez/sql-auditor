@@ -2,6 +2,7 @@ package collect
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -456,7 +457,37 @@ func TestProfiledWriterNamesTheFileAfterQueryAndPlan(t *testing.T) {
 	}
 }
 
-func TestProfiledWriterAcceptsAnEmptyResult(t *testing.T) {
+// profiledIndexSummary reads back the top-level fields of a profiled-plan
+// _index.json that the SKIP and no-match cases must disagree on: a SKIP sets
+// Reason and leaves Omissions empty; a no-match leaves Reason empty and
+// populates Omissions. Collapsing the two into one signal would hide which
+// of "021 never ran here" and "021 ran and 022 found nothing" actually
+// happened.
+type profiledIndexSummary struct {
+	Reason    string          `json:"reason"`
+	Omissions []indexOmission `json:"omissions"`
+}
+
+func readProfiledIndex(t *testing.T, root, rel string) (profiledIndexSummary, []byte) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel), "_index.json"))
+	if err != nil {
+		t.Fatalf("no index written: %v", err)
+	}
+	var idx profiledIndexSummary
+	if err := json.Unmarshal(b, &idx); err != nil {
+		t.Fatal(err)
+	}
+	return idx, b
+}
+
+// TestProfiledWriterSkipsWhenNothingWasSelected pins the SKIP branch: 021 and
+// 022 run independently, and Selected["Sales"] being empty here means 021
+// left nothing to match against. The profiled result set is never even read
+// in that case, which is exactly why this must not be confused with a
+// no-match — see TestProfiledWriterRecordsAQueryWithNoMatchAsAnOmission for
+// the other side of that distinction.
+func TestProfiledWriterSkipsWhenNothingWasSelected(t *testing.T) {
 	root := t.TempDir()
 	sets := profiledSets()
 	sets[1].Set.Rows = nil
@@ -469,11 +500,14 @@ func TestProfiledWriterAcceptsAnEmptyResult(t *testing.T) {
 		Warn:   func(string) {},
 	})
 	if err != nil {
-		t.Fatalf("an empty profiled result must not be an error: %v", err)
+		t.Fatalf("a SKIP must not be an error: %v", err)
 	}
-	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(res.Rel), "_index.json"))
-	if err != nil {
-		t.Fatalf("no index written for an empty result: %v", err)
+	idx, b := readProfiledIndex(t, root, res.Rel)
+	if idx.Reason == "" {
+		t.Errorf("_index.json does not say why nothing was matched:\n%s", b)
+	}
+	if len(idx.Omissions) != 0 {
+		t.Errorf("a SKIP recorded omissions too, blurring it with a no-match: %+v", idx.Omissions)
 	}
 	if !strings.Contains(string(b), "matched_plans") {
 		t.Errorf("_index.json does not say how many plans matched:\n%s", b)
@@ -481,5 +515,218 @@ func TestProfiledWriterAcceptsAnEmptyResult(t *testing.T) {
 	// A zero match must be explicable without going back to the server.
 	if !strings.Contains(string(b), "last_query_plan_stats") {
 		t.Errorf("_index.json does not record whether the feature was even on:\n%s", b)
+	}
+}
+
+// TestProfiledWriterRecordsAQueryWithNoMatchAsAnOmission is the case the SKIP
+// above must not be confused with: 021 did select query 22, 022's plans set
+// has nothing for it, and that is a per-query omission with Reason left
+// empty at the top level — the database was not skipped, one query in it
+// just found no profiled plan.
+func TestProfiledWriterRecordsAQueryWithNoMatchAsAnOmission(t *testing.T) {
+	root := t.TempDir()
+	st := NewQueryStoreState()
+	st.Selected["Sales"] = []int64{11, 22} // only 11 has a matching row in profiledSets
+	res, err := writerFor("query-store-profiled")(WriteRequest{
+		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
+		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
+		Sets:   profiledSets(),
+		State:  st,
+		Warn:   func(string) {},
+	})
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	idx, b := readProfiledIndex(t, root, res.Rel)
+	if idx.Reason != "" {
+		t.Errorf("reason = %q, want empty — this database was not skipped, one query just had no match:\n%s", idx.Reason, b)
+	}
+	found := false
+	for _, o := range idx.Omissions {
+		if o.QueryID == 22 && o.PlanID == 0 && o.Reason == "no profiled plan matched this query_id by query_plan_hash" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("_index.json does not record query 22's no-match: %+v", idx.Omissions)
+	}
+}
+
+// TestProfiledWriterRecordsExtraCandidatesAsOmissions pins the >1-row branch:
+// a second plan_id for the same query, sharing the hash (a recompile, or a
+// genuine collision), is named as an omission rather than silently dropped,
+// and only the first row's plan is ever written to disk.
+func TestProfiledWriterRecordsExtraCandidatesAsOmissions(t *testing.T) {
+	sets := profiledSets()
+	sets[1].Set.Rows = append(sets[1].Set.Rows,
+		[]any{int64(11), int64(102), "plan_hash", int64(2), "<ShowPlanXML>other</ShowPlanXML>"})
+	root := t.TempDir()
+	st := NewQueryStoreState()
+	st.Selected["Sales"] = []int64{11}
+	res, err := writerFor("query-store-profiled")(WriteRequest{
+		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
+		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
+		Sets:   sets,
+		State:  st,
+		Warn:   func(string) {},
+	})
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	dir := filepath.Join(root, filepath.FromSlash(res.Rel))
+	if _, err := os.Stat(filepath.Join(dir, "query_11.plan_101.actual.sqlplan")); err != nil {
+		t.Errorf("missing the written candidate's file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "query_11.plan_102.actual.sqlplan")); err == nil {
+		t.Error("wrote a file for the candidate that should have been recorded as an omission")
+	}
+	found := false
+	for _, o := range indexOmissions(t, root, res.Rel) {
+		if o.QueryID == 11 && o.PlanID == 102 &&
+			strings.Contains(o.Reason, "an additional candidate plan matched the same query_plan_hash and was not written") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("_index.json does not record plan 102 as an unwritten extra candidate: %+v", indexOmissions(t, root, res.Rel))
+	}
+}
+
+// profiledPlanRow builds one root/profiled pair naming a single query and
+// plan, so the oversized- and NULL-plan branches can be tested without
+// disturbing profiledSets' fixture used elsewhere.
+func profiledPlanRow(plan any, planBytes int64) []NamedResultSet {
+	root := ResultSet{
+		Columns: []string{"database", "requested_queries", "matched_plans", "last_query_plan_stats"},
+		Types:   []string{"NVARCHAR", "INT", "INT", "NVARCHAR"},
+		Rows:    [][]any{{"Sales", int64(1), int64(1), "ON"}},
+	}
+	plans := ResultSet{
+		Columns: []string{"query_id", "plan_id", "match", "candidates", "query_plan", "query_plan_bytes"},
+		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "BIGINT", "NVARCHAR", "BIGINT"},
+		Rows: [][]any{
+			{int64(11), int64(101), "plan_hash", int64(1), plan, planBytes},
+		},
+	}
+	return []NamedResultSet{
+		{Spec: ResultSpec{Name: "root", Shape: ShapeObject}, Set: root},
+		{Spec: ResultSpec{Name: "profiled", Shape: ShapeArray}, Set: plans},
+	}
+}
+
+func runProfiledWriter(t *testing.T, sets []NamedResultSet, ids []int64) (root, rel string, warnings []string) {
+	t.Helper()
+	root = t.TempDir()
+	st := NewQueryStoreState()
+	st.Selected["Sales"] = ids
+	res, err := writerFor("query-store-profiled")(WriteRequest{
+		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
+		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
+		Sets:   sets,
+		State:  st,
+		Warn:   func(s string) { warnings = append(warnings, s) },
+	})
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	return root, res.Rel, warnings
+}
+
+// The cap is applied twice, exactly as it is for the detail writer: a guard
+// column can null the plan out before it crosses the wire, or the plan can
+// reach the writer and still be too large. Both must be distinguishable from
+// a plan the DMF simply never returned.
+func TestProfiledWriterCapsAnOversizedPlanFilteredByTheServer(t *testing.T) {
+	root, rel, _ := runProfiledWriter(t, profiledPlanRow(nil, maxPlanBytes+1), []int64{11})
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel), "query_11.plan_101.actual.sqlplan")); err == nil {
+		t.Error("wrote a file for a plan the server filtered by size")
+	}
+	found := false
+	for _, o := range indexOmissions(t, root, rel) {
+		if o.PlanID == 101 && strings.Contains(o.Reason, "exceeds the 8388608 byte per-plan cap and was not sent") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("_index.json does not record the server-side size cap: %+v", indexOmissions(t, root, rel))
+	}
+}
+
+func TestProfiledWriterCapsAnOversizedPlanThatReachedTheWriter(t *testing.T) {
+	root, rel, _ := runProfiledWriter(t, profiledPlanRow(strings.Repeat("x", maxPlanBytes+1), 0), []int64{11})
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel), "query_11.plan_101.actual.sqlplan")); err == nil {
+		t.Error("wrote a file for a plan over the byte cap")
+	}
+	found := false
+	for _, o := range indexOmissions(t, root, rel) {
+		if o.PlanID == 101 && o.Reason == fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap", maxPlanBytes+1, maxPlanBytes) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("_index.json does not record the backstop cap: %+v", indexOmissions(t, root, rel))
+	}
+}
+
+func TestProfiledWriterRecordsANullPlanAsAnOmission(t *testing.T) {
+	root, rel, warnings := runProfiledWriter(t, profiledPlanRow(nil, 0), []int64{11})
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel), "query_11.plan_101.actual.sqlplan")); err == nil {
+		t.Error("wrote a file for a NULL plan")
+	}
+	found := false
+	for _, o := range indexOmissions(t, root, rel) {
+		if o.PlanID == 101 && o.Reason == "no plan XML returned for this plan_id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("_index.json does not record the NULL plan: %+v", indexOmissions(t, root, rel))
+	}
+	if len(warnings) == 0 {
+		t.Error("a NULL plan was recorded but nothing warned the manifest")
+	}
+}
+
+// A budget that dies before a single plan fits must still leave a coherent
+// index behind: no file, an omission naming the budget, and the manifest
+// warned.
+func TestProfiledWriterRecordsWhatTheBudgetRefused(t *testing.T) {
+	root := t.TempDir()
+	out := newRunWriter(root, 4, func(string) {}) // room for no plan at all
+	st := NewQueryStoreState()
+	st.Selected["Sales"] = []int64{11}
+	var warnings []string
+	res, err := writerFor("query-store-profiled")(WriteRequest{
+		Out:    out,
+		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
+		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
+		Sets:   profiledSets(),
+		State:  st,
+		Warn:   func(s string) { warnings = append(warnings, s) },
+	})
+	if err != nil {
+		t.Fatalf("an exhausted budget is a recorded omission, not a failure: %v", err)
+	}
+	dir := filepath.Join(root, filepath.FromSlash(res.Rel))
+	if _, err := os.Stat(filepath.Join(dir, "query_11.plan_101.actual.sqlplan")); err == nil {
+		t.Error("wrote a plan file past the budget")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "_index.json")); err != nil {
+		t.Fatalf("the budget swallowed the index that describes the truncation: %v", err)
+	}
+	found := false
+	for _, o := range indexOmissions(t, root, res.Rel) {
+		if o.PlanID == 101 && o.Reason == budgetReason {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("_index.json does not record the budget refusal")
+	}
+	if len(warnings) == 0 {
+		t.Error("the budget refusal never reached the manifest's warnings")
 	}
 }
