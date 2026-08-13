@@ -108,10 +108,18 @@ SELECT l.name                                                     AS [name],
        CAST(l.is_policy_checked AS int)                           AS [is_policy_checked],
        CAST(l.is_expiration_checked AS int)                       AS [is_expiration_checked],
        l.modify_date                                              AS [modify_date],
-       LOGINPROPERTY(l.name, 'PasswordLastSetTime')               AS [password_last_set],
-       LOGINPROPERTY(l.name, 'IsLocked')                          AS [is_locked],
-       LOGINPROPERTY(l.name, 'IsMustChange')                      AS [must_change],
-       LOGINPROPERTY(l.name, 'BadPasswordCount')                  AS [bad_password_count]
+       -- LOGINPROPERTY returns sql_variant whatever is asked of it, and the
+       -- encoder cannot render sql_variant: projected raw, every one of these
+       -- four reached the archive empty, once per login. The base types are
+       -- documented — PasswordLastSetTime is datetime, IsLocked, IsMustChange
+       -- and BadPasswordCount are int — so the conversion asserts nothing the
+       -- function does not already promise.
+       CONVERT(datetime, LOGINPROPERTY(l.name, 'PasswordLastSetTime'))
+                                                                  AS [password_last_set],
+       CONVERT(bit,      LOGINPROPERTY(l.name, 'IsLocked'))       AS [is_locked],
+       CONVERT(bit,      LOGINPROPERTY(l.name, 'IsMustChange'))   AS [must_change],
+       CONVERT(int,      LOGINPROPERTY(l.name, 'BadPasswordCount'))
+                                                                  AS [bad_password_count]
 FROM sys.sql_logins AS l
 ORDER BY l.name
 OPTION (RECOMPILE, MAXDOP 1);
