@@ -32,6 +32,13 @@ go.work.sum
 .env*
 !.env.example
 
+# Collected archives. OUTPUT_DIR defaults to "output" relative to the working
+# directory, so running the tool from a clone puts a client's archive inside the
+# repository — one `git add -A` away from being committed. The archives hold
+# server names, logins, object names and, under the opt-in flags, statement text
+# and module source.
+output/
+
 # Editor/IDE
 # .idea/
 # .vscode/
