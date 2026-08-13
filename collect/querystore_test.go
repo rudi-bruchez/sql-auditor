@@ -409,9 +409,14 @@ func TestDetailWriterRecordsWhatTheBudgetRefused(t *testing.T) {
 	}
 }
 
-// detailIndexSelection reads back the two fields of _index.json that say why a
-// query is in the archive at all.
-func detailIndexSelection(t *testing.T, root, rel string) (forced int, byQuery map[int64]bool) {
+// detailIndexSelection reads back the fields of _index.json that say why a
+// query is in the archive at all: the selection counts, and each query's own
+// forced flag.
+func detailIndexSelection(t *testing.T, root, rel string) (counts struct {
+	Cap    int64 `json:"cap"`
+	Ranked int   `json:"ranked"`
+	Forced int   `json:"forced"`
+}, byQuery map[int64]bool) {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel), "_index.json"))
 	if err != nil {
@@ -419,7 +424,9 @@ func detailIndexSelection(t *testing.T, root, rel string) (forced int, byQuery m
 	}
 	var idx struct {
 		Selection struct {
-			Forced int `json:"forced"`
+			Cap    int64 `json:"cap"`
+			Ranked int   `json:"ranked"`
+			Forced int   `json:"forced"`
 		} `json:"selection"`
 		Queries []struct {
 			QueryID int64 `json:"query_id"`
@@ -433,7 +440,7 @@ func detailIndexSelection(t *testing.T, root, rel string) (forced int, byQuery m
 	for _, q := range idx.Queries {
 		byQuery[q.QueryID] = q.Forced
 	}
-	return idx.Selection.Forced, byQuery
+	return idx.Selection, byQuery
 }
 
 // TestDetailWriterReadsForcedFromTheSelection is the case is_forced cannot
@@ -453,7 +460,7 @@ func TestDetailWriterReadsForcedFromTheSelection(t *testing.T) {
 			false, nil, nil, nil, nil, true})
 	root, rel, _, _ := runDetailWriter(t, sets)
 
-	forced, byQuery := detailIndexSelection(t, root, rel)
+	counts, byQuery := detailIndexSelection(t, root, rel)
 	if !byQuery[33] {
 		t.Error("query 33 is recorded as not forced, but it is in the selection only because a plan of its own can no longer be forced")
 	}
@@ -463,8 +470,16 @@ func TestDetailWriterReadsForcedFromTheSelection(t *testing.T) {
 	if byQuery[22] {
 		t.Error("query 22 is recorded as forced; it entered on its ranks alone")
 	}
-	if forced != 2 {
-		t.Errorf("selection.forced = %d, want 2 — it counts queries, and query 11's two plans are one query", forced)
+	if counts.Forced != 2 {
+		t.Errorf("selection.forced = %d, want 2 — it counts queries, and query 11's two plans are one query", counts.Forced)
+	}
+	// Query 33 has no rank at all: the SQL LEFT JOINs the rankings, and a
+	// forced-only query arrives with all four NULL. Counting it as ranked would
+	// report a ranked population of 3 against a cap of 50 that only ever
+	// admitted 2 — and, on a full run, a ranked count above the cap, which
+	// reads as a leak. Query 11 is both ranked and forced, and belongs in both.
+	if counts.Ranked != 2 {
+		t.Errorf("selection.ranked = %d, want 2 — a query with no rank did not enter on the ranking", counts.Ranked)
 	}
 }
 
@@ -483,8 +498,12 @@ func profiledSets() []NamedResultSet {
 		Rows:    [][]any{{"Sales", int64(2), int64(1), "ON"}},
 	}
 	plans := ResultSet{
+		// DATETIME, not DATETIMEOFFSET: the column is
+		// sys.dm_exec_query_stats.last_execution_time, which is a datetime, and
+		// the encoder renders the two differently on purpose. The
+		// datetimeoffset one is the Query Store's, which 021 reads.
 		Columns: []string{"query_id", "plan_id", "match", "candidates", "last_execution_time", "query_plan"},
-		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "BIGINT", "DATETIMEOFFSET", "NVARCHAR"},
+		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "BIGINT", "DATETIME", "NVARCHAR"},
 		Rows: [][]any{
 			{int64(11), int64(101), "plan_hash", int64(3),
 				time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC), "<ShowPlanXML>profiled</ShowPlanXML>"},
@@ -625,23 +644,43 @@ func TestProfiledWriterRecordsAQueryWithNoMatchAsAnOmission(t *testing.T) {
 // The hash-collision case is a different one and never reaches here: several
 // cached plan_handles for ONE plan_id are counted by `candidates`, inside the
 // SQL, and only the most recently executed of them is returned.
+// The two rows carry DIFFERENT candidates and different timestamps on purpose:
+// each entry must take its metadata from its OWN row. Reading them from row 0
+// — which is what this fix replaced — would write two files and describe the
+// second with the first's numbers, and identical fixture values would let that
+// through.
 func TestProfiledWriterWritesEveryDistinctPlanOfAQuery(t *testing.T) {
 	sets := profiledSets()
 	sets[1].Set.Rows = append(sets[1].Set.Rows,
-		[]any{int64(11), int64(102), "plan_hash", int64(2),
+		[]any{int64(11), int64(102), "plan_hash", int64(7),
 			time.Date(2026, 8, 13, 9, 45, 0, 0, time.UTC), "<ShowPlanXML>other</ShowPlanXML>"})
-	root, rel, _ := runProfiledWriter(t, sets, []int64{11})
-	dir := filepath.Join(root, filepath.FromSlash(rel))
+	root, res, _ := runProfiledWriter(t, sets, []int64{11})
+	dir := filepath.Join(root, filepath.FromSlash(res.Rel))
 	for _, name := range []string{"query_11.plan_101.actual.sqlplan", "query_11.plan_102.actual.sqlplan"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("missing %s: a distinct plan_id was discarded: %v", name, err)
 		}
 	}
-	if o := indexOmissions(t, root, rel); len(o) != 0 {
+	if o := indexOmissions(t, root, res.Rel); len(o) != 0 {
 		t.Errorf("a distinct plan was recorded as an omission: %+v", o)
 	}
-	if got := len(profiledIndexPlans(t, root, rel)); got != 2 {
-		t.Errorf("_index.json lists %d plans, want both", got)
+	// The disclosure count, now that one query can contribute several plans.
+	if res.PlanFiles != 2 {
+		t.Errorf("PlanFiles = %d, want 2 — the manifest would under-report what is on disk", res.PlanFiles)
+	}
+	plans := profiledIndexPlans(t, root, res.Rel)
+	if len(plans) != 2 {
+		t.Fatalf("_index.json lists %d plans, want both", len(plans))
+	}
+	for _, p := range plans {
+		wantCandidates, wantLast := int64(3), "2026-08-13T09:30:00"
+		if p.PlanID == 102 {
+			wantCandidates, wantLast = 7, "2026-08-13T09:45:00"
+		}
+		if p.Candidates != wantCandidates || p.LastExecution != wantLast {
+			t.Errorf("plan %d = candidates %d, last_execution %q; want %d and %q — its metadata was read from another row",
+				p.PlanID, p.Candidates, p.LastExecution, wantCandidates, wantLast)
+		}
 	}
 }
 
@@ -654,14 +693,18 @@ func TestProfiledWriterRecordsARepeatedPlanIDAsAnOmission(t *testing.T) {
 	sets[1].Set.Rows = append(sets[1].Set.Rows,
 		[]any{int64(11), int64(101), "plan_hash", int64(3),
 			time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC), "<ShowPlanXML>again</ShowPlanXML>"})
-	root, rel, _ := runProfiledWriter(t, sets, []int64{11})
+	root, res, _ := runProfiledWriter(t, sets, []int64{11})
+	rel := res.Rel
 	if got := len(profiledIndexPlans(t, root, rel)); got != 1 {
 		t.Errorf("_index.json lists %d plans for one plan_id", got)
+	}
+	if res.PlanFiles != 1 {
+		t.Errorf("PlanFiles = %d, want 1 — the repeat was counted as a file of its own", res.PlanFiles)
 	}
 	found := false
 	for _, o := range indexOmissions(t, root, rel) {
 		if o.QueryID == 11 && o.PlanID == 101 &&
-			strings.Contains(o.Reason, "a second row was returned for this plan_id") {
+			strings.Contains(o.Reason, "a further row was returned for this plan_id") {
 			found = true
 		}
 	}
@@ -702,13 +745,15 @@ func profiledIndexPlans(t *testing.T, root, rel string) []struct {
 // whether it is the plan from the incident being investigated. It is rendered
 // by the corpus encoder, like every other timestamp in the archive.
 func TestProfiledIndexRecordsWhenTheCachedPlanLastRan(t *testing.T) {
-	root, rel, _ := runProfiledWriter(t, profiledSets(), []int64{11})
-	plans := profiledIndexPlans(t, root, rel)
+	root, res, _ := runProfiledWriter(t, profiledSets(), []int64{11})
+	plans := profiledIndexPlans(t, root, res.Rel)
 	if len(plans) != 1 {
 		t.Fatalf("got %d plans in the index, want 1", len(plans))
 	}
-	if plans[0].LastExecution != "2026-08-13T09:30:00Z" {
-		t.Errorf("last_execution = %q, want the DATETIMEOFFSET the encoder renders", plans[0].LastExecution)
+	// No Z: the DMV's column is a datetime, so this is server local time and
+	// the encoder refuses to assert a UTC conversion nobody performed.
+	if plans[0].LastExecution != "2026-08-13T09:30:00" {
+		t.Errorf("last_execution = %q, want the datetime the encoder renders, without an offset", plans[0].LastExecution)
 	}
 }
 
@@ -734,7 +779,10 @@ func profiledPlanRow(plan any, planBytes int64) []NamedResultSet {
 	}
 }
 
-func runProfiledWriter(t *testing.T, sets []NamedResultSet, ids []int64) (root, rel string, warnings []string) {
+// runProfiledWriter returns the WriteResult whole rather than just its Rel: the
+// counts in it are what the manifest discloses, and a helper that dropped them
+// would leave the disclosure untestable from here.
+func runProfiledWriter(t *testing.T, sets []NamedResultSet, ids []int64) (root string, res WriteResult, warnings []string) {
 	t.Helper()
 	root = t.TempDir()
 	st := NewQueryStoreState()
@@ -750,7 +798,7 @@ func runProfiledWriter(t *testing.T, sets []NamedResultSet, ids []int64) (root, 
 	if err != nil {
 		t.Fatalf("writer: %v", err)
 	}
-	return root, res.Rel, warnings
+	return root, res, warnings
 }
 
 // The cap is applied twice, exactly as it is for the detail writer: a guard
@@ -758,7 +806,8 @@ func runProfiledWriter(t *testing.T, sets []NamedResultSet, ids []int64) (root, 
 // reach the writer and still be too large. Both must be distinguishable from
 // a plan the DMF simply never returned.
 func TestProfiledWriterCapsAnOversizedPlanFilteredByTheServer(t *testing.T) {
-	root, rel, _ := runProfiledWriter(t, profiledPlanRow(nil, maxPlanBytes+1), []int64{11})
+	root, res, _ := runProfiledWriter(t, profiledPlanRow(nil, maxPlanBytes+1), []int64{11})
+	rel := res.Rel
 	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel), "query_11.plan_101.actual.sqlplan")); err == nil {
 		t.Error("wrote a file for a plan the server filtered by size")
 	}
@@ -774,7 +823,8 @@ func TestProfiledWriterCapsAnOversizedPlanFilteredByTheServer(t *testing.T) {
 }
 
 func TestProfiledWriterCapsAnOversizedPlanThatReachedTheWriter(t *testing.T) {
-	root, rel, _ := runProfiledWriter(t, profiledPlanRow(strings.Repeat("x", maxPlanBytes+1), 0), []int64{11})
+	root, res, _ := runProfiledWriter(t, profiledPlanRow(strings.Repeat("x", maxPlanBytes+1), 0), []int64{11})
+	rel := res.Rel
 	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel), "query_11.plan_101.actual.sqlplan")); err == nil {
 		t.Error("wrote a file for a plan over the byte cap")
 	}
@@ -790,7 +840,8 @@ func TestProfiledWriterCapsAnOversizedPlanThatReachedTheWriter(t *testing.T) {
 }
 
 func TestProfiledWriterRecordsANullPlanAsAnOmission(t *testing.T) {
-	root, rel, warnings := runProfiledWriter(t, profiledPlanRow(nil, 0), []int64{11})
+	root, res, warnings := runProfiledWriter(t, profiledPlanRow(nil, 0), []int64{11})
+	rel := res.Rel
 	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel), "query_11.plan_101.actual.sqlplan")); err == nil {
 		t.Error("wrote a file for a NULL plan")
 	}
