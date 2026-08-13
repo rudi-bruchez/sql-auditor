@@ -79,7 +79,7 @@ provides. The gated files and their floors:
 | File | `@min_version` | Version |
 | --- | --- | --- |
 | `10.system/013.memory-model.sql` | `13.0.4001` | SQL Server 2016 SP1 |
-| `10.system/014.cpu-topology.sql` | `13.0` | SQL Server 2016 |
+| `10.system/014.cpu-topology.sql` | `13.0.5026` | SQL Server 2016 SP2 |
 | `10.system/020.host-services.sql` | `13.0.4001` | SQL Server 2016 SP1 |
 | `10.system/051.version-store.sql` | `13.0.5026` | SQL Server 2016 SP2 |
 | `20.databases/011.all-databases-2014.sql` | `12` | SQL Server 2014 |

@@ -233,7 +233,7 @@ note: the connection is encrypted but the server certificate is NOT validated (S
 Queries (38):
   10.system/010.properties.sql
   10.system/013.memory-model.sql             SQL Server 13.0.4001+
-  10.system/014.cpu-topology.sql             SQL Server 13.0+
+  10.system/014.cpu-topology.sql             SQL Server 13.0.5026+
   10.system/015.buffer-pool.sql
   10.system/020.host-services.sql            SQL Server 13.0.4001+
   10.system/030.file-io.sql
