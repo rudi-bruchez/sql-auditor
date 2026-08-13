@@ -125,6 +125,21 @@ func run() int {
 		return 0
 	}
 	if cmd != "collect" && cmd != "check" {
+		// Say what was wrong before printing the help. A wall of usage text
+		// with nothing pointing at the mistake leaves the reader to spot it,
+		// and the mistake that actually happens is "--check" for "check":
+		// every other argument here is a flag, so writing the command as one
+		// is the natural error, and the help alone does not correct it.
+		switch {
+		case cmd == "":
+			fmt.Fprintln(os.Stderr, "no command given.")
+		case strings.HasPrefix(cmd, "-"):
+			fmt.Fprintf(os.Stderr,
+				"%q is not a command: check, collect, queries and version are written without dashes. Did you mean %q?\n\n",
+				cmd, strings.TrimLeft(cmd, "-"))
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command %q.\n\n", cmd)
+		}
 		usage()
 		return 2
 	}
