@@ -142,10 +142,23 @@ func (e panicEvent) apply(s State) State {
 		s.Step = StepConnection
 		s.Field = fieldServer
 		s.ConnError = err
+	case StepCollecting:
+		// A collection is still running, and the screen STAYS on it. Whatever
+		// died is not necessarily collect.Run: the cancellation this sets in
+		// motion reaches it through its context, but it does not return on the
+		// spot — it still writes its manifest and builds its archive. A wizard
+		// that painted the final screen here would take [enter], return from
+		// Run, and let main call os.Exit in the middle of Zip, leaving a
+		// truncated .zip on disk under a perfectly ordinary name, impossible to
+		// tell from a good one. The collectDoneEvent that Run will send is what
+		// ends this screen.
+		s.Stopping = true
+		s.ErrorCount++
+		s.Notes = note(s.Notes, err.Error())
 	default:
-		// A collection was running. It is over — whatever died took it with it
-		// — and the final screen is where the wizard says so, with whatever
-		// counters and archive path it had managed to record.
+		// The collection is over — StepDone or StepQuit — so there is nothing
+		// left to truncate, and the final screen is where the wizard says what
+		// happened, with whatever counters and archive path it had recorded.
 		s.Step = StepDone
 		s.Stopping = false
 		s.ErrorCount++

@@ -169,13 +169,19 @@ func TestLoopTurnsAPanicIntoAnErrorStateInsteadOfPanicking(t *testing.T) {
 	// The recover lives in the goroutine that died — recover is per goroutine
 	// — and what reaches the loop is this event. Handling it here is what buys
 	// the orderly exit: terminal restored, progress flushed, operator told.
+	//
+	// The panic did NOT end the collection: it cancels its context, and
+	// collect.Run goes on to write its manifest and build its archive before
+	// coming back. The screen therefore stays on step 4, and [enter] is not
+	// taken — a wizard that returned here would let main call os.Exit in the
+	// middle of Zip and leave a truncated archive under an ordinary name.
 	end, code := loop(feed(
 		panicEvent{value: "index out of range [3] with length 3", where: "the collection"},
 		key(screen.KeyEnter),
 	), f.draw, fixedSize(80, 24), State{Step: StepCollecting, Units: 10, DoneUnits: 3})
 
-	if end.Step != StepQuit {
-		t.Errorf("Step = %v, want StepQuit after the operator acknowledged", end.Step)
+	if end.Step != StepCollecting || !end.Stopping {
+		t.Errorf("Step = %v, Stopping = %v: want the collection screen, stopping", end.Step, end.Stopping)
 	}
 	if end.ErrorCount != 1 {
 		t.Errorf("ErrorCount = %d, want 1", end.ErrorCount)
@@ -185,6 +191,40 @@ func TestLoopTurnsAPanicIntoAnErrorStateInsteadOfPanicking(t *testing.T) {
 	}
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2: a wizard that crashed must not report success", code)
+	}
+}
+
+// The final screen is reached by the one event that proves the archive is
+// finished: collect.Run coming back.
+func TestLoopEndsAPanickedCollectionOnlyWhenTheRunHasReturned(t *testing.T) {
+	var f frames
+	end, code := loop(feed(
+		panicEvent{value: "nil pointer dereference", where: "the activity indicator"},
+		collectDoneEvent{code: 2, zipPath: `C:\out\a.zip`},
+		key(screen.KeyEnter),
+	), f.draw, fixedSize(80, 24), State{Step: StepCollecting, Units: 10, DoneUnits: 3})
+
+	if end.Step != StepQuit {
+		t.Errorf("Step = %v, want StepQuit after the run returned and the operator acknowledged", end.Step)
+	}
+	if end.ZipPath != `C:\out\a.zip` {
+		t.Errorf("ZipPath = %q, want the archive the run finished writing", end.ZipPath)
+	}
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+}
+
+// A panic after the collection is over has nothing left to truncate, so it
+// goes straight to the screen that reports it.
+func TestLoopAPanicOnTheFinalScreenStaysOnTheFinalScreen(t *testing.T) {
+	var f frames
+	end, _ := loop(feed(
+		panicEvent{value: "slice bounds out of range", where: "the keyboard reader"},
+		key(screen.KeyEnter),
+	), f.draw, fixedSize(80, 24), State{Step: StepDone})
+	if end.Step != StepQuit {
+		t.Errorf("Step = %v, want StepQuit", end.Step)
 	}
 }
 
