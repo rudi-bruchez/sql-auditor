@@ -65,13 +65,71 @@ DECLARE @ring xml =
    queryable document, and casting once is cheaper than casting per projection. */
 DECLARE @deadlocks TABLE (
     event_time datetime2(3),
-    graph      nvarchar(max)
+    graph      nvarchar(max),
+    source     varchar(12)
 );
 
-INSERT INTO @deadlocks (event_time, graph)
+INSERT INTO @deadlocks (event_time, graph, source)
 SELECT x.value('@timestamp', 'datetime2(3)'),
-       CAST(x.query('(data[@name="xml_report"]/value/*)[1]') AS nvarchar(max))
+       CAST(x.query('(data[@name="xml_report"]/value/*)[1]') AS nvarchar(max)),
+       'ring_buffer'
 FROM @ring.nodes('/RingBufferTarget/event[@name="xml_deadlock_report"]') AS e(x);
+
+/* AND THEN THE FILES, which is where the history actually is. The ring buffer
+   is bounded by max_memory before it is bounded by max_events_limit: a session
+   configured for 5 000 events with 4 MB of memory holds whatever fits in 4 MB,
+   which on a busy instance was measured at fifteen events covering one minute.
+   system_health's event_file target keeps four files of 5 MB in rotation, which
+   is days rather than minutes.
+
+   Reading it is a different kind of read from everything else in this corpus.
+   sys.fn_xe_file_target_read_file reaches the file system, as the SQL Server
+   service account rather than as the login connected here, and it RAISES rather
+   than returning empty when the path is wrong or unreadable. A raise in the
+   middle of a result set is a half-sent result set, so it goes into the table
+   variable inside TRY/CATCH and the error is projected as data.
+
+   The path is derived, not guessed: the directory from the file the target is
+   writing right now, the stem from the session definition, and a wildcard
+   between them so the rollover files come too. */
+DECLARE @err_number  int           = NULL;
+DECLARE @err_message nvarchar(400) = NULL;
+DECLARE @path        nvarchar(600) = NULL;
+
+DECLARE @current nvarchar(600) =
+    (SELECT CAST(CAST(t.target_data AS xml).value('(/EventFileTarget/File/@name)[1]', 'nvarchar(600)') AS nvarchar(600))
+       FROM sys.dm_xe_session_targets AS t
+       JOIN sys.dm_xe_sessions AS s ON s.address = t.event_session_address
+      WHERE s.name = 'system_health' AND t.target_name = 'event_file');
+
+IF @current IS NOT NULL
+    SET @path = LEFT(@current, LEN(@current) - CHARINDEX('\', REVERSE(@current)) + 1) + N'system_health*.xel';
+
+IF @path IS NOT NULL
+BEGIN
+    BEGIN TRY
+        INSERT INTO @deadlocks (event_time, graph, source)
+        SELECT x.value('(/event/@timestamp)[1]', 'datetime2(3)'),
+               CAST(x.query('(/event/data[@name="xml_report"]/value/*)[1]') AS nvarchar(max)),
+               'event_file'
+        FROM sys.fn_xe_file_target_read_file(@path, NULL, NULL, NULL) AS t
+        CROSS APPLY (SELECT CAST(t.event_data AS xml)) AS e(x)
+        WHERE t.object_name = 'xml_deadlock_report'
+          /* Not already taken from the ring. The two sources overlap by design
+             — the ring holds the newest events and the file holds those same
+             events plus the older ones — and a graph collected twice would be
+             written twice, counted twice and listed twice. The timestamp is the
+             identity: Extended Events stamps to the millisecond and two
+             deadlocks resolving in the same millisecond on the same instance is
+             not a case worth carrying code for. */
+          AND NOT EXISTS (SELECT 1 FROM @deadlocks AS d
+                           WHERE d.event_time = x.value('(/event/@timestamp)[1]', 'datetime2(3)'));
+    END TRY
+    BEGIN CATCH
+        SET @err_number  = ERROR_NUMBER();
+        SET @err_message = LEFT(ERROR_MESSAGE(), 400);
+    END CATCH
+END;
 
 SELECT
     CAST(CASE WHEN @ring IS NULL THEN 0 ELSE 1 END AS bit)      AS [session.running],
@@ -80,6 +138,17 @@ SELECT
                                                                 AS [session.earliest_deadlock],
     CONVERT(varchar(23), (SELECT MAX(event_time) FROM @deadlocks), 126)
                                                                 AS [session.latest_deadlock],
+    /* Where they came from, and what happened to the file read. Counted apart
+       because the two sources reach back different distances: a run that got
+       nothing from the files and everything from the ring covers minutes, and
+       the reader has to be able to see that without being told. */
+    (SELECT COUNT(*) FROM @deadlocks WHERE source = 'ring_buffer')
+                                                                AS [session.from_ring_buffer],
+    (SELECT COUNT(*) FROM @deadlocks WHERE source = 'event_file')
+                                                                AS [session.from_event_file],
+    @path                                                       AS [session.event_file_path],
+    @err_number                                                 AS [session.event_file_error_number],
+    @err_message                                                AS [session.event_file_error_message],
     /* Both caps, written out, so a DBA reading the exported corpus sees the
        numbers. maxDeadlockGraphs and maxDeadlockBytes on the Go side are held
        to these two by a test. */
@@ -98,6 +167,10 @@ SELECT
     ROW_NUMBER() OVER (ORDER BY d.event_time DESC)              AS [graph.rank],
     COUNT(*)     OVER ()                                        AS [graph.count],
     CONVERT(varchar(23), d.event_time, 126)                     AS [occurred_at],
+    /* Which source this graph came out of. A reader comparing two collections
+       needs it: the same deadlock read from the ring one day and from the file
+       the next is one deadlock, not two. */
+    d.source                                                    AS [source],
     /* The same CASE for both caps, so a graph that is both oversized and past
        the count cap arrives NULL exactly once, with the rank and the size
        beside it saying which it was. */

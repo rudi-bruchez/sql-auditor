@@ -107,6 +107,11 @@ type WriteResult struct {
 	// reason there is a third: it latches its own disclosure, and borrowing
 	// another would have MANIFEST.txt announce content the archive does not hold.
 	GraphFiles int
+	// ReportFiles counts blocked process reports written. A fifth counter, and
+	// not a reuse of GraphFiles: a run that captured blocking and no deadlock
+	// would otherwise have MANIFEST.txt disclose deadlock reports the archive
+	// does not hold, under a flag the operator never passed.
+	ReportFiles int
 }
 
 // ScriptWriter turns materialised result sets into files.
@@ -129,6 +134,8 @@ func writerFor(name string) ScriptWriter {
 		return writeObjectDefinitions
 	case "deadlock-graphs":
 		return writeDeadlockGraphs
+	case "blocked-process-reports":
+		return writeBlockedProcessReports
 	}
 	return nil
 }

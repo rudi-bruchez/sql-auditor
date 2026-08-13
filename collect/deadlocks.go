@@ -55,18 +55,35 @@ type deadlockIndex struct {
 // reader knows whether it covers two days or twenty minutes, and the ring
 // buffer is overwritten rather than archived.
 type deadlockCounts struct {
-	InRing    int    `json:"in_ring"`
-	Written   int    `json:"written"`
-	Earliest  string `json:"earliest,omitempty"`
-	Latest    string `json:"latest,omitempty"`
-	CapGraphs int    `json:"cap_graphs"`
-	CapBytes  int    `json:"cap_graph_bytes"`
+	// InRing is the total the SQL found, from BOTH sources together. The two
+	// breakdowns beside it say how far back that total reaches: everything from
+	// the ring is minutes, everything from the files is days.
+	InRing        int    `json:"in_ring"`
+	FromRing      int    `json:"from_ring_buffer"`
+	FromFile      int    `json:"from_event_file"`
+	EventFilePath string `json:"event_file_path,omitempty"`
+	// Set when reading the .xel raised. The file is read by the SQL Server
+	// service account, not by the connected login, so a path that exists is not
+	// necessarily one it may open — and without this the archive would report
+	// only what the ring held, silently.
+	FileErrorNumber  int    `json:"event_file_error_number,omitempty"`
+	FileErrorMessage string `json:"event_file_error_message,omitempty"`
+	Written          int    `json:"written"`
+	Earliest         string `json:"earliest,omitempty"`
+	Latest           string `json:"latest,omitempty"`
+	CapGraphs        int    `json:"cap_graphs"`
+	CapBytes         int    `json:"cap_graph_bytes"`
 }
 
 type indexedDeadlock struct {
 	Rank       int64  `json:"rank"`
 	OccurredAt string `json:"occurred_at"`
-	Bytes      int64  `json:"bytes"`
+	// Source is "ring_buffer" or "event_file". It matters to anyone comparing
+	// two collections: the ring holds minutes and the files hold days, so a run
+	// that got everything from the ring covers a window a later run will appear
+	// to contradict.
+	Source string `json:"source,omitempty"`
+	Bytes  int64  `json:"bytes"`
 	// File is empty when no graph was written; the reason is in the omissions
 	// under the same rank, never inferred from the empty string.
 	File string `json:"file,omitempty"`
@@ -100,14 +117,24 @@ func writeDeadlockGraphs(req WriteRequest) (WriteResult, error) {
 	inRing, _ := int64At(root, 0, "session.deadlocks")
 	earliest, _ := stringAt(root, 0, "session.earliest_deadlock")
 	latest, _ := stringAt(root, 0, "session.latest_deadlock")
+	fromRing, _ := int64At(root, 0, "session.from_ring_buffer")
+	fromFile, _ := int64At(root, 0, "session.from_event_file")
+	filePath, _ := stringAt(root, 0, "session.event_file_path")
+	fileErrNo, _ := int64At(root, 0, "session.event_file_error_number")
+	fileErrMsg, _ := stringAt(root, 0, "session.event_file_error_message")
 	idx := deadlockIndex{
 		Script: req.Script.Path,
 		Counts: deadlockCounts{
-			InRing:    int(inRing),
-			Earliest:  earliest,
-			Latest:    latest,
-			CapGraphs: maxDeadlockGraphs,
-			CapBytes:  maxDeadlockBytes,
+			InRing:           int(inRing),
+			FromRing:         int(fromRing),
+			FromFile:         int(fromFile),
+			EventFilePath:    filePath,
+			FileErrorNumber:  int(fileErrNo),
+			FileErrorMessage: fileErrMsg,
+			Earliest:         earliest,
+			Latest:           latest,
+			CapGraphs:        maxDeadlockGraphs,
+			CapBytes:         maxDeadlockBytes,
 		},
 		Deadlocks: []indexedDeadlock{},
 		Omissions: []graphOmission{},
@@ -134,8 +161,9 @@ func writeDeadlockGraphs(req WriteRequest) (WriteResult, error) {
 		at, _ := stringAt(deadlocks, r, "occurred_at")
 		size, _ := int64At(deadlocks, r, "graph_bytes")
 		graph, present := stringAt(deadlocks, r, "graph")
+		source, _ := stringAt(deadlocks, r, "source")
 
-		entry := indexedDeadlock{Rank: rank, OccurredAt: at, Bytes: size}
+		entry := indexedDeadlock{Rank: rank, OccurredAt: at, Source: source, Bytes: size}
 		// Sequential, not timestamped: an XE timestamp carries colons, which
 		// are illegal in a Windows filename, and a name sanitised out of its
 		// own timestamp is worse than one that never claimed to have it. The
