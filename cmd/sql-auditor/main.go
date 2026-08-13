@@ -66,20 +66,32 @@ func main() {
 	os.Exit(run())
 }
 
-func run() int {
-	if len(os.Args) < 2 {
-		usage()
-		return 2
-	}
-	cmd, args := os.Args[1], os.Args[2:]
-	// "queries export" is the one command with a subcommand, and flag.Parse
-	// stops at the first non-flag argument — so parsing os.Args[2:] whole
-	// leaves --to unset and the export refuses a destination the user did
-	// supply. Take the subcommand off the front before parsing.
-	sub := ""
-	if cmd == "queries" && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub, args = args[0], args[1:]
-	}
+// cliFlags is every option the command line accepts, kept together so the two
+// callers below can each own a FlagSet of their own.
+//
+// There are two callers because the flag set is created per command — its name
+// appears in the messages flag.ExitOnError prints — and because buildOptions
+// has to be reachable with no command line at all: the wizard resolves a
+// configuration from .env and the environment before the operator has typed
+// anything. Sharing one parsed set instead would have meant handing buildOptions
+// a pre-parsed structure, which is exactly the coupling that made the
+// configuration unreachable from anywhere but run() in the first place.
+type cliFlags struct {
+	fs *flag.FlagSet
+
+	server, user, envFile, queriesDir, outputDir *string
+	to, grantScript                              *string
+	keep                                         *bool
+
+	sessionText, objectDefinitions              *bool
+	deadlockGraphs, blockedProcessReports       *bool
+	estimateCompression                         *bool
+	queryStoreDetail, queryStorePlanStats       *bool
+	queryStoreDays, queryStoreTop               *int
+	queryStoreFrom, queryStoreTo, queryStoreDBs *string
+}
+
+func defineFlags(cmd string) *cliFlags {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	fs.Usage = usage
 	var (
@@ -169,7 +181,127 @@ func run() int {
 			"comma-separated wildcards narrowing which of the collected databases the "+
 				"Query Store extraction reads")
 	)
-	_ = fs.Parse(args)
+	return &cliFlags{
+		fs: fs, server: server, user: user, envFile: envFile,
+		queriesDir: queriesDir, outputDir: outputDir, to: to,
+		grantScript: grantScript, keep: keep,
+		sessionText: sessionText, objectDefinitions: objectDefinitions,
+		deadlockGraphs: deadlockGraphs, blockedProcessReports: blockedProcessReports,
+		estimateCompression: estimateCompression,
+		queryStoreDetail:    queryStoreDetail, queryStorePlanStats: queryStorePlanStats,
+		queryStoreDays: queryStoreDays, queryStoreTop: queryStoreTop,
+		queryStoreFrom: queryStoreFrom, queryStoreTo: queryStoreTo,
+		queryStoreDBs: queryStoreDBs,
+	}
+}
+
+// buildOptions turns a command line, a .env file and the process environment
+// into the collect.Options that check, collect and the wizard all run on.
+//
+// It exists because the wizard needs a complete, resolved configuration and had
+// no way to obtain one: every line of this resolution used to sit inside run(),
+// after the command dispatch and below a dozen local variables. Nothing here is
+// new behaviour — the flag set, the precedence and the refusals are the ones
+// that were there before, moved.
+//
+// The returned int is the exit code to use when the error is non-nil; it is
+// always 2, since everything that can fail here is a configuration the operator
+// wrote and can correct. The error is returned rather than printed so the caller
+// decides where it goes: a subcommand puts it on stderr, and the wizard cannot,
+// because it is about to take the screen.
+func buildOptions(cmd string, args []string, env func(string) string) (collect.Options, int, error) {
+	c := defineFlags(cmd)
+	_ = c.fs.Parse(args)
+
+	dotenv := map[string]string{}
+	if f, err := os.Open(*c.envFile); err == nil {
+		defer f.Close()
+		if parsed, perr := collect.ParseDotEnv(f); perr == nil {
+			dotenv = parsed
+		} else {
+			return collect.Options{}, 2, fmt.Errorf("%s: %w", *c.envFile, perr)
+		}
+	}
+	flags := map[string]string{}
+	for k, v := range map[string]string{
+		"SQL_SERVER": *c.server, "SQL_USER": *c.user,
+		"QUERIES_DIR": *c.queriesDir, "OUTPUT_DIR": *c.outputDir,
+	} {
+		if v != "" {
+			flags[k] = v
+		}
+	}
+	// Which flags the operator actually typed, from the flag set itself rather
+	// than from their values. The two integers default to 0 above, not to 7 and
+	// 50 — Resolve owns the defaults, and a flag carrying its own would beat a
+	// .env value the operator set — and asking the flag set preserves that
+	// while giving a typed value the same answer whatever it is. Testing
+	// "> 0" instead dropped --query-store-days -3 on the floor: the run took
+	// the default of 7 and the manifest recorded 7 as though it had been
+	// chosen, while the same -3 in a .env was refused.
+	typed := map[string]bool{}
+	c.fs.Visit(func(f *flag.Flag) { typed[f.Name] = true })
+	if typed["query-store-days"] {
+		flags["QUERY_STORE_DAYS"] = strconv.Itoa(*c.queryStoreDays)
+	}
+	if *c.queryStoreFrom != "" {
+		flags["QUERY_STORE_FROM"] = *c.queryStoreFrom
+	}
+	if *c.queryStoreTo != "" {
+		flags["QUERY_STORE_TO"] = *c.queryStoreTo
+	}
+	if typed["query-store-top"] {
+		flags["QUERY_STORE_TOP"] = strconv.Itoa(*c.queryStoreTop)
+	}
+	if *c.queryStoreDBs != "" {
+		flags["QUERY_STORE_DB_INCLUDE"] = *c.queryStoreDBs
+	}
+	cfg, err := collect.Resolve(flags, dotenv, env)
+	if err != nil {
+		return collect.Options{}, 2, err
+	}
+
+	opts := collect.Options{
+		Config: cfg, Corpus: sqlauditor.Queries, Root: "queries",
+		Now: time.Now(), Keep: *c.keep, Version: version, Commit: buildStamp(),
+		GrantScript: *c.grantScript,
+		Flags: map[string]bool{
+			collect.FlagIncludeSessionText:    *c.sessionText,
+			collect.FlagEstimateCompression:   *c.estimateCompression,
+			collect.FlagQueryStoreDetail:      *c.queryStoreDetail,
+			collect.FlagQueryStorePlanStats:   *c.queryStorePlanStats,
+			collect.FlagObjectDefinitions:     *c.objectDefinitions,
+			collect.FlagDeadlockGraphs:        *c.deadlockGraphs,
+			collect.FlagBlockedProcessReports: *c.blockedProcessReports,
+		},
+	}
+	if cfg.QueriesDir != "" {
+		opts.Corpus = os.DirFS(cfg.QueriesDir)
+		opts.Root = "."
+	}
+	return opts, 0, nil
+}
+
+func run() int {
+	if len(os.Args) < 2 {
+		usage()
+		return 2
+	}
+	cmd, args := os.Args[1], os.Args[2:]
+	// "queries export" is the one command with a subcommand, and flag.Parse
+	// stops at the first non-flag argument — so parsing os.Args[2:] whole
+	// leaves --to unset and the export refuses a destination the user did
+	// supply. Take the subcommand off the front before parsing.
+	sub := ""
+	if cmd == "queries" && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub, args = args[0], args[1:]
+	}
+	// Parsed here as well as inside buildOptions, and deliberately: a malformed
+	// command line has always been refused before anything else is said,
+	// including before the "unknown command" message, and moving that refusal
+	// after the dispatch would change which of the two an operator sees.
+	c := defineFlags(cmd)
+	_ = c.fs.Parse(args)
 
 	if cmd == "version" {
 		fmt.Printf("sql-auditor %s (%s)\n", version, buildStamp())
@@ -180,15 +312,15 @@ func run() int {
 			fmt.Fprintln(os.Stderr, "the only subcommand is: sql-auditor queries export --to DIR")
 			return 2
 		}
-		if *to == "" {
+		if *c.to == "" {
 			fmt.Fprintln(os.Stderr, "queries export requires --to DIR")
 			return 2
 		}
-		if err := collect.ExportQueries(sqlauditor.Queries, "queries", *to); err != nil {
+		if err := collect.ExportQueries(sqlauditor.Queries, "queries", *c.to); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		fmt.Printf("queries written to %s\n", *to)
+		fmt.Printf("queries written to %s\n", *c.to)
 		return 0
 	}
 	if cmd != "collect" && cmd != "check" {
@@ -218,81 +350,17 @@ func run() int {
 	// on the terminal where the operator is looking.
 	fmt.Fprintf(os.Stderr, "sql-auditor %s (%s)\n\n", version, buildStamp())
 
-	dotenv := map[string]string{}
-	if f, err := os.Open(*envFile); err == nil {
-		defer f.Close()
-		if parsed, perr := collect.ParseDotEnv(f); perr == nil {
-			dotenv = parsed
-		} else {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", *envFile, perr)
-			return 2
-		}
-	}
-	flags := map[string]string{}
-	for k, v := range map[string]string{
-		"SQL_SERVER": *server, "SQL_USER": *user,
-		"QUERIES_DIR": *queriesDir, "OUTPUT_DIR": *outputDir,
-	} {
-		if v != "" {
-			flags[k] = v
-		}
-	}
-	// Which flags the operator actually typed, from the flag set itself rather
-	// than from their values. The two integers default to 0 above, not to 7 and
-	// 50 — Resolve owns the defaults, and a flag carrying its own would beat a
-	// .env value the operator set — and asking the flag set preserves that
-	// while giving a typed value the same answer whatever it is. Testing
-	// "> 0" instead dropped --query-store-days -3 on the floor: the run took
-	// the default of 7 and the manifest recorded 7 as though it had been
-	// chosen, while the same -3 in a .env was refused.
-	typed := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { typed[f.Name] = true })
-	if typed["query-store-days"] {
-		flags["QUERY_STORE_DAYS"] = strconv.Itoa(*queryStoreDays)
-	}
-	if *queryStoreFrom != "" {
-		flags["QUERY_STORE_FROM"] = *queryStoreFrom
-	}
-	if *queryStoreTo != "" {
-		flags["QUERY_STORE_TO"] = *queryStoreTo
-	}
-	if typed["query-store-top"] {
-		flags["QUERY_STORE_TOP"] = strconv.Itoa(*queryStoreTop)
-	}
-	if *queryStoreDBs != "" {
-		flags["QUERY_STORE_DB_INCLUDE"] = *queryStoreDBs
-	}
-	cfg, err := collect.Resolve(flags, dotenv, os.Getenv)
+	opts, code, err := buildOptions(cmd, args, os.Getenv)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return 2
+		return code
 	}
-	if cfg.TrustCert && cfg.Encrypt {
+	if opts.Config.TrustCert && opts.Config.Encrypt {
 		fmt.Fprintln(os.Stderr, "note: the connection is encrypted but the server certificate is NOT validated "+
 			"(SQL_TRUST_SERVER_CERTIFICATE=true)")
 	}
 
-	opts := collect.Options{
-		Config: cfg, Corpus: sqlauditor.Queries, Root: "queries",
-		Now: time.Now(), Keep: *keep, Version: version, Commit: buildStamp(),
-		GrantScript: *grantScript,
-		Flags: map[string]bool{
-			collect.FlagIncludeSessionText:    *sessionText,
-			collect.FlagEstimateCompression:   *estimateCompression,
-			collect.FlagQueryStoreDetail:      *queryStoreDetail,
-			collect.FlagQueryStorePlanStats:   *queryStorePlanStats,
-			collect.FlagObjectDefinitions:     *objectDefinitions,
-			collect.FlagDeadlockGraphs:        *deadlockGraphs,
-			collect.FlagBlockedProcessReports: *blockedProcessReports,
-		},
-	}
-	if cfg.QueriesDir != "" {
-		opts.Corpus = os.DirFS(cfg.QueriesDir)
-		opts.Root = "."
-	}
-
 	ctx := context.Background()
-	var code int
 	switch cmd {
 	case "collect":
 		code, err = collect.Run(ctx, opts)
