@@ -43,15 +43,87 @@ byte-identical rebuild to compare against. What can and cannot be verified is
 set out in full in
 [docs/dba-guide.md](docs/dba-guide.md#can-i-verify-the-binary).
 
+## Running it
+
+Run `sql-auditor` with no argument on a terminal and it opens a four-step
+wizard: connection, verification, what to collect, and the collection itself.
+That is the default because the three things a first run gets wrong are all
+invisible from a command line. Step 1 shows the address, the initial database,
+the authentication mode and whether the server certificate is actually
+validated — resolved from `.env` and the environment exactly as `collect` would
+resolve them — and lets you correct the server and type a password. Step 2
+probes the instance and lists every capability with the full consequence of each
+refusal, never truncated, because that sentence is the only place the cost of a
+missing `GRANT` is ever spelled out; `[g]` writes the T-SQL granting precisely
+what was found missing, and the screen refuses to continue at all when the
+coverage of a run cannot be established. Step 3 lists the opt-ins with what each
+one discloses beside it, and the number of collectors resolved *for this
+instance* rather than the size of the corpus, since the version gates close some
+of them on every server. Step 4 is the collection, showing the collector, the
+database, the elapsed time and the bytes written so far, and it ends on the path
+of the archive alone on its line, indented, so that it can be selected with one
+drag and pasted into a mail.
+
+The keys are written at the bottom of every screen. On step 1 the quit key is
+`[esc]` or `ctrl-c`, not `[q]`, and it is the one screen where they differ:
+every printable character there belongs to the field being edited, so an
+instance named `QUALIF` and a password with a `q` in it have to stay typeable.
+On the later screens `[q]` quits, `[b]` goes back, `[r]` runs the probe again,
+and `ctrl-c` cancels whatever is being waited on — including a collection, which
+still writes its manifest and its archive and says on the final screen that what
+you are holding is partial.
+
+The wizard advises on the harvest and never on the instance. "`VIEW SERVER
+STATE` is missing, here is the T-SQL that grants it" is a statement about what
+can be collected; "your Query Store will fill up in twelve days" is an opinion
+about your server, and no layer of this program is allowed to hold one. The
+sentence at the top of this file is not softened by the wizard existing: it
+collects, it does not judge, and deciding what the numbers mean stays somebody
+else's job. Nor does the wizard edit your configuration — `.env` remains the
+place settings live, and the screens display its effect without ever rewriting
+it — and it changes nothing on the server: `[g]` writes a file, and a DBA reads
+it and runs it themselves.
+
 ## Commands
 
 ```
+sql-auditor                          open the wizard (a terminal on both ends, no argument)
 sql-auditor check                    verify connectivity, permissions and configuration,
                                      and list what a collection would run
 sql-auditor collect                  collect, then archive
 sql-auditor queries export --to DIR  write the embedded queries to disk
 sql-auditor version
 ```
+
+`check` and `collect` are the non-interactive path, and they are that in their
+own right rather than as a leftover from before the wizard. They are what a
+scheduled task, a remote shell, a CI job and a runbook use; they are what makes
+a run reproducible, because a command line can be pasted into a ticket and a
+sequence of keystrokes cannot; and `check` in particular is meant to be run
+without a human present, since its whole output is a verdict something else can
+read. An argument therefore wins over everything else: `sql-auditor collect`
+does the same work whatever terminal it finds itself attached to, and no
+invocation that asked for something ever gets a wizard instead.
+
+The wizard steps aside in exactly three cases.
+
+- `SQL_AUDITOR_NO_TUI` is set to any non-empty value. This is the escape hatch
+  for a terminal that is real but that you do not want a full-screen program on
+  — a nested session, a logging wrapper, a shell inside an editor. It is read
+  from the **process environment**, and it is deliberately **not** a `.env` key:
+  that set is closed, an unrecognised key there is a hard failure rather than a
+  warning, and this is not a connection setting. Putting it in `.env` will stop
+  the tool, not silence the wizard.
+- Either stdin or stdout is not a terminal. Both ends are asked about
+  separately, because a pipe on either one is enough. `sql-auditor > run.log`
+  quietly starting a collection against a production instance would be the worst
+  outcome this program could produce, so with no argument and no terminal it
+  prints the usage on stderr and exits `2`, exactly as it did before the wizard
+  existed.
+- Raw mode cannot be taken. The terminal claims to be one and then refuses the
+  mode a full-screen program needs; rather than degrade into a half-drawn
+  screen, the wizard reports the failure and points at `sql-auditor collect`,
+  which needs no terminal at all.
 
 Options for `check` and `collect`:
 
@@ -77,8 +149,14 @@ Options for `check` and `collect`:
 | `--query-store-top N` | how many queries to extract per database, across the four rankings once deduplicated (default 50). Queries with a forced plan are added on top of this |
 | `--query-store-databases P` | comma-separated `*`/`?` patterns narrowing which of the collected databases the Query Store extraction reads. It narrows the selection; it never widens it |
 
-There is no `--password` flag. A password on the command line ends up in `ps`
-output and in shell history; put it in `.env` instead.
+There is no `--password` flag, and there will not be one. A password on the
+command line ends up in `ps` output, in shell history and in the process table
+of every other user on the machine, and no amount of care at the call site takes
+it back out; put it in `SQL_PASSWORD` in `.env` instead. The wizard's step 1 is
+the only place in this program where a password can be typed, and what is typed
+there stays in memory for the length of the run: it is masked on screen, it is
+never written to disk, it never reaches `.env`, and it appears in no manifest
+and no archive.
 
 Both `check` and `collect` print `sql-auditor <version> (<build>)` on stderr
 before they do anything else, so an archive, a terminal transcript and a bug
@@ -173,7 +251,10 @@ twelve-factor ordering and is
 
 The set is closed. An unrecognised key is an error, not a warning, so a typo
 cannot silently change what the collector does. `SQL_LOGIN` was renamed
-`SQL_USER`; the old name is refused by name rather than ignored.
+`SQL_USER`; the old name is refused by name rather than ignored. That closure is
+also why `SQL_AUDITOR_NO_TUI` is absent from this table: it is not a connection
+setting, it is read from the process environment only, and writing it into
+`.env` refuses the file.
 
 ## Exit codes
 
