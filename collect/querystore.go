@@ -132,6 +132,18 @@ type indexedQuery struct {
 // numbers. A reader seeing cap 50, ranked 50 and forced 3 must not conclude the
 // cap was exceeded: a forced plan is kept because it is forced, and was never
 // subject to the ranking the cap applies to.
+//
+// Ranked counts the queries that entered on the ranking — those the SQL's
+// LEFT JOIN to the rankings gave a rank at all — and never the whole index. A
+// query selected only because one of its plans is forced arrives with all four
+// ranks NULL and belongs in Forced alone; counting it here would report a
+// ranked population larger than the cap, which reads as a leak.
+//
+// The two populations OVERLAP, and the overlap is not an error: a query that
+// the ranking retained AND that has a forced plan is counted in both, because
+// it is a member of both. Ranked + Forced is therefore not the number of
+// queries in the index — len(queries) is, and it is right there beside these
+// three.
 type selectionCounts struct {
 	Cap    int64 `json:"cap"`
 	Ranked int   `json:"ranked"`
@@ -350,10 +362,16 @@ func writeQueryStoreDetail(req WriteRequest) (WriteResult, error) {
 			entry.StatsFile = ""
 		}
 
+		// Ranked is counted here, from the ranks the query actually has. The SQL
+		// LEFT JOINs the rankings, so a query that entered only because a plan
+		// of its own is forced arrives with all four NULL and int64At leaves
+		// them out of the map: a non-empty map IS "entered on the ranking".
+		if len(entry.Ranks) > 0 {
+			idx.Selection.Ranked++
+		}
 		idx.Queries = append(idx.Queries, entry)
 	}
 
-	idx.Selection.Ranked = len(idx.Queries)
 	req.State.Selected[req.Unit.Name] = ids
 
 	n, err := writeIndex(req, rel, idx)
@@ -415,6 +433,14 @@ type profiledPlan struct {
 	// says whether this plan is the one from the incident being investigated:
 	// a profiled plan is pulled from a live cache, and one that last ran three
 	// weeks ago answers a different question from one that ran a minute ago.
+	//
+	// It carries NO OFFSET. The source is sys.dm_exec_query_stats, whose
+	// last_execution_time is a datetime, so this is server local time and the
+	// encoder deliberately renders it without a Z rather than asserting a UTC
+	// conversion that never happened. 021's plan.last_execution comes from the
+	// Query Store, which stores datetimeoffset, and does carry one — the two
+	// are not directly comparable without the server's offset, which the run's
+	// probe records.
 	LastExecution json.RawMessage `json:"last_execution,omitempty"`
 	PlanFile      string          `json:"plan_file,omitempty"`
 }
@@ -521,7 +547,7 @@ func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
 				// happen unless that ranking is edited away. Named rather than
 				// dropped silently, because a repeated plan_id would otherwise
 				// overwrite a file and count it twice.
-				omit(id, planID, "a second row was returned for this plan_id and was not written", 0)
+				omit(id, planID, "a further row was returned for this plan_id and was not written", 0)
 				continue
 			}
 			seenPlan[planID] = true
@@ -533,7 +559,9 @@ func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
 
 			entry := profiledPlan{
 				QueryID: id, PlanID: planID, Match: match, Candidates: candidates,
-				LastExecution: encodedAt(rows, r, "last_execution_time"),
+				LastExecution: encodedAt(rows, r, "last_execution_time", func(msg string) {
+					req.Warn(fmt.Sprintf("%s: query %d, plan %d: %s", req.Unit.Name, id, planID, msg))
+				}),
 			}
 
 			switch {
@@ -588,7 +616,12 @@ func writeProfiledIndex(req WriteRequest, rel string, idx profiledIndex) (int, e
 // not by a second convention that drifts from it. It returns nil for an absent
 // or NULL cell, which the omitempty on the field then drops — a plan whose last
 // execution time the DMF did not report must not carry a zero one.
-func encodedAt(s ResultSet, row int, col string) json.RawMessage {
+//
+// warn takes the encoder's own warning, for the same reason every other
+// omission in this file reaches the manifest: the encoder's warnings name a
+// value it could not render faithfully, and one raised while writing an index
+// nobody re-encodes would otherwise be raised to no one.
+func encodedAt(s ResultSet, row int, col string, warn func(string)) json.RawMessage {
 	v, ok := valueAt(s, row, col)
 	if !ok || v == nil {
 		return nil
@@ -597,7 +630,10 @@ func encodedAt(s ResultSet, row int, col string) json.RawMessage {
 	if i := colIndex(s, col); i >= 0 && i < len(s.Types) {
 		sqlType = strings.ToUpper(s.Types[i])
 	}
-	raw, _ := encodeValue(v, sqlType)
+	raw, warning := encodeValue(v, sqlType)
+	if warning != "" && warn != nil {
+		warn(fmt.Sprintf("column %s: %s", col, warning))
+	}
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
