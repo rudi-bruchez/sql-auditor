@@ -60,7 +60,11 @@ SELECT
     CAST(ls.log_since_last_log_backup_mb AS DECIMAL(18,1))      AS [holdup.since_last_log_backup_mb],
     CAST(ls.log_since_last_checkpoint_mb AS DECIMAL(18,1))      AS [holdup.since_last_checkpoint_mb],
     CONVERT(varchar(23), ls.log_backup_time, 126)               AS [holdup.last_log_backup],
-    CONVERT(varchar(23), ls.log_recovery_time, 126)             AS [holdup.recovery_point],
+    -- The LSN the recovery would start from. Projected beside the megabytes
+    -- because the two together say whether the holdup is one long transaction
+    -- or a checkpoint that never catches up.
+    ls.log_recovery_lsn                                         AS [holdup.recovery_lsn],
+    ls.log_checkpoint_lsn                                       AS [holdup.checkpoint_lsn],
     -- Repeated from 010.all-databases.sql on purpose: the reason and the size
     -- of the holdup are one fact, and splitting them across two files is what
     -- made this hard to read in the first place.
@@ -72,14 +76,14 @@ SELECT
     ls.current_vlf_sequence_number                              AS [config.current_vlf_sequence],
     CAST(ls.log_truncation_holdup_reason AS nvarchar(60))       AS [config.truncation_holdup_reason],
 
-    -- Growth and shrink counts since the log was created. A file that has
-    -- grown four hundred times has been sized by accident rather than by
-    -- decision, and the count is the only place that shows it.
-    ls.log_growth_count                                         AS [churn.growths],
-    ls.log_shrink_count                                         AS [churn.shrinks],
+    -- How many VLFs a crash recovery would have to walk. This is the startup
+    -- and failover cost of the holdup above, and the reason a log held open is
+    -- not only a disk-space question: recovery reads them one after another.
+    ls.recovery_vlf_count                                       AS [churn.recovery_vlf_count],
     ls.total_vlf_count                                          AS [churn.vlf_count],
     ls.active_vlf_count                                         AS [churn.active_vlf_count],
-    CAST(ls.log_since_last_log_backup_mb AS DECIMAL(18,1))      AS [churn.unbacked_mb]
+    CAST(ls.current_vlf_size_mb AS DECIMAL(18,1))               AS [churn.current_vlf_mb],
+    ls.log_end_lsn                                              AS [churn.log_end_lsn]
 FROM sys.dm_db_log_stats(DB_ID()) AS ls
 CROSS JOIN (SELECT log_reuse_wait_desc, target_recovery_time_in_seconds
               FROM sys.databases WHERE database_id = DB_ID()) AS d
