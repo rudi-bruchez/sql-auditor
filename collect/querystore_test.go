@@ -157,26 +157,55 @@ func TestDetailWriterCapsAnOversizedPlanFilteredByTheServer(t *testing.T) {
 	sel, _ := setByName(sets, "selected")
 	sel.Rows[0][3] = nil                     // query_plan, nulled by the DATALENGTH guard
 	sel.Rows[0][4] = int64(maxPlanBytes + 1) // query_plan_bytes, the size that got it dropped
-	assertPlanOmitted(t, sets, "query_11.plan_101.sqlplan", "cap")
+	assertPlanOmitted(t, sets, "query_11.plan_101.sqlplan", 101, "exceeds the 8388608 byte per-plan cap and was not sent")
 }
 
 func TestDetailWriterCapsAnOversizedPlanThatReachedTheWriter(t *testing.T) {
 	sets := detailSets()
 	sel, _ := setByName(sets, "selected")
 	sel.Rows[0][3] = strings.Repeat("x", maxPlanBytes+1)
-	assertPlanOmitted(t, sets, "query_11.plan_101.sqlplan", "cap")
+	assertPlanOmitted(t, sets, "query_11.plan_101.sqlplan", 101, "exceeds the 8388608 byte per-plan cap")
 }
 
-func assertPlanOmitted(t *testing.T, sets []NamedResultSet, file, reasonFragment string) {
+// indexOmissions reads back the omissions _index.json records. Matching on the
+// raw text would not do: every index carries "selection": {"cap": …}
+// unconditionally, so a substring check for "cap" passes against a writer that
+// records no omission at all.
+type indexOmission struct {
+	QueryID int64  `json:"query_id"`
+	PlanID  int64  `json:"plan_id"`
+	Reason  string `json:"reason"`
+	Bytes   int64  `json:"bytes"`
+}
+
+func indexOmissions(t *testing.T, root, rel string) []indexOmission {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel), "_index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx struct {
+		Omissions []indexOmission `json:"omissions"`
+	}
+	if err := json.Unmarshal(b, &idx); err != nil {
+		t.Fatal(err)
+	}
+	return idx.Omissions
+}
+
+func assertPlanOmitted(t *testing.T, sets []NamedResultSet, file string, planID int64, reasonFragment string) {
 	t.Helper()
 	root, rel, _, _ := runDetailWriter(t, sets)
 	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel), file)); err == nil {
 		t.Errorf("wrote %s instead of recording the omission", file)
 	}
-	b, _ := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel), "_index.json"))
-	if !strings.Contains(string(b), reasonFragment) {
-		t.Errorf("_index.json does not explain the omission:\n%s", b)
+	for _, o := range indexOmissions(t, root, rel) {
+		if o.PlanID == planID && strings.Contains(o.Reason, reasonFragment) {
+			return
+		}
 	}
+	t.Errorf("_index.json records no omission for plan %d mentioning %q: %+v",
+		planID, reasonFragment, indexOmissions(t, root, rel))
 }
 
 func TestDetailWriterWritesOnlyAnIndexWhenTheStoreIsOff(t *testing.T) {
@@ -259,6 +288,119 @@ func TestDetailWriterCountsTextFilesEvenWithNoPlans(t *testing.T) {
 	}
 	if res.TextFiles != 2 {
 		t.Fatalf("TextFiles = %d, want 2 — a run that writes only texts must still disclose", res.TextFiles)
+	}
+}
+
+// KnownWriters and writerFor are two closed sets that have to stay in step. A
+// name declared in the corpus but unresolved here falls back to the ordinary
+// encoder and emits one JSON document where a directory of plans was expected,
+// with nothing anywhere saying so — the failure @writer exists to prevent.
+func TestWriterForCoversKnownWriters(t *testing.T) {
+	// The one gap that is expected today: Task 6 owns query-store-profiled.
+	// Delete the entry when it lands; this test fails if you forget to.
+	pending := map[string]bool{"query-store-profiled": true}
+
+	for name := range KnownWriters {
+		w := writerFor(name)
+		if pending[name] {
+			if w != nil {
+				t.Errorf("writerFor(%q) now resolves; drop it from the pending set", name)
+			}
+			continue
+		}
+		if w == nil {
+			t.Errorf("KnownWriters declares %q but writerFor returns nil for it", name)
+		}
+	}
+	for name := range pending {
+		if _, ok := KnownWriters[name]; !ok {
+			t.Errorf("pending writer %q is not declared in KnownWriters", name)
+		}
+	}
+	if writerFor("query-store-nonesuch") != nil {
+		t.Error("writerFor resolved a name that is in no closed set")
+	}
+}
+
+// A budget that dies mid-run is the case the omissions exist for. What must
+// survive it: the index itself, a truthful account of what was left out, and a
+// TextFiles count that still discloses the query text already on disk even
+// though not one plan came with it.
+func TestDetailWriterRecordsWhatTheBudgetRefused(t *testing.T) {
+	root := t.TempDir()
+	// Room for the first query's text and nothing else.
+	out := newRunWriter(root, len("SELECT a FROM t"), func(string) {})
+	var warnings []string
+	res, err := writerFor("query-store-detail")(WriteRequest{
+		Out:    out,
+		Script: Script{Path: "80.workload/021.query-store-detail.sql", Dir: "80.workload", Base: "021.query-store-detail"},
+		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
+		Sets:   detailSets(),
+		State:  NewQueryStoreState(),
+		Warn:   func(s string) { warnings = append(warnings, s) },
+	})
+	if err != nil {
+		t.Fatalf("an exhausted budget is a recorded omission, not a failure: %v", err)
+	}
+	if res.TextFiles != 1 || res.PlanFiles != 0 {
+		t.Fatalf("TextFiles = %d, PlanFiles = %d, want 1 and 0", res.TextFiles, res.PlanFiles)
+	}
+
+	dir := filepath.Join(root, filepath.FromSlash(res.Rel))
+	if _, err := os.Stat(filepath.Join(dir, "query_11.sql")); err != nil {
+		t.Errorf("the one file the budget allowed is missing: %v", err)
+	}
+	for _, gone := range []string{"query_11.plan_101.sqlplan", "query_11.stats.json", "query_22.sql"} {
+		if _, err := os.Stat(filepath.Join(dir, gone)); err == nil {
+			t.Errorf("wrote %s past the budget", gone)
+		}
+	}
+	// The index is written outside the budget: it is the only thing that says
+	// the files beside it are an incomplete set.
+	if _, err := os.Stat(filepath.Join(dir, "_index.json")); err != nil {
+		t.Fatalf("the budget swallowed the index that describes the truncation: %v", err)
+	}
+
+	var refused int
+	for _, o := range indexOmissions(t, root, res.Rel) {
+		if o.Reason == budgetReason {
+			refused++
+		}
+	}
+	if refused == 0 {
+		t.Error("_index.json records nothing about the files the budget refused")
+	}
+	if len(warnings) == 0 {
+		t.Error("the truncation never reached the manifest's warnings")
+	}
+
+	// The partial state has to stay coherent: a query whose text was refused
+	// must not still advertise one.
+	b, _ := os.ReadFile(filepath.Join(dir, "_index.json"))
+	var idx struct {
+		Queries []struct {
+			QueryID   int64    `json:"query_id"`
+			TextFile  string   `json:"text_file"`
+			StatsFile string   `json:"stats_file"`
+			PlanFiles []string `json:"plan_files"`
+		} `json:"queries"`
+	}
+	if err := json.Unmarshal(b, &idx); err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.Queries) != 2 {
+		t.Fatalf("got %d queries in the index, want both listed", len(idx.Queries))
+	}
+	if idx.Queries[0].TextFile != "query_11.sql" || idx.Queries[0].StatsFile != "" {
+		t.Errorf("query 11 = %+v, want its text named and its refused statistics blank", idx.Queries[0])
+	}
+	if idx.Queries[1].TextFile != "" {
+		t.Errorf("query 22 names %q, a text file the budget never let it write", idx.Queries[1].TextFile)
+	}
+	for _, q := range idx.Queries {
+		if len(q.PlanFiles) != 0 {
+			t.Errorf("query %d lists plan files that were never written: %v", q.QueryID, q.PlanFiles)
+		}
 	}
 }
 
