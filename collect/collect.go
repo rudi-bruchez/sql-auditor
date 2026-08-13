@@ -38,6 +38,28 @@ const FlagIncludeSessionText = "include_session_text"
 // I/O, and it needs the same deliberateness as session text.
 const FlagEstimateCompression = "estimate_compression"
 
+// FlagQueryStoreDetail gates the deep read of the Query Store: the full,
+// untruncated text of the heaviest queries and their execution plans.
+//
+// It is not FlagIncludeSessionText, and merging the two would be wrong in both
+// directions. Session text is what was running during the collection; this is
+// the recorded history of what the workload has been doing, whether or not it
+// was running when the collector connected. And a plan discloses more than the
+// text does: it carries the compiled parameter values, the literal predicates
+// and every object name the statement touched.
+const FlagQueryStoreDetail = "query_store_detail"
+
+// FlagQueryStorePlanStats gates the search for the last profiled plan of each
+// extracted query.
+//
+// It is a second decision rather than a widening of the first because of where
+// it reads. sys.dm_exec_query_plan_stats is reached through the plan cache of
+// the whole instance; every other per-database collector in this corpus sees
+// only the database it was pointed at. The dbid filter restricts what is kept,
+// not what is read, and an operator authorising a per-database extraction has
+// not thereby authorised that.
+const FlagQueryStorePlanStats = "query_store_plan_stats"
+
 type Options struct {
 	Config *Config
 	Corpus fs.FS
@@ -51,6 +73,11 @@ type Options struct {
 	// GrantScript, when set, is where "check" writes the T-SQL that grants
 	// the permissions the probe found missing. Empty means write nothing.
 	GrantScript string
+	// QueryStore carries the resolved collection window and the selection made
+	// by 021 for 022 to read. Run creates it; a caller that leaves it nil gets
+	// one rather than a panic, because the two @writer scripts are the only
+	// things that consult it and a run without them must behave as before.
+	QueryStore *QueryStoreState
 }
 
 // prepareRunFolder creates the run folder, clearing it and the archive beside
@@ -586,12 +613,199 @@ func scriptNote(s Script, enabled map[string]bool) string {
 		}
 		notes = append(notes, KnownFlags[s.RequiresFlag]+" ("+state+")")
 	}
+	// A writer script produces a directory, not a document, and `check` is what
+	// a DBA reads before authorising one. "one directory per database: query
+	// text, plans and per-interval statistics" is the sentence that lets them
+	// decide; the file name alone does not.
+	if s.Writer != "" {
+		notes = append(notes, KnownWriters[s.Writer])
+	}
 	return strings.Join(notes, ", ")
+}
+
+// defaultQueryStoreDays repeats the default Resolve applies to
+// QUERY_STORE_DAYS, for the one case Resolve cannot express: a lone
+// QUERY_STORE_TO leaves the days at 0 — the bound is present, so the sliding
+// default was suppressed — and says nothing about where the window starts.
+const defaultQueryStoreDays = 7
+
+// resolveWindow turns the configured window into two instants. It runs after
+// the server probe because that is the only moment the server's UTC offset is
+// known, and the bounds are written in the server's wall clock: the operator
+// types what the client said, "between 14:00 and 15:00 on the 26th", which is
+// neither the auditor's laptop's time nor UTC.
+//
+// It translates; it does not re-litigate. The days-versus-bounds conflict was
+// refused by Resolve, on the raw keys, where "typed" and "defaulted" can still
+// be told apart. The two refusals here are the ones that only become visible
+// once the values are instants, and both produce a run that looks successful
+// and answers nothing.
+func resolveWindow(cfg *Config, now time.Time, loc *time.Location) (time.Time, time.Time, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if cfg.QueryStoreDays > 0 {
+		return now.Add(-time.Duration(cfg.QueryStoreDays) * 24 * time.Hour), now, nil
+	}
+
+	to := now
+	if cfg.QueryStoreTo != "" {
+		t, err := parseServerLocal(cfg.QueryStoreTo, loc)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("QUERY_STORE_TO: %w", err)
+		}
+		to = t
+	}
+	from := to.Add(-defaultQueryStoreDays * 24 * time.Hour)
+	if cfg.QueryStoreFrom != "" {
+		f, err := parseServerLocal(cfg.QueryStoreFrom, loc)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("QUERY_STORE_FROM: %w", err)
+		}
+		from = f
+	}
+
+	if !from.Before(to) {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"the Query Store window is empty: %s is not before %s (both in the server's local time); "+
+				"a window that contains no interval returns nothing and reads as a quiet instance",
+			from.In(loc).Format(time.RFC3339), to.In(loc).Format(time.RFC3339))
+	}
+	// A bound in the future is almost always a bound typed in the wrong zone,
+	// and the Query Store has nothing to say about it either way.
+	if late := latest(from, to); late.After(now) {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"the Query Store window ends in the future: %s, and the collection is running at %s "+
+				"(both in the server's local time); check the bound against the server's clock, "+
+				"not the collecting machine's",
+			late.In(loc).Format(time.RFC3339), now.In(loc).Format(time.RFC3339))
+	}
+	return from, to, nil
+}
+
+func latest(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+// parseServerLocal reads a bound in the server's zone. Resolve already checked
+// the shape, so a failure here means the value reached the config by some other
+// route; it is reported rather than defaulted, because a window silently moved
+// to "now" is the failure this whole path exists to avoid.
+func parseServerLocal(raw string, loc *time.Location) (time.Time, error) {
+	if t, err := time.ParseInLocation("2006-01-02T15:04", raw, loc); err == nil {
+		return t, nil
+	}
+	t, err := time.ParseInLocation("2006-01-02", raw, loc)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid value %q, want 2006-01-02T15:04 or 2006-01-02", raw)
+	}
+	return t, nil
+}
+
+// joinInt64 renders the selected query ids as the comma-wrapped list 022
+// matches on: ",11,22,". The leading and trailing commas are what make its
+// CHARINDEX match whole ids — without them 11 matches inside 211 — and the
+// empty string for an empty slice is what makes the collector inert rather
+// than erroneous when 021 selected nothing.
+func joinInt64(ids []int64) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteByte(',')
+	for _, id := range ids {
+		fmt.Fprintf(&b, "%d,", id)
+	}
+	return b.String()
+}
+
+// queryStoreUnits applies QUERY_STORE_DB_INCLUDE to the databases a writer
+// script will run against, and names every database it removes.
+//
+// It filters the selection DB_INCLUDE and DB_EXCLUDE already made; it never
+// widens it. A database excluded from the run cannot be brought back by asking
+// the Query Store extraction for it, and a database removed here is recorded
+// with its name — N identical lines naming no database is the gap this
+// setting's argument would later be had over.
+func queryStoreUnits(cfg *Config, s Script, folders []DatabaseFolder) ([]DatabaseFolder, []SkippedScript) {
+	if s.Writer == "" || cfg.QueryStoreDBInclude == "" {
+		return folders, nil
+	}
+	patterns := splitPatterns(cfg.QueryStoreDBInclude)
+	var kept []DatabaseFolder
+	var skipped []SkippedScript
+	for _, f := range folders {
+		if matchAny(patterns, f.Name) {
+			kept = append(kept, f)
+			continue
+		}
+		skipped = append(skipped, SkippedScript{
+			Script: s.Path, Target: f.Name,
+			Reason: "not matched by QUERY_STORE_DB_INCLUDE",
+		})
+	}
+	return kept, skipped
+}
+
+// discloseWrites sets the manifest's Query Store disclosures from what the unit
+// actually put on disk, and from nothing else.
+//
+// There are two independent observations and both are needed. The choke point
+// reports a Showplan namespace in any payload it wrote, which catches a foreign
+// corpus dumping plan XML through the ordinary encoder. The writers report the
+// files they created, which catches the case the bytes cannot: query text is a
+// disclosure with no plan in it — a natively compiled procedure has a NULL
+// query_plan, and a run that exhausts the budget writes texts and no plans at
+// all.
+//
+// What is deliberately absent is a matcher over the SQL. Two collectors in this
+// corpus read sys.query_store_plan without emitting a plan, both ungated and
+// both running by default, so a matcher would have MANIFEST.txt announce
+// execution plans in an archive that holds none. Reading is not emitting.
+func discloseWrites(m *Manifest, rw *runWriter, s Script, res WriteResult) {
+	if rw.takeShowplan() {
+		m.Collected.QueryStoreDetail = true
+		// A gated collector is expected to emit plans. An ungated one means the
+		// corpus is collecting more than its own header claims, and the operator
+		// needs to know — the archive is disclosed correctly either way.
+		if s.RequiresFlag == "" {
+			m.Warnings = append(m.Warnings, fmt.Sprintf(
+				"%s writes execution plan XML without declaring @requires_flag: %s. "+
+					"This archive contains execution plans and says so, but the query "+
+					"should carry the gate so the default run does not collect them.",
+				s.Path, FlagQueryStoreDetail))
+		}
+	}
+	if res.PlanFiles > 0 || res.TextFiles > 0 {
+		m.Collected.QueryStoreDetail = true
+	}
+	// From the plan written, never from the flag passed: a run with the option
+	// on and nothing in the cache to match discloses nothing, because it
+	// collected nothing.
+	if s.Writer == "query-store-profiled" && res.PlanFiles > 0 {
+		m.Collected.QueryStoreProfiledPlans = true
+	}
+}
+
+// takeShowplan reports whether a plan reached disk since the last call, and
+// clears the flag. The run writer is shared by every unit, so a flag left set
+// would make the next collector answer for this one's plan — and the warning
+// exists precisely to name the script responsible.
+func (w *runWriter) takeShowplan() bool {
+	saw := w.sawShowplan
+	w.sawShowplan = false
+	return saw
 }
 
 // Run executes the full pipeline. It returns an exit code rather than
 // deciding the process's fate, so the CLI owns that.
 func Run(ctx context.Context, o Options) (int, error) {
+	if o.QueryStore == nil {
+		o.QueryStore = NewQueryStoreState()
+	}
 	m := NewManifest("sql-auditor", o.Version, o.Commit)
 	m.Config = map[string]string{
 		"queries_dir":          o.Config.QueriesDir,
@@ -599,6 +813,24 @@ func Run(ctx context.Context, o Options) (int, error) {
 		"db_include":           o.Config.DBInclude,
 		"db_exclude":           o.Config.DBExclude,
 		"include_session_text": fmt.Sprint(o.Flags[FlagIncludeSessionText]),
+
+		"query_store_detail":     fmt.Sprint(o.Flags[FlagQueryStoreDetail]),
+		"query_store_plan_stats": fmt.Sprint(o.Flags[FlagQueryStorePlanStats]),
+		"query_store_days":       fmt.Sprint(o.Config.QueryStoreDays),
+		"query_store_top":        fmt.Sprint(o.Config.QueryStoreTop),
+		// A setting that changed which databases were read and is absent from
+		// the record is the one that will be argued about later.
+		"query_store_db_include": o.Config.QueryStoreDBInclude,
+	}
+	// The bounds as typed, beside the bounds as resolved further down. It is
+	// having the pair side by side that makes a timezone mistake visible after
+	// the run rather than never: "14:00" and "2026-07-26T12:00:00Z" together
+	// say which offset was applied.
+	if o.Config.QueryStoreFrom != "" {
+		m.Config["query_store_from_requested"] = o.Config.QueryStoreFrom
+	}
+	if o.Config.QueryStoreTo != "" {
+		m.Config["query_store_to_requested"] = o.Config.QueryStoreTo
 	}
 	m.Sources = map[string]SourceInfo{}
 	started := time.Now()
@@ -717,6 +949,26 @@ func Run(ctx context.Context, o Options) (int, error) {
 	m.Server = ServerBlock{Name: si.Name, Version: si.Version, Edition: si.Edition,
 		UTCOffsetMinutes: si.UTCOffsetMinutes, Auth: authLabel(o.Config)}
 
+	// The window is resolved here and nowhere earlier: this is the first moment
+	// the server's UTC offset is known, and the operator types what the client
+	// said — "between 14:00 and 15:00 on the 26th" — which is the server's wall
+	// clock, not the auditor's laptop's and not UTC. Getting this wrong shifts a
+	// seven-day window by hours; on a one-hour window it misses the incident
+	// entirely, returns rows from the wrong hour, and looks exactly like a
+	// successful answer.
+	loc := time.FixedZone("server", si.UTCOffsetMinutes*60)
+	windowFrom, windowTo, err := resolveWindow(o.Config, o.Now, loc)
+	if err != nil {
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", 2, err)
+	}
+	o.QueryStore.From, o.QueryStore.To = windowFrom, windowTo
+	// Rendered in the server's zone, so the offset that was applied is on the
+	// page: "14:00" typed and "2026-07-26T14:00:00+02:00" resolved is a reader's
+	// proof that the bound was not read as the collecting machine's local time.
+	m.Config["query_store_from"] = windowFrom.In(loc).Format(time.RFC3339)
+	m.Config["query_store_to"] = windowTo.In(loc).Format(time.RFC3339)
+
 	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -724,6 +976,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 	}
 	sel, err := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude)
 	if err != nil {
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", 2, err)
+	}
+	// Validated once, here, rather than silently matching nothing later: a
+	// malformed pattern that quietly excluded every database would produce an
+	// extraction that ran nowhere and said only that it had been narrowed.
+	if err := checkPatterns("QUERY_STORE_DB_INCLUDE", splitPatterns(o.Config.QueryStoreDBInclude)); err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)
 	}
@@ -761,6 +1020,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return finishWith("", 2, err)
 	}
 
+	// One run writer for the whole run, handed to every unit. It is the single
+	// choke point: both branches of runUnit write through it and nothing else,
+	// so a .sqlplan whose bytes never form a JSON payload is inspected exactly
+	// like one that does. MANIFEST.txt and _run.json stay outside it — they are
+	// the run's own record and must be written even when the budget is gone.
+	rw := newRunWriter(runFolder, maxRunBytes, func(msg string) {
+		m.Warnings = append(m.Warnings, msg)
+	})
+
 	for _, p := range plan {
 		s := p.Script
 		if s.LintError != "" {
@@ -774,10 +1042,12 @@ func Run(ctx context.Context, o Options) (int, error) {
 		}
 		units := []DatabaseFolder{{}}
 		if s.Scope == ScopeDatabase {
-			units = folders
+			var narrowed []SkippedScript
+			units, narrowed = queryStoreUnits(o.Config, s, folders)
+			m.Skipped = append(m.Skipped, narrowed...)
 		}
 		for _, u := range units {
-			err := runUnit(ctx, conn, o, m, runFolder, s, u)
+			err := runUnit(ctx, conn, o, m, rw, s, u)
 			if err == nil {
 				continue
 			}
@@ -825,8 +1095,11 @@ func Run(ctx context.Context, o Options) (int, error) {
 }
 
 func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
-	runFolder string, s Script, u DatabaseFolder) error {
+	rw *runWriter, s Script, u DatabaseFolder) error {
 
+	if o.QueryStore == nil {
+		o.QueryStore = NewQueryStoreState()
+	}
 	if err := resetWithDeadline(ctx, conn, o.Config); err != nil {
 		return err
 	}
@@ -849,7 +1122,7 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	defer cancel()
 
 	start := time.Now()
-	rows, err := conn.QueryContext(qctx, s.SQL)
+	rows, err := conn.QueryContext(qctx, s.SQL, queryStoreArgs(o, s, u)...)
 	if err != nil {
 		return err
 	}
@@ -859,28 +1132,78 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	if err != nil {
 		return err
 	}
-	payload, warnings, err := Encode(sets)
-	if err != nil {
-		return err
-	}
-	m.Warnings = append(m.Warnings, warnings...)
 
-	rel := ResultRelativePath(s.Dir, s.Base, u.Folder)
-	full := filepath.Join(runFolder, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		return err
+	var res WriteResult
+	var writeErr error
+	if s.Writer != "" {
+		w := writerFor(s.Writer)
+		if w == nil {
+			// Never a silent fall back to the encoder. A script declaring
+			// @writer expects a directory of files; producing one JSON instead
+			// would leave an archive that looks collected and holds none of what
+			// was asked for.
+			return fmt.Errorf("@writer: no writer registered for %q", s.Writer)
+		}
+		// The counts come back valid even with a non-nil error: a writer that
+		// failed halfway has already put files on disk, and computing the
+		// disclosure from a subset of what the archive holds is the defect this
+		// whole design is built around.
+		res, writeErr = w(WriteRequest{
+			Out: rw, Script: s, Unit: u, Sets: sets,
+			State: o.QueryStore,
+			Warn:  func(msg string) { m.Warnings = append(m.Warnings, msg) },
+		})
+	} else {
+		payload, warnings, encErr := Encode(sets)
+		if encErr != nil {
+			return encErr
+		}
+		m.Warnings = append(m.Warnings, warnings...)
+		rel := ResultRelativePath(s.Dir, s.Base, u.Folder)
+		n, werr := rw.write(rel, payload)
+		res, writeErr = WriteResult{Rel: rel, Bytes: n}, werr
 	}
-	if err := os.WriteFile(full, payload, 0o644); err != nil {
-		return err
+
+	// Before any error return: what reached disk is disclosed whether or not
+	// the collector that wrote it finished.
+	discloseWrites(m, rw, s, res)
+	if writeErr != nil {
+		return writeErr
 	}
+
 	scope := "instance"
 	if s.Scope == ScopeDatabase {
 		scope = "database"
 	}
 	m.Results = append(m.Results, ResultEntry{
-		Script: s.Path, Scope: scope, Target: u.Name, Output: rel,
-		Bytes: len(payload), DurationMS: int(time.Since(start).Milliseconds()), Status: "ok",
+		Script: s.Path, Scope: scope, Target: u.Name, Output: res.Rel,
+		Bytes: res.Bytes, DurationMS: int(time.Since(start).Milliseconds()), Status: "ok",
 	})
+	return nil
+}
+
+// queryStoreArgs supplies the named parameters a writer script declares, and
+// nothing for anything else. Sending them for every collector would switch all
+// twenty-eight to sp_executesql for the sake of two, changing how the whole
+// corpus is executed.
+//
+// Each writer gets the parameters its own SQL declares. A parameter declared
+// but unused is legal under sp_executesql, but a reader of 021 who finds
+// @qs_query_ids on the wire has to work out that it means nothing there.
+func queryStoreArgs(o Options, s Script, u DatabaseFolder) []any {
+	switch s.Writer {
+	case "query-store-detail":
+		return []any{
+			sql.Named("qs_from", o.QueryStore.From),
+			sql.Named("qs_to", o.QueryStore.To),
+			sql.Named("qs_top", o.Config.QueryStoreTop),
+		}
+	case "query-store-profiled":
+		// Empty when 021 selected nothing here, which is what makes 022 inert
+		// rather than broken: CHARINDEX matches nothing and the writer records
+		// an index saying so.
+		return []any{sql.Named("qs_query_ids", joinInt64(o.QueryStore.Selected[u.Name]))}
+	}
 	return nil
 }
 

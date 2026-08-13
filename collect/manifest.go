@@ -68,6 +68,12 @@ type ResultEntry struct {
 // the same silent failure CoverageBlock exists to prevent.
 type SkippedScript struct {
 	Script string `json:"script"`
+	// Target names the database the skip applies to, when the skip is per
+	// database rather than per script. Without it, N databases filtered out by
+	// QUERY_STORE_DB_INCLUDE produce N identical lines naming none of them, and
+	// a Query Store found switched off in one database is unreportable. It is
+	// omitempty, so every skip that is about the script alone is unchanged.
+	Target string `json:"target,omitempty"`
 	Reason string `json:"reason"`
 }
 
@@ -597,6 +603,10 @@ func (m *Manifest) writeNotRun(b *strings.Builder) {
 	}
 	fmt.Fprintf(b, "\nQueries not run (%d):\n", len(m.Skipped))
 	for _, s := range m.Skipped {
+		if s.Target != "" {
+			fmt.Fprintf(b, "  - %s on %s\n      %s\n", s.Script, s.Target, s.Reason)
+			continue
+		}
 		fmt.Fprintf(b, "  - %s\n      %s\n", s.Script, s.Reason)
 	}
 }

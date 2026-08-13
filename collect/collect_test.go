@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +12,8 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	sqlauditor "github.com/rudi-bruchez/sql-auditor"
 )
 
 func TestExportQueriesWritesTree(t *testing.T) {
@@ -627,4 +630,214 @@ func failedRunDir(t *testing.T, out string) string {
 		t.Fatalf("want one failed-run-* directory under %s, got %v", out, found)
 	}
 	return found[0]
+}
+
+func TestContainsShowplanIgnoresSQLThatMerelyReadsPlans(t *testing.T) {
+	// The payloads 020 and 030 actually produce: plan metadata and a boolean
+	// derived from the XML, with no XML in sight.
+	for _, payload := range []string{
+		`{"counts":{"plans":42,"forced_plans":1}}`,
+		`{"queries":[{"plan_handle":"0x06","converts_implicitly":true}]}`,
+	} {
+		if containsShowplan([]byte(payload)) {
+			t.Errorf("a payload with no plan tripped the disclosure: %s", payload)
+		}
+	}
+}
+
+func TestContainsShowplanCatchesAPlanInAnyShape(t *testing.T) {
+	payload := `{"plans":[{"query_plan":"<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence/></ShowPlanXML>"}]}`
+	if !containsShowplan([]byte(payload)) {
+		t.Error("plan XML emitted through the ordinary encoder was not detected")
+	}
+}
+
+// The corpus as it stands must produce no disclosure. This is the regression
+// test for the defect this design nearly shipped: a matcher over the SQL would
+// have made both of these files disclose plans they do not emit.
+func TestEmbeddedCorpusHasNoUngatedPlanEmitter(t *testing.T) {
+	for _, path := range []string{
+		"queries/80.workload/020.query-store.sql",
+		"queries/80.workload/030.implicit-conversions.sql",
+	} {
+		b, err := fs.ReadFile(sqlauditor.Queries, path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		s := parseScript(path, string(b))
+		if s.RequiresFlag != "" || s.Writer != "" {
+			t.Errorf("%s is now gated; this test's premise has changed", path)
+		}
+	}
+}
+
+func TestResolveWindowUsesServerLocalTime(t *testing.T) {
+	// The operator asks for 14:00-15:00 on a server two hours ahead of UTC.
+	cfg := &Config{QueryStoreFrom: "2026-07-26T14:00", QueryStoreTo: "2026-07-26T15:00"}
+	from, to, err := resolveWindow(cfg, time.Now(), time.FixedZone("server", 2*3600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := from.UTC().Format(time.RFC3339); got != "2026-07-26T12:00:00Z" {
+		t.Errorf("from = %s, want 2026-07-26T12:00:00Z — the bound was not read as server local time", got)
+	}
+	if to.Sub(from) != time.Hour {
+		t.Errorf("window = %s, want 1h", to.Sub(from))
+	}
+}
+
+// resolveWindow refuses nothing about the days/bounds combination — Resolve
+// already did, on the raw keys, where "typed" and "defaulted" are still
+// distinguishable. Here it only translates.
+func TestResolveWindowTranslatesTheSlidingForm(t *testing.T) {
+	now := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	cfg := &Config{QueryStoreDays: 7}
+	from, to, err := resolveWindow(cfg, now, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !to.Equal(now) || to.Sub(from) != 7*24*time.Hour {
+		t.Errorf("window = %s .. %s, want the seven days ending now", from, to)
+	}
+}
+
+// The two refusals it does own. Both produce a window nothing can answer, and
+// both look from the outside like a successful collection that found nothing.
+func TestResolveWindowRefusesAWindowNobodyCanAnswer(t *testing.T) {
+	now := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, from, to, want string
+	}{
+		{"inverted", "2026-07-26T15:00", "2026-07-26T14:00", "before"},
+		{"empty", "2026-07-26T14:00", "2026-07-26T14:00", "before"},
+		{"in the future", "2026-09-01T14:00", "2026-09-01T15:00", "future"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{QueryStoreFrom: tc.from, QueryStoreTo: tc.to}
+			_, _, err := resolveWindow(cfg, now, time.UTC)
+			if err == nil {
+				t.Fatalf("%s .. %s was accepted", tc.from, tc.to)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A lone --query-store-to leaves QueryStoreDays at 0 and says nothing about
+// where the window starts. Resolve cannot fill that in — it does not know the
+// offset — so the sliding default applies here, ending at the bound.
+func TestResolveWindowFillsInTheStartWhenOnlyTheEndIsGiven(t *testing.T) {
+	now := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	cfg := &Config{QueryStoreTo: "2026-08-10"}
+	from, to, err := resolveWindow(cfg, now, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := to.Format(time.RFC3339); got != "2026-08-10T00:00:00Z" {
+		t.Errorf("to = %s, want the bound that was typed", got)
+	}
+	if to.Sub(from) != 7*24*time.Hour {
+		t.Errorf("window = %s, want the seven-day default ending at the bound", to.Sub(from))
+	}
+}
+
+// The commas are load-bearing: 022 matches with CHARINDEX on the wrapped list,
+// which is what keeps 11 from matching inside 211.
+func TestJoinInt64WrapsTheListInCommas(t *testing.T) {
+	if got := joinInt64([]int64{11, 22}); got != ",11,22," {
+		t.Errorf("joinInt64 = %q, want \",11,22,\"", got)
+	}
+	if got := joinInt64(nil); got != "" {
+		t.Errorf("joinInt64(nil) = %q, want the empty string so CHARINDEX matches nothing", got)
+	}
+}
+
+// QUERY_STORE_DB_INCLUDE narrows the selection DB_INCLUDE already made; it
+// never widens it, and every database it removes is named in the manifest.
+func TestQueryStoreDatabasesFilterRatherThanWiden(t *testing.T) {
+	folders := []DatabaseFolder{{Name: "Sales", Folder: "Sales"}, {Name: "Archive", Folder: "Archive"}}
+	s := Script{Path: "80.workload/021.query-store-detail.sql", Writer: "query-store-detail"}
+	kept, skipped := queryStoreUnits(&Config{QueryStoreDBInclude: "sal*"}, s, folders)
+	if len(kept) != 1 || kept[0].Name != "Sales" {
+		t.Fatalf("kept = %v, want only Sales", kept)
+	}
+	if len(skipped) != 1 || skipped[0].Target != "Archive" {
+		t.Fatalf("skipped = %+v, want Archive named", skipped)
+	}
+	if !strings.Contains(skipped[0].Reason, "QUERY_STORE_DB_INCLUDE") {
+		t.Errorf("reason = %q, does not say what removed the database", skipped[0].Reason)
+	}
+	// An ordinary collector is untouched by it: the setting is about the Query
+	// Store extraction, not about which databases the run reads.
+	plain := Script{Path: "80.workload/020.query-store.sql"}
+	kept, skipped = queryStoreUnits(&Config{QueryStoreDBInclude: "sal*"}, plain, folders)
+	if len(kept) != 2 || len(skipped) != 0 {
+		t.Errorf("an ungated collector was filtered: kept %v, skipped %v", kept, skipped)
+	}
+}
+
+// The disclosure comes from the bytes, never from the SQL. Each branch of it
+// is one fact the archive would otherwise hold without admitting to.
+func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
+	gated := Script{Path: "80.workload/021.query-store-detail.sql",
+		RequiresFlag: FlagQueryStoreDetail, Writer: "query-store-detail"}
+
+	t.Run("a plan seen by the choke point", func(t *testing.T) {
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		rw.sawShowplan = true
+		discloseWrites(m, rw, gated, WriteResult{})
+		if !m.Collected.QueryStoreDetail {
+			t.Error("a plan went to disk and the manifest denies it")
+		}
+		if len(m.Warnings) != 0 {
+			t.Errorf("a gated collector emitting plans is expected, not a warning: %v", m.Warnings)
+		}
+		if rw.sawShowplan {
+			t.Error("the flag was not consumed, so the next unit inherits this one's plan")
+		}
+	})
+
+	t.Run("a plan from an ungated collector", func(t *testing.T) {
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		rw.sawShowplan = true
+		discloseWrites(m, rw, Script{Path: "90.foreign/010.dump.sql"}, WriteResult{})
+		if !m.Collected.QueryStoreDetail {
+			t.Error("the archive holds a plan and does not say so")
+		}
+		if len(m.Warnings) != 1 || !strings.Contains(m.Warnings[0], "90.foreign/010.dump.sql") {
+			t.Errorf("warnings = %v, want one naming the script", m.Warnings)
+		}
+	})
+
+	t.Run("text without a plan", func(t *testing.T) {
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		discloseWrites(m, rw, gated, WriteResult{TextFiles: 3})
+		if !m.Collected.QueryStoreDetail {
+			t.Error("query text was written and the manifest denies it")
+		}
+		if m.Collected.QueryStoreProfiledPlans {
+			t.Error("the detail writer disclosed profiled plans")
+		}
+	})
+
+	t.Run("the profiled writer", func(t *testing.T) {
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		s := Script{Path: "80.workload/022.query-store-profiled.sql",
+			RequiresFlag: FlagQueryStorePlanStats, Writer: "query-store-profiled"}
+		discloseWrites(m, rw, s, WriteResult{PlanFiles: 2})
+		if !m.Collected.QueryStoreProfiledPlans || !m.Collected.QueryStoreDetail {
+			t.Errorf("collected = %+v, want both disclosures", m.Collected)
+		}
+	})
+
+	t.Run("a writer that wrote nothing", func(t *testing.T) {
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+		discloseWrites(m, rw, gated, WriteResult{})
+		if m.Collected.QueryStoreDetail || m.Collected.QueryStoreProfiledPlans {
+			t.Errorf("collected = %+v, want nothing disclosed: the flag was passed but "+
+				"a database with the Query Store off produced no text and no plan", m.Collected)
+		}
+	})
 }
