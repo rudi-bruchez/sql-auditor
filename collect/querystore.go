@@ -77,9 +77,7 @@ func writerFor(name string) ScriptWriter {
 	case "query-store-detail":
 		return writeQueryStoreDetail
 	case "query-store-profiled":
-		// Task 6 owns this one. Declared here rather than left to the default
-		// so the gap is a stated absence instead of an unrecognised name.
-		return nil
+		return writeQueryStoreProfiled
 	}
 	return nil
 }
@@ -380,6 +378,171 @@ func writeIndex(req WriteRequest, rel string, idx detailIndex) (int, error) {
 	b, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("query-store-detail: encoding _index.json: %w", err)
+	}
+	b = append(b, '\n')
+	return req.Out.writeUnbudgeted(path.Join(rel, "_index.json"), b)
+}
+
+// profiledPlan is one row of the profiled-plan directory's index: the query
+// and plan it names, the file it was written to (empty when it was not), and
+// how the match was made.
+type profiledPlan struct {
+	QueryID int64 `json:"query_id"`
+	PlanID  int64 `json:"plan_id"`
+	// Match names how this row was found, never asserting that it is right.
+	// The join key is query_plan_hash, an MD5, so two distinct plans can
+	// collide on it — a fact the reader needs beside the plan, not buried in
+	// a design document nobody re-reads while triaging an incident.
+	Match string `json:"match"`
+	// Candidates is how many rows shared this query's hash before the tie
+	// was broken. 1 means the match was unambiguous; more than 1 means it
+	// was not, however confidently a single file is named below.
+	Candidates int64  `json:"candidates"`
+	PlanFile   string `json:"plan_file,omitempty"`
+}
+
+// profiledIndex is the profiled-plan directory's table of contents. It always
+// carries the four fields a reader needs to judge a zero without going back
+// to the server: how many queries were asked for, how many came back matched,
+// and whether Query Store Plan Stats was even on for this database — a
+// database with the feature off and a database with nothing cached both
+// produce zero plans, and only this field tells them apart.
+type profiledIndex struct {
+	Database           string `json:"database"`
+	Script             string `json:"script"`
+	RequestedQueries   int64  `json:"requested_queries"`
+	MatchedPlans       int64  `json:"matched_plans"`
+	LastQueryPlanStats string `json:"last_query_plan_stats"`
+	// Reason is set only for a SKIP: the detail writer left this database
+	// nothing to match against. Empty otherwise, so an ordinary run's index
+	// does not carry a field that has nothing to say.
+	Reason    string         `json:"reason,omitempty"`
+	Plans     []profiledPlan `json:"plans"`
+	Omissions []omission     `json:"omissions"`
+}
+
+// writeQueryStoreProfiled turns 022's two result sets into the last actual
+// execution plan for each query 021 already selected. It is a bonus writer:
+// sys.dm_exec_query_plan_stats needs SQL Server 2019+, the feature switched
+// on, and the plan still resident in cache, and any one of those being false
+// is the ordinary case, not a fault — so nothing here ever fails the run.
+func writeQueryStoreProfiled(req WriteRequest) (WriteResult, error) {
+	root, ok := setByName(req.Sets, "root")
+	if !ok {
+		return WriteResult{}, fmt.Errorf("query-store-profiled: result set %q is missing", "root")
+	}
+	plans, ok := setByName(req.Sets, "profiled")
+	if !ok {
+		return WriteResult{}, fmt.Errorf("query-store-profiled: result set %q is missing", "profiled")
+	}
+
+	rel := path.Join(req.Script.Dir, req.Unit.Folder, req.Script.Base)
+	res := WriteResult{Rel: rel}
+
+	requested, _ := int64At(root, 0, "requested_queries")
+	matched, _ := int64At(root, 0, "matched_plans")
+	lastStat, _ := stringAt(root, 0, "last_query_plan_stats")
+
+	idx := profiledIndex{
+		Database:           req.Unit.Name,
+		Script:             req.Script.Path,
+		RequestedQueries:   requested,
+		MatchedPlans:       matched,
+		LastQueryPlanStats: lastStat,
+		Plans:              []profiledPlan{},
+		Omissions:          []omission{},
+	}
+
+	ids := req.State.Selected[req.Unit.Name]
+	// 021 and 022 run independently, and the second has nothing to match
+	// against when the first selected nothing here — Query Store off, the
+	// budget exhausted before 021 ran, or simply an empty database. That is
+	// a SKIP recorded in this writer's own index, not an error borrowed from
+	// a script this one never depends on.
+	if len(ids) == 0 {
+		idx.Reason = "the detail writer selected no queries for this database"
+		n, err := writeProfiledIndex(req, rel, idx)
+		res.Bytes += n
+		return res, err
+	}
+
+	omit := func(queryID, planID int64, reason string, size int64) {
+		idx.Omissions = append(idx.Omissions, omission{QueryID: queryID, PlanID: planID, Reason: reason, Bytes: size})
+		req.Warn(fmt.Sprintf("%s: query %d, plan %d: %s", req.Unit.Name, queryID, planID, reason))
+	}
+
+	for _, id := range ids {
+		rows := rowsWhere(plans, "query_id", id)
+		if len(rows.Rows) == 0 {
+			// The four conditions the DMF needs are each independently unmet
+			// more often than not — not opt-in, the plan aged out of cache,
+			// past the 128-level nesting limit, or no hash match at all. All
+			// four read the same from here: nothing came back. One reason
+			// covers them, because distinguishing them is a diagnosis this
+			// writer has no evidence to make.
+			omit(id, 0, "no profiled plan matched this query_id by query_plan_hash", 0)
+			continue
+		}
+
+		if len(rows.Rows) > 1 {
+			// A query_plan_hash collision, or the DMF surfacing more than one
+			// cached plan for the same query. The SQL's own row order picks
+			// the one that gets written; the rest are named as omissions
+			// rather than dropped without a trace.
+			for extra := 1; extra < len(rows.Rows); extra++ {
+				extraPlanID, _ := int64At(rows, extra, "plan_id")
+				omit(id, extraPlanID, "an additional candidate plan matched the same query_plan_hash and was not written", 0)
+			}
+		}
+
+		planID, _ := int64At(rows, 0, "plan_id")
+		match, _ := stringAt(rows, 0, "match")
+		candidates, _ := int64At(rows, 0, "candidates")
+		plan, present := stringAt(rows, 0, "query_plan")
+		size, hasSize := int64At(rows, 0, "query_plan_bytes")
+
+		entry := profiledPlan{QueryID: id, PlanID: planID, Match: match, Candidates: candidates}
+
+		switch {
+		case !present && hasSize && size > maxPlanBytes:
+			omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap and was not sent", size, maxPlanBytes), size)
+		case !present:
+			// A single-operator plan for a trivial query and a NULL past the
+			// 128-nesting-level ceiling are indistinguishable from here: the
+			// DMF does not say which happened, so neither is claimed.
+			omit(id, planID, "no plan XML returned for this plan_id", 0)
+		case len(plan) > maxPlanBytes:
+			omit(id, planID, fmt.Sprintf("plan XML of %d bytes exceeds the %d byte per-plan cap", len(plan), maxPlanBytes), int64(len(plan)))
+		default:
+			name := planFileName(id, planID, ".actual")
+			n, ok, err := writeFile(req, rel, name, []byte(plan))
+			if err != nil {
+				return res, err
+			}
+			if !ok {
+				omit(id, planID, budgetReason, int64(len(plan)))
+			} else {
+				res.Bytes += n
+				res.PlanFiles++
+				entry.PlanFile = name
+				idx.Plans = append(idx.Plans, entry)
+			}
+		}
+	}
+
+	n, err := writeProfiledIndex(req, rel, idx)
+	res.Bytes += n
+	return res, err
+}
+
+// writeProfiledIndex writes _index.json outside the budget, exactly like the
+// detail writer's: it is what tells a reader "a query with no match" apart
+// from "the writer never ran here", so the budget must never be the reason it
+// is missing.
+func writeProfiledIndex(req WriteRequest, rel string, idx profiledIndex) (int, error) {
+	b, err := json.MarshalIndent(idx, "", "  ")
+	if err != nil {
+		return 0, fmt.Errorf("query-store-profiled: encoding _index.json: %w", err)
 	}
 	b = append(b, '\n')
 	return req.Out.writeUnbudgeted(path.Join(rel, "_index.json"), b)

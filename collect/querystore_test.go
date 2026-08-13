@@ -296,9 +296,10 @@ func TestDetailWriterCountsTextFilesEvenWithNoPlans(t *testing.T) {
 // encoder and emits one JSON document where a directory of plans was expected,
 // with nothing anywhere saying so — the failure @writer exists to prevent.
 func TestWriterForCoversKnownWriters(t *testing.T) {
-	// The one gap that is expected today: Task 6 owns query-store-profiled.
-	// Delete the entry when it lands; this test fails if you forget to.
-	pending := map[string]bool{"query-store-profiled": true}
+	// No gap left: both known writers resolve. Kept as a map so a future
+	// writer added to KnownWriters without a writerFor case fails loudly here
+	// instead of falling back to the plain encoder.
+	pending := map[string]bool{}
 
 	for name := range KnownWriters {
 		w := writerFor(name)
@@ -409,5 +410,76 @@ func TestDetailWriterPublishesTheSelection(t *testing.T) {
 	got := st.Selected["Sales"]
 	if len(got) != 2 || got[0] != 11 || got[1] != 22 {
 		t.Fatalf("Selected[Sales] = %v, want [11 22]", got)
+	}
+}
+
+func profiledSets() []NamedResultSet {
+	root := ResultSet{
+		Columns: []string{"database", "requested_queries", "matched_plans", "last_query_plan_stats"},
+		Types:   []string{"NVARCHAR", "INT", "INT", "NVARCHAR"},
+		Rows:    [][]any{{"Sales", int64(2), int64(1), "ON"}},
+	}
+	plans := ResultSet{
+		Columns: []string{"query_id", "plan_id", "match", "candidates", "query_plan"},
+		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "BIGINT", "NVARCHAR"},
+		Rows: [][]any{
+			{int64(11), int64(101), "plan_hash", int64(3), "<ShowPlanXML>profiled</ShowPlanXML>"},
+		},
+	}
+	return []NamedResultSet{
+		{Spec: ResultSpec{Name: "root", Shape: ShapeObject}, Set: root},
+		{Spec: ResultSpec{Name: "profiled", Shape: ShapeArray}, Set: plans},
+	}
+}
+
+func TestProfiledWriterNamesTheFileAfterQueryAndPlan(t *testing.T) {
+	root := t.TempDir()
+	st := NewQueryStoreState()
+	st.Selected["Sales"] = []int64{11, 22}
+	res, err := writerFor("query-store-profiled")(WriteRequest{
+		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
+		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
+		Sets:   profiledSets(),
+		State:  st,
+		Warn:   func(string) {},
+	})
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	dir := filepath.Join(root, filepath.FromSlash(res.Rel))
+	if _, err := os.Stat(filepath.Join(dir, "query_11.plan_101.actual.sqlplan")); err != nil {
+		t.Errorf("missing query_11.plan_101.actual.sqlplan: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "_index.json")); err != nil {
+		t.Errorf("missing _index.json: %v", err)
+	}
+}
+
+func TestProfiledWriterAcceptsAnEmptyResult(t *testing.T) {
+	root := t.TempDir()
+	sets := profiledSets()
+	sets[1].Set.Rows = nil
+	res, err := writerFor("query-store-profiled")(WriteRequest{
+		Out:    newRunWriter(root, maxRunBytes, func(string) {}),
+		Script: Script{Dir: "80.workload", Base: "022.query-store-profiled"},
+		Unit:   DatabaseFolder{Name: "Sales", Folder: "Sales"},
+		Sets:   sets,
+		State:  NewQueryStoreState(),
+		Warn:   func(string) {},
+	})
+	if err != nil {
+		t.Fatalf("an empty profiled result must not be an error: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(res.Rel), "_index.json"))
+	if err != nil {
+		t.Fatalf("no index written for an empty result: %v", err)
+	}
+	if !strings.Contains(string(b), "matched_plans") {
+		t.Errorf("_index.json does not say how many plans matched:\n%s", b)
+	}
+	// A zero match must be explicable without going back to the server.
+	if !strings.Contains(string(b), "last_query_plan_stats") {
+		t.Errorf("_index.json does not record whether the feature was even on:\n%s", b)
 	}
 }
