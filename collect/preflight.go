@@ -101,6 +101,14 @@ func Capabilities() []Capability {
 		{Name: "agent_job_steps", Label: "Read the Agent job steps (msdb.dbo.sysjobsteps)",
 			SQL:    "SELECT TOP 1 step_id FROM msdb.dbo.sysjobsteps",
 			Impact: "job steps not collected — the report can say a job exists but not what it runs"},
+		// A third slice of msdb, and a third grant. MSDB READ is SELECT on
+		// backupset and nothing else; SQLAgentReaderRole does not reach the log
+		// shipping tables either. So an instance can report its backups and its
+		// jobs and say nothing about whether it ships logs — which would read as
+		// "no log shipping" when it means "not allowed to look".
+		{Name: "log_shipping", Label: "Read the log shipping tables (msdb.dbo.log_shipping_*)",
+			SQL:    "SELECT TOP 1 primary_id FROM msdb.dbo.log_shipping_primary_databases",
+			Impact: "log shipping configuration and lag not collected — the report must not read this as 'no log shipping'"},
 		// Asked as a permission question rather than by running the procedure:
 		// sp_readerrorlog reads the whole current log, which is minutes of work
 		// on a long-uptime instance and far too expensive for a probe.

@@ -102,7 +102,7 @@ func TestCapabilityNamesMatchNormalisedPermissions(t *testing.T) {
 	}
 	for _, written := range []string{
 		"CONNECT", "VIEW SERVER STATE", "VIEW ANY DEFINITION", "MSDB READ", "AGENT JOBS",
-		"AGENT JOB STEPS", "ERROR LOG",
+		"AGENT JOB STEPS", "LOG SHIPPING", "ERROR LOG",
 	} {
 		key, ok := NormalisePermission(written)
 		if !ok {
@@ -136,6 +136,8 @@ func nameToPermission(name string) string {
 		return "AGENT JOBS"
 	case "agent_job_steps":
 		return "AGENT JOB STEPS"
+	case "log_shipping":
+		return "LOG SHIPPING"
 	case "error_log":
 		return "ERROR LOG"
 	}
