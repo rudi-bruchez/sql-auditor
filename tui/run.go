@@ -266,6 +266,11 @@ func (e collectDoneEvent) apply(s State) State {
 	s.Total = e.total
 	s.ZipPath, s.ZipBytes = e.zipPath, e.zipBytes
 	if e.err != nil {
+		// Counted as well as written down. This is the fatal error collect.Run
+		// came back with — a lost connection, a reconnect that failed — and it
+		// belongs to no unit, so nothing else has counted it: a summary reading
+		// "0 errors" under the sentence naming the failure would contradict it.
+		s.ErrorCount++
 		s.Notes = note(s.Notes, e.err.Error())
 	}
 	return s

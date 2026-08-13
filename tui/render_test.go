@@ -403,6 +403,21 @@ func TestDoneCountsDeniedPermissionsFromTheVerification(t *testing.T) {
 	absent(t, lines, "Denied permissions are recorded")
 }
 
+// The final screen carries the notes, and the fatal error collect.Run came
+// back with is one of them. Without this, a connection lost mid-run whose
+// reconnect failed ends on "147 collected, 0 errors" beside an archive path
+// and not one word about the failure: the DBA mails a partial archive
+// believing the run complete.
+func TestDoneCarriesTheNotesTheCollectionScreenShowed(t *testing.T) {
+	s := collectingState()
+	s.Step, s.ZipPath, s.DoneUnits = StepDone, `C:\out\a.zip`, 147
+	s.Notes = append(s.Notes, "reconnect failed: dial tcp 10.42.7.19:1433: connection reset by peer")
+	s.ErrorCount = 1
+	lines := Render(s, testWidth, 0)
+	contains(t, lines, "reconnect failed: dial tcp 10.42.7.19:1433: connection reset by peer")
+	contains(t, lines, "147 collected, 0 skipped, 1 error, 2 permissions denied")
+}
+
 func TestACancelledRunSaysTheArchiveIsPartial(t *testing.T) {
 	s := collectingState()
 	s.Step, s.Cancelled, s.ZipPath = StepDone, true, `C:\out\SQL01_PROD-2026-08-13.zip`

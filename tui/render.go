@@ -677,6 +677,14 @@ func renderDone(s State, width int) []string {
 		out = append(out, "", fieldPad+"  "+humanBytes(s.ZipBytes))
 	}
 	out = append(out, "", pad+summaryLine(s))
+	// The same summary the collection screen carries, kept rather than dropped
+	// on the way to this one. collect.Run's fatal error lands here, and so does
+	// a panic's message: without these lines a connection lost mid-run ends on
+	// "147 collected, 0 errors" beside an archive path and not one word about
+	// the failure, and the DBA mails a partial archive believing it complete.
+	for _, n := range s.Notes {
+		out = append(out, pad+screen.Truncate(n, textWidth(width)))
+	}
 	if deniedPermissions(s) > 0 {
 		// The reminder saves the round trip where the archive arrives and the
 		// missing permissions have to be asked for again.
