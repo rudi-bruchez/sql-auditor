@@ -43,7 +43,7 @@ can write them out and read them before you run anything:
 sql-auditor queries export --to ./queries-to-review
 ```
 
-The corpus is 45 files. The archive records the SHA-256 of the exact corpus that
+The corpus is 50 files. The archive records the SHA-256 of the exact corpus that
 was used, so a run can be tied to the questions it asked.
 
 Seven of those files are opt-in and produce nothing unless you ask for them:
