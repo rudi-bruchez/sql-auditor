@@ -125,8 +125,10 @@ WITH matched AS (
 )
 SELECT m.query_id                                                 AS [query_id],
        m.plan_id                                                  AS [plan_id],
-       /* Declared, never asserted: this names how the row was found. */
-       'plan_hash'                                                AS [match],
+       /* Declared, never asserted: this names how the row was found. The N
+          prefix is not decoration — without it the column is varchar, alone
+          among this file's strings. */
+       N'plan_hash'                                               AS [match],
        m.candidates                                               AS [candidates],
        m.last_execution_time                                      AS [last_execution_time],
        /* The same conditional projection and size column as 021: an oversized

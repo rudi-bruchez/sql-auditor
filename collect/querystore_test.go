@@ -17,8 +17,16 @@ func detailSets() []NamedResultSet {
 		Columns: []string{"database", "state.actual", "state.readonly_reason",
 			"window.requested_from", "window.requested_to",
 			"window.effective_from", "window.effective_to", "window.intervals", "selection.cap"},
-		Types: []string{"NVARCHAR", "NVARCHAR", "INT", "DATETIME2", "DATETIME2",
-			"DATETIME2", "DATETIME2", "BIGINT", "INT"},
+		// The four window bounds are DATETIMEOFFSET, and not by choice: two of
+		// them are @qs_from and @qs_to projected straight back, and the driver
+		// sends a time.Time as datetimeoffset(7) on every TDS version this tool
+		// speaks; the other two are those parameters compared against
+		// sys.query_store_runtime_stats_interval, which is datetimeoffset as
+		// well. window.intervals is a COUNT(*), an int, and selection.cap is
+		// @qs_top, which reaches the server as a bigint because the driver
+		// widens Go's int.
+		Types: []string{"NVARCHAR", "NVARCHAR", "INT", "DATETIMEOFFSET", "DATETIMEOFFSET",
+			"DATETIMEOFFSET", "DATETIMEOFFSET", "INT", "BIGINT"},
 		// time.Time, not strings: the driver delivers DATETIME2 that way, and a
 		// fixture that disagrees tests the encoder against data it never sees.
 		Rows: [][]any{{"Sales", "READ_WRITE", int64(0),
@@ -46,8 +54,12 @@ func detailSets() []NamedResultSet {
 		},
 	}
 	intervals := ResultSet{
+		// start_time is projected raw from
+		// sys.query_store_runtime_stats_interval, which declares it
+		// datetimeoffset — the Query Store stores the offset, and the archive
+		// keeps it.
 		Columns: []string{"query_id", "plan_id", "start_time", "count_executions"},
-		Types:   []string{"BIGINT", "BIGINT", "DATETIME2", "BIGINT"},
+		Types:   []string{"BIGINT", "BIGINT", "DATETIMEOFFSET", "BIGINT"},
 		Rows: [][]any{
 			{int64(11), int64(101), time.Date(2026, 8, 6, 1, 0, 0, 0, time.UTC), int64(9)},
 			{int64(22), int64(201), time.Date(2026, 8, 6, 1, 0, 0, 0, time.UTC), int64(3)},
@@ -483,6 +495,55 @@ func TestDetailWriterReadsForcedFromTheSelection(t *testing.T) {
 	}
 }
 
+// TestDetailIndexRendersTimestampsWithTheirOffset pins the rendered strings of
+// the timestamps that reach the archive through the generic encoder rather than
+// through encodedAt — the window block of _index.json, and the interval start
+// times inside a query's statistics file. Nothing else asserted them, so the
+// declared column type could drift from the real one and every test would stay
+// green while production emitted a different shape: DATETIME2 renders without an
+// offset, DATETIMEOFFSET as RFC3339 with a Z, and both of these columns are
+// datetimeoffset at the server.
+func TestDetailIndexRendersTimestampsWithTheirOffset(t *testing.T) {
+	root, rel, _, _ := runDetailWriter(t, detailSets())
+	dir := filepath.Join(root, filepath.FromSlash(rel))
+
+	b, err := os.ReadFile(filepath.Join(dir, "_index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx struct {
+		Window struct {
+			RequestedFrom string `json:"requested_from"`
+			EffectiveTo   string `json:"effective_to"`
+		} `json:"window"`
+	}
+	if err := json.Unmarshal(b, &idx); err != nil {
+		t.Fatal(err)
+	}
+	if idx.Window.RequestedFrom != "2026-08-06T00:00:00Z" || idx.Window.EffectiveTo != "2026-08-13T00:00:00Z" {
+		t.Errorf("window = %+v, want the bounds rendered as datetimeoffset — the parameters reach the server as one", idx.Window)
+	}
+
+	b, err = os.ReadFile(filepath.Join(dir, "query_11.stats.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stats struct {
+		Intervals []struct {
+			StartTime string `json:"start_time"`
+		} `json:"intervals"`
+	}
+	if err := json.Unmarshal(b, &stats); err != nil {
+		t.Fatal(err)
+	}
+	if len(stats.Intervals) != 1 {
+		t.Fatalf("got %d intervals in the statistics file, want 1", len(stats.Intervals))
+	}
+	if stats.Intervals[0].StartTime != "2026-08-06T01:00:00Z" {
+		t.Errorf("interval start_time = %q, want the offset the Query Store stores", stats.Intervals[0].StartTime)
+	}
+}
+
 func TestDetailWriterPublishesTheSelection(t *testing.T) {
 	_, _, st, _ := runDetailWriter(t, detailSets())
 	got := st.Selected["Sales"]
@@ -503,7 +564,7 @@ func profiledSets() []NamedResultSet {
 		// the encoder renders the two differently on purpose. The
 		// datetimeoffset one is the Query Store's, which 021 reads.
 		Columns: []string{"query_id", "plan_id", "match", "candidates", "last_execution_time", "query_plan"},
-		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "BIGINT", "DATETIME", "NVARCHAR"},
+		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "INT", "DATETIME", "NVARCHAR"},
 		Rows: [][]any{
 			{int64(11), int64(101), "plan_hash", int64(3),
 				time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC), "<ShowPlanXML>profiled</ShowPlanXML>"},
@@ -768,7 +829,7 @@ func profiledPlanRow(plan any, planBytes int64) []NamedResultSet {
 	}
 	plans := ResultSet{
 		Columns: []string{"query_id", "plan_id", "match", "candidates", "query_plan", "query_plan_bytes"},
-		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "BIGINT", "NVARCHAR", "BIGINT"},
+		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "INT", "NVARCHAR", "BIGINT"},
 		Rows: [][]any{
 			{int64(11), int64(101), "plan_hash", int64(1), plan, planBytes},
 		},
