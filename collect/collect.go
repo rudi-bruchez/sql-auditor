@@ -683,6 +683,46 @@ func resolveWindow(cfg *Config, now time.Time, loc *time.Location) (time.Time, t
 	return from, to, nil
 }
 
+// serverNow is the instant the future-bound check compares against: the
+// server's, when the probe returned one, and the collecting machine's only as a
+// fallback. The bounds are the server's wall clock, and a server whose clock
+// runs a few minutes ahead of the auditor's laptop would otherwise have a bound
+// typed as "just now" refused as being in the future — by a message telling the
+// operator to check it against the server's clock, which is the clock that
+// accepted it.
+func serverNow(si ServerInfo, local time.Time) time.Time {
+	if !si.NowUTC.IsZero() {
+		return si.NowUTC
+	}
+	if local.IsZero() {
+		return time.Now()
+	}
+	return local
+}
+
+// windowForRun resolves the window and decides what a refusal costs.
+//
+// A window nobody can answer is fatal only when something is going to read it.
+// Neither Query Store flag being on means no collector will look at these
+// bounds at all, and killing an ordinary collection over a stale QUERY_STORE_TO
+// left in a .env would be a refusal about a feature the operator did not ask
+// for. The run carries on and the warning says why the setting was ignored, so
+// the next run with the flag on is not a surprise.
+func windowForRun(cfg *Config, flags map[string]bool, now time.Time, loc *time.Location) (time.Time, time.Time, string, error) {
+	from, to, err := resolveWindow(cfg, now, loc)
+	if err == nil {
+		return from, to, "", nil
+	}
+	if flags[FlagQueryStoreDetail] || flags[FlagQueryStorePlanStats] {
+		return time.Time{}, time.Time{}, "", err
+	}
+	return time.Time{}, time.Time{}, fmt.Sprintf(
+		"the configured Query Store window was not usable and was ignored: %v. "+
+			"Nothing in this run reads it — neither %s nor %s is on — but the next run that "+
+			"turns one of them on will stop on it.",
+		err, KnownFlags[FlagQueryStoreDetail], KnownFlags[FlagQueryStorePlanStats]), nil
+}
+
 func latest(a, b time.Time) time.Time {
 	if a.After(b) {
 		return a
@@ -765,6 +805,13 @@ func queryStoreUnits(cfg *Config, s Script, folders []DatabaseFolder) ([]Databas
 // corpus read sys.query_store_plan without emitting a plan, both ungated and
 // both running by default, so a matcher would have MANIFEST.txt announce
 // execution plans in an archive that holds none. Reading is not emitting.
+//
+// Every field it touches is set-only, and that is load-bearing rather than
+// incidental. takeShowplan consumes the choke point's flag, so the fact it
+// carries survives exactly one call: it is latched here, in a manifest nothing
+// ever clears, before the next unit runs. A version of this function that could
+// set a Collected field back to false would let a database with the Query Store
+// off retract the disclosure of the database collected before it.
 func discloseWrites(m *Manifest, rw *runWriter, s Script, res WriteResult) {
 	if rw.takeShowplan() {
 		m.Collected.QueryStoreDetail = true
@@ -788,16 +835,6 @@ func discloseWrites(m *Manifest, rw *runWriter, s Script, res WriteResult) {
 	if s.Writer == "query-store-profiled" && res.PlanFiles > 0 {
 		m.Collected.QueryStoreProfiledPlans = true
 	}
-}
-
-// takeShowplan reports whether a plan reached disk since the last call, and
-// clears the flag. The run writer is shared by every unit, so a flag left set
-// would make the next collector answer for this one's plan — and the warning
-// exists precisely to name the script responsible.
-func (w *runWriter) takeShowplan() bool {
-	saw := w.sawShowplan
-	w.sawShowplan = false
-	return saw
 }
 
 // Run executes the full pipeline. It returns an exit code rather than
@@ -957,17 +994,27 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// entirely, returns rows from the wrong hour, and looks exactly like a
 	// successful answer.
 	loc := time.FixedZone("server", si.UTCOffsetMinutes*60)
-	windowFrom, windowTo, err := resolveWindow(o.Config, o.Now, loc)
+	windowFrom, windowTo, windowNote, err := windowForRun(o.Config, o.Flags, serverNow(si, o.Now), loc)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)
+	}
+	if windowNote != "" {
+		m.Warnings = append(m.Warnings, windowNote)
 	}
 	o.QueryStore.From, o.QueryStore.To = windowFrom, windowTo
 	// Rendered in the server's zone, so the offset that was applied is on the
 	// page: "14:00" typed and "2026-07-26T14:00:00+02:00" resolved is a reader's
 	// proof that the bound was not read as the collecting machine's local time.
-	m.Config["query_store_from"] = windowFrom.In(loc).Format(time.RFC3339)
-	m.Config["query_store_to"] = windowTo.In(loc).Format(time.RFC3339)
+	if windowFrom.IsZero() {
+		// The window was refused and ignored. Recording "0001-01-01" as the
+		// resolved value would be a resolved window that nothing resolved.
+		m.Config["query_store_from"] = "not resolved"
+		m.Config["query_store_to"] = "not resolved"
+	} else {
+		m.Config["query_store_from"] = windowFrom.In(loc).Format(time.RFC3339)
+		m.Config["query_store_to"] = windowTo.In(loc).Format(time.RFC3339)
+	}
 
 	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
 	if err != nil {
@@ -1121,8 +1168,13 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	qctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	args, note := queryStoreArgs(o, s, u)
+	if note != "" {
+		m.Warnings = append(m.Warnings, note)
+	}
+
 	start := time.Now()
-	rows, err := conn.QueryContext(qctx, s.SQL, queryStoreArgs(o, s, u)...)
+	rows, err := conn.QueryContext(qctx, s.SQL, args...)
 	if err != nil {
 		return err
 	}
@@ -1190,21 +1242,38 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 // Each writer gets the parameters its own SQL declares. A parameter declared
 // but unused is legal under sp_executesql, but a reader of 021 who finds
 // @qs_query_ids on the wire has to work out that it means nothing there.
-func queryStoreArgs(o Options, s Script, u DatabaseFolder) []any {
+//
+// The second return is a warning for the manifest, and it exists for the one
+// place in this feature where an archive can under-report without saying so.
+// An empty @qs_query_ids is the same value on the wire whether 021 selected
+// nothing, 021 failed, or 021 never ran at all, and 022's index then says
+// "nothing matched" — indistinguishable from a genuine no-match on an instance
+// without LAST_QUERY_PLAN_STATS. The two cases are told apart by the map, not
+// by the list: an entry that is empty means 021 ran here and retained nothing,
+// which its own index already records; NO entry means 021 delivered nothing at
+// all, and only this warning says so.
+func queryStoreArgs(o Options, s Script, u DatabaseFolder) ([]any, string) {
 	switch s.Writer {
 	case "query-store-detail":
 		return []any{
 			sql.Named("qs_from", o.QueryStore.From),
 			sql.Named("qs_to", o.QueryStore.To),
 			sql.Named("qs_top", o.Config.QueryStoreTop),
-		}
+		}, ""
 	case "query-store-profiled":
-		// Empty when 021 selected nothing here, which is what makes 022 inert
-		// rather than broken: CHARINDEX matches nothing and the writer records
-		// an index saying so.
-		return []any{sql.Named("qs_query_ids", joinInt64(o.QueryStore.Selected[u.Name]))}
+		ids, delivered := o.QueryStore.Selected[u.Name]
+		note := ""
+		if !delivered {
+			note = fmt.Sprintf(
+				"%s: the Query Store detail collector delivered no selection for %s — it was "+
+					"not run, it failed, or the Query Store is off there — so this collector was "+
+					"asked for nothing and will report that nothing matched. Read that zero as "+
+					"an absence of input, not as a plan cache holding no profiled plan.",
+				s.Path, u.Name)
+		}
+		return []any{sql.Named("qs_query_ids", joinInt64(ids))}, note
 	}
-	return nil
+	return nil, ""
 }
 
 func authLabel(c *Config) string {

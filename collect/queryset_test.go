@@ -439,6 +439,23 @@ func TestParseScriptRefusesUnknownWriter(t *testing.T) {
 	}
 }
 
+// A writer writes one directory per database, so it needs a database. At
+// instance scope it would reach runUnit with an empty DatabaseFolder: the
+// directory collapses onto the non-per-database path and every such script
+// shares the Selected[""] bucket. Both failures are silent, which is why this
+// is a lint and not a runtime check.
+func TestParseScriptRefusesAWriterOutsideDatabaseScope(t *testing.T) {
+	for _, scope := range []string{"-- @scope: instance\n", ""} {
+		sql := scope + `-- @resultsets: root:object
+-- @writer:     query-store-detail
+` + contractPreamble + "SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);\n"
+		s := parseScript("80.workload/021.x.sql", sql)
+		if !strings.Contains(s.LintError, "@scope: database") {
+			t.Errorf("scope %q: LintError = %q, want it to require @scope: database", scope, s.LintError)
+		}
+	}
+}
+
 func TestKnownFlagsCarriesTheQueryStoreFlags(t *testing.T) {
 	want := map[string]string{
 		"query_store_detail":     "--query-store-detail",

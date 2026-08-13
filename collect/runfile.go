@@ -35,18 +35,43 @@ func containsShowplan(payload []byte) bool {
 
 // runWriter is the single choke point through which every collector payload
 // is written into a run folder. It exists because there are two write paths
-// today (the general collectors, and the Query Store plan extraction to
-// come) and probably a third later, and a showplan check wired into the
-// paths one remembers today is a check that silently misses the next one
-// added tomorrow. Routing all writes through here means the presence of an
+// today (the general collectors, and the Query Store plan extraction) and
+// probably a third later, and a showplan check wired into the paths one
+// remembers today is a check that silently misses the next one added
+// tomorrow. Routing all writes through here means the presence of an
 // execution plan in an archive can be read off the bytes actually written,
 // rather than guessed from which collector produced them.
+//
+// One writer serves the whole run, but the plan flag is read per unit: the
+// warning it feeds has to name the script and the database that wrote the
+// plan, which a run-level total cannot do. See takeShowplan.
 type runWriter struct {
-	root        string
-	budget      int
-	spent       int
+	root   string
+	budget int
+	spent  int
+	// sawShowplan records that a plan reached disk. It is NOT a run-level
+	// total: takeShowplan reads and clears it after every unit, so what it
+	// holds is "a plan was written since the last unit was accounted for".
+	// The run-level fact lives in the manifest, which is set-only.
 	sawShowplan bool
 	warn        func(string)
+}
+
+// takeShowplan reports whether a plan reached disk since the last call, and
+// clears the flag. The run writer is shared by every unit, so a flag left set
+// would make the next collector answer for this one's plan — and the warning
+// it drives exists precisely to name the script responsible.
+//
+// Read-and-reset is safe only because the fact it feeds is latched elsewhere
+// and never cleared: discloseWrites sets Manifest.Collected.QueryStoreDetail
+// and nothing in the codebase ever sets it back to false. The first unit's
+// plan is therefore recorded in the manifest before the flag is consumed, and
+// a later unit that writes nothing cannot retract it. Anything that gains the
+// power to clear a Collected field breaks this and must not.
+func (w *runWriter) takeShowplan() bool {
+	saw := w.sawShowplan
+	w.sawShowplan = false
+	return saw
 }
 
 // newRunWriter returns a runWriter rooted at root, refusing to write more

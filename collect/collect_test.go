@@ -832,6 +832,28 @@ func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
 		}
 	})
 
+	// The invariant that makes read-and-reset safe, and the only subtest that
+	// uses one Manifest twice. takeShowplan consumes the choke point's flag, so
+	// the fact has to be latched here — in a manifest nothing ever clears — or
+	// the second database, with its Query Store off, would retract the first
+	// database's disclosure and the archive would deny plans it holds.
+	t.Run("a second unit cannot retract the first one's disclosure", func(t *testing.T) {
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
+
+		rw.sawShowplan = true
+		discloseWrites(m, rw, gated, WriteResult{PlanFiles: 4, TextFiles: 4})
+		if !m.Collected.QueryStoreDetail {
+			t.Fatal("the first database's plans were not disclosed")
+		}
+
+		// The next database: the Query Store is off, so nothing is written and
+		// the choke point saw nothing.
+		discloseWrites(m, rw, gated, WriteResult{})
+		if !m.Collected.QueryStoreDetail {
+			t.Error("a database that collected nothing unset the disclosure of the one before it")
+		}
+	})
+
 	t.Run("a writer that wrote nothing", func(t *testing.T) {
 		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20, func(string) {})
 		discloseWrites(m, rw, gated, WriteResult{})
@@ -840,4 +862,86 @@ func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
 				"a database with the Query Store off produced no text and no plan", m.Collected)
 		}
 	})
+}
+
+// A stale QUERY_STORE_TO in a .env must not kill a collection that reads
+// neither flag. Nothing in such a run looks at the bounds, and refusing it is
+// a refusal about a feature the operator did not ask for.
+func TestAnUnusableWindowOnlyStopsARunThatReadsIt(t *testing.T) {
+	now := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	// Typed the wrong way round, which resolveWindow refuses.
+	cfg := &Config{QueryStoreFrom: "2026-07-26T15:00", QueryStoreTo: "2026-07-26T14:00"}
+
+	_, _, note, err := windowForRun(cfg, map[string]bool{}, now, time.UTC)
+	if err != nil {
+		t.Fatalf("an ordinary collection was killed by a setting it never reads: %v", err)
+	}
+	if !strings.Contains(note, "ignored") {
+		t.Errorf("note = %q, want it to say the setting was ignored", note)
+	}
+
+	for _, flag := range []string{FlagQueryStoreDetail, FlagQueryStorePlanStats} {
+		if _, _, _, err := windowForRun(cfg, map[string]bool{flag: true}, now, time.UTC); err == nil {
+			t.Errorf("%s is on and the unusable window was accepted: the collection would "+
+				"have read a window nobody resolved", flag)
+		}
+	}
+}
+
+// The bounds are the server's wall clock, so the clock the future check reads
+// has to be the server's too. A server a few minutes ahead of the auditor's
+// laptop otherwise refuses a bound typed as "just now" — with a message telling
+// the operator to check it against the clock that accepted it.
+func TestTheFutureBoundCheckReadsTheServerClock(t *testing.T) {
+	laptop := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	si := ServerInfo{NowUTC: laptop.Add(10 * time.Minute)}
+	// A bound five minutes past on the server, five minutes ahead on the laptop.
+	cfg := &Config{QueryStoreFrom: "2026-08-13T08:00", QueryStoreTo: "2026-08-13T09:05"}
+	flags := map[string]bool{FlagQueryStoreDetail: true}
+
+	if _, _, _, err := windowForRun(cfg, flags, serverNow(si, laptop), time.UTC); err != nil {
+		t.Errorf("the server's own clock says this bound is past, and it was refused: %v", err)
+	}
+	if _, _, _, err := windowForRun(cfg, flags, laptop, time.UTC); err == nil {
+		t.Error("the laptop's clock puts the bound in the future; the test's premise is gone")
+	}
+	// Without an answer from the server, the local instant is all there is.
+	if got := serverNow(ServerInfo{}, laptop); !got.Equal(laptop) {
+		t.Errorf("serverNow = %s, want the local fallback %s", got, laptop)
+	}
+}
+
+// 022 asked for nothing looks exactly like 022 asked and found nothing, and
+// the archive must not leave the two indistinguishable.
+func TestTheProfiledCollectorSaysWhenItWasGivenNothing(t *testing.T) {
+	o := Options{Config: &Config{}, QueryStore: NewQueryStoreState()}
+	profiled := Script{Path: "80.workload/022.query-store-profiled.sql", Writer: "query-store-profiled"}
+
+	// No entry at all: 021 did not run, failed, or found the store off.
+	args, note := queryStoreArgs(o, profiled, DatabaseFolder{Name: "Sales"})
+	if note == "" || !strings.Contains(note, "Sales") {
+		t.Errorf("note = %q, want one naming the database that was never selected for", note)
+	}
+	if len(args) != 1 {
+		t.Fatalf("args = %v, want the one named parameter 022 declares", args)
+	}
+
+	// An entry that is empty is a different fact: 021 ran here and retained
+	// nothing, which its own index already records. No warning is owed.
+	o.QueryStore.Selected["Sales"] = nil
+	if _, note := queryStoreArgs(o, profiled, DatabaseFolder{Name: "Sales"}); note != "" {
+		t.Errorf("note = %q, want none: 021 delivered its answer, and the answer was empty", note)
+	}
+
+	// And a selection that exists is passed on with no comment.
+	o.QueryStore.Selected["Sales"] = []int64{11, 22}
+	if _, note := queryStoreArgs(o, profiled, DatabaseFolder{Name: "Sales"}); note != "" {
+		t.Errorf("note = %q, want none", note)
+	}
+	// The detail collector never carries this warning: it is the one that
+	// produces the selection, not the one that consumes it.
+	detail := Script{Path: "80.workload/021.query-store-detail.sql", Writer: "query-store-detail"}
+	if args, note := queryStoreArgs(o, detail, DatabaseFolder{Name: "Absent"}); note != "" || len(args) != 3 {
+		t.Errorf("detail args = %v, note = %q; want its three parameters and no warning", args, note)
+	}
 }

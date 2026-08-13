@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	_ "github.com/microsoft/go-mssqldb"
 )
@@ -49,6 +50,16 @@ type ServerInfo struct {
 	// or it grants permissions to a principal nobody is connecting with.
 	Login            string
 	UTCOffsetMinutes int
+	// NowUTC is the instant the SERVER reports, not the one the collecting
+	// machine believes. The two differ by more than a zone: a server whose
+	// clock runs a few minutes ahead of the auditor's laptop would make a
+	// Query Store bound typed as "just now" look like a bound in the future.
+	// Anything that compares a bound against "now" has to use this one, or the
+	// check and the message it prints refer to two different clocks.
+	//
+	// Zero when the server did not answer with one, which callers treat as
+	// "fall back to the local instant" rather than as the year 1.
+	NowUTC time.Time
 }
 
 type DatabaseInfo struct {
@@ -220,18 +231,23 @@ func Probe(ctx context.Context, c *sql.Conn) (ServerInfo, error) {
 	var si ServerInfo
 	var name, version, edition, login sql.NullString
 	var offset sql.NullInt64
+	var nowUTC sql.NullTime
 	err := c.QueryRowContext(ctx, `
         SELECT CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
                CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')),
                CONVERT(nvarchar(128), SERVERPROPERTY('Edition')),
                DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()),
-               SUSER_SNAME()`).
-		Scan(&name, &version, &edition, &offset, &login)
+               SUSER_SNAME(),
+               GETUTCDATE()`).
+		Scan(&name, &version, &edition, &offset, &login, &nowUTC)
 	if err != nil {
 		return si, err
 	}
 	si.Name, si.Version, si.Edition, si.Login = name.String, version.String, edition.String, login.String
 	si.UTCOffsetMinutes = int(offset.Int64)
+	if nowUTC.Valid {
+		si.NowUTC = nowUTC.Time.UTC()
+	}
 	return si, nil
 }
 
