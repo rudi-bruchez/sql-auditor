@@ -36,6 +36,14 @@
 -- collector is not itself flag-gated. If that trade is wrong for a client,
 -- the file is the place to change it.
 --
+-- 021.query-store-detail.sql and 022.query-store-profiled.sql do the DEEP
+-- read: the whole statement text, the execution plans, and the per-interval
+-- statistics behind each plan. Both are flag-gated where this file is not, and
+-- the 500-character truncation above is exactly what buys this one its place
+-- in every collection. A summary that runs always and a deep read that runs on
+-- request are not a duplication: the first is what tells an operator whether
+-- the second is worth asking for.
+--
 -- NO JUDGEMENT IS APPLIED. Nothing here is labelled a regression: comparing
 -- two intervals and deciding a plan got worse is analysis, and it needs the
 -- deployment calendar to be worth anything.

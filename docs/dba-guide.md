@@ -39,7 +39,7 @@ can write them out and read them before you run anything:
 sql-auditor queries export --to ./queries-to-review
 ```
 
-The corpus is 28 files. The archive records the SHA-256 of the exact corpus that
+The corpus is 30 files. The archive records the SHA-256 of the exact corpus that
 was used, so a run can be tied to the questions it asked.
 
 It collects; it does not judge. There are no thresholds and no recommendations

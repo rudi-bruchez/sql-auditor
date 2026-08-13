@@ -55,6 +55,8 @@ function Get-ParserFor([string]$minVersion) {
         '^11'   { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql110Parser]::new($true), 'TSql110 (SQL Server 2012)' }
         '^12'   { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql120Parser]::new($true), 'TSql120 (SQL Server 2014)' }
         '^13'   { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql130Parser]::new($true), 'TSql130 (SQL Server 2016)' }
+        '^14'   { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql140Parser]::new($true), 'TSql140 (SQL Server 2017)' }
+        '^15'   { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql150Parser]::new($true), 'TSql150 (SQL Server 2019)' }
         default { throw "no parser mapped for @min_version '$minVersion'" }
     }
 }
