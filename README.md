@@ -65,7 +65,7 @@ of the archive alone on its line, indented, so that it can be selected with one
 drag and pasted into a mail.
 
 The keys are written at the bottom of every screen. On step 1 the quit key is
-`[esc]` or `ctrl-c`, not `[q]`, and it is the one screen where they differ:
+`ctrl-c`, not `[q]`, and it is the one screen where they differ:
 every printable character there belongs to the field being edited, so an
 instance named `QUALIF` and a password with a `q` in it have to stay typeable.
 On the later screens `[q]` quits, `[b]` goes back, `[r]` runs the probe again,
