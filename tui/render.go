@@ -149,10 +149,15 @@ func renderConnection(s State, width int) []string {
 	if s.Source != "" {
 		out = append(out, "", fieldPad+s.Source)
 	}
-	// [esc] rather than [q], and this is the one screen where they differ.
+	// [ctrl-c] rather than [q], and this is the one screen where they differ.
 	// Every printable rune belongs to the field being edited: a server named
 	// QUALIF, or a password with a q in it, must be typeable.
-	return append(out, "", pad+"[enter] connect   [tab] next field   [esc] quit")
+	//
+	// Not [esc] either. A lone 0x1b is indistinguishable from the first byte of
+	// an arrow sequence, so the decoder has to hold it until the next keystroke
+	// arrives — an advertised key that takes two presses to work. Nothing binds
+	// an arrow, so nothing needs Esc at all.
+	return append(out, "", pad+"[enter] connect   [tab] next field   [ctrl-c] quit")
 }
 
 // editable draws one of the two editable values, underscoring the rest of the

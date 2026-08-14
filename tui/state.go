@@ -185,9 +185,8 @@ func (s State) Key(k screen.Key) State {
 	case StepConnecting, StepVerifying:
 		// A wait offers exactly one choice: give up on it. Ctrl-C cancels the
 		// context and drops back to screen 1, where the operator can fix the
-		// address that is not answering. Esc is the same key for anybody who
-		// reads Ctrl-C as "kill the program".
-		if k.Named == screen.KeyCtrlC || k.Named == screen.KeyEsc {
+		// address that is not answering.
+		if k.Named == screen.KeyCtrlC {
 			s.Step = StepConnection
 			s.Field = fieldServer
 		}
@@ -226,9 +225,12 @@ func (s State) Key(k screen.Key) State {
 // and that operator is exactly who this wizard is for. The value is held in
 // memory, shown as stars, and never written to disk.
 //
-// This is also why the screen quits on Esc rather than on [q]: every printable
-// rune belongs to the field being edited, and a server named QUALIF or a
-// password containing a q must not close the program.
+// This is also why the screen quits on ctrl-c rather than on [q]: every
+// printable rune belongs to the field being edited, and a server named QUALIF
+// or a password containing a q must not close the program. Esc would not do
+// either — the decoder cannot tell a lone one from the head of an arrow, so it
+// has to hold it until the next keystroke, and an advertised key that takes
+// two presses is worse than no key.
 func (s State) keyConnection(k screen.Key) State {
 	switch k.Named {
 	case screen.KeyEnter:
@@ -237,7 +239,7 @@ func (s State) keyConnection(k screen.Key) State {
 		s.ConnError = nil
 		s.Step = StepConnecting
 		return s
-	case screen.KeyCtrlC, screen.KeyEsc:
+	case screen.KeyCtrlC:
 		s.Step = StepQuit
 		return s
 	case screen.KeyTab:

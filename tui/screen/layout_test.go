@@ -1,6 +1,7 @@
 package screen
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -196,5 +197,26 @@ func TestDecodeKeyDropsAnInvalidByte(t *testing.T) {
 	// forever either.
 	if _, n := DecodeKey([]byte{0xc3, 0xc3, 0xc3, 0xc3}); n == 0 {
 		t.Error("a run of invalid lead bytes asked for more input indefinitely")
+	}
+}
+
+// An escape that never resolves must not hold the reader. ReadKey loops on
+// Read while DecodeKey answers "not yet", so a shape that answered it for ever
+// would block the wizard until the operator happened to press another key —
+// with nothing on screen explaining why the last keystroke did nothing.
+//
+// The bound is checked once, ahead of every shape, so this holds for the CSI
+// that never sends a final byte, for the SS3 whose third byte never comes, and
+// for a lone escape from a mangled paste alike.
+func TestDecodeKeyNeverAsksForMoreThanEscapeMaxBytes(t *testing.T) {
+	for _, head := range []string{"\x1b", "\x1b[", "\x1bO", "\x1b[0;1;2;3;4;5;6"} {
+		in := append([]byte(head), bytes.Repeat([]byte{'0'}, escapeMax)...)
+		for len(in) >= escapeMax {
+			_, n := DecodeKey(in)
+			if n <= 0 {
+				t.Fatalf("DecodeKey(%q) consumed nothing with %d bytes buffered", in, len(in))
+			}
+			in = in[n:]
+		}
 	}
 }

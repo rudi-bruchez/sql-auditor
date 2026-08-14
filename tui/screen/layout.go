@@ -145,13 +145,22 @@ const escapeMax = 16
 
 // decodeEscape consumes a whole CSI or SS3 sequence and reports KeyNone: the
 // wizard binds letters, enter, tab and space, so arrows and function keys are
-// recognised only in order to be swallowed.
+// recognised only in order to be swallowed. There is no Esc key to report —
+// see the NamedKey list.
 func decodeEscape(b []byte) (Key, int) {
+	// The bound is tested once, ahead of every shape, so no branch below can
+	// forget it: whatever the bytes look like, an escape that has not resolved
+	// in escapeMax of them gives up its first byte and lets the rest be decoded
+	// on their own merits. A branch answering "not yet" indefinitely would hold
+	// ReadKey inside Read until the operator happened to press another key.
+	if len(b) >= escapeMax {
+		return Key{}, 1
+	}
 	if len(b) == 1 {
 		// Ambiguous: a lone Esc looks exactly like the first byte of an arrow.
 		// Waiting is the safe half of that choice, because Esc is bound to
-		// nothing — the screens offer [q] and [b] — while a leaked "[A" is
-		// typed into a field.
+		// nothing — the screens offer [q], [b] and [ctrl-c] — while a leaked
+		// "[A" is typed into a field.
 		return Key{}, 0
 	}
 	switch b[1] {
@@ -161,9 +170,6 @@ func decodeEscape(b []byte) (Key, int) {
 				return Key{}, i + 1
 			}
 		}
-		if len(b) >= escapeMax {
-			return Key{Named: KeyEsc}, 1
-		}
 		return Key{}, 0
 	case 'O': // SS3: ESC O x, the application-mode arrows and F1-F4
 		if len(b) < 3 {
@@ -172,7 +178,7 @@ func decodeEscape(b []byte) (Key, int) {
 		return Key{}, 3
 	}
 	// ESC followed by anything else is Alt+key on most terminals. The wizard
-	// has no Alt bindings, so the escape is reported as Esc and the key that
-	// follows is decoded on the next call, on its own merits.
-	return Key{Named: KeyEsc}, 1
+	// has no Alt bindings, so the escape is dropped and the key that follows is
+	// decoded on the next call, on its own merits.
+	return Key{}, 1
 }

@@ -26,7 +26,11 @@ const (
 	KeyTab
 	KeySpace
 	KeyCtrlC
-	KeyEsc
+	// There is no KeyEsc. A lone 0x1b cannot be told apart from the first byte
+	// of an arrow sequence without waiting for the next keystroke, so a screen
+	// that offered [esc] would need two presses to answer one; and since no
+	// arrow is bound to anything, nothing needs the key. Escape sequences are
+	// consumed and reported as KeyNone.
 	KeyBackspace
 )
 

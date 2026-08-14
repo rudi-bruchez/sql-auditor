@@ -150,7 +150,7 @@ func TestConnectionMarksAServerTypedOverAFlag(t *testing.T) {
 	lines := Render(s, testWidth, 0)
 	contains(t, lines, "(overrides --server)")
 	contains(t, lines, "yes, server certificate NOT validated")
-	contains(t, lines, "[esc] quit")
+	contains(t, lines, "[ctrl-c] quit")
 	// [q] would close the wizard for anybody connecting to a server named
 	// QUALIF, so screen 1 does not offer it.
 	absent(t, lines, "[q] quit")
