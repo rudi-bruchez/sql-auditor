@@ -69,133 +69,120 @@ func main() {
 	os.Exit(run())
 }
 
-// cliFlags is every option the command line accepts, kept together so the two
-// callers below can each own a FlagSet of their own.
+// cliFlags is every option the command line accepts, held as values the flag
+// set writes into directly.
 //
-// There are two callers because the flag set is created per command — its name
-// appears in the messages flag.ExitOnError prints — and because buildOptions
-// has to be reachable with no command line at all: the wizard resolves a
-// configuration from .env and the environment before the operator has typed
-// anything. Sharing one parsed set instead would have meant handing buildOptions
-// a pre-parsed structure, which is exactly the coupling that made the
-// configuration unreachable from anywhere but run() in the first place.
+// The set is created per command, because its name appears in the messages
+// flag.ExitOnError prints, and it is parsed exactly once per invocation: run()
+// parses it before the dispatch and hands the parsed struct to optionsFrom.
+// The wizard needs the same resolution with no command line at all — it reads
+// .env and the environment before the operator has typed anything — which is
+// what buildOptions is for.
 type cliFlags struct {
 	fs *flag.FlagSet
 
-	server, user, envFile, queriesDir, outputDir *string
-	to, grantScript                              *string
-	keep                                         *bool
+	server, user, envFile, queriesDir, outputDir string
+	to, grantScript                              string
+	keep                                         bool
 
-	sessionText, objectDefinitions              *bool
-	deadlockGraphs, blockedProcessReports       *bool
-	estimateCompression                         *bool
-	queryStoreDetail, queryStorePlanStats       *bool
-	queryStoreDays, queryStoreTop               *int
-	queryStoreFrom, queryStoreTo, queryStoreDBs *string
+	sessionText, objectDefinitions              bool
+	deadlockGraphs, blockedProcessReports       bool
+	estimateCompression                         bool
+	queryStoreDetail, queryStorePlanStats       bool
+	queryStoreDays, queryStoreTop               int
+	queryStoreFrom, queryStoreTo, queryStoreDBs string
 }
 
 func defineFlags(cmd string) *cliFlags {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	fs.Usage = usage
-	var (
-		server     = fs.String("server", "", "SQL Server instance (overrides SQL_SERVER)")
-		user       = fs.String("user", "", "SQL login (overrides SQL_USER)")
-		envFile    = fs.String("env", ".env", "path to the .env file")
-		queriesDir = fs.String("queries-dir", "", "run queries from this directory instead of the embedded corpus")
-		outputDir  = fs.String("output-dir", "", "where to write results")
-		keep       = fs.Bool("keep", false, "keep an existing same-day run folder, suffixing this run")
-		to         = fs.String("to", "", "destination directory for 'queries export'")
-		// Writes a file, never a permission. The collector connects with the
-		// login being measured, which by construction cannot grant anything —
-		// so the output is a script for a DBA to read and run, and the tool
-		// stays a reader of the instance in every mode.
-		grantScript = fs.String("grant-script", "",
-			"write the T-SQL that grants the missing permissions to this file (check only)")
-		// Off by default, and it has to stay that way: this is the only option
-		// that puts the verbatim SQL of live user batches into the archive,
-		// along with the login, host and program names behind them. That text
-		// can carry literals copied out of application tables. Turning it on
-		// also changes what MANIFEST.txt discloses, so the archive says so.
-		sessionText = fs.Bool("include-session-text", false,
-			"also collect the SQL text of sessions running during collection, "+
-				"with their login, host and program names — this may contain application data")
-		// Off by default, and for privacy rather than cost: this exports the
-		// client's own code. A view or a procedure names linked servers, can
-		// embed values as literals, and now and then holds a credential in
-		// clear inside an OPENQUERY. Turning it on changes what MANIFEST.txt
-		// discloses, so the archive says so.
-		objectDefinitions = fs.Bool("include-object-definitions", false,
-			"also collect the source of views, procedures, functions and triggers — "+
-				"this is code written on this server and may contain credentials")
-		// Off by default, and the narrowest of the disclosure options: a
-		// deadlock graph carries the verbatim SQL of both victims.
-		// 060.system-health.sql collects the count and the timestamps by
-		// default and stops there, which is the line this option crosses.
-		deadlockGraphs = fs.Bool("include-deadlock-graphs", false,
-			"also collect the deadlock reports system_health still holds, one .xdl "+
-				"file each — these carry the SQL of both victims")
-		// Off by default. It is the only collector that reads the server's file
-		// system — through sys.fn_xe_file_target_read_file, as the SQL Server
-		// service account — and a report names the blocking session's SQL as
-		// well as the blocked one's.
-		blockedProcessReports = fs.Bool("include-blocked-process-reports", false,
-			"also collect the blocked process reports captured by an Extended Events "+
-				"session, one .xml file each — these name both sessions and carry their SQL")
-		// Off by default for cost, not for privacy. The estimate samples real
-		// data into tempdb, and the objects worth asking about are the large
-		// ones — which is precisely when it hurts.
-		estimateCompression = fs.Bool("estimate-compression", false,
-			"also estimate page-compression savings on the largest uncompressed objects — "+
-				"this samples data into tempdb and is slow on large tables")
-		// Off by default, and it has to stay that way: this is the option that
-		// puts the full text of production queries and their execution plans
-		// into the archive. A plan carries the compiled parameter values and
-		// the literal predicates. Turning it on changes what MANIFEST.txt
-		// discloses, so the archive says so.
-		queryStoreDetail = fs.Bool("query-store-detail", false,
-			"also collect the full text and execution plans of the heaviest Query Store "+
-				"queries — this may contain application data")
-		// A second option rather than a widening of the first: finding the
-		// profiled plan reads the plan cache of the whole instance, where every
-		// other per-database collector sees only the database it was pointed
-		// at. It does nothing without --query-store-detail, which is what
-		// produces the list of queries to look for.
-		queryStorePlanStats = fs.Bool("query-store-plan-stats", false,
-			"also look for the last profiled plan of each extracted query — this reads "+
-				"the plan cache of the whole instance, and needs LAST_QUERY_PLAN_STATS "+
-				"or trace flag 2451 to return anything")
-		queryStoreDays = fs.Int("query-store-days", 0,
-			"how many days of Query Store history to read, counting back from now "+
-				"(default 7); cannot be combined with --query-store-from/--query-store-to")
-		// The bounds exist for the question a sliding window cannot answer: the
-		// client saw a slowdown for one hour, eighteen days ago. Widening to
-		// eighteen days does not help — the hour disappears into the average.
-		queryStoreFrom = fs.String("query-store-from", "",
-			"start of the window, YYYY-MM-DDTHH:MM, in the SERVER's local time")
-		queryStoreTo = fs.String("query-store-to", "",
-			"end of the window, YYYY-MM-DDTHH:MM, in the SERVER's local time "+
-				"(default: the moment of collection); given on its own it implies "+
-				"a seven-day window ending at that bound")
-		queryStoreTop = fs.Int("query-store-top", 0,
-			"how many queries to extract per database, across all four rankings "+
-				"once deduplicated (default 50); queries with a forced plan are added "+
-				"on top of this")
-		queryStoreDBs = fs.String("query-store-databases", "",
-			"comma-separated wildcards narrowing which of the collected databases the "+
-				"Query Store extraction reads")
-	)
-	return &cliFlags{
-		fs: fs, server: server, user: user, envFile: envFile,
-		queriesDir: queriesDir, outputDir: outputDir, to: to,
-		grantScript: grantScript, keep: keep,
-		sessionText: sessionText, objectDefinitions: objectDefinitions,
-		deadlockGraphs: deadlockGraphs, blockedProcessReports: blockedProcessReports,
-		estimateCompression: estimateCompression,
-		queryStoreDetail:    queryStoreDetail, queryStorePlanStats: queryStorePlanStats,
-		queryStoreDays: queryStoreDays, queryStoreTop: queryStoreTop,
-		queryStoreFrom: queryStoreFrom, queryStoreTo: queryStoreTo,
-		queryStoreDBs: queryStoreDBs,
-	}
+	c := &cliFlags{fs: fs}
+	fs.StringVar(&c.server, "server", "", "SQL Server instance (overrides SQL_SERVER)")
+	fs.StringVar(&c.user, "user", "", "SQL login (overrides SQL_USER)")
+	fs.StringVar(&c.envFile, "env", ".env", "path to the .env file")
+	fs.StringVar(&c.queriesDir, "queries-dir", "", "run queries from this directory instead of the embedded corpus")
+	fs.StringVar(&c.outputDir, "output-dir", "", "where to write results")
+	fs.BoolVar(&c.keep, "keep", false, "keep an existing same-day run folder, suffixing this run")
+	fs.StringVar(&c.to, "to", "", "destination directory for 'queries export'")
+	// Writes a file, never a permission. The collector connects with the
+	// login being measured, which by construction cannot grant anything —
+	// so the output is a script for a DBA to read and run, and the tool
+	// stays a reader of the instance in every mode.
+	fs.StringVar(&c.grantScript, "grant-script", "",
+		"write the T-SQL that grants the missing permissions to this file (check only)")
+	// Off by default, and it has to stay that way: this is the only option
+	// that puts the verbatim SQL of live user batches into the archive,
+	// along with the login, host and program names behind them. That text
+	// can carry literals copied out of application tables. Turning it on
+	// also changes what MANIFEST.txt discloses, so the archive says so.
+	fs.BoolVar(&c.sessionText, "include-session-text", false,
+		"also collect the SQL text of sessions running during collection, "+
+			"with their login, host and program names — this may contain application data")
+	// Off by default, and for privacy rather than cost: this exports the
+	// client's own code. A view or a procedure names linked servers, can
+	// embed values as literals, and now and then holds a credential in
+	// clear inside an OPENQUERY. Turning it on changes what MANIFEST.txt
+	// discloses, so the archive says so.
+	fs.BoolVar(&c.objectDefinitions, "include-object-definitions", false,
+		"also collect the source of views, procedures, functions and triggers — "+
+			"this is code written on this server and may contain credentials")
+	// Off by default, and the narrowest of the disclosure options: a
+	// deadlock graph carries the verbatim SQL of both victims.
+	// 060.system-health.sql collects the count and the timestamps by
+	// default and stops there, which is the line this option crosses.
+	fs.BoolVar(&c.deadlockGraphs, "include-deadlock-graphs", false,
+		"also collect the deadlock reports system_health still holds, one .xdl "+
+			"file each — these carry the SQL of both victims")
+	// Off by default. It is the only collector that reads the server's file
+	// system — through sys.fn_xe_file_target_read_file, as the SQL Server
+	// service account — and a report names the blocking session's SQL as
+	// well as the blocked one's.
+	fs.BoolVar(&c.blockedProcessReports, "include-blocked-process-reports", false,
+		"also collect the blocked process reports captured by an Extended Events "+
+			"session, one .xml file each — these name both sessions and carry their SQL")
+	// Off by default for cost, not for privacy. The estimate samples real
+	// data into tempdb, and the objects worth asking about are the large
+	// ones — which is precisely when it hurts.
+	fs.BoolVar(&c.estimateCompression, "estimate-compression", false,
+		"also estimate page-compression savings on the largest uncompressed objects — "+
+			"this samples data into tempdb and is slow on large tables")
+	// Off by default, and it has to stay that way: this is the option that
+	// puts the full text of production queries and their execution plans
+	// into the archive. A plan carries the compiled parameter values and
+	// the literal predicates. Turning it on changes what MANIFEST.txt
+	// discloses, so the archive says so.
+	fs.BoolVar(&c.queryStoreDetail, "query-store-detail", false,
+		"also collect the full text and execution plans of the heaviest Query Store "+
+			"queries — this may contain application data")
+	// A second option rather than a widening of the first: finding the
+	// profiled plan reads the plan cache of the whole instance, where every
+	// other per-database collector sees only the database it was pointed
+	// at. It does nothing without --query-store-detail, which is what
+	// produces the list of queries to look for.
+	fs.BoolVar(&c.queryStorePlanStats, "query-store-plan-stats", false,
+		"also look for the last profiled plan of each extracted query — this reads "+
+			"the plan cache of the whole instance, and needs LAST_QUERY_PLAN_STATS "+
+			"or trace flag 2451 to return anything")
+	fs.IntVar(&c.queryStoreDays, "query-store-days", 0,
+		"how many days of Query Store history to read, counting back from now "+
+			"(default 7); cannot be combined with --query-store-from/--query-store-to")
+	// The bounds exist for the question a sliding window cannot answer: the
+	// client saw a slowdown for one hour, eighteen days ago. Widening to
+	// eighteen days does not help — the hour disappears into the average.
+	fs.StringVar(&c.queryStoreFrom, "query-store-from", "",
+		"start of the window, YYYY-MM-DDTHH:MM, in the SERVER's local time")
+	fs.StringVar(&c.queryStoreTo, "query-store-to", "",
+		"end of the window, YYYY-MM-DDTHH:MM, in the SERVER's local time "+
+			"(default: the moment of collection); given on its own it implies "+
+			"a seven-day window ending at that bound")
+	fs.IntVar(&c.queryStoreTop, "query-store-top", 0,
+		"how many queries to extract per database, across all four rankings "+
+			"once deduplicated (default 50); queries with a forced plan are added "+
+			"on top of this")
+	fs.StringVar(&c.queryStoreDBs, "query-store-databases", "",
+		"comma-separated wildcards narrowing which of the collected databases the "+
+			"Query Store extraction reads")
+	return c
 }
 
 // buildOptions turns a command line, a .env file and the process environment
@@ -215,20 +202,28 @@ func defineFlags(cmd string) *cliFlags {
 func buildOptions(cmd string, args []string, env func(string) string) (collect.Options, int, error) {
 	c := defineFlags(cmd)
 	_ = c.fs.Parse(args)
+	return optionsFrom(c, env)
+}
 
+// optionsFrom is the resolution itself, on a command line that has already been
+// parsed. run() parses one before the dispatch — a malformed command line has
+// always been refused before anything else is said, including before the
+// "unknown command" message — and parsing it a second time here would only
+// produce the same values.
+func optionsFrom(c *cliFlags, env func(string) string) (collect.Options, int, error) {
 	dotenv := map[string]string{}
-	if f, err := os.Open(*c.envFile); err == nil {
+	if f, err := os.Open(c.envFile); err == nil {
 		defer f.Close()
 		if parsed, perr := collect.ParseDotEnv(f); perr == nil {
 			dotenv = parsed
 		} else {
-			return collect.Options{}, 2, fmt.Errorf("%s: %w", *c.envFile, perr)
+			return collect.Options{}, 2, fmt.Errorf("%s: %w", c.envFile, perr)
 		}
 	}
 	flags := map[string]string{}
 	for k, v := range map[string]string{
-		"SQL_SERVER": *c.server, "SQL_USER": *c.user,
-		"QUERIES_DIR": *c.queriesDir, "OUTPUT_DIR": *c.outputDir,
+		"SQL_SERVER": c.server, "SQL_USER": c.user,
+		"QUERIES_DIR": c.queriesDir, "OUTPUT_DIR": c.outputDir,
 	} {
 		if v != "" {
 			flags[k] = v
@@ -245,19 +240,19 @@ func buildOptions(cmd string, args []string, env func(string) string) (collect.O
 	typed := map[string]bool{}
 	c.fs.Visit(func(f *flag.Flag) { typed[f.Name] = true })
 	if typed["query-store-days"] {
-		flags["QUERY_STORE_DAYS"] = strconv.Itoa(*c.queryStoreDays)
+		flags["QUERY_STORE_DAYS"] = strconv.Itoa(c.queryStoreDays)
 	}
-	if *c.queryStoreFrom != "" {
-		flags["QUERY_STORE_FROM"] = *c.queryStoreFrom
+	if c.queryStoreFrom != "" {
+		flags["QUERY_STORE_FROM"] = c.queryStoreFrom
 	}
-	if *c.queryStoreTo != "" {
-		flags["QUERY_STORE_TO"] = *c.queryStoreTo
+	if c.queryStoreTo != "" {
+		flags["QUERY_STORE_TO"] = c.queryStoreTo
 	}
 	if typed["query-store-top"] {
-		flags["QUERY_STORE_TOP"] = strconv.Itoa(*c.queryStoreTop)
+		flags["QUERY_STORE_TOP"] = strconv.Itoa(c.queryStoreTop)
 	}
-	if *c.queryStoreDBs != "" {
-		flags["QUERY_STORE_DB_INCLUDE"] = *c.queryStoreDBs
+	if c.queryStoreDBs != "" {
+		flags["QUERY_STORE_DB_INCLUDE"] = c.queryStoreDBs
 	}
 	cfg, err := collect.Resolve(flags, dotenv, env)
 	if err != nil {
@@ -266,16 +261,16 @@ func buildOptions(cmd string, args []string, env func(string) string) (collect.O
 
 	opts := collect.Options{
 		Config: cfg, Corpus: sqlauditor.Queries, Root: "queries",
-		Now: time.Now(), Keep: *c.keep, Version: version, Commit: buildStamp(),
-		GrantScript: *c.grantScript,
+		Now: time.Now(), Keep: c.keep, Version: version, Commit: buildStamp(),
+		GrantScript: c.grantScript,
 		Flags: map[string]bool{
-			collect.FlagIncludeSessionText:    *c.sessionText,
-			collect.FlagEstimateCompression:   *c.estimateCompression,
-			collect.FlagQueryStoreDetail:      *c.queryStoreDetail,
-			collect.FlagQueryStorePlanStats:   *c.queryStorePlanStats,
-			collect.FlagObjectDefinitions:     *c.objectDefinitions,
-			collect.FlagDeadlockGraphs:        *c.deadlockGraphs,
-			collect.FlagBlockedProcessReports: *c.blockedProcessReports,
+			collect.FlagIncludeSessionText:    c.sessionText,
+			collect.FlagEstimateCompression:   c.estimateCompression,
+			collect.FlagQueryStoreDetail:      c.queryStoreDetail,
+			collect.FlagQueryStorePlanStats:   c.queryStorePlanStats,
+			collect.FlagObjectDefinitions:     c.objectDefinitions,
+			collect.FlagDeadlockGraphs:        c.deadlockGraphs,
+			collect.FlagBlockedProcessReports: c.blockedProcessReports,
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -365,10 +360,10 @@ func run() int {
 	if cmd == "queries" && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub, args = args[0], args[1:]
 	}
-	// Parsed here as well as inside buildOptions, and deliberately: a malformed
-	// command line has always been refused before anything else is said,
-	// including before the "unknown command" message, and moving that refusal
-	// after the dispatch would change which of the two an operator sees.
+	// Parsed before the dispatch, and deliberately: a malformed command line has
+	// always been refused before anything else is said, including before the
+	// "unknown command" message, and moving that refusal after the dispatch
+	// would change which of the two an operator sees.
 	c := defineFlags(cmd)
 	_ = c.fs.Parse(args)
 
@@ -381,15 +376,15 @@ func run() int {
 			fmt.Fprintln(os.Stderr, "the only subcommand is: sql-auditor queries export --to DIR")
 			return 2
 		}
-		if *c.to == "" {
+		if c.to == "" {
 			fmt.Fprintln(os.Stderr, "queries export requires --to DIR")
 			return 2
 		}
-		if err := collect.ExportQueries(sqlauditor.Queries, "queries", *c.to); err != nil {
+		if err := collect.ExportQueries(sqlauditor.Queries, "queries", c.to); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		fmt.Printf("queries written to %s\n", *c.to)
+		fmt.Printf("queries written to %s\n", c.to)
 		return 0
 	}
 	if cmd != "collect" && cmd != "check" {
@@ -419,7 +414,7 @@ func run() int {
 	// on the terminal where the operator is looking.
 	fmt.Fprintf(os.Stderr, "sql-auditor %s (%s)\n\n", version, buildStamp())
 
-	opts, code, err := buildOptions(cmd, args, os.Getenv)
+	opts, code, err := optionsFrom(c, os.Getenv)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return code
