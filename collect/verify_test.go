@@ -74,9 +74,7 @@ func TestVerifyMarksAFailedProbeAsNotProbed(t *testing.T) {
 	if v.Collectors != 0 {
 		t.Errorf("Collectors = %d, want 0: the plan needs the server version, which is unknown here", v.Collectors)
 	}
-	if len(v.Skipped) != 0 {
-		t.Errorf("Skipped = %v, want none: an unprobed instance has no skip list", v.Skipped)
-	}
+
 	if len(v.Checks) != 0 {
 		t.Errorf("Checks = %v, want none: the preflight never ran", v.Checks)
 	}

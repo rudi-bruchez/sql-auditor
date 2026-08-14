@@ -46,10 +46,6 @@ type VerifyResult struct {
 	// neither of which is known without a successful probe. A screen must
 	// print "not checked" rather than "0 collectors".
 	Collectors int
-	// Skipped is the manifest's skip list as the run would write it: global
-	// skips and per-database narrowings interleaved in plan order. Also empty
-	// when Probed is false.
-	Skipped []SkippedScript
 
 	LintFailures   int
 	OutputWritable bool
@@ -174,7 +170,6 @@ func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 		delete(denied, "connect")
 		plan := planScripts(v.Scripts, denied, ParseVersion(si.Version), o.Flags)
 		v.Collectors = countCollectors(plan)
-		_, v.Skipped, _ = planUnits(plan, v.Folders, o.Config)
 	}
 	return nil
 }
