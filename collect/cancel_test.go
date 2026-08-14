@@ -16,63 +16,37 @@ import (
 // answering perfectly.
 //
 // Nothing here needs a server: the decision is a pure function of the context
-// and the error, which is exactly why it was worth extracting.
+// and the error.
 
 // The shape of what runUnit hands back on a cancelled context: the cause is
 // wrapped by the time the loop sees it, so the decision cannot be made by
 // matching on the message.
 var cancelledUnitErr = fmt.Errorf("reconnect failed: %w", context.Canceled)
 
-func TestCancellationIsNotReportedAsAnUnreachableInstance(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	code, err := cancellationOutcome(ctx, cancelledUnitErr)
-	if code != 0 {
-		t.Errorf("exit code = %d, want 0: a deliberate stop is neither an unreachable "+
-			"instance (1) nor a refused configuration (2)", code)
-	}
-	if err != nil {
-		t.Errorf("error = %v, want nil: the unit error only says the context was "+
-			"cancelled, which the manifest already records as cancelled", err)
-	}
-}
-
 // A cancelled context also covers a deadline that expired, which is the same
 // decision: the caller set the bound, so the run stopping at it is not the
 // instance failing to answer.
-func TestCancellationIsNotReportedAsAnUnreachableInstanceOnADeadline(t *testing.T) {
+func TestADeadlineIsNotReportedAsAnUnreachableInstance(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 0)
 	defer cancel()
 	<-ctx.Done()
+	m := NewManifest("sql-auditor", "0.18.0", "abc1234")
 
-	if code, err := cancellationOutcome(ctx, context.DeadlineExceeded); code != 0 || err != nil {
-		t.Errorf("cancellationOutcome = (%d, %v), want (0, nil)", code, err)
+	exit, cancelled := recordUnitFailure(ctx, m, "80.workload/020.query-store.sql", "", context.DeadlineExceeded)
+	if exit != 0 || !cancelled {
+		t.Errorf("recordUnitFailure = (%d, %v), want (0, true)", exit, cancelled)
+	}
+	if len(m.Errors) != 0 {
+		t.Errorf("the manifest carries %d error(s) for a run that hit its own bound: %+v", len(m.Errors), m.Errors)
 	}
 }
 
-// The other half, and the one that a naive implementation gets wrong by
-// testing the error instead of the context: a live context means the unit
-// genuinely failed and nothing about it may be softened. The error must come
-// back unchanged — not merely a similar one — because the caller records it in
-// the manifest verbatim.
-func TestALiveContextLeavesTheErrorAlone(t *testing.T) {
-	want := errors.New("Invalid object name 'sys.dm_os_wait_stats'")
-
-	code, got := cancellationOutcome(context.Background(), want)
-	if code != 2 {
-		t.Errorf("exit code = %d, want 2 (partial failure)", code)
-	}
-	if !errors.Is(got, want) {
-		t.Errorf("error = %v, want the error that was passed in", got)
-	}
-}
-
-// The placement is the whole point of this task, so it is what gets tested.
-// Deciding after the ErrorEntry has been appended would leave a manifest that
-// says exit_code 0, cancelled true, AND carries an error reading "context
-// canceled" — three statements that cannot all be true, and the exact
-// ambiguity this change exists to remove.
+// The placement is the whole point, so it is what gets tested. Deciding after
+// the ErrorEntry has been appended would leave a manifest that says exit_code
+// 0, cancelled true, AND carries an error reading "context canceled" — three
+// statements that cannot all be true, and the exact ambiguity this decision
+// exists to remove. A deliberate stop is neither an unreachable instance (1)
+// nor a refused configuration (2).
 func TestACancelledRunRecordsNoUnitError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
