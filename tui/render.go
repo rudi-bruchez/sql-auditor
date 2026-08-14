@@ -71,12 +71,12 @@ const (
 	rightMargin = 2
 )
 
-// The four words a capability line can start with. They carry the whole
-// meaning: there is no colour anywhere in this package, which is what makes one
+// The one status word this file spells out. The other three — ok, denied,
+// error — are collect's own, copied verbatim out of a CapabilityCheck, and
+// this package must not restate them. They carry the whole meaning of a
+// capability line: there is no colour anywhere here, which is what makes one
 // set of witness strings enough and NO_COLOR trivially honoured.
-const (
-	statusNotChecked = "not checked"
-)
+const statusNotChecked = "not checked"
 
 // row places a right-hand value at the right edge of the terminal, which is
 // where the mock-ups put the step number and the counters. It keeps a two

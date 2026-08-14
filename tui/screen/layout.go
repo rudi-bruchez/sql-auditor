@@ -5,7 +5,7 @@ import (
 	"unicode/utf8"
 )
 
-// The three characters the collect texts carry that a non-UTF-8 Windows console
+// The two characters the collect texts carry that a non-UTF-8 Windows console
 // cannot draw, and their ASCII spellings. Nothing else is substituted: the
 // screens use words — ok, denied, skipped, missing, not checked — and no
 // symbols, so this list is the whole of the transformation. Accented letters
@@ -14,7 +14,6 @@ import (
 var asciiFolds = strings.NewReplacer(
 	"—", "-",
 	"…", "...",
-	"•", "-",
 )
 
 // ToASCII spells the frame with ASCII only, for a console whose output code

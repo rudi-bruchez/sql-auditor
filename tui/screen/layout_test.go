@@ -102,9 +102,7 @@ func TestToASCIIReplacesTheEmDashesOfTheImpactTexts(t *testing.T) {
 	if got := ToASCII("COMPTAB…"); got != "COMPTAB..." {
 		t.Errorf("ToASCII of a truncation marker = %q", got)
 	}
-	if got := ToASCII("• item"); got != "- item" {
-		t.Errorf("ToASCII of a bullet = %q", got)
-	}
+
 	// Accented letters are left alone: a code page that cannot show them is a
 	// display problem, and replacing COMPTABILITÉ with COMPTABILITE would
 	// rename a database in a screen the DBA reads to identify it.

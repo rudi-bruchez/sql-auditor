@@ -91,7 +91,7 @@ func Open(in, out *os.File) (*Terminal, error) {
 	// Hide the cursor for the whole session. Draw repaints the entire screen on
 	// every frame, so the cursor would otherwise be parked wherever the last
 	// line ended and blink there through every redraw.
-	_, _ = emit(t.out, "\x1b[?25l")
+	_, _ = t.out.WriteString("\x1b[?25l")
 	return t, nil
 }
 
@@ -104,7 +104,7 @@ func (t *Terminal) Close() error {
 	}
 	// Clear before showing the cursor again so the shell prompt comes back at
 	// the top of a clean screen rather than under the last frame.
-	_, firstErr := emit(t.out, "\x1b[?25h\x1b[H\x1b[2J")
+	_, firstErr := t.out.WriteString("\x1b[?25h\x1b[H\x1b[2J")
 	t.restoreConsole()
 	if err := term.Restore(int(t.in.Fd()), t.prior); err != nil && firstErr == nil {
 		firstErr = err
@@ -146,7 +146,7 @@ func (t *Terminal) Draw(lines []string) error {
 		b.WriteString(l)
 		b.WriteString("\r\n")
 	}
-	_, err := emit(t.out, b.String())
+	_, err := t.out.WriteString(b.String())
 	return err
 }
 
@@ -179,7 +179,3 @@ func (t *Terminal) ReadKey() (Key, error) {
 		return Key{}, err
 	}
 }
-
-// emit writes a string to the terminal. Wrapped so each escape sequence above
-// reads as one expression, and named away from the io package.
-func emit(f *os.File, s string) (int, error) { return f.WriteString(s) }
