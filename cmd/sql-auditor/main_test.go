@@ -285,3 +285,54 @@ func TestPasswordNeverReachesTheFlagsUsageText(t *testing.T) {
 		t.Error("a bare --password option exists; README says it must not")
 	}
 }
+
+// --all turns on every opt-in there is, and the test enumerates them from the
+// Options it produces rather than from a list written here: a flag added to
+// defineFlags and forgotten in --all would otherwise pass. What it cannot catch
+// is a flag added to neither, which is what the count below is for.
+func TestAllTurnsOnEveryOptIn(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+	o, code, err := buildOptions("collect", []string{"--env", env, "--all"}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if len(o.Flags) != 7 {
+		t.Fatalf("Options carries %d flags, want 7; --all was written against a "+
+			"different set and one of them is now decided somewhere else", len(o.Flags))
+	}
+	for name, on := range o.Flags {
+		if !on {
+			t.Errorf("--all left %s off", name)
+		}
+	}
+}
+
+// Without it, every one of them stays off. The default is the narrow one, and
+// that is the property the whole disclosure design rests on.
+func TestWithoutAllEveryOptInIsOff(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+	o, code, err := buildOptions("collect", []string{"--env", env}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	for name, on := range o.Flags {
+		if on {
+			t.Errorf("%s is on with no option given", name)
+		}
+	}
+}
+
+// --all is a union, not an assignment: naming an individual option alongside it
+// cannot turn one back off. There is no --no-X in this program, so an operator
+// who wants six of the seven names the six.
+func TestAllIgnoresAnIndividualOptionGivenBesideIt(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+	o, code, err := buildOptions("collect",
+		[]string{"--env", env, "--all", "--include-session-text=false"}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if !o.Flags["include_session_text"] {
+		t.Error("an explicit =false beat --all; --all is a union and must win")
+	}
+}

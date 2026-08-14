@@ -84,7 +84,7 @@ type cliFlags struct {
 
 	server, user, envFile, queriesDir, outputDir string
 	to, grantScript                              string
-	keep, force                                  bool
+	keep, force, all                             bool
 
 	passwordFile  string
 	passwordStdin bool
@@ -116,6 +116,17 @@ func defineFlags(cmd string) *cliFlags {
 	fs.StringVar(&c.queriesDir, "queries-dir", "", "run queries from this directory instead of the embedded corpus")
 	fs.StringVar(&c.outputDir, "output-dir", "", "where to write results")
 	fs.BoolVar(&c.keep, "keep", false, "keep an existing same-day run folder, suffixing this run")
+	// A union of the seven opt-ins below, and deliberately not a mode: it
+	// turns them on and changes nothing else. Six of them are disclosure
+	// decisions and one is a cost decision, so what this asks for is the
+	// widest archive the tool can produce — which is the right thing on an
+	// instance you have a mandate for, and the wrong thing everywhere else.
+	// MANIFEST.txt is unchanged by it: the archive keeps recording the seven
+	// individually, because what was collected is the fact worth keeping and
+	// how few words it took to ask is not.
+	fs.BoolVar(&c.all, "all", false,
+		"turn on every optional collector at once, including the ones off by default "+
+			"for disclosure and the one off for cost")
 	fs.StringVar(&c.to, "to", "",
 		"destination: a directory for 'queries export', a file for 'env init' (default .env)")
 	fs.BoolVar(&c.force, "force", false, "'env init' only: replace an existing file")
@@ -339,13 +350,13 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader) (collect
 		Now: time.Now(), Keep: c.keep, Version: version, Commit: buildStamp(),
 		GrantScript: c.grantScript,
 		Flags: map[string]bool{
-			collect.FlagIncludeSessionText:    c.sessionText,
-			collect.FlagEstimateCompression:   c.estimateCompression,
-			collect.FlagQueryStoreDetail:      c.queryStoreDetail,
-			collect.FlagQueryStorePlanStats:   c.queryStorePlanStats,
-			collect.FlagObjectDefinitions:     c.objectDefinitions,
-			collect.FlagDeadlockGraphs:        c.deadlockGraphs,
-			collect.FlagBlockedProcessReports: c.blockedProcessReports,
+			collect.FlagIncludeSessionText:    c.all || c.sessionText,
+			collect.FlagEstimateCompression:   c.all || c.estimateCompression,
+			collect.FlagQueryStoreDetail:      c.all || c.queryStoreDetail,
+			collect.FlagQueryStorePlanStats:   c.all || c.queryStorePlanStats,
+			collect.FlagObjectDefinitions:     c.all || c.objectDefinitions,
+			collect.FlagDeadlockGraphs:        c.all || c.deadlockGraphs,
+			collect.FlagBlockedProcessReports: c.all || c.blockedProcessReports,
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -559,6 +570,11 @@ Options (check, collect):
   --queries-dir DIR           run a corpus from disk instead of the embedded one
   --output-dir DIR            where to write results
   --keep                      keep an existing same-day run folder
+  --all                       turn on all seven options below at once: the six
+                              that are off for disclosure and the one that is
+                              off for cost. The widest archive this tool can
+                              produce. It changes nothing else, and MANIFEST.txt
+                              still records the seven individually.
   --grant-script FILE         check only. After probing permissions, write the
                               T-SQL that grants exactly the ones found missing,
                               for the login the server reports, with the reason

@@ -146,6 +146,7 @@ Options for `check` and `collect`:
 | `--queries-dir DIR` | run a corpus from disk instead of the embedded one |
 | `--output-dir DIR` | where to write results |
 | `--keep` | keep an existing same-day run folder, suffixing this run |
+| `--all` | turn on all seven options below at once — the six off for disclosure and the one off for cost. See the note under this table |
 | `--grant-script FILE` | `check` only. Write the T-SQL that grants the permissions found missing, for the login the server reports, with the reason for each. Never executed. |
 | `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
 | `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
@@ -159,6 +160,16 @@ Options for `check` and `collect`:
 | `--query-store-to T` | end of the window, same format and same clock (default: the moment of collection). Given on its own it implies a seven-day window ending at that bound |
 | `--query-store-top N` | how many queries to extract per database, across the four rankings once deduplicated (default 50). Queries with a forced plan are added on top of this |
 | `--query-store-databases P` | comma-separated `*`/`?` patterns narrowing which of the collected databases the Query Store extraction reads. It narrows the selection; it never widens it |
+
+`--all` is the one option that is a convenience rather than a decision, and it
+should be read as what it is: six of the seven collectors it turns on are off by
+default because of what they put in the archive, not because of what they cost.
+It asks for the widest archive this tool can produce. That is the right thing on
+an instance you have a written mandate for and the wrong thing everywhere else,
+and the tool will not ask you which it is. It changes nothing else: no
+confirmation, no extra collectors beyond the seven, and `MANIFEST.txt` still
+discloses them one by one, because what the archive contains is the fact that
+matters and how briefly it was requested is not.
 
 There is no `--password` flag, and there will not be one. A password on the
 command line ends up in `ps` output, in shell history and in the process table
