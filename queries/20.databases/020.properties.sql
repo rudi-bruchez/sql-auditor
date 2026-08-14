@@ -48,7 +48,14 @@ SELECT
     CAST(d.is_db_chaining_on               AS BIT)                  AS [database.cross_db_chaining],
 
     /* ───────── space summary ───────── */
-    (SELECT CAST(SUM(size) * 8 / 1024.0 AS DECIMAL(14,1))
+    -- The cast to BIGINT is before the SUM and not after it. sys.database_files.size
+    -- is an int page count, SUM over int returns int, and int * 8 overflows at
+    -- 2.1 TB — 281 million pages times eight is 2.25 billion, past the 2.147
+    -- billion ceiling. The whole statement then fails with "Arithmetic overflow
+    -- converting expression to data type int", so a 2.1 TB database reports no
+    -- compatibility level, no page verify, no collation and no owner either.
+    -- The line below already casts for the same reason.
+    (SELECT CAST(SUM(CAST(size AS BIGINT)) * 8 / 1024.0 AS DECIMAL(14,1))
        FROM sys.database_files WHERE type = 0)                      AS [space.data_allocated_mb],
     (SELECT CAST(SUM(CAST(FILEPROPERTY(name,'SpaceUsed') AS BIGINT)) * 8 / 1024.0 AS DECIMAL(14,1))
        FROM sys.database_files WHERE type = 0)                      AS [space.data_used_mb],

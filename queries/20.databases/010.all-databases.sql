@@ -60,14 +60,22 @@ SELECT
     bk.last_full, bk.last_diff, bk.last_log
 FROM sys.databases AS d
 OUTER APPLY (
+    -- The cast to BIGINT is before the SUM and not after it. sys.master_files.size
+    -- is an int page count, SUM over int returns int, and int * 8 overflows at
+    -- 2.1 TB — 281 million pages times eight is 2.25 billion, past the 2.147
+    -- billion ceiling. The whole statement then fails with "Arithmetic overflow
+    -- converting expression to data type int", and since this collector is the
+    -- one projecting compatibility level, page verify, auto-shrink, auto-close,
+    -- RCSI, collation and owner, a single oversized database took all of them
+    -- out of the archive for every database on the instance.
     SELECT COUNT(*) AS data_files,
-           CAST(SUM(mf.size) * 8 / 1024.0 AS DECIMAL(14,1)) AS data_mb
+           CAST(SUM(CAST(mf.size AS BIGINT)) * 8 / 1024.0 AS DECIMAL(14,1)) AS data_mb
     FROM sys.master_files AS mf
     WHERE mf.database_id = d.database_id AND mf.type = 0
 ) AS ds
 OUTER APPLY (
     SELECT COUNT(*) AS log_files,
-           CAST(SUM(mf.size) * 8 / 1024.0 AS DECIMAL(14,1)) AS log_mb
+           CAST(SUM(CAST(mf.size AS BIGINT)) * 8 / 1024.0 AS DECIMAL(14,1)) AS log_mb
     FROM sys.master_files AS mf
     WHERE mf.database_id = d.database_id AND mf.type = 1
 ) AS ls

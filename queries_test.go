@@ -1,6 +1,7 @@
 package sqlauditor_test
 
 import (
+	"io/fs"
 	"regexp"
 	"strings"
 	"testing"
@@ -174,6 +175,37 @@ func TestEmbeddedEnvTemplateIsAcceptedByTheResolver(t *testing.T) {
 		}
 		if _, err := collect.Resolve(nil, parsed, func(string) string { return "" }); err != nil {
 			t.Errorf("%s: the resolver refuses the template it ships: %v", c.name, err)
+		}
+	}
+}
+
+// sys.master_files.size and sys.database_files.size are int page counts, and
+// SUM over int returns int. Multiplying that by 8 to reach kilobytes overflows
+// at 281 million pages — 2.1 TB — and the failure is not a NULL column but a
+// dead statement: "Arithmetic overflow error converting expression to data type
+// int" takes the whole SELECT with it. When that SELECT is the one projecting
+// compatibility level, page verify, RCSI, collation and owner, one oversized
+// database empties those facts for every database on the instance.
+//
+// This was found on a client run, not by a test, because no test in this
+// repository has a 2.1 TB database to collect. What a test can do is refuse the
+// shape: a SUM taken directly over a column named "size" is the bug, and
+// SUM(CAST(size AS BIGINT)) is the fix.
+func TestNoSumOverAnIntPageCountWithoutWidening(t *testing.T) {
+	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	bare := regexp.MustCompile(`(?i)SUM\(\s*(\w+\.)?size\s*\)`)
+	for _, s := range scripts {
+		body, err := fs.ReadFile(sqlauditor.Queries, "queries/"+s.Path)
+		if err != nil {
+			t.Fatalf("%s: %v", s.Path, err)
+		}
+		for _, m := range bare.FindAllString(string(body), -1) {
+			t.Errorf("%s: %s sums an int page count directly. SUM over int returns "+
+				"int and overflows past 2.1 TB, killing the whole statement. Write "+
+				"SUM(CAST(size AS BIGINT)) instead.", s.Path, m)
 		}
 	}
 }
