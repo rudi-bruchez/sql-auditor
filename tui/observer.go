@@ -40,9 +40,7 @@ func (o observer) send(e event) {
 	o.ch <- e
 }
 
-func (o observer) Planned(units, databases int) {
-	o.send(plannedEvent{units: units, databases: databases})
-}
+func (o observer) Planned(units int) { o.send(plannedEvent{units: units}) }
 
 func (o observer) UnitStarted(script, database string) {
 	o.send(unitStartedEvent{script: script, database: database})
@@ -63,10 +61,10 @@ func (o observer) Finished(cancelled bool) { o.send(finishedEvent{cancelled: can
 // plannedEvent carries the gauge's denominator. It arrives once, before the
 // first unit, because planUnits resolves the whole plan up front — which is
 // exactly why the wizard can show 12/223 rather than a spinner.
-type plannedEvent struct{ units, databases int }
+type plannedEvent struct{ units int }
 
 func (e plannedEvent) apply(s State) State {
-	s.Units, s.Databases = e.units, e.databases
+	s.Units = e.units
 	return s
 }
 

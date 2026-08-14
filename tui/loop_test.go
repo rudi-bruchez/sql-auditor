@@ -71,14 +71,14 @@ func TestLoopFoldsASequenceOfEventsIntoTheExpectedState(t *testing.T) {
 	// A whole collection, in the order collect produces it: the plan, then a
 	// unit, then a tick, then the archive.
 	end, code := drive(feed(
-		plannedEvent{units: 3, databases: 2},
+		plannedEvent{units: 3},
 		unitStartedEvent{script: "queries/01/a.sql", database: "SALES"},
 		unitDoneEvent{script: "queries/01/a.sql", database: "SALES", bytes: 4096, took: time.Second},
 		tickEvent{elapsed: 124 * time.Second},
 	), f.draw, fixedSize(80, 24), State{Step: StepCollecting})
 
-	if end.Units != 3 || end.DoneUnits != 1 || end.Databases != 2 {
-		t.Errorf("state = %d/%d units over %d databases, want 1/3 over 2", end.DoneUnits, end.Units, end.Databases)
+	if end.Units != 3 || end.DoneUnits != 1 {
+		t.Errorf("state = %d/%d units, want 1/3", end.DoneUnits, end.Units)
 	}
 	if end.Bytes != 4096 {
 		t.Errorf("Bytes = %d, want 4096", end.Bytes)
@@ -291,7 +291,7 @@ func TestLoopSerialisesThreeConcurrentProducers(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		o := observer{ch: ch}
-		o.Planned(units, 1)
+		o.Planned(units)
 		for i := 0; i < units; i++ {
 			o.UnitStarted("queries/01/a.sql", "SALES")
 			o.UnitDone("queries/01/a.sql", "SALES", 10, time.Millisecond, nil)

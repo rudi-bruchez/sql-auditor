@@ -331,7 +331,7 @@ func TestRenderCutsAFrameToTheTerminalHeight(t *testing.T) {
 func collectingState() State {
 	return State{
 		Step: StepCollecting, Verify: probedVerify(), Flags: map[string]bool{},
-		Units: 223, DoneUnits: 147, Databases: 12,
+		Units: 223, DoneUnits: 147,
 		Script: "80.workload/021.query-store-detail", Database: "SALESDB",
 		Elapsed: 124 * time.Second, Bytes: 39_950_000,
 		Notes: []string{"denied   50.agent/020.job-steps",

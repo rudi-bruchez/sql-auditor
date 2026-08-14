@@ -11,7 +11,10 @@ import "time"
 // unit would be a second scheduler beside the plan, and the plan is the thing
 // the manifest is written from.
 type Observer interface {
-	Planned(units, databases int)
+	// Planned announces the gauge's denominator, once, before the first unit.
+	// It is a number of UNITS and never of scripts: the corpus holds 55 files
+	// and a run over twelve databases is 223 units.
+	Planned(units int)
 	UnitStarted(script, database string)
 	// UnitDone carries bytes but no row count. runUnit never counts rows, and
 	// producing one would have to cross ReadResultSets and six writers for a
@@ -102,9 +105,9 @@ func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]u
 // compile error at the call site instead.
 type observer struct{ o Observer }
 
-func (w observer) Planned(units, databases int) {
+func (w observer) Planned(units int) {
 	if w.o != nil {
-		w.o.Planned(units, databases)
+		w.o.Planned(units)
 	}
 }
 

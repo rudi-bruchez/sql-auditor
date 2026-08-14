@@ -1291,7 +1291,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 
 	// The total is announced before the first unit runs, and it is the same
 	// list the loop below walks — not a product of scripts and databases.
-	obs.Planned(len(units), len(folders))
+	obs.Planned(len(units))
 	for _, s := range planSkipped {
 		obs.ScriptSkipped(s.Script, s.Target, s.Reason)
 	}

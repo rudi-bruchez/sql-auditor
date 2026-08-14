@@ -12,7 +12,7 @@ import (
 // arrives after the one it should precede would render a gauge that moves
 // backwards.
 type recordingObserver struct {
-	planned []string
+	planned []int
 	started []string
 	done    []string
 	skipped []string
@@ -21,8 +21,8 @@ type recordingObserver struct {
 	finished []string
 }
 
-func (r *recordingObserver) Planned(units, databases int) {
-	r.planned = append(r.planned, fmtPair(units, databases))
+func (r *recordingObserver) Planned(units int) {
+	r.planned = append(r.planned, units)
 }
 
 func (r *recordingObserver) UnitStarted(script, database string) {
@@ -47,16 +47,12 @@ func (r *recordingObserver) Finished(cancelled bool) {
 	r.finished = append(r.finished, word)
 }
 
-func fmtPair(a, b int) string {
-	return string(rune('0'+a)) + "/" + string(rune('0'+b))
-}
-
 // The zero value is the path every non-TUI caller takes, so it is the one that
 // must not panic. Testing it once here is what buys the right to call the
 // callbacks unguarded at every site inside Run.
 func TestObserverCallbacksAreSafeOnTheZeroValue(t *testing.T) {
 	var o observer
-	o.Planned(3, 2)
+	o.Planned(3)
 	o.UnitStarted("10.system/010.foo.sql", "")
 	o.UnitDone("10.system/010.foo.sql", "", 42, time.Second, errors.New("boom"))
 	o.ScriptSkipped("10.system/010.foo.sql", "RH", "not matched")
@@ -68,14 +64,14 @@ func TestObserverForwardsToTheWrappedImplementation(t *testing.T) {
 	rec := &recordingObserver{}
 	o := observer{o: rec}
 
-	o.Planned(5, 3)
+	o.Planned(5)
 	o.UnitStarted("80.workload/020.query-store.sql", "SALESDB")
 	o.UnitDone("80.workload/020.query-store.sql", "SALESDB", 10, time.Second, nil)
 	o.ScriptSkipped("80.workload/021.query-store-detail.sql", "RH", "not matched by QUERY_STORE_DB_INCLUDE")
 	o.Phase("writing manifest")
 	o.Finished(true)
 
-	if len(rec.planned) != 1 || rec.planned[0] != "5/3" {
+	if len(rec.planned) != 1 || rec.planned[0] != 5 {
 		t.Fatalf("Planned not forwarded: %v", rec.planned)
 	}
 	if len(rec.started) != 1 || rec.started[0] != "80.workload/020.query-store.sql|SALESDB" {
@@ -261,7 +257,7 @@ func TestPlannedCountMatchesTheUnitsThatWillRun(t *testing.T) {
 
 	rec := &recordingObserver{}
 	obs := observer{o: rec}
-	obs.Planned(len(units), len(folders))
+	obs.Planned(len(units))
 	for _, s := range skipped {
 		obs.ScriptSkipped(s.Script, s.Target, s.Reason)
 	}
@@ -274,8 +270,8 @@ func TestPlannedCountMatchesTheUnitsThatWillRun(t *testing.T) {
 	if len(rec.started) != len(units) {
 		t.Fatalf("UnitStarted called %d times for %d units", len(rec.started), len(units))
 	}
-	if got := rec.planned[0]; got != fmtPair(len(units), len(folders)) {
-		t.Fatalf("Planned announced %s, the loop ran %d units", got, len(rec.started))
+	if got := rec.planned[0]; got != len(units) {
+		t.Fatalf("Planned announced %d, the loop ran %d units", got, len(rec.started))
 	}
 	// Skips never reach the loop, so they must never be counted into the
 	// denominator: a gauge that stops at 5/9 because four scripts were gated

@@ -29,10 +29,10 @@ func fold(t *testing.T, s State, ch chan event) State {
 
 func TestObserverPlannedCarriesTheGaugeDenominator(t *testing.T) {
 	ch := make(chan event, 4)
-	observer{ch: ch}.Planned(223, 12)
+	observer{ch: ch}.Planned(223)
 	got := fold(t, State{}, ch)
-	if got.Units != 223 || got.Databases != 12 {
-		t.Errorf("after Planned(223, 12): Units = %d, Databases = %d", got.Units, got.Databases)
+	if got.Units != 223 {
+		t.Errorf("after Planned(223): Units = %d", got.Units)
 	}
 }
 
@@ -109,7 +109,7 @@ func TestObserverACompleteRunEndsAtExactlyOneHundredPercent(t *testing.T) {
 	const units = 5
 	ch := make(chan event, 32)
 	o := observer{ch: ch}
-	o.Planned(units, 3)
+	o.Planned(units)
 	for i := 0; i < units; i++ {
 		o.UnitStarted("queries/01/a.sql", "")
 		o.UnitDone("queries/01/a.sql", "", 10, time.Second, nil)
@@ -152,7 +152,7 @@ func TestObserverPhaseReplacesTheCollectorLine(t *testing.T) {
 func TestObserverOnlySendsAndNeverTouchesTheState(t *testing.T) {
 	ch := make(chan event, 8)
 	o := observer{ch: ch}
-	o.Planned(3, 1)
+	o.Planned(3)
 	o.UnitStarted("a.sql", "")
 	o.UnitDone("a.sql", "", 1, time.Second, nil)
 	o.ScriptSkipped("b.sql", "", "gated")

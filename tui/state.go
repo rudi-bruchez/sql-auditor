@@ -128,16 +128,16 @@ type State struct {
 	ASCII bool
 
 	// Screen 4, fed by the observer adapter.
-	Units, DoneUnits, Databases int
-	Script, Database            string
-	Elapsed                     time.Duration
+	Units, DoneUnits int
+	Script, Database string
+	Elapsed          time.Duration
 	// Spinner is the activity indicator's phase, advanced by the ticker. It
 	// exists for the two waits as much as for the collection: something has to
 	// move while the wizard waits on a server that may never answer.
 	Spinner int
 
-	DeniedCount, SkippedCount, ErrorCount int
-	Bytes                                 int64
+	SkippedCount, ErrorCount int
+	Bytes                    int64
 	// Notes is the cumulative summary under the gauge — denials, skips — not
 	// a scrolling log. The full log is the manifest's job and it already does
 	// it.
