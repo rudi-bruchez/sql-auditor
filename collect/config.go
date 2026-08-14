@@ -96,6 +96,13 @@ var knownKeys = map[string]bool{
 	"QUERY_STORE_TOP": true, "QUERY_STORE_DB_INCLUDE": true,
 }
 
+// DefaultAppName is what SQL Server reports in program_name when the operator
+// set no SQL_APPLICATION_NAME. It is exported because the caller stamps the
+// version onto it: the version lives in main, where the release workflow can
+// reach it with -ldflags, and this package must not learn about it just to
+// build a string.
+const DefaultAppName = "sql-auditor"
+
 // renamed maps retired key names to their replacement, so the error can say
 // what to do instead of only what is wrong.
 var renamed = map[string]string{"SQL_LOGIN": "SQL_USER"}
@@ -282,7 +289,7 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		Database:       get("SQL_DATABASE", "master"),
 		User:           get("SQL_USER", ""),
 		Password:       get("SQL_PASSWORD", ""),
-		AppName:        get("SQL_APPLICATION_NAME", "sql-auditor"),
+		AppName:        get("SQL_APPLICATION_NAME", DefaultAppName),
 		Integrated:     boolOf("SQL_INTEGRATED_SECURITY", false),
 		Encrypt:        boolOf("SQL_ENCRYPT", true),
 		TrustCert:      boolOf("SQL_TRUST_SERVER_CERTIFICATE", true),

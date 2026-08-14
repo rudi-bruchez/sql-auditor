@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rudi-bruchez/sql-auditor/collect"
 )
 
 // noStdin is the reader every test that does not exercise --password-stdin
@@ -334,5 +336,37 @@ func TestAllIgnoresAnIndividualOptionGivenBesideIt(t *testing.T) {
 	}
 	if !o.Flags["include_session_text"] {
 		t.Error("an explicit =false beat --all; --all is a union and must win")
+	}
+}
+
+// The program name is what a DBA watching sys.dm_exec_sessions sees while this
+// runs, and "sql-auditor" alone does not say which corpus is being run. The
+// version is the fact they need to correlate a session with an archive, so the
+// default carries it.
+func TestTheDefaultProgramNameCarriesTheVersion(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+	o, code, err := buildOptions("collect", []string{"--env", env}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if !strings.Contains(o.Config.AppName, version) {
+		t.Errorf("AppName = %q, want it to name version %s", o.Config.AppName, version)
+	}
+	if !strings.HasPrefix(o.Config.AppName, collect.DefaultAppName) {
+		t.Errorf("AppName = %q, want it to still begin with %q", o.Config.AppName, collect.DefaultAppName)
+	}
+}
+
+// A name the operator chose is left exactly as they wrote it. They picked it to
+// be matched by something — an Extended Events filter, a monitoring rule — and
+// appending to it would break the match.
+func TestAnOperatorsProgramNameIsLeftAlone(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\nSQL_APPLICATION_NAME=audit-nightly\n")
+	o, code, err := buildOptions("collect", []string{"--env", env}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if o.Config.AppName != "audit-nightly" {
+		t.Errorf("AppName = %q, want it untouched", o.Config.AppName)
 	}
 }

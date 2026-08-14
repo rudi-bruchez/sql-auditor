@@ -280,7 +280,7 @@ twelve-factor ordering and is
 | `SQL_TRUST_SERVER_CERTIFICATE` | `true` | skip server certificate validation |
 | `SQL_CONNECT_TIMEOUT_SEC` | `15` | seconds to establish the connection |
 | `SQL_QUERY_TIMEOUT_SEC` | `60` | seconds per round trip made by the pipeline itself; a collector's own `@timeout` wins over it ([why](docs/dba-guide.md#timeouts-15-s-to-connect-and-why-raising-the-query-timeout-may-not-help)) |
-| `SQL_APPLICATION_NAME` | `sql-auditor` | application name shown in `sys.dm_exec_sessions` |
+| `SQL_APPLICATION_NAME` | `sql-auditor <version>` | application name shown in `sys.dm_exec_sessions`. The default carries the version, so a session can be tied to the corpus that produced it; a value you set is used exactly as written |
 | `QUERIES_DIR` | *(empty)* | run a corpus from disk instead of the embedded one |
 | `OUTPUT_DIR` | `output` | where run folders and archives are written |
 | `DB_INCLUDE` | *(empty)* | comma-separated `*`/`?` patterns; empty means all user databases |

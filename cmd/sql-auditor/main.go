@@ -344,6 +344,18 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader) (collect
 	if err != nil {
 		return collect.Options{}, 2, err
 	}
+	// A DBA watching sys.dm_exec_sessions while this runs sees program_name and
+	// nothing else, and "sql-auditor" on its own does not say which corpus is
+	// on the wire — which is the question asked when two runs disagree. So the
+	// default carries the version.
+	//
+	// A name the operator chose is left exactly as they wrote it: it was picked
+	// to be matched by an Extended Events filter or a monitoring rule, and
+	// appending to it would break the match. Stamping it here rather than in
+	// Resolve keeps the version in the one file the release workflow rewrites.
+	if cfg.AppName == collect.DefaultAppName {
+		cfg.AppName = collect.DefaultAppName + " " + version
+	}
 
 	opts := collect.Options{
 		Config: cfg, Corpus: sqlauditor.Queries, Root: "queries",
