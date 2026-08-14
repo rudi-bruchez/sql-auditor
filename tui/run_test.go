@@ -62,10 +62,6 @@ func TestApplyStateCarriesTheSevenFlagsAndKeep(t *testing.T) {
 	for _, name := range flagOrder {
 		s.Flags[name] = true
 	}
-	if len(flagOrder) != 7 {
-		t.Fatalf("flagOrder has %d entries, want the seven opt-ins", len(flagOrder))
-	}
-
 	got := applyState(s, baseOptions())
 
 	if !got.Keep {

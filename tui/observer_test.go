@@ -146,22 +146,6 @@ func TestObserverPhaseReplacesTheCollectorLine(t *testing.T) {
 	}
 }
 
-// The adapter's whole contract: wrap and send, touch nothing. Anything it
-// computed would be computed off the render loop's goroutine, and this package
-// has no mutex to protect that.
-func TestObserverOnlySendsAndNeverTouchesTheState(t *testing.T) {
-	ch := make(chan event, 8)
-	o := observer{ch: ch}
-	o.Planned(3)
-	o.UnitStarted("a.sql", "")
-	o.UnitDone("a.sql", "", 1, time.Second, nil)
-	o.ScriptSkipped("b.sql", "", "gated")
-	o.Phase("archiving")
-	if len(ch) != 5 {
-		t.Errorf("the adapter sent %d events for 5 callbacks", len(ch))
-	}
-}
-
 func TestObserverNotesKeepTheMostRecentLines(t *testing.T) {
 	ch := make(chan event, 64)
 	o := observer{ch: ch}

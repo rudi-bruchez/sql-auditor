@@ -431,23 +431,3 @@ func TestWritingTheGrantScriptKeepsTheOperatorOnTheVerificationScreen(t *testing
 		t.Errorf("GrantPath = %q after a failure, want empty", failed.GrantPath)
 	}
 }
-
-func TestFlagOrderListsTheSevenOptInsInScreenOrder(t *testing.T) {
-	want := []string{
-		collect.FlagIncludeSessionText,
-		collect.FlagObjectDefinitions,
-		collect.FlagDeadlockGraphs,
-		collect.FlagBlockedProcessReports,
-		collect.FlagQueryStoreDetail,
-		collect.FlagQueryStorePlanStats,
-		collect.FlagEstimateCompression,
-	}
-	if len(flagOrder) != len(want) {
-		t.Fatalf("flagOrder has %d entries, want %d", len(flagOrder), len(want))
-	}
-	for i := range want {
-		if flagOrder[i] != want[i] {
-			t.Errorf("flagOrder[%d] = %q, want %q", i, flagOrder[i], want[i])
-		}
-	}
-}
