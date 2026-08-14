@@ -708,7 +708,7 @@ func renderDone(s State, width int) []string {
 
 func summaryLine(s State) string {
 	return fmt.Sprintf("%s, %s, %s, %s",
-		plural(s.DoneUnits, "collected", "collected"),
+		fmt.Sprintf("%d collected", s.DoneUnits),
 		plural(s.SkippedCount, "skipped", "skipped"),
 		plural(s.ErrorCount, "error", "errors"),
 		plural(deniedPermissions(s), "permission denied", "permissions denied"))
@@ -719,10 +719,20 @@ func summaryLine(s State) string {
 // about. It is not the number of units that failed: a unit can fail for ten
 // reasons that are not a refused permission, and the two numbers answer two
 // different questions.
+// deniedPermissions counts the capabilities the server REFUSED, and there are
+// three statuses rather than two: ok, denied, and error. An error is the probe
+// itself failing — the instance dropping mid-check, a query timing out — and
+// collect.BuildGrantScript already excludes those from the grant script, on the
+// grounds that nothing was refused and there is nothing to GRANT.
+//
+// Counting them here said the opposite on the final screen: an instance that
+// wobbled during the probe was reported as "3 permissions denied", sending a
+// DBA to look for a permission that was never the problem — the exact sentence
+// the script generator refuses to write.
 func deniedPermissions(s State) int {
 	n := 0
 	for _, c := range s.Verify.Checks {
-		if c.Status != "ok" {
+		if c.Status == "denied" {
 			n++
 		}
 	}

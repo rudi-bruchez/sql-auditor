@@ -480,3 +480,21 @@ func TestShortDurationMatchesTheMockups(t *testing.T) {
 		}
 	}
 }
+
+// A capability can come back ok, denied or error, and only the middle one is a
+// permission the server refused. An error is the probe failing — the instance
+// dropping mid-check — and collect.BuildGrantScript already excludes those,
+// because nothing was refused and there is nothing to GRANT. The final screen
+// counted them anyway and reported "3 permissions denied", sending a DBA after
+// a permission that was never the problem.
+func TestTheFinalScreenCountsRefusalsAndNotProbeFailures(t *testing.T) {
+	s := State{Verify: collect.VerifyResult{Checks: []collect.CapabilityCheck{
+		{Name: "connect", Status: "ok"},
+		{Name: "view server state", Status: "denied"},
+		{Name: "view any definition", Status: "error"},
+		{Name: "msdb read", Status: "error"},
+	}}}
+	if got := deniedPermissions(s); got != 1 {
+		t.Errorf("deniedPermissions = %d, want 1: two of these are probe failures", got)
+	}
+}

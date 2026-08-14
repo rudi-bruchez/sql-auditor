@@ -155,6 +155,13 @@ func (r *runner) guard(where string) {
 	}
 }
 
+// collectionJob names the goroutine in both places that have to agree on it:
+// startWork passes it to the generic guard, and guardCollection used to spell
+// the same words a second time. The parameter is in fact dead at that call site
+// — guardCollection consumes the panic first — but two spellings of one name is
+// a divergence waiting to happen in a bug report nobody can act on.
+const collectionJob = "the collection"
+
 // guardCollection is guard for the one goroutine whose screen waits on a second
 // event before it will let go. StepCollecting ends on collectDoneEvent and on
 // nothing else — deliberately, since a panic elsewhere in the wizard must not
@@ -170,7 +177,7 @@ func (r *runner) guard(where string) {
 // something in it failed.
 func (r *runner) guardCollection() {
 	if v := recover(); v != nil {
-		r.send(panicEvent{value: v, where: "the collection"})
+		r.send(panicEvent{value: v, where: collectionJob})
 		r.send(collectDoneEvent{code: 2, err: fmt.Errorf("internal error in the collection: %v", v)})
 	}
 }
@@ -381,7 +388,7 @@ func (r *runner) stateChanged(prev, next State) {
 			r.startWork("the probe", func(ctx context.Context) { r.verify(ctx, next) })
 		case StepCollecting:
 			r.startTicker()
-			r.startWork("the collection", func(ctx context.Context) { r.collect(ctx, next) })
+			r.startWork(collectionJob, func(ctx context.Context) { r.collect(ctx, next) })
 		}
 	}
 	// Ctrl-C during the collection does not change the step — the run is still

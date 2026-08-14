@@ -608,6 +608,17 @@ func run() int {
 			"(SQL_TRUST_SERVER_CERTIFICATE=true)")
 	}
 
+	// --grant-script is a check option and the help says so, but nothing
+	// refused it: `sql-auditor collect --grant-script f.sql` ran the whole
+	// collection, wrote no file and said nothing, because collect.Run never
+	// reads the field. An operator who asked for a grant script and got an
+	// archive instead has no way to tell that from a script with nothing in it.
+	if cmd == "collect" && opts.GrantScript != "" {
+		fmt.Fprintln(os.Stderr,
+			"--grant-script belongs to check, which probes permissions: sql-auditor check --grant-script "+opts.GrantScript)
+		return 2
+	}
+
 	ctx := context.Background()
 	switch cmd {
 	case "collect":
