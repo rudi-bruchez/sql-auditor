@@ -28,7 +28,7 @@ import (
 // the tool that produced it, and "dev" told a reader nothing about which
 // collectors were in the corpus. So the number lives here and moves with the
 // corpus, while buildStamp fills in the revision from the build itself.
-var version = "0.17.0"
+var version = "0.18.0"
 var commit = ""
 
 // buildStamp returns what to print after the version. When -ldflags supplied a
