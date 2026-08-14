@@ -241,6 +241,10 @@ func renderVerification(s State, width int) []string {
 	out := []string{row(pad+"Verification", "step 2/4", width), ""}
 	out = append(out, serverBlock(s, width)...)
 	out = append(out, "")
+	if local := localBlock(s, width); len(local) > 0 {
+		out = append(out, local...)
+		out = append(out, "")
+	}
 	out = append(out, permissionBlock(s, width)...)
 	out = append(out, "")
 	out = append(out, databaseBlock(s, width)...)
@@ -254,6 +258,38 @@ func renderVerification(s State, width int) []string {
 		return append(out, pad+"[r] re-probe   [b] back   [q] quit")
 	}
 	return append(out, pad+"[enter] continue   [r] re-probe   [b] back   [q] quit")
+}
+
+// localBlock reports the two findings VerifyLocal makes before a socket is
+// opened, and it prints NOTHING when there is nothing to say. Both are already
+// priced by `check` — PreflightExitCode reads them — and both were missing from
+// this screen, which is the one place a run's coverage is meant to be settled
+// before anything is collected. An unwritable output directory ends collect.Run
+// at its first line; a script that fails lint makes the run exit 2 whatever
+// else happens. Neither was visible, so [enter] started a collection whose
+// outcome was already decided.
+//
+// Silence when all is well is deliberate. A screen that prints "output
+// writable: yes" on every run is a screen whose reader learns to skip the
+// block, and the one time it says otherwise it will be skipped too.
+func localBlock(s State, width int) []string {
+	var out []string
+	if !s.Verify.OutputWritable {
+		// Named, not described. OUTPUT_DIR is relative by default, so the
+		// directory is often not the one the operator has in mind — a
+		// double-clicked binary writes wherever its working directory happened
+		// to be.
+		out = append(out, row(pad+fmt.Sprintf("%-9s%s", "Output", s.OutputDir), "!! not writable", width))
+		out = append(out, screen.Wrap(
+			"the collection stops here, before its first query", width, fieldPad)...)
+	}
+	if s.Verify.LintFailures > 0 {
+		out = append(out, row(pad+fmt.Sprintf("%-9s%s", "Corpus",
+			plural(s.Verify.LintFailures, "script fails lint", "scripts fail lint")), "!! exit 2", width))
+		out = append(out, screen.Wrap(
+			"those collectors do not run, whatever else succeeds", width, fieldPad)...)
+	}
+	return out
 }
 
 func serverBlock(s State, width int) []string {
@@ -338,10 +374,19 @@ func status(st string) string {
 // point: they are two thirds of the collectors, and the permission probes
 // cannot see them at all, since every probe reads at server level.
 func databaseBlock(s State, width int) []string {
-	if !s.Verify.Probed || s.Verify.CandidatesErr != nil {
+	// SelectErr sits beside CandidatesErr rather than being folded into it, for
+	// the reason check gives when it stops on one: a malformed
+	// DB_INCLUDE/DB_EXCLUDE is the operator's typo and no selection could be
+	// computed from it. Showing "0 selected, 0 skipped" would be a count of a
+	// list that was never built, and the operator would read it as an instance
+	// with no databases.
+	if !s.Verify.Probed || s.Verify.CandidatesErr != nil || s.Verify.SelectErr != nil {
 		out := []string{row(pad+"Databases", statusNotChecked, width)}
 		if s.Verify.CandidatesErr != nil {
 			out = append(out, screen.Wrap(s.Verify.CandidatesErr.Error(), width, fieldPad)...)
+		}
+		if s.Verify.SelectErr != nil {
+			out = append(out, screen.Wrap(s.Verify.SelectErr.Error(), width, fieldPad)...)
 		}
 		return out
 	}

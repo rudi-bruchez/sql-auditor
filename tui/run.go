@@ -610,6 +610,7 @@ func initialState(o collect.Options, ascii bool) State {
 		Encrypt:    cfg.Encrypt,
 		TrustCert:  cfg.TrustCert,
 		Source:     "Read from .env and the environment.",
+		OutputDir:  cfg.OutputDir,
 		Field:      fieldServer,
 		Flags:      flags,
 		Keep:       o.Keep,

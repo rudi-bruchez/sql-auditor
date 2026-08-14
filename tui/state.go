@@ -110,6 +110,12 @@ type State struct {
 	Verify     collect.VerifyResult
 	GrantPath  string
 	GrantError error
+	// OutputDir is carried so that screen 2 can NAME the directory it reports
+	// as unwritable. "the output directory cannot be written to" is not a
+	// finding an operator can act on; the path is, and it is often not the one
+	// they think — OUTPUT_DIR is relative by default, so it follows whatever
+	// working directory a double-clicked binary happened to inherit.
+	OutputDir string
 
 	// Screen 3.
 	Flags     map[string]bool

@@ -498,3 +498,61 @@ func TestTheFinalScreenCountsRefusalsAndNotProbeFailures(t *testing.T) {
 		t.Errorf("deniedPermissions = %d, want 1: two of these are probe failures", got)
 	}
 }
+
+// Screen 2 exists so that a run's coverage is settled before anything is
+// collected. Three findings it already held were not on it: an output directory
+// that cannot be written to, scripts that fail lint, and a DB_INCLUDE the
+// selection could not be computed from. `check` prices all three; the wizard
+// showed none, so [enter] started a collection that collect.Run ends at its
+// first line with exit 2 — the round trip this screen was built to remove.
+func TestVerificationShowsTheFindingsItAlreadyHolds(t *testing.T) {
+	base := func() State {
+		v := probedVerify()
+		v.OutputWritable = true
+		return State{Step: StepVerification, Verify: v, OutputDir: `C:\audit\output`}
+	}
+
+	// Nothing to say: none of the three lines appears, because a screen that
+	// prints "output writable: yes" on every run trains the reader to skip it.
+	quiet := Render(base(), 100, 60)
+	absent(t, quiet, "not writable")
+	absent(t, quiet, "fail lint")
+
+	notWritable := base()
+	notWritable.Verify.OutputWritable = false
+	out := Render(notWritable, 100, 60)
+	contains(t, out, `C:\audit\output`)
+	// The same words check uses, so the tool has one vocabulary for one fact.
+	contains(t, out, "not writable")
+	contains(t, out, "before its first query")
+
+	linted := base()
+	linted.Verify.LintFailures = 2
+	out = Render(linted, 100, 60)
+	contains(t, out, "2 ")
+	contains(t, out, "fail lint")
+
+	// A malformed DB_INCLUDE is the operator's typo and the selection could not
+	// be built from it, so the database block says so instead of showing a
+	// count nobody can trust.
+	selectFailed := base()
+	selectFailed.Verify.SelectErr = errors.New(`DB_INCLUDE "PROD[" is not a valid pattern`)
+	out = Render(selectFailed, 100, 60)
+	contains(t, out, "not a valid pattern")
+}
+
+// Display only. None of the three changes what the keys do: an operator who has
+// read the finding and wants to collect anyway still can, which is the same
+// stance the screen takes on a denied permission.
+func TestTheNewFindingsDoNotChangeWhatTheKeysDo(t *testing.T) {
+	v := probedVerify()
+	v.OutputWritable = false
+	v.LintFailures = 3
+	v.SelectErr = errors.New("bad pattern")
+	s := State{Step: StepVerification, Verify: v, OutputDir: `C:\out`}
+
+	if !s.canContinue() {
+		t.Error("the screen refuses to continue on findings that are displayed, not fatal")
+	}
+	contains(t, Render(s, 100, 60), "[enter] continue")
+}
