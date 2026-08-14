@@ -135,15 +135,15 @@ SELECT
     -- grown to. Reading master_files alone reported eight 8 MB files on an
     -- instance whose used_mb was 11.1 — a file cannot hold more than its size,
     -- and that impossibility is what gave the defect away.
-    CAST(COALESCE(df.size, mf.size) * 8 / 1024.0 AS DECIMAL(14,1)) AS size_mb,
-    CAST(mf.size * 8 / 1024.0 AS DECIMAL(14,1))             AS configured_size_mb,
-    CAST(FILEPROPERTY(mf.name,'SpaceUsed') * 8 / 1024.0 AS DECIMAL(14,1)) AS used_mb,
+    CAST(CAST(COALESCE(df.size, mf.size) AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)) AS size_mb,
+    CAST(CAST(mf.size AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)) AS configured_size_mb,
+    CAST(CAST(FILEPROPERTY(mf.name,'SpaceUsed') AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)) AS used_mb,
     CASE WHEN mf.max_size = -1 THEN 'unlimited'
          WHEN mf.max_size = 268435456 THEN 'log_2tb'
-         ELSE CAST(CAST(mf.max_size * 8 / 1024.0 AS DECIMAL(14,1)) AS varchar(20)) END AS max_mb,
+         ELSE CAST(CAST(CAST(mf.max_size AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)) AS varchar(20)) END AS max_mb,
     CAST(mf.is_percent_growth AS BIT)                       AS percent_growth,
     CASE WHEN mf.is_percent_growth = 1 THEN CONCAT(mf.growth, ' %')
-         ELSE CONCAT(CAST(mf.growth * 8 / 1024.0 AS DECIMAL(14,1)), ' MB') END AS growth,
+         ELSE CONCAT(CAST(CAST(mf.growth AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)), ' MB') END AS growth,
     vs.volume_mount_point                                   AS volume,
     CAST(vs.total_bytes     / 1073741824.0 AS DECIMAL(14,1)) AS volume_total_gb,
     CAST(vs.available_bytes / 1073741824.0 AS DECIMAL(14,1)) AS volume_free_gb

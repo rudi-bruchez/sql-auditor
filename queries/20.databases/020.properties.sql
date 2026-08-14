@@ -82,14 +82,14 @@ SELECT df.name,
        df.type_desc                              AS type,
        df.physical_name,
        df.state_desc                             AS state,
-       CAST(df.size * 8 / 1024.0 AS DECIMAL(14,1))                           AS size_mb,
-       CAST(FILEPROPERTY(df.name,'SpaceUsed') * 8 / 1024.0 AS DECIMAL(14,1)) AS used_mb,
+       CAST(CAST(df.size AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1))           AS size_mb,
+       CAST(CAST(FILEPROPERTY(df.name,'SpaceUsed') AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)) AS used_mb,
        CASE WHEN df.max_size = -1 THEN 'unlimited'
             WHEN df.max_size = 268435456 THEN 'log_2tb'
-            ELSE CAST(CAST(df.max_size * 8 / 1024.0 AS DECIMAL(14,1)) AS varchar(20)) END AS max_mb,
+            ELSE CAST(CAST(CAST(df.max_size AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)) AS varchar(20)) END AS max_mb,
        CAST(df.is_percent_growth AS BIT)         AS percent_growth,
        CASE WHEN df.is_percent_growth = 1 THEN CONCAT(df.growth, ' %')
-            ELSE CONCAT(CAST(df.growth * 8 / 1024.0 AS DECIMAL(14,1)), ' MB') END AS growth
+            ELSE CONCAT(CAST(CAST(df.growth AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)), ' MB') END AS growth
 FROM sys.database_files AS df
 ORDER BY df.type, df.file_id
 OPTION (RECOMPILE, MAXDOP 1);

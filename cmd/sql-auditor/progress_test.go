@@ -278,3 +278,34 @@ func TestTheLineIsCutOnRunesAndNotOnBytes(t *testing.T) {
 		}
 	}
 }
+
+// collect writes to Progress before the plan exists: prepareRunFolder warns
+// about replacing a same-day run folder well before planUnits calls Planned.
+// That write goes through progressWriter, which repaints — and with no start
+// time the elapsed column showed the whole range of a duration, "2562047h47m",
+// printed under the warning the operator was reading.
+func TestNothingIsPaintedBeforeTheClockHasStarted(t *testing.T) {
+	var b strings.Builder
+	o := newProgress(&b, true, func() int { return 80 }, fixedClock())
+
+	fmt.Fprintln(o.Writer(), "replacing the run folder of 2026-08-14")
+	o.Tick()
+
+	out := b.String()
+	if !strings.Contains(out, "replacing the run folder") {
+		t.Fatalf("the warning did not get through: %q", out)
+	}
+	if strings.Contains(out, "2562047h") {
+		t.Errorf("a gauge was painted with no start time:\n%q", out)
+	}
+	// Nothing at all should follow the warning: there is no run to report on.
+	if after := out[strings.Index(out, "2026-08-14")+len("2026-08-14"):]; strings.TrimSpace(after) != "" {
+		t.Errorf("something was painted under the warning: %q", after)
+	}
+
+	// And once the run starts, the gauge appears as usual.
+	o.Planned(4)
+	if !strings.Contains(b.String(), "0/4") {
+		t.Errorf("the gauge never appeared after Planned:\n%q", b.String())
+	}
+}

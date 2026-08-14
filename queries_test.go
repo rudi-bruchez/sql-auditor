@@ -179,33 +179,52 @@ func TestEmbeddedEnvTemplateIsAcceptedByTheResolver(t *testing.T) {
 	}
 }
 
-// sys.master_files.size and sys.database_files.size are int page counts, and
-// SUM over int returns int. Multiplying that by 8 to reach kilobytes overflows
-// at 281 million pages — 2.1 TB — and the failure is not a NULL column but a
-// dead statement: "Arithmetic overflow error converting expression to data type
-// int" takes the whole SELECT with it. When that SELECT is the one projecting
-// compatibility level, page verify, RCSI, collation and owner, one oversized
-// database empties those facts for every database on the instance.
+// Page counts are int in sys.master_files, sys.database_files and
+// FILEPROPERTY(...,'SpaceUsed'), and multiplying an int by 8 to reach kilobytes
+// overflows at 268 435 456 pages — 2 TiB. The failure is not a NULL column but
+// a dead statement: "Arithmetic overflow error converting expression to data
+// type int" takes the whole SELECT with it, and with it every other fact that
+// SELECT was projecting.
 //
-// This was found on a client run, not by a test, because no test in this
-// repository has a 2.1 TB database to collect. What a test can do is refuse the
-// shape: a SUM taken directly over a column named "size" is the bug, and
-// SUM(CAST(size AS BIGINT)) is the fix.
-func TestNoSumOverAnIntPageCountWithoutWidening(t *testing.T) {
+// This was found on a client run at 2.1 TB, fixed for the aggregated form, and
+// then found AGAIN by a reviewer twenty-five lines below the fix, in the same
+// file: the per-file projection has the same shape and was not touched. The
+// first version of this test looked for SUM(size) and could not see df.size * 8.
+//
+// So the rule is now about the multiplication rather than about the aggregate:
+// wherever a page count is multiplied by 8, the widening must already have
+// happened. Bigint sources — the *_page_count columns of dm_db_file_space_usage
+// and dm_db_partition_stats — do not name size, growth or FILEPROPERTY, so they
+// are not caught, and multiplying by 8.0 is float arithmetic and cannot
+// overflow an int.
+func TestNoIntPageCountIsMultipliedBeforeItIsWidened(t *testing.T) {
 	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	bare := regexp.MustCompile(`(?i)SUM\(\s*(\w+\.)?size\s*\)`)
+	// "* 8" not followed by a digit or a decimal point: "* 8.0" is float and
+	// safe by construction.
+	mul := regexp.MustCompile(`\*\s*8([^0-9.]|$)`)
+	intPages := regexp.MustCompile(`(?i)size|growth|FILEPROPERTY`)
 	for _, s := range scripts {
 		body, err := fs.ReadFile(sqlauditor.Queries, "queries/"+s.Path)
 		if err != nil {
 			t.Fatalf("%s: %v", s.Path, err)
 		}
-		for _, m := range bare.FindAllString(string(body), -1) {
-			t.Errorf("%s: %s sums an int page count directly. SUM over int returns "+
-				"int and overflows past 2.1 TB, killing the whole statement. Write "+
-				"SUM(CAST(size AS BIGINT)) instead.", s.Path, m)
+		for i, line := range strings.Split(string(body), "\n") {
+			// Comments explain this very rule and would flag themselves.
+			if c := strings.Index(line, "--"); c >= 0 {
+				line = line[:c]
+			}
+			if !mul.MatchString(line) || !intPages.MatchString(line) {
+				continue
+			}
+			if strings.Contains(strings.ToUpper(line), "BIGINT") {
+				continue
+			}
+			t.Errorf("%s:%d multiplies an int page count by 8 before widening it, "+
+				"which kills the whole statement past 2 TiB. Wrap the operand in "+
+				"CAST(... AS BIGINT):\n  %s", s.Path, i+1, strings.TrimSpace(line))
 		}
 	}
 }

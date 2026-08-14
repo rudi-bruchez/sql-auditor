@@ -120,7 +120,13 @@ func gauge(done, planned int, since time.Duration, label string, width int) stri
 //
 // The caller holds the mutex.
 func (p *progress) paint() {
-	if !p.tty {
+	// The clock has to have been started. Planned is what starts it, and it is
+	// not the first thing that reaches this type: prepareRunFolder writes its
+	// replacement warning to Progress before the plan exists, and that write
+	// goes through progressWriter, which repaints. With a zero start the
+	// elapsed column read "2562047h47m" — the whole range of a duration —
+	// printed under the warning the operator was in the middle of reading.
+	if !p.tty || p.start.IsZero() {
 		return
 	}
 	line := gauge(p.done, p.planned, p.now().Sub(p.start), p.label, p.width())
@@ -147,9 +153,7 @@ func (p *progress) clear() {
 func (p *progress) Tick() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.start.IsZero() {
-		p.paint()
-	}
+	p.paint()
 }
 
 // StartTicking runs the repaint on its own goroutine and returns the stop. It
