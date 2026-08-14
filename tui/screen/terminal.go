@@ -168,9 +168,14 @@ func (t *Terminal) ReadKey() (Key, error) {
 		if err == nil {
 			continue
 		}
-		// Close() closing the descriptor under us is the designed way to
-		// unblock this call once the wizard has quit; the caller treats any
-		// error as "stop reading" and needs no second shutdown mechanism.
+		// Any error means "stop reading". Nothing unblocks this call from the
+		// outside: Close emits its sequences, restores the console and calls
+		// term.Restore, and it does NOT close t.in — so once the wizard has
+		// quit, the goroutine calling this method stays parked inside Read
+		// until the process exits and takes it with it. That is acceptable
+		// precisely because the process exits immediately afterwards, and a
+		// second shutdown mechanism would not help: the goroutine is inside a
+		// syscall, not waiting on a channel.
 		return Key{}, err
 	}
 }

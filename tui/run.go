@@ -154,12 +154,17 @@ func (r *runner) guard(where string) {
 	}
 }
 
-// readKeys is the keyboard producer. It stops when ReadKey fails, which is what
-// Close on the terminal makes happen: after the wizard has quit, this goroutine
-// is still blocked inside Read, and closing the descriptor under it is the
-// designed way to release it. There is deliberately no second shutdown
-// mechanism — a select here would not help, since the goroutine is inside a
-// syscall and not on a channel.
+// readKeys is the keyboard producer. It stops when ReadKey fails — and after
+// the wizard has quit, nothing makes that happen: Close restores the terminal
+// but does not close t.in, so this goroutine stays parked inside Read until the
+// process exits and takes it with it.
+//
+// That is deliberate rather than overlooked. tui.Run returns to main, which
+// exits within microseconds, so the goroutine outlives the wizard by nothing
+// worth measuring; and a second shutdown mechanism would not release it anyway,
+// since it is inside a syscall and not waiting on a channel. What matters is
+// that it cannot block anyone: its only send goes through r.send, which selects
+// on done.
 func (r *runner) readKeys(t *screen.Terminal) {
 	defer r.guard("the keyboard reader")
 	for {
