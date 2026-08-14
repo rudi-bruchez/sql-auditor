@@ -495,6 +495,8 @@ func (r *runner) verify(ctx context.Context, s State) {
 func (r *runner) collect(ctx context.Context, s State) {
 	o := applyState(s, r.opts)
 	o.Observer = observer{ch: r.events}
+	// The wizard is painting the terminal, so Run must put nothing on stdout.
+	o.OwnsScreen = true
 	// The archive's name is derived before the run rather than read from it,
 	// because Run reports it on stdout only when there is no Observer — under
 	// the wizard that write is suppressed, since it would land in the middle of

@@ -104,6 +104,15 @@ binary, which is the point: the key set is closed, an unrecognised key stops the
 run, and the person who received the executable on its own has no other copy of
 the list.
 
+`collect` shows its progress on **stderr**: on a terminal, one line rewritten in
+place with the count, the percentage, the elapsed time and the collector
+currently running, refreshed every second so that a slow collector can be told
+apart from a hung one. Redirected, the same run writes one plain line per
+finished unit instead, so `2> run.log` stays a file a person can read. A failed
+unit leaves a permanent line either way. Nothing of this touches **stdout**,
+which still carries only the summary and the archive path — `sql-auditor collect
+| tail -1` reads the same thing it always did.
+
 `check` and `collect` are the non-interactive path, and they are that in their
 own right rather than as a leftover from before the wizard. They are what a
 scheduled task, a remote shell, a CI job and a runbook use; they are what makes

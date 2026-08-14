@@ -430,6 +430,19 @@ func mode(isTTY func(*os.File) bool, stdin, stdout *os.File, env func(string) st
 // wrong answer.
 func isTerminal(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
 
+// stderrWidth is where the gauge is cut. It is read afresh on every repaint
+// rather than once, which is how a resized window is handled without a SIGWINCH
+// handler and without the Windows equivalent that does not exist. 80 is the
+// answer when the size cannot be had — including the 0x0 an RDP window reports
+// while it is being dragged, which would otherwise cut the line to nothing.
+func stderrWidth() int {
+	w, _, err := term.GetSize(int(os.Stderr.Fd()))
+	if err != nil || w <= 0 {
+		return 80
+	}
+	return w
+}
+
 func run() int {
 	switch mode(isTerminal, os.Stdin, os.Stdout, os.Getenv, os.Args[1:]) {
 	case ModeUsage:
@@ -543,7 +556,14 @@ func run() int {
 	ctx := context.Background()
 	switch cmd {
 	case "collect":
+		// The gauge goes on stderr and OwnsScreen stays false, so Run still
+		// puts its summary and the archive path on stdout where a script reads
+		// them. `check` gets none of this: it is a listing, not a wait.
+		p := newProgress(os.Stderr, isTerminal(os.Stderr), stderrWidth, time.Now)
+		stop := p.StartTicking(time.Second)
+		opts.Observer = p
 		code, err = collect.Run(ctx, opts)
+		stop()
 	case "check":
 		code, err = collect.Check(ctx, opts)
 	}
