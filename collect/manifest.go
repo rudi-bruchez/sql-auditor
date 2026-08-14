@@ -383,7 +383,7 @@ func (m *Manifest) Human() string {
 	// approve a transfer wants to know, and the only way to tell at a glance
 	// that the archive is the size a metadata collection should be.
 	files, bytes := m.contents()
-	fmt.Fprintf(&b, "Contents     : %d data files, %s\n", files, humanBytes(bytes))
+	fmt.Fprintf(&b, "Contents     : %d data files, %s\n", files, HumanBytes(bytes))
 
 	m.writeDataNature(&b)
 	m.writeCoverage(&b)
@@ -746,13 +746,22 @@ func (m *Manifest) contents() (files int, bytes int64) {
 	return files, bytes
 }
 
-func humanBytes(n int64) string {
+// HumanBytes spells a size the way the manifest and the wizard's screens both
+// show it. Exported for the wizard: the archive and the screen must not report
+// two different sizes for the same file, and a second copy of this body is how
+// that happens.
+func HumanBytes(n int64) string {
 	const unit = 1024
 	if n < unit {
 		return fmt.Sprintf("%d bytes", n)
 	}
+	// The exponent stops at the last letter there is. A size read from an
+	// unbounded os.Stat would otherwise index "KMGT"[4] and panic — in the
+	// renderer, which is documented as total on its inputs because a panic
+	// there leaves the terminal in raw mode with no wizard left to restore it.
+	// A petabyte archive then reads as "1024.0 TB", which is true.
 	div, exp := int64(unit), 0
-	for v := n / unit; v >= unit; v /= unit {
+	for v := n / unit; v >= unit && exp < len("KMGT")-1; v /= unit {
 		div *= unit
 		exp++
 	}

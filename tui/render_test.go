@@ -480,27 +480,3 @@ func TestShortDurationMatchesTheMockups(t *testing.T) {
 		}
 	}
 }
-
-// Render is total on its inputs, and that includes the size of the archive.
-// ZipBytes comes from an unbounded os.Stat, and indexing "KMGT" past its last
-// letter panics — in the renderer, which would leave the terminal in raw mode
-// with no wizard left to restore it.
-func TestHumanBytesStopsAtTheLastUnitItCanName(t *testing.T) {
-	for _, c := range []struct {
-		n    int64
-		want string
-	}{
-		{512, "512 bytes"},
-		{1536, "1.5 KB"},
-		{4_404_019, "4.2 MB"},
-		{1 << 40, "1.0 TB"},
-		// A petabyte, which has no letter in the list: reported in terabytes
-		// rather than crashing the frame.
-		{1 << 50, "1024.0 TB"},
-		{1 << 60, "1048576.0 TB"},
-	} {
-		if got := humanBytes(c.n); got != c.want {
-			t.Errorf("humanBytes(%d) = %q, want %q", c.n, got, c.want)
-		}
-	}
-}

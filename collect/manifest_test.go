@@ -152,9 +152,18 @@ func TestHumanBytesScales(t *testing.T) {
 		{1536, "1.5 KB"},
 		{5 * 1024 * 1024, "5.0 MB"},
 		{3 * 1024 * 1024 * 1024, "3.0 GB"},
+		{1 << 40, "1.0 TB"},
+		// A petabyte, which has no letter in the list. The size of an archive
+		// comes from an unbounded os.Stat and the wizard spells it with this
+		// function, so indexing "KMGT" past its last letter would panic inside
+		// a renderer that is documented as total on its inputs — leaving the
+		// terminal in raw mode with no wizard left to restore it. Reported in
+		// terabytes instead, which is true.
+		{1 << 50, "1024.0 TB"},
+		{1 << 60, "1048576.0 TB"},
 	} {
-		if got := humanBytes(tc.n); got != tc.want {
-			t.Errorf("humanBytes(%d) = %q, want %q", tc.n, got, tc.want)
+		if got := HumanBytes(tc.n); got != tc.want {
+			t.Errorf("HumanBytes(%d) = %q, want %q", tc.n, got, tc.want)
 		}
 	}
 }

@@ -630,7 +630,7 @@ func renderCollecting(s State, width int) []string {
 	// propagating a counter out of six writers — the diffuse change to collect
 	// this whole batch refused to make. Bytes are also the more useful number:
 	// they announce the weight of the archive to send.
-	out = append(out, pad+status("written")+humanBytes(s.Bytes)+" so far", "")
+	out = append(out, pad+status("written")+collect.HumanBytes(s.Bytes)+" so far", "")
 	if s.Stopping {
 		// Ctrl-C has been pressed and Run has not come back yet. Saying the
 		// collection is over before its manifest and its archive are written
@@ -680,7 +680,7 @@ func renderDone(s State, width int) []string {
 		// second read of the whole archive and either a second file to send or
 		// a string that dies with the terminal.
 		out = append(out, fieldPad+"  "+s.ZipPath)
-		out = append(out, "", fieldPad+"  "+humanBytes(s.ZipBytes))
+		out = append(out, "", fieldPad+"  "+collect.HumanBytes(s.ZipBytes))
 	}
 	out = append(out, "", pad+summaryLine(s))
 	// The same summary the collection screen carries, kept rather than dropped
@@ -745,27 +745,4 @@ func shortDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm%02ds", m, sec)
 	}
 	return fmt.Sprintf("%ds", sec)
-}
-
-// humanBytes is the same spelling collect's manifest uses, kept here because
-// the collect one is unexported and this batch does not widen collect's API for
-// a format string. If the two ever disagree the archive and the screen would
-// report different sizes for the same file, so the shape is deliberately
-// identical.
-func humanBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d bytes", n)
-	}
-	// The exponent stops at the last letter there is. ZipBytes comes from an
-	// unbounded os.Stat, and "KMGT"[4] panics — in the renderer, which is
-	// documented as total on its inputs because a panic there leaves the
-	// terminal in raw mode with no wizard left to restore it. A petabyte
-	// archive then reads as "1024.0 TB", which is true.
-	div, exp := int64(unit), 0
-	for v := n / unit; v >= unit && exp < len("KMGT")-1; v /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
 }
