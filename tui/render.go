@@ -378,6 +378,18 @@ func blockingBlock(s State, width int) []string {
 	}
 	out := []string{row(pad+"Blocked process capture", lines[0], width)}
 	for _, l := range lines[1:] {
+		// BlockingHowTo is a 107-character URL and goes out raw: no fold, and
+		// no indent either. Wrap never breaks a word, so folding it produced a
+		// line of 111 columns — the URL plus four spaces of indent — which
+		// claims to fit in eighty, is folded again by the terminal, and takes
+		// every line of the following frame with it. Unindented it is 107, four
+		// columns closer to fitting and honest about not doing so, and it is
+		// alone on its line for the same reason the archive path is on the
+		// final screen: that is what a DBA drags the mouse across.
+		if l == collect.BlockingHowTo {
+			out = append(out, l)
+			continue
+		}
 		out = append(out, screen.Wrap(l, width, fieldPad)...)
 	}
 	// The wait figures appear ONLY when something has actually waited on a

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rudi-bruchez/sql-auditor/collect"
 )
@@ -270,6 +271,43 @@ func TestBlockedProcessCaptureComesFromCollect(t *testing.T) {
 
 	v.Blocking.LockWaitMS, v.Blocking.TotalWaitMS, v.Blocking.LockWaitTasks = 7_200_000, 72_000_000, 400
 	contains(t, Render(State{Step: StepVerification, Verify: v}, testWidth, 0), "Lock waits:")
+}
+
+// BlockingHowTo is 107 characters and goes out raw: one line, no indent. Wrap
+// never breaks a word, so folding it produced a 111-column line — the URL plus
+// four spaces — which claimed to fit in eighty, was folded again by the
+// terminal, and took every line of the following frame with it. The indent is
+// the part this test pins: it is the only difference an over-long unbreakable
+// token can have, and four columns of it are four columns of pretence.
+func TestTheBlockingURLIsNeverFoldedAndOwnsItsLine(t *testing.T) {
+	v := probedVerify()
+	v.Blocking = collect.BlockingReadiness{Probed: true}
+	lines := Render(State{Step: StepVerification, Verify: v}, testWidth, 0)
+
+	var found int
+	for _, l := range lines {
+		if !strings.Contains(l, collect.BlockingHowTo) {
+			continue
+		}
+		found++
+		if l != collect.BlockingHowTo {
+			t.Errorf("the URL line is %q; it must carry the URL and nothing else, indent included", l)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("the URL appears on %d lines, want exactly 1 (it must not be folded)", found)
+	}
+	// Every OTHER line of the frame still respects the width it was given, so
+	// this is an exception made for one unbreakable token and not a licence to
+	// overflow.
+	for _, l := range lines {
+		if strings.Contains(l, collect.BlockingHowTo) {
+			continue
+		}
+		if utf8.RuneCountInString(l) > testWidth {
+			t.Errorf("line %q is %d columns wide, over %d", l, utf8.RuneCountInString(l), testWidth)
+		}
+	}
 }
 
 func TestNoFrameCarriesAnEscapeSequence(t *testing.T) {
