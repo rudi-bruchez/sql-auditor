@@ -160,20 +160,8 @@ func BlockingNotice(r BlockingReadiness) []string {
 	}
 
 	out := []string{head, "Nothing on this instance can currently produce a blocked process report:"}
-	switch {
-	case r.SessionsCapturing == 0:
-		out = append(out, "  - no Extended Events session subscribes to blocked_process_report.")
-	case r.SessionsRunning == 0:
-		out = append(out, fmt.Sprintf("  - %d session(s) subscribe to blocked_process_report, but none is running.", r.SessionsCapturing))
-	case r.WritesToFile == 0:
-		// Worth its own line: this one looks fine in SSMS. The events are being
-		// captured and are visible live; they are simply not on disk, so no
-		// collection can bring them back.
-		out = append(out, "  - the capturing session writes to a ring buffer only, with no event_file target, "+
-			"so its events cannot be exported (they are visible live in SSMS and nowhere else).")
-	}
-	if r.ThresholdSeconds == 0 {
-		out = append(out, "  - 'blocked process threshold (s)' is 0, the default, so the event never fires at all.")
+	for _, f := range blockingFailures(r) {
+		out = append(out, "  - "+f+".")
 	}
 	out = append(out,
 		"To capture them, a DBA can create the session and set the threshold with this script:",
@@ -217,7 +205,22 @@ func BlockingCaptureLines(r BlockingReadiness) []string {
 		}
 	}
 
-	out := []string{"not ready"}
+	out := append([]string{"not ready"}, blockingFailures(r)...)
+	return append(out, "to set the capture up:", BlockingHowTo)
+}
+
+// blockingFailures names every precondition of the capture that is missing,
+// one sentence per line, with NO trailing punctuation and no bullet: the two
+// callers dress them differently, and only the dressing differs.
+//
+// It exists because BlockingNotice and BlockingCaptureLines carried the same
+// three-branch switch, the same four sentences to a full stop, and the same
+// ThresholdSeconds test in two places. The spec's one demand about this pair is
+// that the two formulations "must not drift apart", and sitting next to each
+// other in the file is not a mechanism — a correction applied to one copy would
+// not reach the other. Now there is one copy.
+func blockingFailures(r BlockingReadiness) []string {
+	var out []string
 	// The three session failures are mutually exclusive and get three distinct
 	// sentences, because they cost three different actions: create a session,
 	// start it, or give it an event_file target.
@@ -239,5 +242,5 @@ func BlockingCaptureLines(r BlockingReadiness) []string {
 	if r.ThresholdSeconds == 0 {
 		out = append(out, "'blocked process threshold (s)' is 0, the default, so the event never fires at all")
 	}
-	return append(out, "to set the capture up:", BlockingHowTo)
+	return out
 }
