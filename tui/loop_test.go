@@ -38,8 +38,18 @@ func feed(es ...event) <-chan event {
 	return ch
 }
 
-func key(k screen.NamedKey) keyEvent { return keyEvent{key: screen.Key{Named: k}} }
-func rune_(r rune) keyEvent          { return keyEvent{key: screen.Key{Rune: r}} }
+func key(k screen.NamedKey) pressEvent { return pressEvent{key: screen.Key{Named: k}} }
+func rune_(r rune) pressEvent          { return pressEvent{key: screen.Key{Rune: r}} }
+
+// drive runs the loop and reports the state it ended on, which is what these
+// tests assert about. Production has no use for it — run.go only wants the exit
+// code — so the loop does not return one, and the hook it does take is enough
+// to observe every state it went through.
+func drive(events <-chan event, draw func([]string), size func() (int, int), s State) (State, int) {
+	last := s
+	code := loop(events, draw, size, s, func(_, next State) { last = next })
+	return last, code
+}
 
 // runFinished stands in for the event run.go sends when collect.Run returns.
 // It lives in the test because task 21 owns the real one; what the loop has to
@@ -60,7 +70,7 @@ func TestLoopFoldsASequenceOfEventsIntoTheExpectedState(t *testing.T) {
 	var f frames
 	// A whole collection, in the order collect produces it: the plan, then a
 	// unit, then a tick, then the archive.
-	end, code := loop(feed(
+	end, code := drive(feed(
 		plannedEvent{units: 3, databases: 2},
 		unitStartedEvent{script: "queries/01/a.sql", database: "SALES"},
 		unitDoneEvent{script: "queries/01/a.sql", database: "SALES", bytes: 4096, took: time.Second},
@@ -90,7 +100,7 @@ func TestLoopPaintsBeforeTheFirstEventArrives(t *testing.T) {
 	var f frames
 	// The realistic case: the wizard opens on screen 1 and waits on a keyboard
 	// that may not be touched for a minute.
-	loop(feed(), f.draw, fixedSize(80, 24), State{Step: StepConnection, Server: "SQL01"})
+	drive(feed(), f.draw, fixedSize(80, 24), State{Step: StepConnection, Server: "SQL01"})
 	if f.n != 1 {
 		t.Fatalf("the loop painted %d frames with no events, want 1", f.n)
 	}
@@ -104,7 +114,7 @@ func TestLoopStopsTheCollectionOnCtrlCWithoutEndingTheStep(t *testing.T) {
 	// Ctrl-C arrives as the byte 0x03 in raw mode, decoded to KeyCtrlC — never
 	// as a signal. The run keeps going until it has written its manifest and
 	// its archive, so the step must not change.
-	end, code := loop(feed(key(screen.KeyCtrlC)), f.draw, fixedSize(80, 24),
+	end, code := drive(feed(key(screen.KeyCtrlC)), f.draw, fixedSize(80, 24),
 		State{Step: StepCollecting, Units: 10, DoneUnits: 4})
 	if !end.Stopping {
 		t.Error("Ctrl-C during the collection did not set Stopping")
@@ -122,7 +132,7 @@ func TestLoopStopsTheCollectionOnCtrlCWithoutEndingTheStep(t *testing.T) {
 
 func TestLoopExitsWithZeroWhenTheOperatorQuits(t *testing.T) {
 	var f frames
-	end, code := loop(feed(rune_('q')), f.draw, fixedSize(80, 24),
+	end, code := drive(feed(rune_('q')), f.draw, fixedSize(80, 24),
 		State{Step: StepOptions, Verify: collect.VerifyResult{Probed: true, Collectors: 3}})
 	if end.Step != StepQuit {
 		t.Errorf("Step = %v, want StepQuit", end.Step)
@@ -141,7 +151,7 @@ func TestLoopStopsAtTheFirstQuitAndIgnoresWhatFollows(t *testing.T) {
 	var f frames
 	// The keyboard goroutine stays blocked on Read after the quit and may
 	// still push one keystroke; nothing after StepQuit may reach the state.
-	end, _ := loop(feed(rune_('q'), plannedEvent{units: 99}), f.draw, fixedSize(80, 24),
+	end, _ := drive(feed(rune_('q'), plannedEvent{units: 99}), f.draw, fixedSize(80, 24),
 		State{Step: StepDone})
 	if end.Units != 0 {
 		t.Errorf("Units = %d: an event after the quit was applied", end.Units)
@@ -152,7 +162,7 @@ func TestLoopReturnsTheExitCodeTheRunReported(t *testing.T) {
 	var f frames
 	// The run comes back with 2 while the operator is still reading the final
 	// screen. The code has to survive until [enter] ends the process.
-	end, code := loop(feed(
+	end, code := drive(feed(
 		runFinished{code: 2, zip: `C:\audit\SRV-2026-08-13.zip`},
 		key(screen.KeyEnter),
 	), f.draw, fixedSize(80, 24), State{Step: StepCollecting})
@@ -175,7 +185,7 @@ func TestLoopTurnsAPanicIntoAnErrorStateInsteadOfPanicking(t *testing.T) {
 	// coming back. The screen therefore stays on step 4, and [enter] is not
 	// taken — a wizard that returned here would let main call os.Exit in the
 	// middle of Zip and leave a truncated archive under an ordinary name.
-	end, code := loop(feed(
+	end, code := drive(feed(
 		panicEvent{value: "index out of range [3] with length 3", where: "the collection"},
 		key(screen.KeyEnter),
 	), f.draw, fixedSize(80, 24), State{Step: StepCollecting, Units: 10, DoneUnits: 3})
@@ -198,7 +208,7 @@ func TestLoopTurnsAPanicIntoAnErrorStateInsteadOfPanicking(t *testing.T) {
 // finished: collect.Run coming back.
 func TestLoopEndsAPanickedCollectionOnlyWhenTheRunHasReturned(t *testing.T) {
 	var f frames
-	end, code := loop(feed(
+	end, code := drive(feed(
 		panicEvent{value: "nil pointer dereference", where: "the activity indicator"},
 		collectDoneEvent{code: 2, zipPath: `C:\out\a.zip`},
 		key(screen.KeyEnter),
@@ -219,7 +229,7 @@ func TestLoopEndsAPanickedCollectionOnlyWhenTheRunHasReturned(t *testing.T) {
 // goes straight to the screen that reports it.
 func TestLoopAPanicOnTheFinalScreenStaysOnTheFinalScreen(t *testing.T) {
 	var f frames
-	end, _ := loop(feed(
+	end, _ := drive(feed(
 		panicEvent{value: "slice bounds out of range", where: "the keyboard reader"},
 		key(screen.KeyEnter),
 	), f.draw, fixedSize(80, 24), State{Step: StepDone})
@@ -230,7 +240,7 @@ func TestLoopAPanicOnTheFinalScreenStaysOnTheFinalScreen(t *testing.T) {
 
 func TestLoopAPanicBeforeTheCollectionReturnsToTheFirstScreen(t *testing.T) {
 	var f frames
-	end, _ := loop(feed(panicEvent{value: "nil map", where: "the probe"}),
+	end, _ := drive(feed(panicEvent{value: "nil map", where: "the probe"}),
 		f.draw, fixedSize(80, 24), State{Step: StepVerifying, Field: fieldPassword})
 	if end.Step != StepConnection || end.Field != fieldServer {
 		t.Errorf("Step = %v, Field = %d: want screen 1 with the cursor in the server field", end.Step, end.Field)
@@ -260,7 +270,7 @@ func TestLoopSurvivesATerminalThatReportsNoSize(t *testing.T) {
 				Probed: true, Collectors: 47, Checks: checks,
 			},
 		}
-		end, code := loop(feed(tickEvent{elapsed: time.Second}, key(screen.KeyTab)),
+		end, code := drive(feed(tickEvent{elapsed: time.Second}, key(screen.KeyTab)),
 			f.draw, fixedSize(0, 0), s)
 		if end.Step == StepQuit && code != 0 {
 			t.Errorf("step %v exited with %d", step, code)
@@ -310,7 +320,7 @@ func TestLoopSerialisesThreeConcurrentProducers(t *testing.T) {
 		close(ch)
 	}()
 
-	end, code := loop(ch, f.draw, fixedSize(80, 24), State{Step: StepCollecting})
+	end, code := drive(ch, f.draw, fixedSize(80, 24), State{Step: StepCollecting})
 	if end.DoneUnits != units || end.Units != units {
 		t.Errorf("DoneUnits = %d, Units = %d, want %d for both", end.DoneUnits, end.Units, units)
 	}

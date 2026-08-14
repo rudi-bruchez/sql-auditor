@@ -74,7 +74,7 @@ func Run(o collect.Options, in, out *os.File) int {
 	r.watchSignals()
 
 	s := initialState(o, t.ASCIIOnly())
-	final, code := loopWith(r.events, func(lines []string) { _ = t.Draw(lines) }, t.Size, s, r.stateChanged)
+	code := loop(r.events, func(lines []string) { _ = t.Draw(lines) }, t.Size, s, r.stateChanged)
 
 	// From here on nothing may block on a send. done releases every producer
 	// that goes through r.send; the drain releases the observer, whose sends go
@@ -89,7 +89,6 @@ func Run(o collect.Options, in, out *os.File) int {
 		}
 	}()
 
-	_ = final
 	return code
 }
 
@@ -331,7 +330,7 @@ func (r *runner) watchSignals() {
 			case <-r.done:
 				return
 			case <-sig:
-				r.send(keyEvent{key: screen.Key{Named: screen.KeyCtrlC}})
+				r.send(pressEvent{key: screen.Key{Named: screen.KeyCtrlC}, opts: r.opts})
 			}
 		}
 	}()
