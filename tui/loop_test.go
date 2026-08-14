@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -326,5 +327,63 @@ func TestLoopSerialisesThreeConcurrentProducers(t *testing.T) {
 	}
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
+	}
+}
+
+// A panic INSIDE collect.Run is the case the test above cannot reach: it hands
+// the loop a collectDoneEvent that, in that scenario, no producer ever sends.
+// The goroutine dies at the panic, so r.send(e) at the end of collect() is
+// never reached, the screen keeps waiting on StepCollecting, and Ctrl-C only
+// re-sets Stopping. The exit was kill -9, with the terminal left in raw mode.
+//
+// So this drives what the loop actually receives when nothing but the panic
+// arrives, and asserts that it does not sit there for ever.
+func TestLoopDoesNotWaitForeverOnAPanicThatEndedTheRun(t *testing.T) {
+	var f frames
+	end, code := drive(feed(
+		panicEvent{value: "index out of range [3]", where: "the collection"},
+		collectDoneEvent{code: 2, err: errors.New("internal error: index out of range [3]")},
+		key(screen.KeyEnter),
+	), f.draw, fixedSize(80, 24), State{Step: StepCollecting, Units: 10, DoneUnits: 3})
+
+	if end.Step != StepQuit {
+		t.Errorf("Step = %v, want the wizard to have been able to quit", end.Step)
+	}
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+}
+
+// The exit code of a run that crashed and was then cancelled. The panic reports
+// 2; the hook it triggers cancels the context; collect.Run comes back on a dead
+// context and its event reports 0, because a cancellation on its own is not a
+// failure. Taking the later of the two turned every crash into a success for
+// whatever script wrapped the wizard — which is exactly what
+// panicEvent.exitStatus says must not happen.
+func TestLoopKeepsTheFirstFailingExitCode(t *testing.T) {
+	var f frames
+	_, code := drive(feed(
+		panicEvent{value: "nil pointer dereference", where: "the activity indicator"},
+		collectDoneEvent{code: 0, ctxCancelled: true},
+		key(screen.KeyEnter),
+	), f.draw, fixedSize(80, 24), State{Step: StepCollecting, Units: 10, DoneUnits: 3})
+
+	if code != 2 {
+		t.Errorf("exit code = %d, want the panic's 2 to survive the cancellation's 0", code)
+	}
+}
+
+// And a failure reported after a benign event still wins: the guard is "the
+// first code that is not zero", not "the first code at all".
+func TestLoopTakesAFailureReportedAfterASuccess(t *testing.T) {
+	var f frames
+	_, code := drive(feed(
+		collectDoneEvent{code: 0, ctxCancelled: true},
+		panicEvent{value: "boom", where: "the ticker"},
+		key(screen.KeyEnter),
+	), f.draw, fixedSize(80, 24), State{Step: StepDone})
+
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
 	}
 }

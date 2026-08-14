@@ -47,7 +47,15 @@ func loop(events <-chan event, draw func([]string), size func() (int, int), s St
 	paint()
 
 	for e := range events {
-		if c, ok := e.(coded); ok {
+		// The first code that is not zero wins, rather than the last code to
+		// arrive. Both events of a crashed collection carry one: the panic
+		// reports 2, the hook it triggers cancels the context, collect.Run then
+		// comes back on a dead context and its event reports 0 — because a
+		// cancellation on its own is not a failure. Assigning on every coded
+		// event let that 0 erase the 2, so a wizard that crashed exited 0 and
+		// told whatever script wrapped it that everything had gone fine, which
+		// is the outcome panicEvent.exitStatus exists to prevent.
+		if c, ok := e.(coded); ok && code == 0 {
 			code = c.exitStatus()
 		}
 		prev := s

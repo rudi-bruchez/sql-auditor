@@ -153,6 +153,26 @@ func (r *runner) guard(where string) {
 	}
 }
 
+// guardCollection is guard for the one goroutine whose screen waits on a second
+// event before it will let go. StepCollecting ends on collectDoneEvent and on
+// nothing else — deliberately, since a panic elsewhere in the wizard must not
+// cut a run short while collect.Run is still writing its manifest and building
+// its archive. But a panic INSIDE collect.Run kills the goroutine at the panic,
+// so the send at the end of collect() is never reached and that event never
+// comes: the screen stayed on "stopping…" for ever, Ctrl-C only re-set the flag
+// it had already set, and the way out was kill -9 with the terminal in raw mode.
+//
+// So the panic reports itself and then reports the run as over, in that order:
+// the first sets Stopping and counts the error, the second releases the screen.
+// The code is 2 for the same reason panicEvent uses it — the run happened and
+// something in it failed.
+func (r *runner) guardCollection() {
+	if v := recover(); v != nil {
+		r.send(panicEvent{value: v, where: "the collection"})
+		r.send(collectDoneEvent{code: 2, err: fmt.Errorf("internal error in the collection: %v", v)})
+	}
+}
+
 // readKeys is the keyboard producer. It stops when ReadKey fails — and after
 // the wizard has quit, nothing makes that happen: Close restores the terminal
 // but does not close t.in, so this goroutine stays parked inside Read until the
@@ -493,6 +513,11 @@ func (r *runner) verify(ctx context.Context, s State) {
 }
 
 func (r *runner) collect(ctx context.Context, s State) {
+	// Before anything else, and inside this function rather than in startWork:
+	// this recover runs first and consumes the panic, so the generic guard
+	// deferred one frame up finds nothing left to convert. See guardCollection
+	// for why this goroutine needs two events where the others need one.
+	defer r.guardCollection()
 	o := applyState(s, r.opts)
 	o.Observer = observer{ch: r.events}
 	// The wizard is painting the terminal, so Run must put nothing on stdout.
