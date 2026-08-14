@@ -193,9 +193,9 @@ func countCollectors(plan []plannedScript) int {
 
 // blockingWithDeadline is the fourth of the bounded read-only calls this
 // package makes outside runUnit, and it was the one missing a bound. It sits
-// beside the other three for the same reason they sit together: both Check and
-// Verify make these calls, and a deadline present in one copy and absent from
-// the other is invisible until an instance hangs.
+// beside the other three for the same reason they sit together: these are the
+// bounded calls a check reaches through VerifyServer, and a deadline present in
+// one of them and absent from another is invisible until an instance hangs.
 //
 // ProbeBlocking has its own fifteen-second ceiling, deliberately short because
 // this is the least important thing check does. That is not a substitute for

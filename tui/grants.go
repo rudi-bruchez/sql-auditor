@@ -32,20 +32,31 @@ func grantFileName(instance string, t time.Time) string {
 // approves grants, and this key exists to help that review rather than to
 // silently replace its subject. The suffix goes before the extension so the
 // result is still a .sql file to every editor that decides by extension.
-func freeName(dir, name string) (string, error) {
+// It creates the file rather than reporting a name that was free a moment ago.
+// Stat-then-write leaves a window between the two, and O_EXCL closes it by
+// making the test and the claim one operation: the file this returns is one
+// nothing else held. The window was not theoretical for the caller that writes
+// a progress log at the end of every run — two wizards pointed at the same
+// output directory, one second apart, is an ordinary afternoon — and a function
+// whose entire purpose is "never overwriting" must not be the one that does.
+//
+// 0600 for both callers: a grant script names an instance and a login, and a
+// progress log names databases and whatever the server said when it refused
+// something, on a machine the auditor does not own.
+func createFree(dir, name string) (*os.File, error) {
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
 	candidate := filepath.Join(dir, name)
 	for i := 2; ; i++ {
-		_, err := os.Stat(candidate)
+		f, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		switch {
-		case errors.Is(err, os.ErrNotExist):
-			return candidate, nil
-		case err != nil:
-			// Not "taken": a directory that cannot be stat'ed at all is a
+		case err == nil:
+			return f, nil
+		case !errors.Is(err, os.ErrExist):
+			// Not "taken": a directory that cannot be written to at all is a
 			// failure the caller must report rather than route around by
 			// picking another name in the same unusable place.
-			return "", err
+			return nil, err
 		}
 		candidate = filepath.Join(dir, fmt.Sprintf("%s-%d%s", stem, i, ext))
 	}
@@ -70,6 +81,13 @@ func writeGrants(v collect.VerifyResult, outputDir, tool string, now time.Time) 
 	// is connecting with — worse than failing, because it looks like it
 	// worked.
 	if !v.Probed {
+		// Two messages, because ServerErr is not always set: a probe can fail
+		// with nothing folded into it, and %w on a nil error prints the literal
+		// "%!w(<nil>)" — offered to an operator as the reason they cannot have
+		// their grant script.
+		if v.ServerErr == nil {
+			return "", errors.New("the server probe did not complete, so the login and version are unknown")
+		}
 		return "", fmt.Errorf("the server probe failed, so the login and version are unknown: %w", v.ServerErr)
 	}
 	if strings.TrimSpace(v.Server.Login) == "" {
@@ -87,14 +105,18 @@ func writeGrants(v collect.VerifyResult, outputDir, tool string, now time.Time) 
 	if err != nil {
 		return "", err
 	}
-	path, err := freeName(dir, grantFileName(v.Server.Name, now))
+	// 0600, and set by createFree: the file names a login and everything it is
+	// not allowed to do, on a machine the auditor does not own.
+	f, err := createFree(dir, grantFileName(v.Server.Name, now))
 	if err != nil {
 		return "", err
 	}
-	// 0o600: the file names a login and everything it is not allowed to do,
-	// on a machine the auditor does not own.
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	defer f.Close()
+	if _, err := f.WriteString(body); err != nil {
 		return "", err
 	}
-	return path, nil
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
 }

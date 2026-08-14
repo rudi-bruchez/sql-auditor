@@ -48,12 +48,18 @@ func stopRequested(ctx context.Context, m *Manifest) bool {
 	return true
 }
 
-func recordUnitFailure(ctx context.Context, m *Manifest, script, target string, err error) (int, bool) {
+// The third return is what to TELL, as opposed to what to record, and the two
+// have to agree. An observer handed the raw error on a cancelled unit puts
+// "context canceled" on the screen — as a counted error in the wizard, and as a
+// permanent "!!" line under the command line's gauge — while the manifest of
+// the same run says cancelled with no errors at all. One run must not produce
+// two accounts of itself, and the one an operator reads first is the screen.
+func recordUnitFailure(ctx context.Context, m *Manifest, script, target string, err error) (int, bool, error) {
 	if stopRequested(ctx, m) {
-		return 0, true
+		return 0, true, nil
 	}
 	m.Errors = append(m.Errors, ErrorEntry{
 		Script: script, Target: target, Message: err.Error(), SQLError: sqlErrorNumber(err),
 	})
-	return 2, false
+	return 2, false, err
 }

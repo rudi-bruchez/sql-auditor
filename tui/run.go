@@ -51,8 +51,10 @@ func Run(o collect.Options, in, out *os.File) int {
 	// is the only function in the program that puts a terminal into raw mode,
 	// so its defer covers everything it calls — including a panic on the main
 	// goroutine — and a failure before this line leaves a perfectly ordinary
-	// terminal behind. Close is safe to call twice; the exit path below calls
-	// it explicitly so that anything written to stderr afterwards is readable.
+	// terminal behind. Close is safe to call twice, which is what lets
+	// flushOnExit call it again on the way out: it restores the terminal before
+	// emptying the progress buffer, so anything written to stderr afterwards is
+	// readable.
 	//
 	// The buffer is emptied in the SAME defer, after the restore, and that is
 	// the whole reason this is not two statements at the end of the function. A
@@ -356,7 +358,7 @@ func (r *runner) watchSignals() {
 	}()
 }
 
-// stateChanged is the hook loopWith calls after every event. It is the only
+// stateChanged is the hook loop calls after every event. It is the only
 // place that starts or stops anything, which is what keeps the invariant the
 // spec insists on: a ticker is started on entry to every waiting step and
 // stopped on exit from it, whatever the exit — success, cancellation, error or

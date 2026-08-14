@@ -307,14 +307,31 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader) (collect
 	if err != nil {
 		return collect.Options{}, 2, err
 	}
+	// An absent .env is normal at the default name: the whole configuration can
+	// come from the environment, and the wizard opens on a machine where the
+	// file has yet to be written. An absent .env at a name the operator TYPED
+	// is not: `--env prod.env` with a typo in it currently resolved from
+	// whatever SQL_SERVER happened to be exported, and a run pointed at the
+	// wrong instance is worse than a run that refuses to start. Same family as
+	// the empty --password-file refused a few lines above.
+	typedEnv := false
+	c.fs.Visit(func(f *flag.Flag) {
+		if f.Name == "env" {
+			typedEnv = true
+		}
+	})
 	dotenv := map[string]string{}
-	if f, err := os.Open(c.envFile); err == nil {
+	f, oerr := os.Open(c.envFile)
+	switch {
+	case oerr == nil:
 		defer f.Close()
-		if parsed, perr := collect.ParseDotEnv(f); perr == nil {
-			dotenv = parsed
-		} else {
+		parsed, perr := collect.ParseDotEnv(f)
+		if perr != nil {
 			return collect.Options{}, 2, fmt.Errorf("%s: %w", c.envFile, perr)
 		}
+		dotenv = parsed
+	case typedEnv:
+		return collect.Options{}, 2, fmt.Errorf("--env %s: %w", c.envFile, oerr)
 	}
 	flags := map[string]string{}
 	for k, v := range map[string]string{
@@ -430,6 +447,12 @@ func mode(isTTY func(*os.File) bool, stdin, stdout *os.File, env func(string) st
 	if len(args) > 0 {
 		return ModeSubcommand
 	}
+	// Any non-empty value disables the wizard, "false" and "0" included. That
+	// is the usual shape for a switch of this kind and it is the one thing
+	// about it that surprises people, so it is now written down in usage() as
+	// well as here: somebody who exports SQL_AUDITOR_NO_TUI=false to turn the
+	// wizard back on gets the opposite of what they asked for, and nothing on
+	// screen explains it. Unsetting the variable is what re-enables it.
 	if env("SQL_AUDITOR_NO_TUI") != "" {
 		return ModeUsage
 	}
@@ -709,6 +732,13 @@ Options (check, collect):
   --query-store-databases P   comma-separated wildcards narrowing which of the
                               collected databases the extraction reads. It narrows
                               the selection; it never widens it.
+
+Environment (read from the process environment, never from .env):
+  SQL_AUDITOR_NO_TUI          any non-empty value opens no wizard, so an
+                              argument-less run prints this help instead. That
+                              includes "false" and "0": the test is on the
+                              variable being set at all. Unset it to get the
+                              wizard back.
 
 Exit codes: 0 success, 2 partial failure or bad configuration, 1 fatal.
 `)

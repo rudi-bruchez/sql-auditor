@@ -533,6 +533,16 @@ func optionLines(s State, index int, o option, width int) []string {
 // and every word of them has to survive.
 func hang(head string, col int, body string, width int) []string {
 	folded := screen.Wrap(body, width, strings.Repeat(" ", col))
+	if len(folded) == 0 {
+		// Wrap returns nil for an empty body, and folded[0] below would then
+		// panic. No caller passes one today, and the guard is here anyway
+		// because of where it would happen: a panic in the renderer runs
+		// through the loop's recover, but the frame it was drawing never
+		// appears, and a wizard that dies mid-paint leaves the terminal in raw
+		// mode. One line to make a label with nothing after it a label with
+		// nothing after it.
+		return []string{head}
+	}
 	gap := col - utf8.RuneCountInString(head)
 	if gap < 1 {
 		// A label wider than its column pushes the text one space along rather

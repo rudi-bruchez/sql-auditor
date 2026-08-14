@@ -51,17 +51,21 @@ func flushProgress(buf *bytes.Buffer, outputDir string, now time.Time) (string, 
 	if err != nil {
 		return "", spill(buf, err)
 	}
-	path, err := freeName(dir, progressFileName(now))
+	// 0600, and set by createFree: these lines name an instance, its databases
+	// and whatever the server said when it refused something, on a machine the
+	// auditor does not own.
+	f, err := createFree(dir, progressFileName(now))
 	if err != nil {
 		return "", spill(buf, err)
 	}
-	// 0o600: these lines name an instance, its databases and whatever the
-	// server said when it refused something, on a machine the auditor does not
-	// own.
-	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+	defer f.Close()
+	if _, err := f.Write(buf.Bytes()); err != nil {
 		return "", spill(buf, err)
 	}
-	return path, nil
+	if err := f.Close(); err != nil {
+		return "", spill(buf, err)
+	}
+	return f.Name(), nil
 }
 
 // spill is the last-resort of the last resort. It puts the buffer on stderr,

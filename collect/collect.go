@@ -1308,19 +1308,24 @@ func Run(ctx context.Context, o Options) (int, error) {
 		obs.UnitStarted(s.Path, target.Name)
 		before, started := rw.Spent(), time.Now()
 		err := runUnit(ctx, conn, o, m, rw, s, target)
+		// The context is consulted before a single word is written down —
+		// before the ErrorEntry, and before the observer is told. Were this
+		// after the entry, a stopped run would carry the phantom "context
+		// canceled" failure for ever; were it after the reconnect below, it
+		// would never be reached at all, because a ping on a dead context
+		// cannot succeed; and were it after UnitDone, the screen would show an
+		// error the manifest goes on to deny.
+		code, cancelled, report := 0, false, error(nil)
+		if err != nil {
+			code, cancelled, report = recordUnitFailure(ctx, m, s.Path, target.Name, err)
+		}
 		// The bytes of this unit are the difference across a run-level total,
 		// which is what the writer offers. A unit that failed still reports
 		// what it managed to write before failing.
-		obs.UnitDone(s.Path, target.Name, int64(rw.Spent()-before), time.Since(started), err)
+		obs.UnitDone(s.Path, target.Name, int64(rw.Spent()-before), time.Since(started), report)
 		if err == nil {
 			continue
 		}
-		// The context is consulted before a single word is written down. Were
-		// this after the ErrorEntry, a stopped run would carry the phantom
-		// "context canceled" failure for ever; were it after the reconnect
-		// below, it would never be reached at all, because a ping on a dead
-		// context cannot succeed.
-		code, cancelled := recordUnitFailure(ctx, m, s.Path, target.Name, err)
 		if cancelled {
 			// Out of the loop, but not out of the function: the manifest and
 			// the archive are still written below. A DBA who stopped after

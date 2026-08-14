@@ -21,29 +21,50 @@ func TestGrantFileNameIsSafeOnEveryFileSystem(t *testing.T) {
 	}
 }
 
-func TestFreeNameSuffixesATakenName(t *testing.T) {
+func TestCreateFreeSuffixesATakenNameAndClaimsIt(t *testing.T) {
 	dir := t.TempDir()
-	first, err := freeName(dir, "grants-SRV-2026-08-13.sql")
+	first, err := createFree(dir, "grants-SRV-2026-08-13.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(first) != "grants-SRV-2026-08-13.sql" {
-		t.Fatalf("freeName in an empty directory = %q", first)
+	defer first.Close()
+	if filepath.Base(first.Name()) != "grants-SRV-2026-08-13.sql" {
+		t.Fatalf("createFree in an empty directory = %q", first.Name())
 	}
-	if err := os.WriteFile(first, []byte("--"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	second, err := freeName(dir, "grants-SRV-2026-08-13.sql")
+	// The name is taken by the act of asking for it, not by a later write:
+	// between a stat that found it free and a WriteFile there was a window, and
+	// two wizards pointed at one output directory a second apart is an ordinary
+	// afternoon. Nothing is written here on purpose — the previous version of
+	// this test had to write the file to make the second call move on.
+	second, err := createFree(dir, "grants-SRV-2026-08-13.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer second.Close()
 	// Never overwriting: the file already there may be the one a DBA is
 	// halfway through reviewing, and the wizard has no way to know.
-	if second == first {
-		t.Fatalf("freeName returned the taken name %q", second)
+	if second.Name() == first.Name() {
+		t.Fatalf("createFree returned the taken name %q", second.Name())
 	}
-	if filepath.Base(second) != "grants-SRV-2026-08-13-2.sql" {
-		t.Errorf("freeName = %q, want the suffix before the extension", second)
+	if filepath.Base(second.Name()) != "grants-SRV-2026-08-13-2.sql" {
+		t.Errorf("createFree = %q, want the suffix before the extension", second.Name())
+	}
+	// And a file that was there before this process started is respected too.
+	third := filepath.Join(dir, "grants-SRV-2026-08-13-3.sql")
+	if err := os.WriteFile(third, []byte("-- a DBA is reading this"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fourth, err := createFree(dir, "grants-SRV-2026-08-13.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fourth.Close()
+	if filepath.Base(fourth.Name()) != "grants-SRV-2026-08-13-4.sql" {
+		t.Errorf("createFree = %q, want it to step over the file already on disk", fourth.Name())
+	}
+	body, rerr := os.ReadFile(third)
+	if rerr != nil || string(body) != "-- a DBA is reading this" {
+		t.Errorf("the existing file was touched: %q, %v", body, rerr)
 	}
 }
 
@@ -108,5 +129,31 @@ func TestWriteGrantsRefusesWithoutASuccessfulProbe(t *testing.T) {
 	// either fail on its first statement or grant to a principal nobody uses.
 	if _, err := writeGrants(v, t.TempDir(), "0.18.0", time.Now()); err == nil {
 		t.Fatal("writeGrants accepted an unprobed instance")
+	}
+}
+
+// A probe that did not complete without folding in a cause: %w on a nil error
+// prints "%!w(<nil>)", and that string was what the operator got as the reason
+// they could not have their grant script.
+func TestGrantsRefusalReadsAsASentenceWhenNoCauseWasFolded(t *testing.T) {
+	_, err := writeGrants(collect.VerifyResult{Probed: false}, t.TempDir(), "0.19.0", time.Now())
+	if err == nil {
+		t.Fatal("an unprobed server produced a grant script")
+	}
+	if strings.Contains(err.Error(), "%!w") {
+		t.Errorf("the refusal is a formatting artefact: %q", err)
+	}
+	if !strings.Contains(err.Error(), "probe") {
+		t.Errorf("the refusal does not say what failed: %q", err)
+	}
+}
+
+// hang is asked for a label with nothing after it. No caller does that today;
+// what makes it worth a line is where it would happen — a panic in the renderer
+// means the frame is never painted and the terminal stays in raw mode.
+func TestHangSurvivesAnEmptyBody(t *testing.T) {
+	got := hang("page verify", 20, "", 80)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "page verify") {
+		t.Errorf("hang with no body = %#v, want the label alone", got)
 	}
 }

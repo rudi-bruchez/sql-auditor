@@ -134,8 +134,12 @@ func TestBuildOptionsRefusesAnUnknownDotEnvKey(t *testing.T) {
 // has typed anything. That path must produce a usable Options rather than a
 // refusal, or the first screen would have nothing to display.
 func TestBuildOptionsResolvesWithoutAnyArguments(t *testing.T) {
-	dir := t.TempDir()
-	env := filepath.Join(dir, "absent.env")
+	// An EMPTY .env rather than an absent one. The point of naming a file here
+	// is to keep the developer's own .env out of the test; it used to be a path
+	// that did not exist, which is now a refusal in its own right — a typed
+	// --env that is not there stops the run rather than resolving from whatever
+	// happens to be exported.
+	env := writeDotEnv(t, "")
 	exported := func(k string) string {
 		switch k {
 		case "SQL_SERVER":
@@ -409,5 +413,59 @@ func TestOnlyRealCommandsAreSuggested(t *testing.T) {
 		if got := isCommand(c.in); got != c.want {
 			t.Errorf("isCommand(%q) = %v, want %v", c.in, got, c.want)
 		}
+	}
+}
+
+// A --env the operator typed and that is not there stops the run. Before, it
+// was ignored without a word and the resolution fell through to the process
+// environment: `--env prod.env` with a typo in it collected from whatever
+// SQL_SERVER happened to be exported, which is a run pointed at the wrong
+// instance — worse than a run that refuses to start.
+func TestATypedEnvFileThatIsAbsentStopsTheRun(t *testing.T) {
+	absent := filepath.Join(t.TempDir(), "prod.env")
+	exported := func(k string) string {
+		if k == "SQL_SERVER" {
+			return "the-wrong-instance"
+		}
+		return ""
+	}
+	_, code, err := buildOptions("collect", []string{"--env", absent}, exported, noStdin)
+	if err == nil {
+		t.Fatal("a typed --env that does not exist was ignored")
+	}
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(err.Error(), absent) {
+		t.Errorf("error %q does not name the file", err)
+	}
+}
+
+// The default name is different: no .env at all is the ordinary state of a
+// machine where the configuration comes from the environment, and of one where
+// the file has yet to be written. Nothing is typed, so nothing is refused.
+func TestAnAbsentDefaultEnvFileIsNotAnError(t *testing.T) {
+	dir := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+
+	exported := func(k string) string {
+		if k == "SQL_SERVER" {
+			return "invalid.invalid"
+		}
+		return ""
+	}
+	o, code, err := buildOptions("collect", nil, exported, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if o.Config.Server != "invalid.invalid" {
+		t.Errorf("Server = %q, want the environment to have been read", o.Config.Server)
 	}
 }
