@@ -84,7 +84,7 @@ type cliFlags struct {
 
 	server, user, envFile, queriesDir, outputDir string
 	to, grantScript                              string
-	keep                                         bool
+	keep, force                                  bool
 
 	passwordFile  string
 	passwordStdin bool
@@ -116,7 +116,9 @@ func defineFlags(cmd string) *cliFlags {
 	fs.StringVar(&c.queriesDir, "queries-dir", "", "run queries from this directory instead of the embedded corpus")
 	fs.StringVar(&c.outputDir, "output-dir", "", "where to write results")
 	fs.BoolVar(&c.keep, "keep", false, "keep an existing same-day run folder, suffixing this run")
-	fs.StringVar(&c.to, "to", "", "destination directory for 'queries export'")
+	fs.StringVar(&c.to, "to", "",
+		"destination: a directory for 'queries export', a file for 'env init' (default .env)")
+	fs.BoolVar(&c.force, "force", false, "'env init' only: replace an existing file")
 	// Writes a file, never a permission. The collector connects with the
 	// login being measured, which by construction cannot grant anything —
 	// so the output is a script for a DBA to read and run, and the tool
@@ -430,7 +432,7 @@ func run() int {
 	// leaves --to unset and the export refuses a destination the user did
 	// supply. Take the subcommand off the front before parsing.
 	sub := ""
-	if cmd == "queries" && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+	if (cmd == "queries" || cmd == "env") && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub, args = args[0], args[1:]
 	}
 	// Parsed before the dispatch, and deliberately: a malformed command line has
@@ -458,6 +460,24 @@ func run() int {
 			return 1
 		}
 		fmt.Printf("queries written to %s\n", c.to)
+		return 0
+	}
+	if cmd == "env" {
+		if sub != "init" {
+			fmt.Fprintln(os.Stderr, "the only subcommand is: sql-auditor env init [--to FILE] [--force]")
+			return 2
+		}
+		// Defaulted here rather than on the flag, so that the help can say
+		// ".env" without --to appearing to have been given when it was not.
+		dest := c.to
+		if dest == "" {
+			dest = ".env"
+		}
+		if err := collect.WriteEnvTemplate(sqlauditor.EnvExample, dest, c.force); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		fmt.Printf("%s written — fill in SQL_SERVER, then run: sql-auditor check\n", dest)
 		return 0
 	}
 	if cmd != "collect" && cmd != "check" {
@@ -516,6 +536,11 @@ func usage() {
   sql-auditor check                    verify connectivity, permissions and configuration,
                                        and list what a collection would run
   sql-auditor collect                  collect, then archive
+  sql-auditor env init                 write the annotated .env template, so the
+                                       settings this tool accepts can be read on
+                                       a machine that has only the executable.
+                                       --to FILE to write elsewhere (default
+                                       .env), --force to replace an existing one
   sql-auditor queries export --to DIR  write the embedded queries to disk
   sql-auditor version
 

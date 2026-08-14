@@ -652,6 +652,11 @@ Settings live in a `.env` file in the working directory. The repository ships
 fill in `SQL_SERVER`. Every other key in it is already set to the value the tool
 would use anyway, so copying it verbatim changes nothing else.
 
+Working from the binary alone, `sql-auditor env init` writes the same template —
+it is embedded in the executable — to `.env` in the current directory, or to
+`--to FILE`. It refuses to write over a file that already exists unless you pass
+`--force`.
+
 Precedence is: **command-line flag, then `.env`, then the process environment,
 then the built-in default.**
 

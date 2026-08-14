@@ -150,3 +150,30 @@ func TestEmbeddedCorpusHasNoTopLevelKeyCollision(t *testing.T) {
 		}
 	}
 }
+
+// The template shipped inside the binary is the only documentation of the
+// closed key set that a user receiving the executable alone can read, and
+// `env init` writes it verbatim. A key renamed in config.go without the
+// template following would hand that user a file the tool then refuses.
+//
+// Both halves are checked. The active lines are what a verbatim copy resolves
+// to. The commented ones matter just as much: they are there to be uncommented,
+// and a stale name among them fails only in the user's hands.
+func TestEmbeddedEnvTemplateIsAcceptedByTheResolver(t *testing.T) {
+	uncommented := regexp.MustCompile(`(?m)^# ([A-Z][A-Z0-9_]*=)`)
+	for _, c := range []struct{ name, body string }{
+		{"as written", sqlauditor.EnvExample},
+		{"with every commented key uncommented", uncommented.ReplaceAllString(sqlauditor.EnvExample, "$1")},
+	} {
+		parsed, err := collect.ParseDotEnv(strings.NewReader(c.body))
+		if err != nil {
+			t.Fatalf("%s: the template does not parse: %v", c.name, err)
+		}
+		if len(parsed) == 0 {
+			t.Fatalf("%s: the template set no keys at all", c.name)
+		}
+		if _, err := collect.Resolve(nil, parsed, func(string) string { return "" }); err != nil {
+			t.Errorf("%s: the resolver refuses the template it ships: %v", c.name, err)
+		}
+	}
+}

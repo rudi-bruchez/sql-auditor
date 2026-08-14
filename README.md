@@ -91,9 +91,18 @@ sql-auditor                          open the wizard (a terminal on both ends, n
 sql-auditor check                    verify connectivity, permissions and configuration,
                                      and list what a collection would run
 sql-auditor collect                  collect, then archive
+sql-auditor env init                 write the annotated .env template
 sql-auditor queries export --to DIR  write the embedded queries to disk
 sql-auditor version
 ```
+
+`env init` writes `.env.example` — the annotated template listing every setting
+this tool accepts — to `.env` in the current directory, or to `--to FILE`. It
+refuses to write over an existing file unless `--force` is given, since that
+file is where your server and password live. The template is embedded in the
+binary, which is the point: the key set is closed, an unrecognised key stops the
+run, and the person who received the executable on its own has no other copy of
+the list.
 
 `check` and `collect` are the non-interactive path, and they are that in their
 own right rather than as a leftover from before the wizard. They are what a
@@ -241,7 +250,8 @@ are covered in
 ## Configuration
 
 Settings are read from a `.env` file in the working directory. Copy
-[`.env.example`](.env.example) to `.env` and fill in `SQL_SERVER`; every other
+[`.env.example`](.env.example) to `.env` — or run `sql-auditor env init`, which
+writes the same file from inside the binary — and fill in `SQL_SERVER`; every other
 key in it is already set to the value the tool would use anyway. Precedence is
 flag, then `.env`, then the process environment, then the default — note that
 `.env` beats an exported environment variable, which is the reverse of the usual

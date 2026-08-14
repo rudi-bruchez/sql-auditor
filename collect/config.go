@@ -3,13 +3,51 @@ package collect
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// WriteEnvTemplate writes the annotated configuration template to dest, which
+// is what `sql-auditor env init` does. The content is passed in rather than
+// read here, because the template is embedded in the root package and this one
+// must not import it.
+//
+// It is written verbatim. The comments are the greater part of its value — the
+// key set is closed, so the file is the only place that says what may appear in
+// it — and rendering the keys back out of a parsed form would drop exactly that.
+//
+// An existing file stops the command unless force is set. The target is where
+// the operator's server and, frequently, their password live; a command whose
+// purpose is to produce a starting point must not be the one that destroys the
+// finished configuration. O_EXCL does the refusing, so the check and the write
+// are one operation and a second process cannot slip between them.
+func WriteEnvTemplate(content, dest string, force bool) error {
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if force {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	// 0600 rather than 0644: the file this creates is the one meant to hold
+	// SQL_PASSWORD, and it is easier to widen a file than to notice it was
+	// world-readable for the fortnight before anyone looked.
+	f, err := os.OpenFile(dest, flags, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%s already exists; move it aside, or pass --force to replace it", dest)
+		}
+		return err
+	}
+	defer f.Close()
+	if _, err := io.WriteString(f, content); err != nil {
+		return err
+	}
+	return f.Close()
+}
 
 type Config struct {
 	Server, Database, User, Password, AppName string
