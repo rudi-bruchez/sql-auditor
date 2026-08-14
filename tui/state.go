@@ -323,7 +323,7 @@ func (s State) keyVerification(k screen.Key) State {
 func (s State) keyOptions(k screen.Key) State {
 	switch {
 	case k.Named == screen.KeySpace:
-		if s.FlagIndex >= 0 && s.FlagIndex < len(flagOrder) {
+		if s.FlagIndex < len(flagOrder) {
 			s.Flags = toggleFlag(s.Flags, flagOrder[s.FlagIndex])
 		}
 	case k.Named == screen.KeyTab:
@@ -374,16 +374,14 @@ func (s State) canStart() bool { return s.Verify.Probed && s.Verify.Collectors >
 
 // writeGrantScript is the impure half of [g], kept out of Key so that the
 // state machine remains a pure function of keystrokes and the file writing
-// remains testable without one.
+// remains testable without one. Its one caller is the [g] branch of
+// pressEvent, which is where the step is tested.
 //
 // It never leaves screen 2, in either outcome. On success the operator has a
 // path to hand to whoever grants permissions; on failure they have the reason
 // in full, and they can still continue — a missing grant script does not stop
 // a degraded collection, which the repository counts as a success.
 func (s State) writeGrantScript(outputDir, tool string, now time.Time) State {
-	if s.Step != StepVerification {
-		return s
-	}
 	path, err := writeGrants(s.Verify, outputDir, tool, now)
 	s.GrantPath, s.GrantError = path, err
 	if err != nil {

@@ -533,9 +533,6 @@ func optionLines(s State, index int, o option, width int) []string {
 // and every word of them has to survive.
 func hang(head string, col int, body string, width int) []string {
 	folded := screen.Wrap(body, width, strings.Repeat(" ", col))
-	if len(folded) == 0 {
-		return []string{head}
-	}
 	gap := col - utf8.RuneCountInString(head)
 	if gap < 1 {
 		// A label wider than its column pushes the text one space along rather

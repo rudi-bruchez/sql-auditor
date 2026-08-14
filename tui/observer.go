@@ -29,16 +29,7 @@ type event interface{ apply(State) State }
 // instead of dropping the events that say what went wrong.
 type observer struct{ ch chan<- event }
 
-// send is the one place a nil channel is tolerated. A zero-value observer
-// appears in tests of the events themselves, and a send on a nil channel blocks
-// forever — a deadlock in a wizard whose whole purpose is to never look frozen
-// would be the worst possible way to fail.
-func (o observer) send(e event) {
-	if o.ch == nil {
-		return
-	}
-	o.ch <- e
-}
+func (o observer) send(e event) { o.ch <- e }
 
 func (o observer) Planned(units int) { o.send(plannedEvent{units: units}) }
 
