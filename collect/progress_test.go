@@ -221,6 +221,7 @@ func TestLastResortDoesNotClaimToWriteToStderr(t *testing.T) {
 
 // The other stdout writer, Run's final summary and zip path, is not covered
 // here and cannot be: reaching the end of Run needs a server, and no test in
-// this package opens a connection. It is silenced under an Observer rather
-// than redirected, so that `sql-auditor collect | tail -1` keeps reading the
-// zip path off stdout. That call site is verified by review.
+// this package opens a connection. It is silenced for a caller that sets
+// OwnsScreen rather than redirected, so that `sql-auditor collect | tail -1`
+// keeps reading the zip path off stdout — the command-line gauge observes the
+// same run and does not set it. That call site is verified by review.

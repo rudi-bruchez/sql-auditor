@@ -117,6 +117,13 @@ type Options struct {
 	// one rather than a panic, because the two @writer scripts are the only
 	// things that consult it and a run without them must behave as before.
 	QueryStore *QueryStoreState
+	// OwnsScreen says the caller is painting the terminal itself and that this
+	// package must write nothing to stdout. Only the wizard sets it. It is a
+	// field of its own rather than an inference from Observer being non-nil,
+	// because those two are different claims: the command-line gauge observes
+	// the run without owning the screen, and it still needs Run's last two
+	// lines to reach the script reading them.
+	OwnsScreen bool
 	// Observer watches the run go by, for a caller that displays progress.
 	// Nil is the ordinary case and means exactly the behaviour this package
 	// had before the interface existed: every call site goes through the
@@ -1301,19 +1308,24 @@ func Run(ctx context.Context, o Options) (int, error) {
 		obs.UnitStarted(s.Path, target.Name)
 		before, started := rw.Spent(), time.Now()
 		err := runUnit(ctx, conn, o, m, rw, s, target)
+		// The context is consulted before a single word is written down —
+		// before the ErrorEntry, and before the observer is told. Were this
+		// after the entry, a stopped run would carry the phantom "context
+		// canceled" failure for ever; were it after the reconnect below, it
+		// would never be reached at all, because a ping on a dead context
+		// cannot succeed; and were it after UnitDone, the screen would show an
+		// error the manifest goes on to deny.
+		code, cancelled, report := 0, false, error(nil)
+		if err != nil {
+			code, cancelled, report = recordUnitFailure(ctx, m, s.Path, target.Name, err)
+		}
 		// The bytes of this unit are the difference across a run-level total,
 		// which is what the writer offers. A unit that failed still reports
 		// what it managed to write before failing.
-		obs.UnitDone(s.Path, target.Name, int64(rw.Spent()-before), time.Since(started), err)
+		obs.UnitDone(s.Path, target.Name, int64(rw.Spent()-before), time.Since(started), report)
 		if err == nil {
 			continue
 		}
-		// The context is consulted before a single word is written down. Were
-		// this after the ErrorEntry, a stopped run would carry the phantom
-		// "context canceled" failure for ever; were it after the reconnect
-		// below, it would never be reached at all, because a ping on a dead
-		// context cannot succeed.
-		code, cancelled := recordUnitFailure(ctx, m, s.Path, target.Name, err)
 		if cancelled {
 			// Out of the loop, but not out of the function: the manifest and
 			// the archive are still written below. A DBA who stopped after
@@ -1328,6 +1340,18 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// One reconnect attempt on a dead connection. The replacement is
 		// reset before the next unit uses it — the PowerShell version
 		// skipped that step and quietly broke its own invariant.
+		// Asked again here, and not only inside recordUnitFailure above. The
+		// two calls are a few instructions apart, but a stop landing between
+		// them takes the whole reconnect down the wrong path: the ping runs on
+		// a dead context and cannot succeed, db.Conn cannot succeed either, and
+		// the run ends at finishWith(..., 1, "reconnect failed: context
+		// canceled") — exit 1, documented as "the instance could not be
+		// reached", with no cancelled flag on the manifest. That is precisely
+		// the misfiling recordUnitFailure exists to prevent, reached through a
+		// door it does not cover.
+		if stopRequested(ctx, m) {
+			break
+		}
 		if !connAlive(ctx, conn, o.Config) {
 			fmt.Fprintln(o.progress(), "connection lost; attempting one reconnect")
 			conn.Close()
@@ -1363,13 +1387,19 @@ func Run(ctx context.Context, o Options) (int, error) {
 	if err := Zip(runFolder, zipPath); err != nil {
 		return 2, err
 	}
-	// Silenced under an Observer, not redirected. `sql-auditor collect | tail -1`
-	// is how a script picks up the archive path, so on the command line these
-	// two lines must keep going to stdout exactly where they always went. A
-	// caller that owns the screen counted every unit through the Observer and
-	// derives the same path from RunFolderName, so printing these would smear
-	// its frame with facts it already holds.
-	if o.Observer == nil {
+	// Silenced for a caller that owns the screen, not redirected.
+	// `sql-auditor collect | tail -1` is how a script picks up the archive path,
+	// so on the command line these two lines must keep going to stdout exactly
+	// where they always went. The wizard counted every unit through the Observer
+	// and derives the same path from RunFolderName, so printing these would
+	// smear its frame with facts it already holds.
+	//
+	// The test is OwnsScreen and not "there is an Observer", which is what it
+	// used to be. The two were the same thing only for as long as the wizard was
+	// the only caller with an observer; the command line now has one too, and
+	// under the old test its gauge would have taken the archive path away from
+	// every script that reads it.
+	if !o.OwnsScreen {
 		fmt.Printf("%d result(s), %d skipped, %d error(s)\n%s\n",
 			len(m.Results), len(m.Skipped), len(m.Errors), zipPath)
 	}

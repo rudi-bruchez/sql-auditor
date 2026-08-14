@@ -91,9 +91,27 @@ sql-auditor                          open the wizard (a terminal on both ends, n
 sql-auditor check                    verify connectivity, permissions and configuration,
                                      and list what a collection would run
 sql-auditor collect                  collect, then archive
+sql-auditor env init                 write the annotated .env template
 sql-auditor queries export --to DIR  write the embedded queries to disk
 sql-auditor version
 ```
+
+`env init` writes `.env.example` — the annotated template listing every setting
+this tool accepts — to `.env` in the current directory, or to `--to FILE`. It
+refuses to write over an existing file unless `--force` is given, since that
+file is where your server and password live. The template is embedded in the
+binary, which is the point: the key set is closed, an unrecognised key stops the
+run, and the person who received the executable on its own has no other copy of
+the list.
+
+`collect` shows its progress on **stderr**: on a terminal, one line rewritten in
+place with the count, the percentage, the elapsed time and the collector
+currently running, refreshed every second so that a slow collector can be told
+apart from a hung one. Redirected, the same run writes one plain line per
+finished unit instead, so `2> run.log` stays a file a person can read. A failed
+unit leaves a permanent line either way. Nothing of this touches **stdout**,
+which still carries only the summary and the archive path — `sql-auditor collect
+| tail -1` reads the same thing it always did.
 
 `check` and `collect` are the non-interactive path, and they are that in their
 own right rather than as a leftover from before the wizard. They are what a
@@ -132,9 +150,12 @@ Options for `check` and `collect`:
 | `--server HOST[,PORT]` | overrides `SQL_SERVER` |
 | `--user NAME` | overrides `SQL_USER` |
 | `--env PATH` | `.env` file to read (default `.env`) |
+| `--password-file FILE` | read `SQL_PASSWORD` from this file rather than from `.env`. One trailing line ending is ignored; an empty file is refused |
+| `--password-stdin` | read `SQL_PASSWORD` from standard input, same rules |
 | `--queries-dir DIR` | run a corpus from disk instead of the embedded one |
 | `--output-dir DIR` | where to write results |
 | `--keep` | keep an existing same-day run folder, suffixing this run |
+| `--all` | turn on all seven options below at once — the six off for disclosure and the one off for cost. See the note under this table |
 | `--grant-script FILE` | `check` only. Write the T-SQL that grants the permissions found missing, for the login the server reports, with the reason for each. Never executed. |
 | `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
 | `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
@@ -149,14 +170,43 @@ Options for `check` and `collect`:
 | `--query-store-top N` | how many queries to extract per database, across the four rankings once deduplicated (default 50). Queries with a forced plan are added on top of this |
 | `--query-store-databases P` | comma-separated `*`/`?` patterns narrowing which of the collected databases the Query Store extraction reads. It narrows the selection; it never widens it |
 
+`--all` is the one option that is a convenience rather than a decision, and it
+should be read as what it is: six of the seven collectors it turns on are off by
+default because of what they put in the archive, not because of what they cost.
+It asks for the widest archive this tool can produce. That is the right thing on
+an instance you have a written mandate for and the wrong thing everywhere else,
+and the tool will not ask you which it is. It changes nothing else: no
+confirmation, no extra collectors beyond the seven, and `MANIFEST.txt` still
+discloses them one by one, because what the archive contains is the fact that
+matters and how briefly it was requested is not.
+
 There is no `--password` flag, and there will not be one. A password on the
 command line ends up in `ps` output, in shell history and in the process table
 of every other user on the machine, and no amount of care at the call site takes
-it back out; put it in `SQL_PASSWORD` in `.env` instead. The wizard's step 1 is
-the only place in this program where a password can be typed, and what is typed
-there stays in memory for the length of the run: it is masked on screen, it is
-never written to disk, it never reaches `.env`, and it appears in no manifest
-and no archive.
+it back out.
+
+`--password-file` and `--password-stdin` exist because that objection is about
+the argument, not about scripting. A path is not a secret, and a pipe is read by
+this process alone — neither appears in the process table, and a secret store
+that prints to stdout can hand the password over without it ever touching disk:
+
+```
+vault read -field=password secret/sql-auditor | sql-auditor collect --password-stdin
+```
+
+Both read the value the same way. Exactly one trailing line ending is removed
+and nothing else, so a password ending in a space is the password you wrote; an
+empty source is refused rather than treated as no password, because a CI step
+that wrote nothing would otherwise fall through to integrated authentication and
+measure the wrong login. Giving both at once is refused too. The value obeys the
+ordinary precedence — it beats `SQL_PASSWORD` in `.env`, which beats the
+environment.
+
+Otherwise, put it in `SQL_PASSWORD` in `.env`. The wizard's step 1 remains the
+only place in this program where a password is *typed*, and what is typed there
+stays in memory for the length of the run: it is masked on screen, it is never
+written to disk, it never reaches `.env`, and it appears in no manifest and no
+archive. A password from either option above is treated identically once read.
 
 Both `check` and `collect` print `sql-auditor <version> (<build>)` on stderr
 before they do anything else, so an archive, a terminal transcript and a bug
@@ -220,7 +270,8 @@ are covered in
 ## Configuration
 
 Settings are read from a `.env` file in the working directory. Copy
-[`.env.example`](.env.example) to `.env` and fill in `SQL_SERVER`; every other
+[`.env.example`](.env.example) to `.env` — or run `sql-auditor env init`, which
+writes the same file from inside the binary — and fill in `SQL_SERVER`; every other
 key in it is already set to the value the tool would use anyway. Precedence is
 flag, then `.env`, then the process environment, then the default — note that
 `.env` beats an exported environment variable, which is the reverse of the usual
@@ -238,7 +289,7 @@ twelve-factor ordering and is
 | `SQL_TRUST_SERVER_CERTIFICATE` | `true` | skip server certificate validation |
 | `SQL_CONNECT_TIMEOUT_SEC` | `15` | seconds to establish the connection |
 | `SQL_QUERY_TIMEOUT_SEC` | `60` | seconds per round trip made by the pipeline itself; a collector's own `@timeout` wins over it ([why](docs/dba-guide.md#timeouts-15-s-to-connect-and-why-raising-the-query-timeout-may-not-help)) |
-| `SQL_APPLICATION_NAME` | `sql-auditor` | application name shown in `sys.dm_exec_sessions` |
+| `SQL_APPLICATION_NAME` | `sql-auditor <version>` | application name shown in `sys.dm_exec_sessions`. The default carries the version, so a session can be tied to the corpus that produced it; a value you set is used exactly as written |
 | `QUERIES_DIR` | *(empty)* | run a corpus from disk instead of the embedded one |
 | `OUTPUT_DIR` | `output` | where run folders and archives are written |
 | `DB_INCLUDE` | *(empty)* | comma-separated `*`/`?` patterns; empty means all user databases |

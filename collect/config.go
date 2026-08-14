@@ -3,24 +3,74 @@ package collect
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
+// WriteEnvTemplate writes the annotated configuration template to dest, which
+// is what `sql-auditor env init` does. The content is passed in rather than
+// read here, because the template is embedded in the root package and this one
+// must not import it.
+//
+// It is written verbatim. The comments are the greater part of its value — the
+// key set is closed, so the file is the only place that says what may appear in
+// it — and rendering the keys back out of a parsed form would drop exactly that.
+//
+// An existing file stops the command unless force is set. The target is where
+// the operator's server and, frequently, their password live; a command whose
+// purpose is to produce a starting point must not be the one that destroys the
+// finished configuration. O_EXCL does the refusing, so the check and the write
+// are one operation and a second process cannot slip between them.
+func WriteEnvTemplate(content, dest string, force bool) error {
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if force {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	// 0600 rather than 0644: the file this creates is the one meant to hold
+	// SQL_PASSWORD, and it is easier to widen a file than to notice it was
+	// world-readable for the fortnight before anyone looked.
+	f, err := os.OpenFile(dest, flags, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%s already exists; move it aside, or pass --force to replace it", dest)
+		}
+		return err
+	}
+	defer f.Close()
+	// The perm argument above applies only when the file is created, so a
+	// --force over an existing 0644 .env would have kept it world-readable —
+	// which is the opposite of what the mode is there for, and least visible
+	// on exactly the file that goes on to hold SQL_PASSWORD.
+	if err := f.Chmod(0o600); err != nil && !errors.Is(err, os.ErrInvalid) {
+		return err
+	}
+	if _, err := io.WriteString(f, content); err != nil {
+		return err
+	}
+	return f.Close()
+}
+
 type Config struct {
 	Server, Database, User, Password, AppName string
-	Integrated, Encrypt, TrustCert            bool
-	ConnectTimeout, QueryTimeout              time.Duration
-	QueriesDir, OutputDir                     string
-	DBInclude, DBExclude                      string
-	QueryStoreDays                            int
-	QueryStoreFrom, QueryStoreTo              string
-	QueryStoreTop                             int
-	QueryStoreDBInclude                       string
+	// AppNameSet distinguishes an AppName the operator supplied from the one
+	// this package defaulted to. The two cannot be told apart from the value:
+	// SQL_APPLICATION_NAME=sql-auditor is a legitimate thing to write — it is
+	// the worked example in .env.example — and the caller must not decorate it.
+	AppNameSet                     bool
+	Integrated, Encrypt, TrustCert bool
+	ConnectTimeout, QueryTimeout   time.Duration
+	QueriesDir, OutputDir          string
+	DBInclude, DBExclude           string
+	QueryStoreDays                 int
+	QueryStoreFrom, QueryStoreTo   string
+	QueryStoreTop                  int
+	QueryStoreDBInclude            string
 	// QueryStoreWindowConflict is set when QUERY_STORE_DAYS was typed
 	// alongside QUERY_STORE_FROM or QUERY_STORE_TO. Resolve is the only place
 	// that can see the conflict — downstream only ever sees a resolved int, so
@@ -57,6 +107,13 @@ var knownKeys = map[string]bool{
 	"QUERY_STORE_DAYS": true, "QUERY_STORE_FROM": true, "QUERY_STORE_TO": true,
 	"QUERY_STORE_TOP": true, "QUERY_STORE_DB_INCLUDE": true,
 }
+
+// DefaultAppName is what SQL Server reports in program_name when the operator
+// set no SQL_APPLICATION_NAME. It is exported because the caller stamps the
+// version onto it: the version lives in main, where the release workflow can
+// reach it with -ldflags, and this package must not learn about it just to
+// build a string.
+const DefaultAppName = "sql-auditor"
 
 // renamed maps retired key names to their replacement, so the error can say
 // what to do instead of only what is wrong.
@@ -120,6 +177,14 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		}
 		return def
 	}
+	// set reports that the operator supplied the key, wherever from. It is not
+	// the same question as "does the value differ from the default", and one
+	// key needs the difference: SQL_APPLICATION_NAME=sql-auditor written out in
+	// full is a choice, and .env.example ships exactly that line as its worked
+	// example. Comparing against the default would treat it as absent and
+	// append a version to it, breaking the Extended Events filter it was
+	// written to be matched by.
+	set := func(key string) bool { return get(key, "") != "" }
 	// firstErr captures the first malformed-value error encountered by
 	// boolOf or secOf. An absent or empty value still takes the default
 	// silently; only a present-but-unparseable value is an error — that
@@ -244,7 +309,8 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		Database:       get("SQL_DATABASE", "master"),
 		User:           get("SQL_USER", ""),
 		Password:       get("SQL_PASSWORD", ""),
-		AppName:        get("SQL_APPLICATION_NAME", "sql-auditor"),
+		AppName:        get("SQL_APPLICATION_NAME", DefaultAppName),
+		AppNameSet:     set("SQL_APPLICATION_NAME"),
 		Integrated:     boolOf("SQL_INTEGRATED_SECURITY", false),
 		Encrypt:        boolOf("SQL_ENCRYPT", true),
 		TrustCert:      boolOf("SQL_TRUST_SERVER_CERTIFICATE", true),

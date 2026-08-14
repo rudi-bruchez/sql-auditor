@@ -241,6 +241,10 @@ func renderVerification(s State, width int) []string {
 	out := []string{row(pad+"Verification", "step 2/4", width), ""}
 	out = append(out, serverBlock(s, width)...)
 	out = append(out, "")
+	if local := localBlock(s, width); len(local) > 0 {
+		out = append(out, local...)
+		out = append(out, "")
+	}
 	out = append(out, permissionBlock(s, width)...)
 	out = append(out, "")
 	out = append(out, databaseBlock(s, width)...)
@@ -254,6 +258,38 @@ func renderVerification(s State, width int) []string {
 		return append(out, pad+"[r] re-probe   [b] back   [q] quit")
 	}
 	return append(out, pad+"[enter] continue   [r] re-probe   [b] back   [q] quit")
+}
+
+// localBlock reports the two findings VerifyLocal makes before a socket is
+// opened, and it prints NOTHING when there is nothing to say. Both are already
+// priced by `check` — PreflightExitCode reads them — and both were missing from
+// this screen, which is the one place a run's coverage is meant to be settled
+// before anything is collected. An unwritable output directory ends collect.Run
+// at its first line; a script that fails lint makes the run exit 2 whatever
+// else happens. Neither was visible, so [enter] started a collection whose
+// outcome was already decided.
+//
+// Silence when all is well is deliberate. A screen that prints "output
+// writable: yes" on every run is a screen whose reader learns to skip the
+// block, and the one time it says otherwise it will be skipped too.
+func localBlock(s State, width int) []string {
+	var out []string
+	if !s.Verify.OutputWritable {
+		// Named, not described. OUTPUT_DIR is relative by default, so the
+		// directory is often not the one the operator has in mind — a
+		// double-clicked binary writes wherever its working directory happened
+		// to be.
+		out = append(out, row(pad+fmt.Sprintf("%-9s%s", "Output", s.OutputDir), "!! not writable", width))
+		out = append(out, screen.Wrap(
+			"the collection stops here, before its first query", width, fieldPad)...)
+	}
+	if s.Verify.LintFailures > 0 {
+		out = append(out, row(pad+fmt.Sprintf("%-9s%s", "Corpus",
+			plural(s.Verify.LintFailures, "script fails lint", "scripts fail lint")), "!! exit 2", width))
+		out = append(out, screen.Wrap(
+			"those collectors do not run, whatever else succeeds", width, fieldPad)...)
+	}
+	return out
 }
 
 func serverBlock(s State, width int) []string {
@@ -338,10 +374,19 @@ func status(st string) string {
 // point: they are two thirds of the collectors, and the permission probes
 // cannot see them at all, since every probe reads at server level.
 func databaseBlock(s State, width int) []string {
-	if !s.Verify.Probed || s.Verify.CandidatesErr != nil {
+	// SelectErr sits beside CandidatesErr rather than being folded into it, for
+	// the reason check gives when it stops on one: a malformed
+	// DB_INCLUDE/DB_EXCLUDE is the operator's typo and no selection could be
+	// computed from it. Showing "0 selected, 0 skipped" would be a count of a
+	// list that was never built, and the operator would read it as an instance
+	// with no databases.
+	if !s.Verify.Probed || s.Verify.CandidatesErr != nil || s.Verify.SelectErr != nil {
 		out := []string{row(pad+"Databases", statusNotChecked, width)}
 		if s.Verify.CandidatesErr != nil {
 			out = append(out, screen.Wrap(s.Verify.CandidatesErr.Error(), width, fieldPad)...)
+		}
+		if s.Verify.SelectErr != nil {
+			out = append(out, screen.Wrap(s.Verify.SelectErr.Error(), width, fieldPad)...)
 		}
 		return out
 	}
@@ -533,6 +578,16 @@ func optionLines(s State, index int, o option, width int) []string {
 // and every word of them has to survive.
 func hang(head string, col int, body string, width int) []string {
 	folded := screen.Wrap(body, width, strings.Repeat(" ", col))
+	if len(folded) == 0 {
+		// Wrap returns nil for an empty body, and folded[0] below would then
+		// panic. No caller passes one today, and the guard is here anyway
+		// because of where it would happen: a panic in the renderer runs
+		// through the loop's recover, but the frame it was drawing never
+		// appears, and a wizard that dies mid-paint leaves the terminal in raw
+		// mode. One line to make a label with nothing after it a label with
+		// nothing after it.
+		return []string{head}
+	}
 	gap := col - utf8.RuneCountInString(head)
 	if gap < 1 {
 		// A label wider than its column pushes the text one space along rather
@@ -698,7 +753,7 @@ func renderDone(s State, width int) []string {
 
 func summaryLine(s State) string {
 	return fmt.Sprintf("%s, %s, %s, %s",
-		plural(s.DoneUnits, "collected", "collected"),
+		fmt.Sprintf("%d collected", s.DoneUnits),
 		plural(s.SkippedCount, "skipped", "skipped"),
 		plural(s.ErrorCount, "error", "errors"),
 		plural(deniedPermissions(s), "permission denied", "permissions denied"))
@@ -709,10 +764,20 @@ func summaryLine(s State) string {
 // about. It is not the number of units that failed: a unit can fail for ten
 // reasons that are not a refused permission, and the two numbers answer two
 // different questions.
+// deniedPermissions counts the capabilities the server REFUSED, and there are
+// three statuses rather than two: ok, denied, and error. An error is the probe
+// itself failing — the instance dropping mid-check, a query timing out — and
+// collect.BuildGrantScript already excludes those from the grant script, on the
+// grounds that nothing was refused and there is nothing to GRANT.
+//
+// Counting them here said the opposite on the final screen: an instance that
+// wobbled during the probe was reported as "3 permissions denied", sending a
+// DBA to look for a permission that was never the problem — the exact sentence
+// the script generator refuses to write.
 func deniedPermissions(s State) int {
 	n := 0
 	for _, c := range s.Verify.Checks {
-		if c.Status != "ok" {
+		if c.Status == "denied" {
 			n++
 		}
 	}

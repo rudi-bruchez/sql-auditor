@@ -1,6 +1,9 @@
 package collect
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -271,5 +274,97 @@ func TestResolveRefusesNonPositiveQueryStoreDays(t *testing.T) {
 		func(string) string { return "" })
 	if err == nil {
 		t.Fatal("Resolve accepted QUERY_STORE_DAYS=0; a window of zero days collects nothing and says nothing")
+	}
+}
+
+// env init writes the template, and refuses to write over a file that is
+// already there. The file it targets is the one holding the operator's server
+// and, often, their password: a command whose whole purpose is to produce a
+// starting point must never be the thing that destroys the finished one.
+func TestWriteEnvTemplateRefusesToOverwriteWithoutForce(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(dest, []byte("SQL_SERVER=already-here\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteEnvTemplate("SQL_SERVER=template\n", dest, false)
+	if err == nil {
+		t.Fatal("an existing .env was overwritten")
+	}
+	if !strings.Contains(err.Error(), dest) {
+		t.Errorf("error %q does not name the file it refused to touch", err)
+	}
+	body, rerr := os.ReadFile(dest)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(body) != "SQL_SERVER=already-here\n" {
+		t.Errorf("the existing file was modified: %q", body)
+	}
+}
+
+func TestWriteEnvTemplateWritesVerbatim(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, ".env")
+	// Comments and blank lines are the greater part of what makes the template
+	// useful, so what lands on disk is the template and not a rendering of the
+	// keys it happens to set.
+	const body = "# a comment\n\nSQL_SERVER=MYSERVER01\n# SQL_APPLICATION_NAME=sql-auditor\n"
+	if err := WriteEnvTemplate(body, dest, false); err != nil {
+		t.Fatalf("WriteEnvTemplate: %v", err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != body {
+		t.Errorf("wrote %q, want the template verbatim", got)
+	}
+	// And --force replaces it, which is the only way to get a fresh template
+	// next to a .env that has drifted.
+	if err := WriteEnvTemplate("SQL_SERVER=second\n", dest, true); err != nil {
+		t.Fatalf("WriteEnvTemplate with force: %v", err)
+	}
+	got, err = os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "SQL_SERVER=second\n" {
+		t.Errorf("force did not replace the file: %q", got)
+	}
+}
+
+// A destination whose directory does not exist is the operator's typo, not an
+// invitation to create a tree.
+func TestWriteEnvTemplateDoesNotCreateDirectories(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "absent", ".env")
+	if err := WriteEnvTemplate("SQL_SERVER=x\n", dest, false); err == nil {
+		t.Fatal("a missing parent directory was created")
+	}
+}
+
+// --force reuses an existing file, and the perm argument to OpenFile applies
+// only when one is created — so without an explicit chmod a .env left at 0644
+// by an earlier hand would stay world-readable through the very command meant
+// to lay down a fresh template for a password.
+//
+// Only Unix can answer this: Windows maps the mode to a read-only bit and
+// reports 0666 whatever was asked for.
+func TestWriteEnvTemplateTightensTheModeWhenItReplaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes on Windows are a read-only bit, not permission bits")
+	}
+	dest := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(dest, []byte("SQL_SERVER=old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteEnvTemplate("SQL_SERVER=new\n", dest, true); err != nil {
+		t.Fatalf("WriteEnvTemplate: %v", err)
+	}
+	fi, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode = %04o, want 0600", got)
 	}
 }

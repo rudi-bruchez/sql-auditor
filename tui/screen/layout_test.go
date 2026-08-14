@@ -218,3 +218,38 @@ func TestDecodeKeyNeverAsksForMoreThanEscapeMaxBytes(t *testing.T) {
 		}
 	}
 }
+
+// CRLF is one keystroke. Two would carry the operator through screen 2 and
+// straight into a collection they had not confirmed — and past a same-day
+// collision banner, where the second [enter] means "replace it".
+func TestDecodeKeyReadsCRLFAsOneEnter(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+		want int
+	}{
+		{"CRLF in one buffer", []byte("\r\n"), 2},
+		{"a lone CR", []byte("\r"), 1},
+		{"a lone LF", []byte("\n"), 1},
+		{"CR followed by something else", []byte("\rx"), 1},
+		// Split across two reads the pair cannot be seen, and the \n is an
+		// [enter] of its own. Waiting for the next byte to find out would make
+		// every real [enter] hang until the following keystroke.
+		{"CR at the end of a buffer", []byte("ab\r"[2:]), 1},
+	}
+	for _, c := range cases {
+		k, n := DecodeKey(c.in)
+		if k.Named != KeyEnter {
+			t.Errorf("%s: Named = %v, want KeyEnter", c.name, k.Named)
+		}
+		if n != c.want {
+			t.Errorf("%s: consumed %d byte(s), want %d", c.name, n, c.want)
+		}
+	}
+	// And the pair really is consumed: nothing is left to decode a second time.
+	b := []byte("\r\n")
+	_, n := DecodeKey(b)
+	if rest := b[n:]; len(rest) != 0 {
+		t.Errorf("%q left over, which would decode as a second [enter]", rest)
+	}
+}

@@ -1,6 +1,7 @@
 package sqlauditor_test
 
 import (
+	"io/fs"
 	"regexp"
 	"strings"
 	"testing"
@@ -147,6 +148,83 @@ func TestEmbeddedCorpusHasNoTopLevelKeyCollision(t *testing.T) {
 					"collector writes nothing. Rename the column prefix.",
 					s.Path, m[1], key)
 			}
+		}
+	}
+}
+
+// The template shipped inside the binary is the only documentation of the
+// closed key set that a user receiving the executable alone can read, and
+// `env init` writes it verbatim. A key renamed in config.go without the
+// template following would hand that user a file the tool then refuses.
+//
+// Both halves are checked. The active lines are what a verbatim copy resolves
+// to. The commented ones matter just as much: they are there to be uncommented,
+// and a stale name among them fails only in the user's hands.
+func TestEmbeddedEnvTemplateIsAcceptedByTheResolver(t *testing.T) {
+	uncommented := regexp.MustCompile(`(?m)^# ([A-Z][A-Z0-9_]*=)`)
+	for _, c := range []struct{ name, body string }{
+		{"as written", sqlauditor.EnvExample},
+		{"with every commented key uncommented", uncommented.ReplaceAllString(sqlauditor.EnvExample, "$1")},
+	} {
+		parsed, err := collect.ParseDotEnv(strings.NewReader(c.body))
+		if err != nil {
+			t.Fatalf("%s: the template does not parse: %v", c.name, err)
+		}
+		if len(parsed) == 0 {
+			t.Fatalf("%s: the template set no keys at all", c.name)
+		}
+		if _, err := collect.Resolve(nil, parsed, func(string) string { return "" }); err != nil {
+			t.Errorf("%s: the resolver refuses the template it ships: %v", c.name, err)
+		}
+	}
+}
+
+// Page counts are int in sys.master_files, sys.database_files and
+// FILEPROPERTY(...,'SpaceUsed'), and multiplying an int by 8 to reach kilobytes
+// overflows at 268 435 456 pages — 2 TiB. The failure is not a NULL column but
+// a dead statement: "Arithmetic overflow error converting expression to data
+// type int" takes the whole SELECT with it, and with it every other fact that
+// SELECT was projecting.
+//
+// This was found on a client run at 2.1 TB, fixed for the aggregated form, and
+// then found AGAIN by a reviewer twenty-five lines below the fix, in the same
+// file: the per-file projection has the same shape and was not touched. The
+// first version of this test looked for SUM(size) and could not see df.size * 8.
+//
+// So the rule is now about the multiplication rather than about the aggregate:
+// wherever a page count is multiplied by 8, the widening must already have
+// happened. Bigint sources — the *_page_count columns of dm_db_file_space_usage
+// and dm_db_partition_stats — do not name size, growth or FILEPROPERTY, so they
+// are not caught, and multiplying by 8.0 is float arithmetic and cannot
+// overflow an int.
+func TestNoIntPageCountIsMultipliedBeforeItIsWidened(t *testing.T) {
+	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	// "* 8" not followed by a digit or a decimal point: "* 8.0" is float and
+	// safe by construction.
+	mul := regexp.MustCompile(`\*\s*8([^0-9.]|$)`)
+	intPages := regexp.MustCompile(`(?i)size|growth|FILEPROPERTY`)
+	for _, s := range scripts {
+		body, err := fs.ReadFile(sqlauditor.Queries, "queries/"+s.Path)
+		if err != nil {
+			t.Fatalf("%s: %v", s.Path, err)
+		}
+		for i, line := range strings.Split(string(body), "\n") {
+			// Comments explain this very rule and would flag themselves.
+			if c := strings.Index(line, "--"); c >= 0 {
+				line = line[:c]
+			}
+			if !mul.MatchString(line) || !intPages.MatchString(line) {
+				continue
+			}
+			if strings.Contains(strings.ToUpper(line), "BIGINT") {
+				continue
+			}
+			t.Errorf("%s:%d multiplies an int page count by 8 before widening it, "+
+				"which kills the whole statement past 2 TiB. Wrap the operand in "+
+				"CAST(... AS BIGINT):\n  %s", s.Path, i+1, strings.TrimSpace(line))
 		}
 	}
 }

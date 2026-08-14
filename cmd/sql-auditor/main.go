@@ -6,7 +6,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	sqlauditor "github.com/rudi-bruchez/sql-auditor"
 	"github.com/rudi-bruchez/sql-auditor/collect"
 	"github.com/rudi-bruchez/sql-auditor/tui"
+	"github.com/rudi-bruchez/sql-auditor/tui/screen"
 )
 
 // version is the source of truth between releases. The release workflow
@@ -28,7 +31,7 @@ import (
 // the tool that produced it, and "dev" told a reader nothing about which
 // collectors were in the corpus. So the number lives here and moves with the
 // corpus, while buildStamp fills in the revision from the build itself.
-var version = "0.18.0"
+var version = "0.19.0"
 var commit = ""
 
 // buildStamp returns what to print after the version. When -ldflags supplied a
@@ -83,7 +86,10 @@ type cliFlags struct {
 
 	server, user, envFile, queriesDir, outputDir string
 	to, grantScript                              string
-	keep                                         bool
+	keep, force, all                             bool
+
+	passwordFile  string
+	passwordStdin bool
 
 	sessionText, objectDefinitions              bool
 	deadlockGraphs, blockedProcessReports       bool
@@ -100,10 +106,32 @@ func defineFlags(cmd string) *cliFlags {
 	fs.StringVar(&c.server, "server", "", "SQL Server instance (overrides SQL_SERVER)")
 	fs.StringVar(&c.user, "user", "", "SQL login (overrides SQL_USER)")
 	fs.StringVar(&c.envFile, "env", ".env", "path to the .env file")
+	// Neither of these is --password, and the difference is the whole point:
+	// a password given as an argument is in the process table for every other
+	// user on the machine and in the shell history afterwards, and nothing at
+	// the call site takes it back out. A path is not a secret, and a pipe is
+	// read by this process alone.
+	fs.StringVar(&c.passwordFile, "password-file", "",
+		"read SQL_PASSWORD from this file instead of .env (one trailing line ending is ignored)")
+	fs.BoolVar(&c.passwordStdin, "password-stdin", false,
+		"read SQL_PASSWORD from standard input instead of .env")
 	fs.StringVar(&c.queriesDir, "queries-dir", "", "run queries from this directory instead of the embedded corpus")
 	fs.StringVar(&c.outputDir, "output-dir", "", "where to write results")
 	fs.BoolVar(&c.keep, "keep", false, "keep an existing same-day run folder, suffixing this run")
-	fs.StringVar(&c.to, "to", "", "destination directory for 'queries export'")
+	// A union of the seven opt-ins below, and deliberately not a mode: it
+	// turns them on and changes nothing else. Six of them are disclosure
+	// decisions and one is a cost decision, so what this asks for is the
+	// widest archive the tool can produce — which is the right thing on an
+	// instance you have a mandate for, and the wrong thing everywhere else.
+	// MANIFEST.txt is unchanged by it: the archive keeps recording the seven
+	// individually, because what was collected is the fact worth keeping and
+	// how few words it took to ask is not.
+	fs.BoolVar(&c.all, "all", false,
+		"turn on every optional collector at once, including the ones off by default "+
+			"for disclosure and the one off for cost")
+	fs.StringVar(&c.to, "to", "",
+		"destination: a directory for 'queries export', a file for 'env init' (default .env)")
+	fs.BoolVar(&c.force, "force", false, "'env init' only: replace an existing file")
 	// Writes a file, never a permission. The collector connects with the
 	// login being measured, which by construction cannot grant anything —
 	// so the output is a script for a DBA to read and run, and the tool
@@ -199,10 +227,70 @@ func defineFlags(cmd string) *cliFlags {
 // wrote and can correct. The error is returned rather than printed so the caller
 // decides where it goes: a subcommand puts it on stderr, and the wizard cannot,
 // because it is about to take the screen.
-func buildOptions(cmd string, args []string, env func(string) string) (collect.Options, int, error) {
+func buildOptions(cmd string, args []string, env func(string) string, stdin io.Reader) (collect.Options, int, error) {
 	c := defineFlags(cmd)
 	_ = c.fs.Parse(args)
-	return optionsFrom(c, env)
+	return optionsFrom(c, env, stdin)
+}
+
+// readPassword resolves --password-file and --password-stdin into the value
+// SQL_PASSWORD would have carried. An empty string with a nil error means
+// neither option was given, which is the ordinary case.
+//
+// Exactly one trailing line ending is removed and nothing else. Trimming
+// whitespace generally would be the friendlier-looking choice and the wrong
+// one: a password can end in a space, and one that works in .env — where the
+// operator quotes it — must not become a different password here. The single
+// \r\n or \n is the one thing an editor or a `>` redirection adds without
+// being asked.
+//
+// An empty source is an error rather than an empty password. A CI step that
+// wrote nothing to the file, or a pipeline whose left-hand side failed, would
+// otherwise fall through to Windows integrated authentication and quietly
+// measure a different login than the one the run is about.
+func readPassword(c *cliFlags, stdin io.Reader) (string, error) {
+	if c.passwordFile != "" && c.passwordStdin {
+		return "", fmt.Errorf("--password-file and --password-stdin cannot both be given")
+	}
+	var raw []byte
+	switch {
+	case c.passwordFile != "":
+		b, err := os.ReadFile(c.passwordFile)
+		if err != nil {
+			return "", fmt.Errorf("--password-file: %w", err)
+		}
+		// A warning and not a refusal: the file belongs to the operator, and a
+		// scheduler that cannot chmod is a real situation. But env init was
+		// just tightened to 0600 for this same secret, and saying nothing here
+		// while doing that there would be two answers to one question. Windows
+		// is excluded because it has no permission bits to read: Go reports
+		// 0666 for every file, so the test would fire on every run.
+		if runtime.GOOS != "windows" {
+			if fi, serr := os.Stat(c.passwordFile); serr == nil && fi.Mode().Perm()&0o077 != 0 {
+				fmt.Fprintf(os.Stderr, "note: %s is readable by other users (mode %04o); chmod 600 it\n",
+					c.passwordFile, fi.Mode().Perm())
+			}
+		}
+		raw = b
+	case c.passwordStdin:
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", fmt.Errorf("--password-stdin: %w", err)
+		}
+		raw = b
+	default:
+		return "", nil
+	}
+	s := strings.TrimSuffix(string(raw), "\n")
+	s = strings.TrimSuffix(s, "\r")
+	if s == "" {
+		source := "--password-file " + c.passwordFile
+		if c.passwordStdin {
+			source = "--password-stdin"
+		}
+		return "", fmt.Errorf("%s: empty; a password read from nothing is not a password", source)
+	}
+	return s, nil
 }
 
 // optionsFrom is the resolution itself, on a command line that has already been
@@ -210,20 +298,49 @@ func buildOptions(cmd string, args []string, env func(string) string) (collect.O
 // always been refused before anything else is said, including before the
 // "unknown command" message — and parsing it a second time here would only
 // produce the same values.
-func optionsFrom(c *cliFlags, env func(string) string) (collect.Options, int, error) {
+func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader) (collect.Options, int, error) {
+	// Before the .env is opened, because a password source the operator named
+	// and this program cannot read is their mistake to correct, and saying so
+	// first keeps the two refusals from arriving in an order that depends on
+	// which file happens to be missing.
+	password, err := readPassword(c, stdin)
+	if err != nil {
+		return collect.Options{}, 2, err
+	}
+	// An absent .env is normal at the default name: the whole configuration can
+	// come from the environment, and the wizard opens on a machine where the
+	// file has yet to be written. An absent .env at a name the operator TYPED
+	// is not: `--env prod.env` with a typo in it currently resolved from
+	// whatever SQL_SERVER happened to be exported, and a run pointed at the
+	// wrong instance is worse than a run that refuses to start. Same family as
+	// the empty --password-file refused a few lines above.
+	typedEnv := false
+	c.fs.Visit(func(f *flag.Flag) {
+		if f.Name == "env" {
+			typedEnv = true
+		}
+	})
 	dotenv := map[string]string{}
-	if f, err := os.Open(c.envFile); err == nil {
+	f, oerr := os.Open(c.envFile)
+	switch {
+	case oerr == nil:
 		defer f.Close()
-		if parsed, perr := collect.ParseDotEnv(f); perr == nil {
-			dotenv = parsed
-		} else {
+		parsed, perr := collect.ParseDotEnv(f)
+		if perr != nil {
 			return collect.Options{}, 2, fmt.Errorf("%s: %w", c.envFile, perr)
 		}
+		dotenv = parsed
+	case typedEnv:
+		return collect.Options{}, 2, fmt.Errorf("--env %s: %w", c.envFile, oerr)
 	}
 	flags := map[string]string{}
 	for k, v := range map[string]string{
 		"SQL_SERVER": c.server, "SQL_USER": c.user,
 		"QUERIES_DIR": c.queriesDir, "OUTPUT_DIR": c.outputDir,
+		// A password from --password-file or --password-stdin enters here
+		// and nowhere else, so it obeys the same precedence as every other
+		// flag — over .env, over the environment — with no rule of its own.
+		"SQL_PASSWORD": password,
 	} {
 		if v != "" {
 			flags[k] = v
@@ -258,19 +375,31 @@ func optionsFrom(c *cliFlags, env func(string) string) (collect.Options, int, er
 	if err != nil {
 		return collect.Options{}, 2, err
 	}
+	// A DBA watching sys.dm_exec_sessions while this runs sees program_name and
+	// nothing else, and "sql-auditor" on its own does not say which corpus is
+	// on the wire — which is the question asked when two runs disagree. So the
+	// default carries the version.
+	//
+	// A name the operator chose is left exactly as they wrote it: it was picked
+	// to be matched by an Extended Events filter or a monitoring rule, and
+	// appending to it would break the match. Stamping it here rather than in
+	// Resolve keeps the version in the one file the release workflow rewrites.
+	if !cfg.AppNameSet {
+		cfg.AppName = collect.DefaultAppName + " " + version
+	}
 
 	opts := collect.Options{
 		Config: cfg, Corpus: sqlauditor.Queries, Root: "queries",
 		Now: time.Now(), Keep: c.keep, Version: version, Commit: buildStamp(),
 		GrantScript: c.grantScript,
 		Flags: map[string]bool{
-			collect.FlagIncludeSessionText:    c.sessionText,
-			collect.FlagEstimateCompression:   c.estimateCompression,
-			collect.FlagQueryStoreDetail:      c.queryStoreDetail,
-			collect.FlagQueryStorePlanStats:   c.queryStorePlanStats,
-			collect.FlagObjectDefinitions:     c.objectDefinitions,
-			collect.FlagDeadlockGraphs:        c.deadlockGraphs,
-			collect.FlagBlockedProcessReports: c.blockedProcessReports,
+			collect.FlagIncludeSessionText:    c.all || c.sessionText,
+			collect.FlagEstimateCompression:   c.all || c.estimateCompression,
+			collect.FlagQueryStoreDetail:      c.all || c.queryStoreDetail,
+			collect.FlagQueryStorePlanStats:   c.all || c.queryStorePlanStats,
+			collect.FlagObjectDefinitions:     c.all || c.objectDefinitions,
+			collect.FlagDeadlockGraphs:        c.all || c.deadlockGraphs,
+			collect.FlagBlockedProcessReports: c.all || c.blockedProcessReports,
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -318,6 +447,12 @@ func mode(isTTY func(*os.File) bool, stdin, stdout *os.File, env func(string) st
 	if len(args) > 0 {
 		return ModeSubcommand
 	}
+	// Any non-empty value disables the wizard, "false" and "0" included. That
+	// is the usual shape for a switch of this kind and it is the one thing
+	// about it that surprises people, so it is now written down in usage() as
+	// well as here: somebody who exports SQL_AUDITOR_NO_TUI=false to turn the
+	// wizard back on gets the opposite of what they asked for, and nothing on
+	// screen explains it. Unsetting the variable is what re-enables it.
 	if env("SQL_AUDITOR_NO_TUI") != "" {
 		return ModeUsage
 	}
@@ -332,6 +467,29 @@ func mode(isTTY func(*os.File) bool, stdin, stdout *os.File, env func(string) st
 // wrong answer.
 func isTerminal(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
 
+// isCommand is the list the dispatch below actually accepts, in one place, so
+// that the "did you mean" suggestion cannot offer a word that would fail again.
+func isCommand(s string) bool {
+	switch s {
+	case "check", "collect", "env", "queries", "version":
+		return true
+	}
+	return false
+}
+
+// stderrWidth is where the gauge is cut. It is read afresh on every repaint
+// rather than once, which is how a resized window is handled without a SIGWINCH
+// handler and without the Windows equivalent that does not exist. 80 is the
+// answer when the size cannot be had — including the 0x0 an RDP window reports
+// while it is being dragged, which would otherwise cut the line to nothing.
+func stderrWidth() int {
+	w, _, err := term.GetSize(int(os.Stderr.Fd()))
+	if err != nil || w <= 0 {
+		return 80
+	}
+	return w
+}
+
 func run() int {
 	switch mode(isTerminal, os.Stdin, os.Stdout, os.Getenv, os.Args[1:]) {
 	case ModeUsage:
@@ -343,7 +501,7 @@ func run() int {
 		// server and supply a password on screen 1. A refusal here is a .env
 		// the wizard cannot show, so it is reported the way a subcommand would
 		// report it — before the terminal is taken.
-		o, code, err := buildOptions("collect", nil, os.Getenv)
+		o, code, err := buildOptions("collect", nil, os.Getenv, os.Stdin)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return code
@@ -357,7 +515,7 @@ func run() int {
 	// leaves --to unset and the export refuses a destination the user did
 	// supply. Take the subcommand off the front before parsing.
 	sub := ""
-	if cmd == "queries" && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+	if (cmd == "queries" || cmd == "env") && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub, args = args[0], args[1:]
 	}
 	// Parsed before the dispatch, and deliberately: a malformed command line has
@@ -387,6 +545,24 @@ func run() int {
 		fmt.Printf("queries written to %s\n", c.to)
 		return 0
 	}
+	if cmd == "env" {
+		if sub != "init" {
+			fmt.Fprintln(os.Stderr, "the only subcommand is: sql-auditor env init [--to FILE] [--force]")
+			return 2
+		}
+		// Defaulted here rather than on the flag, so that the help can say
+		// ".env" without --to appearing to have been given when it was not.
+		dest := c.to
+		if dest == "" {
+			dest = ".env"
+		}
+		if err := collect.WriteEnvTemplate(sqlauditor.EnvExample, dest, c.force); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		fmt.Printf("%s written — fill in SQL_SERVER, then run: sql-auditor check\n", dest)
+		return 0
+	}
 	if cmd != "collect" && cmd != "check" {
 		// Say what was wrong before printing the help. A wall of usage text
 		// with nothing pointing at the mistake leaves the reader to spot it,
@@ -396,10 +572,18 @@ func run() int {
 		switch {
 		case cmd == "":
 			fmt.Fprintln(os.Stderr, "no command given.")
+		// The suggestion is only made when the undashed form is a command that
+		// exists. `--check` for `check` is the mistake this branch is for; but
+		// `--all` is a real option written where a command belongs, and
+		// answering it with `Did you mean "all"?` sends the reader to the same
+		// error a second time — "all" is not a command either.
+		case strings.HasPrefix(cmd, "-") && isCommand(strings.TrimLeft(cmd, "-")):
+			fmt.Fprintf(os.Stderr,
+				"%q is not a command: check, collect, env, queries and version are written without dashes. Did you mean %q?\n\n",
+				cmd, strings.TrimLeft(cmd, "-"))
 		case strings.HasPrefix(cmd, "-"):
 			fmt.Fprintf(os.Stderr,
-				"%q is not a command: check, collect, queries and version are written without dashes. Did you mean %q?\n\n",
-				cmd, strings.TrimLeft(cmd, "-"))
+				"%q is an option, not a command. Options come after one: sql-auditor collect %s\n\n", cmd, cmd)
 		default:
 			fmt.Fprintf(os.Stderr, "unknown command %q.\n\n", cmd)
 		}
@@ -414,7 +598,7 @@ func run() int {
 	// on the terminal where the operator is looking.
 	fmt.Fprintf(os.Stderr, "sql-auditor %s (%s)\n\n", version, buildStamp())
 
-	opts, code, err := optionsFrom(c, os.Getenv)
+	opts, code, err := optionsFrom(c, os.Getenv, os.Stdin)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return code
@@ -424,10 +608,45 @@ func run() int {
 			"(SQL_TRUST_SERVER_CERTIFICATE=true)")
 	}
 
+	// --grant-script is a check option and the help says so, but nothing
+	// refused it: `sql-auditor collect --grant-script f.sql` ran the whole
+	// collection, wrote no file and said nothing, because collect.Run never
+	// reads the field. An operator who asked for a grant script and got an
+	// archive instead has no way to tell that from a script with nothing in it.
+	if cmd == "collect" && opts.GrantScript != "" {
+		fmt.Fprintln(os.Stderr,
+			"--grant-script belongs to check, which probes permissions: sql-auditor check --grant-script "+opts.GrantScript)
+		return 2
+	}
+
 	ctx := context.Background()
 	switch cmd {
 	case "collect":
+		// The gauge goes on stderr and OwnsScreen stays false, so Run still
+		// puts its summary and the archive path on stdout where a script reads
+		// them. `check` gets none of this: it is a listing, not a wait.
+		// Both questions have to be asked, and they are not the same one.
+		// Being a terminal says the output is for a person; accepting escape
+		// sequences says the line can be rewritten. On conhost the second is
+		// off by default and per handle — the wizard sets it on stdout, which
+		// does nothing for stderr — so a gauge that assumed it would print
+		// "←[K[ 12/223] …" once a second on exactly the Windows Server console
+		// this tool is usually run from. When the console says no, the run
+		// falls back to one plain line per unit.
+		restoreEscapes, escapes := screen.EnableEscapes(os.Stderr)
+		defer restoreEscapes()
+		p := newProgress(os.Stderr, isTerminal(os.Stderr) && escapes, stderrWidth, time.Now)
+		stop := p.StartTicking(time.Second)
+		opts.Observer = p
+		// collect's own commentary goes through the gauge rather than straight
+		// to stderr, so the reconnect notice erases the line instead of landing
+		// on top of it.
+		opts.Progress = p.Writer()
 		code, err = collect.Run(ctx, opts)
+		// In this order: no tick may fire after the line is taken down, and
+		// nothing main prints below may land on a gauge.
+		stop()
+		p.Done()
 	case "check":
 		code, err = collect.Check(ctx, opts)
 	}
@@ -443,6 +662,11 @@ func usage() {
   sql-auditor check                    verify connectivity, permissions and configuration,
                                        and list what a collection would run
   sql-auditor collect                  collect, then archive
+  sql-auditor env init                 write the annotated .env template, so the
+                                       settings this tool accepts can be read on
+                                       a machine that has only the executable.
+                                       --to FILE to write elsewhere (default
+                                       .env), --force to replace an existing one
   sql-auditor queries export --to DIR  write the embedded queries to disk
   sql-auditor version
 
@@ -450,9 +674,22 @@ Options (check, collect):
   --server HOST[,PORT]        overrides SQL_SERVER
   --user NAME                 overrides SQL_USER
   --env PATH                  .env file to read (default .env)
+  --password-file FILE        read SQL_PASSWORD from this file rather than from
+                              .env. Exactly one trailing line ending is ignored;
+                              everything else, including a trailing space, is
+                              part of the password. An empty file is refused.
+  --password-stdin            read SQL_PASSWORD from standard input, same rules.
+                              For a secret store that prints to a pipe. There is
+                              no --password: an argument is in the process table
+                              and in the shell history, and a path is not.
   --queries-dir DIR           run a corpus from disk instead of the embedded one
   --output-dir DIR            where to write results
   --keep                      keep an existing same-day run folder
+  --all                       turn on all seven options below at once: the six
+                              that are off for disclosure and the one that is
+                              off for cost. The widest archive this tool can
+                              produce. It changes nothing else, and MANIFEST.txt
+                              still records the seven individually.
   --grant-script FILE         check only. After probing permissions, write the
                               T-SQL that grants exactly the ones found missing,
                               for the login the server reports, with the reason
@@ -506,6 +743,13 @@ Options (check, collect):
   --query-store-databases P   comma-separated wildcards narrowing which of the
                               collected databases the extraction reads. It narrows
                               the selection; it never widens it.
+
+Environment (read from the process environment, never from .env):
+  SQL_AUDITOR_NO_TUI          any non-empty value opens no wizard, so an
+                              argument-less run prints this help instead. That
+                              includes "false" and "0": the test is on the
+                              variable being set at all. Unset it to get the
+                              wizard back.
 
 Exit codes: 0 success, 2 partial failure or bad configuration, 1 fatal.
 `)

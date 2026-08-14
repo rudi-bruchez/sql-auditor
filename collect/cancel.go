@@ -30,13 +30,36 @@ import "context"
 // does not lower an exit code already raised by something else: a lint error
 // found before the loop is a real partial failure and stopping the run early
 // does not undo it.
-func recordUnitFailure(ctx context.Context, m *Manifest, script, target string, err error) (int, bool) {
-	if ctx.Err() != nil {
-		m.Run.Cancelled = true
-		return 0, true
+// stopRequested is the rule itself, apart from the recording: a dead context
+// means the operator stopped the run, and the manifest must say so before
+// anything else is decided.
+//
+// It is a function of its own because the run loop asks the same question in
+// two places. recordUnitFailure asks it about the error a unit came back with;
+// the reconnect branch asks it a few instructions later, because a stop landing
+// in between sends a live instance down the "could not be reached" path — the
+// ping runs on a dead context and cannot succeed, and neither can db.Conn. Two
+// copies of one rule is how the second call site came to be missing.
+func stopRequested(ctx context.Context, m *Manifest) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	m.Run.Cancelled = true
+	return true
+}
+
+// The third return is what to TELL, as opposed to what to record, and the two
+// have to agree. An observer handed the raw error on a cancelled unit puts
+// "context canceled" on the screen — as a counted error in the wizard, and as a
+// permanent "!!" line under the command line's gauge — while the manifest of
+// the same run says cancelled with no errors at all. One run must not produce
+// two accounts of itself, and the one an operator reads first is the screen.
+func recordUnitFailure(ctx context.Context, m *Manifest, script, target string, err error) (int, bool, error) {
+	if stopRequested(ctx, m) {
+		return 0, true, nil
 	}
 	m.Errors = append(m.Errors, ErrorEntry{
 		Script: script, Target: target, Message: err.Error(), SQLError: sqlErrorNumber(err),
 	})
-	return 2, false
+	return 2, false, err
 }

@@ -16,3 +16,12 @@ import "os"
 func prepareConsole(out *os.File) (restore func(), asciiOnly bool, err error) {
 	return func() {}, false, nil
 }
+
+// EnableEscapes is the same statement for a caller that wants escape sequences
+// on one stream and nothing else — the command line's progress gauge, which
+// rewrites a line on stderr and has no use for raw mode, a code page or a
+// frame buffer. Outside Windows a terminal already interprets them, so this
+// answers yes without touching anything.
+func EnableEscapes(f *os.File) (restore func(), ok bool) {
+	return func() {}, true
+}

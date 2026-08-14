@@ -106,7 +106,24 @@ func DecodeKey(b []byte) (Key, int) {
 		return Key{}, 0
 	}
 	switch b[0] {
-	case '\r', '\n':
+	case '\r':
+		// CRLF is one keystroke, not two. A terminal that sends both, or a
+		// pasted line ending, otherwise delivered two [enter]s: on screen 2 the
+		// first advances to screen 3 and the second reaches canStart() and
+		// launches the collection — and with a same-day collision on screen,
+		// that second [enter] also means "replace it", destroying the previous
+		// run's folder and zip without anyone having read the question.
+		//
+		// The pair is only recognised inside one buffer. Split across two
+		// reads, the \n arrives on its own and is an [enter] again; ReadKey
+		// keeps a partial rune between calls but not a partial pair, and a
+		// keystroke that waits for the next byte to find out what it is would
+		// make every real [enter] hang until the one after it.
+		if len(b) > 1 && b[1] == '\n' {
+			return Key{Named: KeyEnter}, 2
+		}
+		return Key{Named: KeyEnter}, 1
+	case '\n':
 		return Key{Named: KeyEnter}, 1
 	case '\t':
 		return Key{Named: KeyTab}, 1

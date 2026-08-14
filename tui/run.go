@@ -51,8 +51,10 @@ func Run(o collect.Options, in, out *os.File) int {
 	// is the only function in the program that puts a terminal into raw mode,
 	// so its defer covers everything it calls — including a panic on the main
 	// goroutine — and a failure before this line leaves a perfectly ordinary
-	// terminal behind. Close is safe to call twice; the exit path below calls
-	// it explicitly so that anything written to stderr afterwards is readable.
+	// terminal behind. Close is safe to call twice, which is what lets
+	// flushOnExit call it again on the way out: it restores the terminal before
+	// emptying the progress buffer, so anything written to stderr afterwards is
+	// readable.
 	//
 	// The buffer is emptied in the SAME defer, after the restore, and that is
 	// the whole reason this is not two statements at the end of the function. A
@@ -150,6 +152,33 @@ func (r *runner) send(e event) {
 func (r *runner) guard(where string) {
 	if v := recover(); v != nil {
 		r.send(panicEvent{value: v, where: where})
+	}
+}
+
+// collectionJob names the goroutine in both places that have to agree on it:
+// startWork passes it to the generic guard, and guardCollection used to spell
+// the same words a second time. The parameter is in fact dead at that call site
+// — guardCollection consumes the panic first — but two spellings of one name is
+// a divergence waiting to happen in a bug report nobody can act on.
+const collectionJob = "the collection"
+
+// guardCollection is guard for the one goroutine whose screen waits on a second
+// event before it will let go. StepCollecting ends on collectDoneEvent and on
+// nothing else — deliberately, since a panic elsewhere in the wizard must not
+// cut a run short while collect.Run is still writing its manifest and building
+// its archive. But a panic INSIDE collect.Run kills the goroutine at the panic,
+// so the send at the end of collect() is never reached and that event never
+// comes: the screen stayed on "stopping…" for ever, Ctrl-C only re-set the flag
+// it had already set, and the way out was kill -9 with the terminal in raw mode.
+//
+// So the panic reports itself and then reports the run as over, in that order:
+// the first sets Stopping and counts the error, the second releases the screen.
+// The code is 2 for the same reason panicEvent uses it — the run happened and
+// something in it failed.
+func (r *runner) guardCollection() {
+	if v := recover(); v != nil {
+		r.send(panicEvent{value: v, where: collectionJob})
+		r.send(collectDoneEvent{code: 2, err: fmt.Errorf("internal error in the collection: %v", v)})
 	}
 }
 
@@ -336,7 +365,7 @@ func (r *runner) watchSignals() {
 	}()
 }
 
-// stateChanged is the hook loopWith calls after every event. It is the only
+// stateChanged is the hook loop calls after every event. It is the only
 // place that starts or stops anything, which is what keeps the invariant the
 // spec insists on: a ticker is started on entry to every waiting step and
 // stopped on exit from it, whatever the exit — success, cancellation, error or
@@ -359,7 +388,7 @@ func (r *runner) stateChanged(prev, next State) {
 			r.startWork("the probe", func(ctx context.Context) { r.verify(ctx, next) })
 		case StepCollecting:
 			r.startTicker()
-			r.startWork("the collection", func(ctx context.Context) { r.collect(ctx, next) })
+			r.startWork(collectionJob, func(ctx context.Context) { r.collect(ctx, next) })
 		}
 	}
 	// Ctrl-C during the collection does not change the step — the run is still
@@ -493,10 +522,17 @@ func (r *runner) verify(ctx context.Context, s State) {
 }
 
 func (r *runner) collect(ctx context.Context, s State) {
+	// Before anything else, and inside this function rather than in startWork:
+	// this recover runs first and consumes the panic, so the generic guard
+	// deferred one frame up finds nothing left to convert. See guardCollection
+	// for why this goroutine needs two events where the others need one.
+	defer r.guardCollection()
 	o := applyState(s, r.opts)
 	o.Observer = observer{ch: r.events}
+	// The wizard is painting the terminal, so Run must put nothing on stdout.
+	o.OwnsScreen = true
 	// The archive's name is derived before the run rather than read from it,
-	// because Run reports it on stdout only when there is no Observer — under
+	// because Run reports it on stdout only when OwnsScreen is unset — under
 	// the wizard that write is suppressed, since it would land in the middle of
 	// a frame. RunFolderFor is deterministic given the same output directory,
 	// server name, clock and --keep, and runFolderFor passes it the same four
@@ -574,6 +610,7 @@ func initialState(o collect.Options, ascii bool) State {
 		Encrypt:    cfg.Encrypt,
 		TrustCert:  cfg.TrustCert,
 		Source:     "Read from .env and the environment.",
+		OutputDir:  cfg.OutputDir,
 		Field:      fieldServer,
 		Flags:      flags,
 		Keep:       o.Keep,

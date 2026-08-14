@@ -257,3 +257,59 @@ func TestTheRunLogSurvivesAPanicOnTheWayOut(t *testing.T) {
 		t.Errorf("run log = %q, want the buffered manifest", written)
 	}
 }
+
+// A panic inside collect.Run must produce BOTH events. Only the first was sent
+// before, and StepCollecting ends on the second: the wizard sat on "stopping…"
+// until the process was killed, terminal still in raw mode.
+//
+// The recover is exercised directly rather than through collect.Run, which
+// cannot be made to panic from a test — which is precisely how the gap survived
+// a test suite that looked like it covered this.
+func TestAPanickedCollectionReportsItselfAndThenReportsTheRunOver(t *testing.T) {
+	r := &runner{events: make(chan event, 4), done: make(chan struct{})}
+	func() {
+		defer r.guardCollection()
+		panic("index out of range [3] with length 3")
+	}()
+	close(r.events)
+
+	var got []event
+	for e := range r.events {
+		got = append(got, e)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want the panic and the end of the run: %#v", len(got), got)
+	}
+	p, ok := got[0].(panicEvent)
+	if !ok {
+		t.Fatalf("first event is %T, want panicEvent", got[0])
+	}
+	if p.where != "the collection" {
+		t.Errorf("where = %q, want the goroutine named", p.where)
+	}
+	d, ok := got[1].(collectDoneEvent)
+	if !ok {
+		t.Fatalf("second event is %T, want collectDoneEvent — the screen ends on nothing else", got[1])
+	}
+	if d.code != 2 {
+		t.Errorf("code = %d, want 2: the run happened and something in it failed", d.code)
+	}
+	if d.err == nil || !strings.Contains(d.err.Error(), "index out of range") {
+		t.Errorf("err = %v, want the panic value carried through", d.err)
+	}
+	// And it must not claim the operator cancelled: nothing was cancelled, the
+	// code crashed.
+	if d.ctxCancelled {
+		t.Error("the crash was reported as a cancellation")
+	}
+}
+
+// A collection that returns normally still sends exactly one event. The recover
+// must not fire on the ordinary path.
+func TestAnUnpanickedGuardSendsNothing(t *testing.T) {
+	r := &runner{events: make(chan event, 4), done: make(chan struct{})}
+	func() { defer r.guardCollection() }()
+	if len(r.events) != 0 {
+		t.Errorf("%d events sent with no panic", len(r.events))
+	}
+}
