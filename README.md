@@ -132,6 +132,8 @@ Options for `check` and `collect`:
 | `--server HOST[,PORT]` | overrides `SQL_SERVER` |
 | `--user NAME` | overrides `SQL_USER` |
 | `--env PATH` | `.env` file to read (default `.env`) |
+| `--password-file FILE` | read `SQL_PASSWORD` from this file rather than from `.env`. One trailing line ending is ignored; an empty file is refused |
+| `--password-stdin` | read `SQL_PASSWORD` from standard input, same rules |
 | `--queries-dir DIR` | run a corpus from disk instead of the embedded one |
 | `--output-dir DIR` | where to write results |
 | `--keep` | keep an existing same-day run folder, suffixing this run |
@@ -152,11 +154,30 @@ Options for `check` and `collect`:
 There is no `--password` flag, and there will not be one. A password on the
 command line ends up in `ps` output, in shell history and in the process table
 of every other user on the machine, and no amount of care at the call site takes
-it back out; put it in `SQL_PASSWORD` in `.env` instead. The wizard's step 1 is
-the only place in this program where a password can be typed, and what is typed
-there stays in memory for the length of the run: it is masked on screen, it is
-never written to disk, it never reaches `.env`, and it appears in no manifest
-and no archive.
+it back out.
+
+`--password-file` and `--password-stdin` exist because that objection is about
+the argument, not about scripting. A path is not a secret, and a pipe is read by
+this process alone — neither appears in the process table, and a secret store
+that prints to stdout can hand the password over without it ever touching disk:
+
+```
+vault read -field=password secret/sql-auditor | sql-auditor collect --password-stdin
+```
+
+Both read the value the same way. Exactly one trailing line ending is removed
+and nothing else, so a password ending in a space is the password you wrote; an
+empty source is refused rather than treated as no password, because a CI step
+that wrote nothing would otherwise fall through to integrated authentication and
+measure the wrong login. Giving both at once is refused too. The value obeys the
+ordinary precedence — it beats `SQL_PASSWORD` in `.env`, which beats the
+environment.
+
+Otherwise, put it in `SQL_PASSWORD` in `.env`. The wizard's step 1 remains the
+only place in this program where a password is *typed*, and what is typed there
+stays in memory for the length of the run: it is masked on screen, it is never
+written to disk, it never reaches `.env`, and it appears in no manifest and no
+archive. A password from either option above is treated identically once read.
 
 Both `check` and `collect` print `sql-auditor <version> (<build>)` on stderr
 before they do anything else, so an archive, a terminal transcript and a bug

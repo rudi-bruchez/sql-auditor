@@ -1176,6 +1176,25 @@ Note that `MANIFEST.txt` reports the authentication mode as either `sql:<login>`
 or `windows`. A Kerberos run is recorded as `windows`, since from the
 configuration's point of view it is the same integrated path.
 
+#### Supplying the password without a `.env`
+
+`--password-file FILE` and `--password-stdin` read `SQL_PASSWORD` from somewhere
+other than the `.env`, for a scheduled run or a pipeline that has no business
+leaving a credential on disk. They are mutually exclusive, and both read the
+value the same way: exactly one trailing `\n` or `\r\n` is removed, and nothing
+else is. A trailing space, a `#`, a quote — all part of the password. This is
+deliberately stricter than the `.env` parser, which strips a trailing comment
+from an unquoted value: here there is no line to comment, so there is nothing to
+strip and no ambiguity to resolve.
+
+An empty file, or an empty standard input, stops the run. It is not read as "no
+password": with `SQL_USER` set and `SQL_PASSWORD` empty the tool would try
+integrated authentication and measure whichever identity the scheduler runs as,
+which is the failure the closed key set exists to prevent elsewhere.
+
+There is no `--password`. See the README for why the argument form is the one
+thing these two options are not.
+
 ### TLS
 
 The connection is encrypted by default (`SQL_ENCRYPT=true`), but the server

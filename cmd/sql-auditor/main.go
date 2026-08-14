@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"runtime/debug"
 	"strconv"
@@ -85,6 +86,9 @@ type cliFlags struct {
 	to, grantScript                              string
 	keep                                         bool
 
+	passwordFile  string
+	passwordStdin bool
+
 	sessionText, objectDefinitions              bool
 	deadlockGraphs, blockedProcessReports       bool
 	estimateCompression                         bool
@@ -100,6 +104,15 @@ func defineFlags(cmd string) *cliFlags {
 	fs.StringVar(&c.server, "server", "", "SQL Server instance (overrides SQL_SERVER)")
 	fs.StringVar(&c.user, "user", "", "SQL login (overrides SQL_USER)")
 	fs.StringVar(&c.envFile, "env", ".env", "path to the .env file")
+	// Neither of these is --password, and the difference is the whole point:
+	// a password given as an argument is in the process table for every other
+	// user on the machine and in the shell history afterwards, and nothing at
+	// the call site takes it back out. A path is not a secret, and a pipe is
+	// read by this process alone.
+	fs.StringVar(&c.passwordFile, "password-file", "",
+		"read SQL_PASSWORD from this file instead of .env (one trailing line ending is ignored)")
+	fs.BoolVar(&c.passwordStdin, "password-stdin", false,
+		"read SQL_PASSWORD from standard input instead of .env")
 	fs.StringVar(&c.queriesDir, "queries-dir", "", "run queries from this directory instead of the embedded corpus")
 	fs.StringVar(&c.outputDir, "output-dir", "", "where to write results")
 	fs.BoolVar(&c.keep, "keep", false, "keep an existing same-day run folder, suffixing this run")
@@ -199,10 +212,58 @@ func defineFlags(cmd string) *cliFlags {
 // wrote and can correct. The error is returned rather than printed so the caller
 // decides where it goes: a subcommand puts it on stderr, and the wizard cannot,
 // because it is about to take the screen.
-func buildOptions(cmd string, args []string, env func(string) string) (collect.Options, int, error) {
+func buildOptions(cmd string, args []string, env func(string) string, stdin io.Reader) (collect.Options, int, error) {
 	c := defineFlags(cmd)
 	_ = c.fs.Parse(args)
-	return optionsFrom(c, env)
+	return optionsFrom(c, env, stdin)
+}
+
+// readPassword resolves --password-file and --password-stdin into the value
+// SQL_PASSWORD would have carried. An empty string with a nil error means
+// neither option was given, which is the ordinary case.
+//
+// Exactly one trailing line ending is removed and nothing else. Trimming
+// whitespace generally would be the friendlier-looking choice and the wrong
+// one: a password can end in a space, and one that works in .env — where the
+// operator quotes it — must not become a different password here. The single
+// \r\n or \n is the one thing an editor or a `>` redirection adds without
+// being asked.
+//
+// An empty source is an error rather than an empty password. A CI step that
+// wrote nothing to the file, or a pipeline whose left-hand side failed, would
+// otherwise fall through to Windows integrated authentication and quietly
+// measure a different login than the one the run is about.
+func readPassword(c *cliFlags, stdin io.Reader) (string, error) {
+	if c.passwordFile != "" && c.passwordStdin {
+		return "", fmt.Errorf("--password-file and --password-stdin cannot both be given")
+	}
+	var raw []byte
+	switch {
+	case c.passwordFile != "":
+		b, err := os.ReadFile(c.passwordFile)
+		if err != nil {
+			return "", fmt.Errorf("--password-file: %w", err)
+		}
+		raw = b
+	case c.passwordStdin:
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", fmt.Errorf("--password-stdin: %w", err)
+		}
+		raw = b
+	default:
+		return "", nil
+	}
+	s := strings.TrimSuffix(string(raw), "\n")
+	s = strings.TrimSuffix(s, "\r")
+	if s == "" {
+		source := "--password-file " + c.passwordFile
+		if c.passwordStdin {
+			source = "--password-stdin"
+		}
+		return "", fmt.Errorf("%s: empty; a password read from nothing is not a password", source)
+	}
+	return s, nil
 }
 
 // optionsFrom is the resolution itself, on a command line that has already been
@@ -210,7 +271,15 @@ func buildOptions(cmd string, args []string, env func(string) string) (collect.O
 // always been refused before anything else is said, including before the
 // "unknown command" message — and parsing it a second time here would only
 // produce the same values.
-func optionsFrom(c *cliFlags, env func(string) string) (collect.Options, int, error) {
+func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader) (collect.Options, int, error) {
+	// Before the .env is opened, because a password source the operator named
+	// and this program cannot read is their mistake to correct, and saying so
+	// first keeps the two refusals from arriving in an order that depends on
+	// which file happens to be missing.
+	password, err := readPassword(c, stdin)
+	if err != nil {
+		return collect.Options{}, 2, err
+	}
 	dotenv := map[string]string{}
 	if f, err := os.Open(c.envFile); err == nil {
 		defer f.Close()
@@ -224,6 +293,10 @@ func optionsFrom(c *cliFlags, env func(string) string) (collect.Options, int, er
 	for k, v := range map[string]string{
 		"SQL_SERVER": c.server, "SQL_USER": c.user,
 		"QUERIES_DIR": c.queriesDir, "OUTPUT_DIR": c.outputDir,
+		// A password from --password-file or --password-stdin enters here
+		// and nowhere else, so it obeys the same precedence as every other
+		// flag — over .env, over the environment — with no rule of its own.
+		"SQL_PASSWORD": password,
 	} {
 		if v != "" {
 			flags[k] = v
@@ -343,7 +416,7 @@ func run() int {
 		// server and supply a password on screen 1. A refusal here is a .env
 		// the wizard cannot show, so it is reported the way a subcommand would
 		// report it — before the terminal is taken.
-		o, code, err := buildOptions("collect", nil, os.Getenv)
+		o, code, err := buildOptions("collect", nil, os.Getenv, os.Stdin)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return code
@@ -414,7 +487,7 @@ func run() int {
 	// on the terminal where the operator is looking.
 	fmt.Fprintf(os.Stderr, "sql-auditor %s (%s)\n\n", version, buildStamp())
 
-	opts, code, err := optionsFrom(c, os.Getenv)
+	opts, code, err := optionsFrom(c, os.Getenv, os.Stdin)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return code
@@ -450,6 +523,14 @@ Options (check, collect):
   --server HOST[,PORT]        overrides SQL_SERVER
   --user NAME                 overrides SQL_USER
   --env PATH                  .env file to read (default .env)
+  --password-file FILE        read SQL_PASSWORD from this file rather than from
+                              .env. Exactly one trailing line ending is ignored;
+                              everything else, including a trailing space, is
+                              part of the password. An empty file is refused.
+  --password-stdin            read SQL_PASSWORD from standard input, same rules.
+                              For a secret store that prints to a pipe. There is
+                              no --password: an argument is in the process table
+                              and in the shell history, and a path is not.
   --queries-dir DIR           run a corpus from disk instead of the embedded one
   --output-dir DIR            where to write results
   --keep                      keep an existing same-day run folder

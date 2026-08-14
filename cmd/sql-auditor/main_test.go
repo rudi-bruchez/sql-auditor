@@ -7,6 +7,11 @@ import (
 	"testing"
 )
 
+// noStdin is the reader every test that does not exercise --password-stdin
+// passes: reading it is a bug in the code under test, not a source of an empty
+// password, so it must be distinguishable from an empty stdin.
+var noStdin = strings.NewReader("")
+
 // writeDotEnv puts a .env in a temporary directory and returns its path, so a
 // test can exercise the file half of the precedence without touching the
 // developer's own .env — which is the file that would otherwise be read, since
@@ -74,7 +79,7 @@ func TestModeChoosesBetweenTheSubcommandTheWizardAndTheUsage(t *testing.T) {
 
 func TestBuildOptionsPrefersAFlagOverTheDotEnvFile(t *testing.T) {
 	env := writeDotEnv(t, "SQL_SERVER=from-dotenv\n")
-	o, code, err := buildOptions("check", []string{"--env", env, "--server", "from-flag"}, noEnv)
+	o, code, err := buildOptions("check", []string{"--env", env, "--server", "from-flag"}, noEnv, noStdin)
 	if err != nil || code != 0 {
 		t.Fatalf("buildOptions: code %d, err %v", code, err)
 	}
@@ -96,7 +101,7 @@ func TestBuildOptionsPrefersTheDotEnvFileOverAnExportedVariable(t *testing.T) {
 		}
 		return ""
 	}
-	o, code, err := buildOptions("check", []string{"--env", env}, exported)
+	o, code, err := buildOptions("check", []string{"--env", env}, exported, noStdin)
 	if err != nil || code != 0 {
 		t.Fatalf("buildOptions: code %d, err %v", code, err)
 	}
@@ -111,7 +116,7 @@ func TestBuildOptionsPrefersTheDotEnvFileOverAnExportedVariable(t *testing.T) {
 // wrong login's permissions.
 func TestBuildOptionsRefusesAnUnknownDotEnvKey(t *testing.T) {
 	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\nSQL_LOGIN=sa\n")
-	_, code, err := buildOptions("check", []string{"--env", env}, noEnv)
+	_, code, err := buildOptions("check", []string{"--env", env}, noEnv, noStdin)
 	if err == nil {
 		t.Fatal("an unknown .env key was accepted")
 	}
@@ -138,7 +143,7 @@ func TestBuildOptionsResolvesWithoutAnyArguments(t *testing.T) {
 		}
 		return ""
 	}
-	o, code, err := buildOptions("collect", []string{"--env", env}, exported)
+	o, code, err := buildOptions("collect", []string{"--env", env}, exported, noStdin)
 	if err != nil || code != 0 {
 		t.Fatalf("buildOptions: code %d, err %v", code, err)
 	}
@@ -150,5 +155,133 @@ func TestBuildOptionsResolvesWithoutAnyArguments(t *testing.T) {
 	}
 	if o.Version == "" {
 		t.Error("Version is empty; every archive records the build that made it")
+	}
+}
+
+// writePasswordFile puts a file next to nothing else and returns its path. The
+// body is written verbatim, because what these tests are about is exactly which
+// bytes survive the read.
+func writePasswordFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pw")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A password read from a file is a flag, so it beats the .env for the same
+// reason --server does: it is what the operator typed for this run.
+func TestPasswordFileBeatsTheDotEnvFile(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\nSQL_USER=sa\nSQL_PASSWORD=from-dotenv\n")
+	pw := writePasswordFile(t, "from-file")
+	o, code, err := buildOptions("collect", []string{"--env", env, "--password-file", pw}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if o.Config.Password != "from-file" {
+		t.Errorf("Password = %q, want the file to win", o.Config.Password)
+	}
+}
+
+// Exactly one trailing line ending goes, and nothing else. A password may
+// legitimately end in a space, contain a "#", or hold a second line's worth of
+// punctuation; trimming more than the line ending an editor added would corrupt
+// passwords that work everywhere else.
+func TestPasswordFileTrimsOneLineEndingAndNothingElse(t *testing.T) {
+	cases := []struct{ name, body, want string }{
+		{"no line ending", "p@ss w0rd", "p@ss w0rd"},
+		{"unix line ending", "p@ss w0rd\n", "p@ss w0rd"},
+		{"windows line ending", "p@ss w0rd\r\n", "p@ss w0rd"},
+		{"a trailing space is part of the password", "p@ss \n", "p@ss "},
+		{"a hash is not a comment", "p@ss#1\n", "p@ss#1"},
+		{"only the last line ending goes", "p@ss\n\n", "p@ss\n"},
+	}
+	for _, c := range cases {
+		env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\nSQL_USER=sa\n")
+		o, code, err := buildOptions("collect",
+			[]string{"--env", env, "--password-file", writePasswordFile(t, c.body)}, noEnv, noStdin)
+		if err != nil || code != 0 {
+			t.Fatalf("%s: buildOptions: code %d, err %v", c.name, code, err)
+		}
+		if o.Config.Password != c.want {
+			t.Errorf("%s: Password = %q, want %q", c.name, o.Config.Password, c.want)
+		}
+	}
+}
+
+// --password-stdin reads the same way, from the reader the caller supplies.
+func TestPasswordStdinReadsTheSuppliedReader(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\nSQL_USER=sa\nSQL_PASSWORD=from-dotenv\n")
+	o, code, err := buildOptions("collect", []string{"--env", env, "--password-stdin"},
+		noEnv, strings.NewReader("from-stdin\n"))
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if o.Config.Password != "from-stdin" {
+		t.Errorf("Password = %q, want the reader to win", o.Config.Password)
+	}
+}
+
+// An empty source is refused rather than silently meaning "no password". The
+// mistake that produces it — a file the CI wrote nothing into, a pipeline whose
+// left-hand side failed — would otherwise fall through to integrated
+// authentication and measure the wrong login, which is the same failure the
+// unknown-key refusal exists to prevent.
+func TestPasswordSourcesRefuseWhatTheyCannotRead(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\nSQL_USER=sa\n")
+	cases := []struct {
+		name  string
+		args  []string
+		stdin *strings.Reader
+		names string
+	}{
+		{"an empty file", []string{"--password-file", writePasswordFile(t, "")}, noStdin, "empty"},
+		{"a file holding only a line ending", []string{"--password-file", writePasswordFile(t, "\n")}, noStdin, "empty"},
+		{"an absent file", []string{"--password-file", filepath.Join(t.TempDir(), "absent")}, noStdin, "absent"},
+		{"an empty stdin", []string{"--password-stdin"}, strings.NewReader(""), "empty"},
+	}
+	for _, c := range cases {
+		_, code, err := buildOptions("collect", append([]string{"--env", env}, c.args...), noEnv, c.stdin)
+		if err == nil {
+			t.Errorf("%s: accepted", c.name)
+			continue
+		}
+		if code != 2 {
+			t.Errorf("%s: exit code = %d, want 2", c.name, code)
+		}
+	}
+}
+
+// Both at once is a refusal and not a precedence rule. Two sources named on one
+// command line is a mistake in whatever generated it, and picking a winner would
+// hide it.
+func TestPasswordFileAndStdinTogetherAreRefused(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\nSQL_USER=sa\n")
+	pw := writePasswordFile(t, "from-file")
+	_, code, err := buildOptions("collect",
+		[]string{"--env", env, "--password-file", pw, "--password-stdin"},
+		noEnv, strings.NewReader("from-stdin\n"))
+	if err == nil {
+		t.Fatal("both password sources were accepted at once")
+	}
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(err.Error(), "--password-file") || !strings.Contains(err.Error(), "--password-stdin") {
+		t.Errorf("error %q does not name both options", err)
+	}
+}
+
+// The password is never printed back. It reaches Config and stops there: no
+// echo, no confirmation line, nothing an operator could paste into a bug report
+// by accident.
+func TestPasswordNeverReachesTheFlagsUsageText(t *testing.T) {
+	c := defineFlags("collect")
+	var b strings.Builder
+	c.fs.SetOutput(&b)
+	c.fs.PrintDefaults()
+	if strings.Contains(b.String(), "--password ") {
+		t.Error("a bare --password option exists; README says it must not")
 	}
 }
