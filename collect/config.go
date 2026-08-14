@@ -43,6 +43,13 @@ func WriteEnvTemplate(content, dest string, force bool) error {
 		return err
 	}
 	defer f.Close()
+	// The perm argument above applies only when the file is created, so a
+	// --force over an existing 0644 .env would have kept it world-readable —
+	// which is the opposite of what the mode is there for, and least visible
+	// on exactly the file that goes on to hold SQL_PASSWORD.
+	if err := f.Chmod(0o600); err != nil && !errors.Is(err, os.ErrInvalid) {
+		return err
+	}
 	if _, err := io.WriteString(f, content); err != nil {
 		return err
 	}
@@ -51,14 +58,19 @@ func WriteEnvTemplate(content, dest string, force bool) error {
 
 type Config struct {
 	Server, Database, User, Password, AppName string
-	Integrated, Encrypt, TrustCert            bool
-	ConnectTimeout, QueryTimeout              time.Duration
-	QueriesDir, OutputDir                     string
-	DBInclude, DBExclude                      string
-	QueryStoreDays                            int
-	QueryStoreFrom, QueryStoreTo              string
-	QueryStoreTop                             int
-	QueryStoreDBInclude                       string
+	// AppNameSet distinguishes an AppName the operator supplied from the one
+	// this package defaulted to. The two cannot be told apart from the value:
+	// SQL_APPLICATION_NAME=sql-auditor is a legitimate thing to write — it is
+	// the worked example in .env.example — and the caller must not decorate it.
+	AppNameSet                     bool
+	Integrated, Encrypt, TrustCert bool
+	ConnectTimeout, QueryTimeout   time.Duration
+	QueriesDir, OutputDir          string
+	DBInclude, DBExclude           string
+	QueryStoreDays                 int
+	QueryStoreFrom, QueryStoreTo   string
+	QueryStoreTop                  int
+	QueryStoreDBInclude            string
 	// QueryStoreWindowConflict is set when QUERY_STORE_DAYS was typed
 	// alongside QUERY_STORE_FROM or QUERY_STORE_TO. Resolve is the only place
 	// that can see the conflict — downstream only ever sees a resolved int, so
@@ -165,6 +177,14 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		}
 		return def
 	}
+	// set reports that the operator supplied the key, wherever from. It is not
+	// the same question as "does the value differ from the default", and one
+	// key needs the difference: SQL_APPLICATION_NAME=sql-auditor written out in
+	// full is a choice, and .env.example ships exactly that line as its worked
+	// example. Comparing against the default would treat it as absent and
+	// append a version to it, breaking the Extended Events filter it was
+	// written to be matched by.
+	set := func(key string) bool { return get(key, "") != "" }
 	// firstErr captures the first malformed-value error encountered by
 	// boolOf or secOf. An absent or empty value still takes the default
 	// silently; only a present-but-unparseable value is an error — that
@@ -290,6 +310,7 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		User:           get("SQL_USER", ""),
 		Password:       get("SQL_PASSWORD", ""),
 		AppName:        get("SQL_APPLICATION_NAME", DefaultAppName),
+		AppNameSet:     set("SQL_APPLICATION_NAME"),
 		Integrated:     boolOf("SQL_INTEGRATED_SECURITY", false),
 		Encrypt:        boolOf("SQL_ENCRYPT", true),
 		TrustCert:      boolOf("SQL_TRUST_SERVER_CERTIFICATE", true),

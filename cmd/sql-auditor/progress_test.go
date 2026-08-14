@@ -2,9 +2,11 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestElapsedIsWrittenAtTheScaleItHasReached(t *testing.T) {
@@ -197,5 +199,82 @@ func fixedClock() func() time.Time {
 	return func() time.Time {
 		n++
 		return base.Add(time.Duration(n) * time.Second)
+	}
+}
+
+// The order Run actually calls the observer in: Finished arrives from inside
+// the manifest write, and a phase follows it. Nothing calls back after that —
+// Run goes on to zip, then prints its summary and the archive path on stdout —
+// so a transient line left painted here is the line the shell prompt lands on.
+func TestAPhaseAfterTheVerdictEndsItsLine(t *testing.T) {
+	var b strings.Builder
+	o := newProgress(&b, true, func() int { return 80 }, fixedClock())
+	o.Planned(1)
+	o.UnitStarted("a.sql", "")
+	o.UnitDone("a.sql", "", 10, time.Second, nil)
+	o.Finished(false)
+	o.Phase("archiving")
+
+	out := b.String()
+	if !strings.HasSuffix(out, "archiving\n") {
+		t.Errorf("the run does not end on a finished line: %q", out[max(0, len(out)-40):])
+	}
+}
+
+// And on the paths where no phase follows — Run returning an error, a run
+// stopped early — main's Done is what takes the line down before anything else
+// is printed to the same stderr.
+func TestDoneClearsALinePhaseNeverFollowed(t *testing.T) {
+	var b strings.Builder
+	o := newProgress(&b, true, func() int { return 80 }, fixedClock())
+	o.Planned(2)
+	o.UnitStarted("a.sql", "")
+	o.Done()
+
+	out := b.String()
+	if !strings.HasSuffix(out, "\r\x1b[K") {
+		t.Errorf("Done left the line on screen: %q", out[max(0, len(out)-40):])
+	}
+}
+
+// collect writes its own commentary — the reconnect notice — to the stream the
+// gauge owns. Straight to stderr it would land on top of a painted line and
+// leave the line's tail showing past the end of the message.
+func TestForeignWritesEraseTheLineFirst(t *testing.T) {
+	var b strings.Builder
+	o := newProgress(&b, true, func() int { return 80 }, fixedClock())
+	o.Planned(2)
+	o.UnitStarted("40.database/210.a-collector-with-a-long-name.sql", "CLIENTDB")
+	b.Reset()
+
+	fmt.Fprintln(o.Writer(), "connection lost; attempting one reconnect")
+
+	out := b.String()
+	if !strings.HasPrefix(out, "\r\x1b[K") {
+		t.Errorf("the message did not erase the gauge before writing: %q", out)
+	}
+	msg := strings.Index(out, "connection lost")
+	if msg < 0 {
+		t.Fatalf("the message never got written: %q", out)
+	}
+	// The tail of the collector's name must not survive on the message's line.
+	if strings.Contains(out[msg:strings.Index(out[msg:], "\n")+msg], "210.a-collector") {
+		t.Errorf("the gauge's tail is still on the message's line: %q", out)
+	}
+}
+
+// A COMPTABILITÉ database is the ordinary case for this tool's users. Cutting
+// its name on a byte boundary emits an invalid rune, which the terminal draws
+// as a replacement glyph and the next repaint does not necessarily cover.
+func TestTheLineIsCutOnRunesAndNotOnBytes(t *testing.T) {
+	label := "40.database/210.index-usage.sql (COMPTABILITÉ-DES-VENTES)"
+	for width := 20; width < 60; width++ {
+		got := gauge(7, 9, time.Second, label, width)
+		if !utf8.ValidString(got) {
+			t.Fatalf("width %d: the line is not valid UTF-8: %q", width, got)
+		}
+		if n := utf8.RuneCountInString(got); n > width-1 {
+			t.Errorf("width %d: %d runes, want at most %d", width, n, width-1)
+		}
 	}
 }

@@ -498,7 +498,7 @@ func (r *runner) collect(ctx context.Context, s State) {
 	// The wizard is painting the terminal, so Run must put nothing on stdout.
 	o.OwnsScreen = true
 	// The archive's name is derived before the run rather than read from it,
-	// because Run reports it on stdout only when there is no Observer — under
+	// because Run reports it on stdout only when OwnsScreen is unset — under
 	// the wizard that write is suppressed, since it would land in the middle of
 	// a frame. RunFolderFor is deterministic given the same output directory,
 	// server name, clock and --keep, and runFolderFor passes it the same four

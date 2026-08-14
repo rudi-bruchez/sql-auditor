@@ -3,6 +3,7 @@ package collect
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -338,5 +339,32 @@ func TestWriteEnvTemplateDoesNotCreateDirectories(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "absent", ".env")
 	if err := WriteEnvTemplate("SQL_SERVER=x\n", dest, false); err == nil {
 		t.Fatal("a missing parent directory was created")
+	}
+}
+
+// --force reuses an existing file, and the perm argument to OpenFile applies
+// only when one is created — so without an explicit chmod a .env left at 0644
+// by an earlier hand would stay world-readable through the very command meant
+// to lay down a fresh template for a password.
+//
+// Only Unix can answer this: Windows maps the mode to a read-only bit and
+// reports 0666 whatever was asked for.
+func TestWriteEnvTemplateTightensTheModeWhenItReplaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes on Windows are a read-only bit, not permission bits")
+	}
+	dest := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(dest, []byte("SQL_SERVER=old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteEnvTemplate("SQL_SERVER=new\n", dest, true); err != nil {
+		t.Fatalf("WriteEnvTemplate: %v", err)
+	}
+	fi, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode = %04o, want 0600", got)
 	}
 }

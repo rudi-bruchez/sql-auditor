@@ -353,7 +353,7 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader) (collect
 	// to be matched by an Extended Events filter or a monitoring rule, and
 	// appending to it would break the match. Stamping it here rather than in
 	// Resolve keeps the version in the one file the release workflow rewrites.
-	if cfg.AppName == collect.DefaultAppName {
+	if !cfg.AppNameSet {
 		cfg.AppName = collect.DefaultAppName + " " + version
 	}
 
@@ -527,7 +527,7 @@ func run() int {
 			fmt.Fprintln(os.Stderr, "no command given.")
 		case strings.HasPrefix(cmd, "-"):
 			fmt.Fprintf(os.Stderr,
-				"%q is not a command: check, collect, queries and version are written without dashes. Did you mean %q?\n\n",
+				"%q is not a command: check, collect, env, queries and version are written without dashes. Did you mean %q?\n\n",
 				cmd, strings.TrimLeft(cmd, "-"))
 		default:
 			fmt.Fprintf(os.Stderr, "unknown command %q.\n\n", cmd)
@@ -562,8 +562,15 @@ func run() int {
 		p := newProgress(os.Stderr, isTerminal(os.Stderr), stderrWidth, time.Now)
 		stop := p.StartTicking(time.Second)
 		opts.Observer = p
+		// collect's own commentary goes through the gauge rather than straight
+		// to stderr, so the reconnect notice erases the line instead of landing
+		// on top of it.
+		opts.Progress = p.Writer()
 		code, err = collect.Run(ctx, opts)
+		// In this order: no tick may fire after the line is taken down, and
+		// nothing main prints below may land on a gauge.
 		stop()
+		p.Done()
 	case "check":
 		code, err = collect.Check(ctx, opts)
 	}

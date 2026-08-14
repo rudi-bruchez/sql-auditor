@@ -41,6 +41,27 @@ type progress struct {
 	// dirty records that a transient line is on screen and must be erased
 	// before anything permanent is written under it.
 	dirty bool
+	// finished records that the run's verdict is in, which changes what a
+	// phase is worth: see Phase.
+	finished bool
+}
+
+// Writer returns the stream collect writes its own running commentary to — the
+// reconnect notice, the run-replacement warning. Those go to stderr, which is
+// the stream the gauge owns, and writing them straight there would land them on
+// top of a painted line and leave its tail showing past the end of the message.
+// Through here they erase the line first and the gauge repaints under them.
+func (p *progress) Writer() io.Writer { return progressWriter{p} }
+
+type progressWriter struct{ p *progress }
+
+func (w progressWriter) Write(b []byte) (int, error) {
+	w.p.mu.Lock()
+	defer w.p.mu.Unlock()
+	w.p.clear()
+	n, err := w.p.out.Write(b)
+	w.p.paint()
+	return n, err
 }
 
 func newProgress(out io.Writer, tty bool, width func() int, now func() time.Time) *progress {
@@ -80,8 +101,15 @@ func gauge(done, planned int, since time.Duration, label string, width int) stri
 	line := b.String()
 	// A width of 0 is what GetSize reports while an RDP window is being
 	// dragged, and it must not become a negative bound.
-	if width > 1 && len(line) > width-1 {
-		line = line[:width-1]
+	//
+	// The cut is on runes, not bytes. A COMPTABILITÉ database is the ordinary
+	// case for this tool's users, and slicing its name mid-rune would emit an
+	// invalid byte — which the terminal draws as a replacement glyph and which
+	// the next repaint does not necessarily cover.
+	if width > 1 {
+		if r := []rune(line); len(r) > width-1 {
+			line = string(r[:width-1])
+		}
 	}
 	return line
 }
@@ -132,8 +160,9 @@ func (p *progress) StartTicking(every time.Duration) func() {
 	if !p.tty {
 		return func() {}
 	}
-	done := make(chan struct{})
+	done, exited := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(exited)
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
@@ -145,7 +174,14 @@ func (p *progress) StartTicking(every time.Duration) func() {
 			}
 		}
 	}()
-	return func() { close(done) }
+	// The stop waits for the goroutine to be gone, and must: everything main
+	// prints after Run returns — the error, in particular — goes to the same
+	// stderr, and a tick still in flight would repaint the gauge on top of the
+	// reason the run died.
+	return func() {
+		close(done)
+		<-exited
+	}
 }
 
 func (p *progress) Planned(units int) {
@@ -189,19 +225,50 @@ func (p *progress) UnitDone(script, database string, bytes int64, d time.Duratio
 // is where that belongs.
 func (p *progress) ScriptSkipped(script, database, reason string) {}
 
+// Phase paints the stretches where the counter is full and the tool is still
+// working, which is what keeps "223/223" from reading as a hang while a large
+// run folder is zipped.
+//
+// After Finished it prints a permanent line instead of a transient one, and the
+// asymmetry is forced by the order Run calls things in: Finished arrives from
+// inside the manifest write, then Phase("archiving"), then Zip, and then Run
+// puts its summary and the archive path on stdout — with no callback in
+// between. A transient line there would still be on screen under both of them:
+// the shell prompt would land on it, and Run's own two lines would overwrite
+// its prefix and leave the tail of "archiving" hanging off the end. Ending the
+// line is what hands the cursor back.
 func (p *progress) Phase(name string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.label = name
+	if p.finished {
+		p.clear()
+		if p.tty {
+			fmt.Fprintf(p.out, "%s\n", name)
+		}
+		return
+	}
 	p.paint()
 }
 
-// Finished leaves the line clean and says nothing. collect.Run prints the
-// summary and the archive path to stdout immediately afterwards, and a second
-// account of the same run on stderr would only invite the two to disagree.
+// Finished says nothing of its own. collect.Run prints the summary and the
+// archive path to stdout immediately afterwards, and a second account of the
+// same run on stderr would only invite the two to disagree.
 func (p *progress) Finished(cancelled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.finished = true
+	p.clear()
+}
+
+// Done is called by main once Run has returned. Finished is not enough: the
+// phases after it, and any error Run comes back with, both land after the last
+// observer callback, so something has to take the line off the screen on the
+// paths where no Phase followed.
+func (p *progress) Done() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.finished = true
 	p.clear()
 }
 

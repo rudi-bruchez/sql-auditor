@@ -370,3 +370,19 @@ func TestAnOperatorsProgramNameIsLeftAlone(t *testing.T) {
 		t.Errorf("AppName = %q, want it untouched", o.Config.AppName)
 	}
 }
+
+// The name the operator wrote is left alone even when it is character for
+// character the default. .env.example ships `SQL_APPLICATION_NAME=sql-auditor`
+// as its worked example, so this is the value most likely to be set explicitly
+// — and an Extended Events filter on program_name = 'sql-auditor' matches
+// nothing the moment a version is appended to it.
+func TestAProgramNameSetToTheDefaultStringIsStillTheOperatorsChoice(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\nSQL_APPLICATION_NAME=sql-auditor\n")
+	o, code, err := buildOptions("collect", []string{"--env", env}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if o.Config.AppName != collect.DefaultAppName {
+		t.Errorf("AppName = %q, want %q exactly", o.Config.AppName, collect.DefaultAppName)
+	}
+}
