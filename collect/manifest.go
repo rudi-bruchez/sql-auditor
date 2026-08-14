@@ -286,7 +286,11 @@ func WriteManifestWithFallback(m *Manifest, runFolder string, progress io.Writer
 		return "", lastResort(b, err, progress)
 	}
 	if herr := m.WriteHuman(dir); herr != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", manifestHumanName, herr)
+		// progress, like its twin on the successful branch above. On stderr it
+		// would land in the middle of a painted frame under a caller that owns
+		// the terminal, shifting every line below it — which is the one thing
+		// this parameter exists to prevent.
+		fmt.Fprintf(progress, "warning: could not write %s: %v\n", manifestHumanName, herr)
 	}
 	fmt.Fprintf(progress, "output directory unwritable; manifest written to %s\n", path)
 	return path, nil
@@ -302,7 +306,11 @@ func WriteManifestWithFallback(m *Manifest, runFolder string, progress io.Writer
 // receives is the only copy of the manifest in existence. A caller that
 // substitutes a buffer owes it a flush to somewhere durable.
 func lastResort(manifestJSON []byte, cause error, progress io.Writer) error {
-	fmt.Fprintf(progress, "cannot write the manifest anywhere (%v); it follows on stderr:\n%s\n", cause, manifestJSON)
+	// "it follows", not "it follows on stderr": progress is stderr only for the
+	// command-line callers. Under the wizard it is an in-memory buffer flushed
+	// to a file, and naming a stream the reader is not looking at would send
+	// them to the wrong place for the only copy of the manifest.
+	fmt.Fprintf(progress, "cannot write the manifest anywhere (%v); it follows:\n%s\n", cause, manifestJSON)
 	return cause
 }
 

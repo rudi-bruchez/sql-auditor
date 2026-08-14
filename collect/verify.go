@@ -66,26 +66,26 @@ type VerifyResult struct {
 	SelectErr     error
 }
 
-// Verify gathers everything `check` reports and everything the wizard shows,
-// on one connection, and prints nothing.
+// VerifyLocal gathers everything that can be known without a socket: the
+// corpus, its lint verdicts, and whether the output directory will take an
+// archive.
 //
-// The returned error is the first FATAL failure — the corpus, the address, the
-// connection — and is nil for the two degraded outcomes, which are reported on
-// the result instead: a database list that could not be read still leaves a
-// usable permissions report, and refusing to return the whole thing over it
-// would hide the answer to the question the operator asked.
+// It is separate from VerifyServer so that a caller can SAY something before
+// spending minutes on the network. `check` prints the corpus listing and the
+// Output line from this result alone, which is what it did before the two were
+// ever gathered together: on a struggling instance every probe runs to
+// SQL_QUERY_TIMEOUT_SEC, and an operator staring at an empty terminal cannot
+// tell a working tool from a hung one. It also means `check > report.txt`
+// killed halfway leaves the findings already established rather than an empty
+// file.
 //
-// One connection for everything, as in Run and in the version of Check this
-// was extracted from: the pool allows exactly one, so anything taking the
-// *sql.DB while this Conn is held would wait for a connection only this
-// function can give back.
-func Verify(ctx context.Context, o Options) (VerifyResult, error) {
+// Discover comes first and outputWritable second, in that order and not the
+// reverse: outputWritable creates the directory it tests, and a corpus that
+// cannot be read is an early return. Probing the corpus first keeps
+// `check --queries-dir C:\typo` a command that touches nothing on the
+// operator's disk before refusing.
+func VerifyLocal(o Options) (VerifyResult, error) {
 	var v VerifyResult
-
-	// First, and unconditionally: the contract says a VerifyResult is always
-	// usable, and OutputWritable false is a finding the caller must be able to
-	// trust even on a run that failed for an unrelated reason.
-	v.OutputWritable = outputWritable(o.Config.OutputDir)
 
 	scripts, err := Discover(o.Corpus, o.Root)
 	if err != nil {
@@ -99,17 +99,39 @@ func Verify(ctx context.Context, o Options) (VerifyResult, error) {
 		}
 	}
 
+	// OutputWritable false is a finding the caller must be able to trust even
+	// on a run that fails for an unrelated reason later, so it is gathered
+	// unconditionally once the corpus is known to exist.
+	v.OutputWritable = outputWritable(o.Config.OutputDir)
+	return v, nil
+}
+
+// VerifyServer fills in everything that needs the instance — the preflight,
+// the server probe, the blocking readiness, the database selection and the
+// resolved plan — into a result VerifyLocal has already populated.
+//
+// The returned error is the first FATAL failure — the address, the
+// connection — and is nil for the two degraded outcomes, which are reported on
+// the result instead: a database list that could not be read still leaves a
+// usable permissions report, and refusing to return the whole thing over it
+// would hide the answer to the question the operator asked.
+//
+// One connection for everything, as in Run and in the version of Check this
+// was extracted from: the pool allows exactly one, so anything taking the
+// *sql.DB while this Conn is held would wait for a connection only this
+// function can give back.
+func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 	db, err := Open(o.Config)
 	if err != nil {
 		v.OpenErr = err
-		return v, err
+		return err
 	}
 	defer db.Close()
 
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		v.ConnErr = err
-		return v, err
+		return err
 	}
 	defer conn.Close()
 
@@ -150,11 +172,11 @@ func Verify(ctx context.Context, o Options) (VerifyResult, error) {
 		denied := DeniedCapabilities(v.Checks)
 		// connect is not a per-script gate. Getting here means it answered.
 		delete(denied, "connect")
-		plan := planScripts(scripts, denied, ParseVersion(si.Version), o.Flags)
+		plan := planScripts(v.Scripts, denied, ParseVersion(si.Version), o.Flags)
 		v.Collectors = countCollectors(plan)
-		_, v.Skipped = planUnits(plan, v.Folders, o.Config)
+		_, v.Skipped, _ = planUnits(plan, v.Folders, o.Config)
 	}
-	return v, nil
+	return nil
 }
 
 // countCollectors is how many scripts would run at least once, which is not

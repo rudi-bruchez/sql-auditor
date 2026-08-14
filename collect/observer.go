@@ -50,20 +50,26 @@ type unit struct {
 // the moment a @writer script is narrowed: twelve databases and a pattern
 // matching one give one unit, not twelve.
 //
-// The second return is ordered exactly as the plan is — a script's own skip
-// first, then the per-database skips it produced, then the next script — so it
-// can be appended to m.Skipped in one go without changing the list a human
-// reads to write the audit up. Grouping the targeted skips together would read
-// as a different run.
-func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]unit, []SkippedScript) {
+// The second and third returns are ordered exactly as the plan is — a script's
+// own skip first, then the per-database skips it produced, then the next
+// script — so each can be appended to its manifest list in one go without
+// changing the list a human reads to write the audit up. Grouping the targeted
+// skips together would read as a different run, and the same argument applies
+// to the lint errors: they are produced here, in plan order, rather than by a
+// second walk of the plan at the call site that would sort them by nothing.
+func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]unit, []SkippedScript, []ErrorEntry) {
 	var units []unit
 	var skipped []SkippedScript
+	var errs []ErrorEntry
 	for _, p := range plan {
 		s := p.Script
-		// A lint error is an error, not a skip. It is recorded by the caller,
-		// where it can also set exit 2; turning it into a skip line here would
-		// report a broken collector as a deliberate omission.
+		// A lint error is an error, not a skip: turning it into a skip line
+		// would report a broken collector as a deliberate omission. It is
+		// returned separately because the caller also prices it — a corpus
+		// that does not lint is exit 2 — and this function decides nothing
+		// about exit codes.
 		if s.LintError != "" {
+			errs = append(errs, ErrorEntry{Script: s.Path, Message: s.LintError})
 			continue
 		}
 		if p.Skip != "" {
@@ -80,47 +86,54 @@ func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]u
 			units = append(units, unit{Script: s, Target: t})
 		}
 	}
-	return units, skipped
+	return units, skipped, errs
 }
 
 // observer is the nil-safe wrapper every call site inside this package uses.
 // Keeping the nil test here rather than at the twenty sites is the whole
 // point: a forgotten guard would panic on the default path — the one with no
 // observer at all — which is every command-line run.
-type observer struct{ Observer }
+//
+// The Observer is held in a NAMED field and never embedded. Embedding would
+// promote the interface's own methods onto the wrapper, so a method added to
+// Observer later and not redefined below would compile, satisfy the interface,
+// and dispatch straight onto the nil embedded value — a panic on the one path
+// this type exists to protect. With a named field, forgetting a method is a
+// compile error at the call site instead.
+type observer struct{ o Observer }
 
-func (o observer) Planned(units, databases int) {
-	if o.Observer != nil {
-		o.Observer.Planned(units, databases)
+func (w observer) Planned(units, databases int) {
+	if w.o != nil {
+		w.o.Planned(units, databases)
 	}
 }
 
-func (o observer) UnitStarted(script, database string) {
-	if o.Observer != nil {
-		o.Observer.UnitStarted(script, database)
+func (w observer) UnitStarted(script, database string) {
+	if w.o != nil {
+		w.o.UnitStarted(script, database)
 	}
 }
 
-func (o observer) UnitDone(script, database string, bytes int64, d time.Duration, err error) {
-	if o.Observer != nil {
-		o.Observer.UnitDone(script, database, bytes, d, err)
+func (w observer) UnitDone(script, database string, bytes int64, d time.Duration, err error) {
+	if w.o != nil {
+		w.o.UnitDone(script, database, bytes, d, err)
 	}
 }
 
-func (o observer) ScriptSkipped(script, database, reason string) {
-	if o.Observer != nil {
-		o.Observer.ScriptSkipped(script, database, reason)
+func (w observer) ScriptSkipped(script, database, reason string) {
+	if w.o != nil {
+		w.o.ScriptSkipped(script, database, reason)
 	}
 }
 
-func (o observer) Phase(name string) {
-	if o.Observer != nil {
-		o.Observer.Phase(name)
+func (w observer) Phase(name string) {
+	if w.o != nil {
+		w.o.Phase(name)
 	}
 }
 
-func (o observer) Finished(cancelled bool) {
-	if o.Observer != nil {
-		o.Observer.Finished(cancelled)
+func (w observer) Finished(cancelled bool) {
+	if w.o != nil {
+		w.o.Finished(cancelled)
 	}
 }

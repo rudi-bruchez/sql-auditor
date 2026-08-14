@@ -474,7 +474,15 @@ func (r *runner) connect(ctx context.Context, s State) {
 
 func (r *runner) verify(ctx context.Context, s State) {
 	o := applyState(s, r.opts)
-	v, err := collect.Verify(ctx, o)
+	// The two halves in order: the local one cannot fail on the network, and
+	// the server one is where the minutes go. The wizard has no listing to
+	// print between them — its spinner is already saying the same thing — but
+	// it must still stop on a corpus it could not read rather than probe an
+	// instance for a plan it cannot build.
+	v, err := collect.VerifyLocal(o)
+	if err == nil {
+		err = collect.VerifyServer(ctx, o, &v)
+	}
 	if ctx.Err() != nil {
 		return
 	}

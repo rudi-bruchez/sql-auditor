@@ -518,10 +518,14 @@ func openExitCode(err error) int {
 // production instance, so the script and database lists are printed even when
 // every probe comes back clean.
 func Check(ctx context.Context, o Options) (int, error) {
-	// Everything is gathered first and printed afterwards. Check used to
-	// interleave the two, which is exactly why nothing else could reuse any of
-	// it: the facts existed only as text on their way to stdout.
-	v, err := Verify(ctx, o)
+	// Gathered in two halves, and printed between them. Everything that can be
+	// known without a socket is printed BEFORE the instance is touched: the
+	// probes below each run to SQL_QUERY_TIMEOUT_SEC on a struggling instance,
+	// and a terminal that stays empty for minutes is indistinguishable from a
+	// tool that has hung. It also means a redirected check that is killed
+	// halfway still holds the findings about the corpus and the output
+	// directory.
+	v, err := VerifyLocal(o)
 	if v.CorpusErr != nil {
 		// Nothing has been printed on this path, deliberately. The CLI prints
 		// the returned error, and a "Queries (0):" above it would report an
@@ -558,7 +562,11 @@ func Check(ctx context.Context, o Options) (int, error) {
 	}
 	fmt.Println()
 
-	// The two failures that end the listing, in the order Verify meets them.
+	// Only now is the instance touched.
+	err = VerifyServer(ctx, o, &v)
+
+	// The two failures that end the listing, in the order VerifyServer meets
+	// them.
 	// Both are handed back so the CLI can print them; the unreachable instance
 	// also says so in words, because "1" alone reads as a query that failed.
 	if v.OpenErr != nil {
@@ -599,12 +607,12 @@ func Check(ctx context.Context, o Options) (int, error) {
 	// an empty list is itself the finding when VIEW ANY DEFINITION is missing.
 	switch {
 	case v.CandidatesErr != nil:
-		fmt.Fprintf(os.Stderr, "could not list databases: %v\n", v.CandidatesErr)
+		fmt.Fprintf(o.progress(), "could not list databases: %v\n", v.CandidatesErr)
 	case v.SelectErr != nil:
 		// A malformed DB_INCLUDE/DB_EXCLUDE is the operator's typo, and it
 		// stops here: reporting the grant advice below on a selection nobody
 		// could compute would name the wrong databases.
-		fmt.Fprintln(os.Stderr, v.SelectErr)
+		fmt.Fprintln(o.progress(), v.SelectErr)
 		return 2, nil
 	default:
 		fmt.Printf("\nDatabases that would be collected (%d):\n", len(v.Selection.Included))
@@ -630,7 +638,7 @@ func Check(ctx context.Context, o Options) (int, error) {
 	// collectors.
 	if o.GrantScript != "" {
 		if werr := writeGrantScript(o, v.Scripts, v.Checks, v.Server, v.ServerErr, v.NoAccess); werr != nil {
-			fmt.Fprintf(os.Stderr, "could not write %s: %v\n", o.GrantScript, werr)
+			fmt.Fprintf(o.progress(), "could not write %s: %v\n", o.GrantScript, werr)
 			return 2, nil
 		}
 	} else if anyDenied(v.Checks) || len(v.NoAccess) > 0 {
@@ -1004,7 +1012,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	}
 	// Wrapped once, here, so every callback below can be written unguarded.
 	// A nil Observer — every command-line run — makes all of them no-ops.
-	obs := observer{Observer: o.Observer}
+	obs := observer{o: o.Observer}
 	m := NewManifest("sql-auditor", o.Version, o.Commit)
 	m.Config = map[string]string{
 		"queries_dir":          o.Config.QueriesDir,
@@ -1262,23 +1270,24 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// the run's own record and must be written even when the budget is gone.
 	rw := newRunWriter(runFolder, maxRunBytes)
 
-	// A lint error stops its own script and nothing else, so it is recorded
-	// ahead of the loop rather than inside it. planUnits has already left
-	// those scripts out of the unit list, and a broken collector is an error
-	// the operator can act on before the run's first result arrives.
-	for _, p := range plan {
-		if p.Script.LintError != "" {
-			m.Errors = append(m.Errors, ErrorEntry{Script: p.Script.Path, Message: p.Script.LintError})
-			exit = 2
-		}
-	}
-
 	// The whole plan is unfolded before anything runs. The list of units is
-	// what the loop walks and what a total can be stated from; the skips come
-	// back in plan order, so appending them wholesale leaves the manifest
-	// reading exactly as it did when they were collected along the way.
-	units, planSkipped := planUnits(plan, folders, o.Config)
+	// what the loop walks and what a total can be stated from; the skips and
+	// the lint errors come back in plan order, so appending each wholesale
+	// leaves those lists reading exactly as they did when they were collected
+	// along the way.
+	//
+	// One honest caveat about m.Errors. Its lint entries keep their order
+	// relative to each other, but they now all precede the unit failures
+	// instead of interleaving with them, because the plan is resolved before
+	// the first unit runs and a script that fails lint produces no unit to
+	// interleave with. A lint error stops its own script and nothing else, and
+	// it is an error the operator can act on before the first result arrives.
+	units, planSkipped, planErrors := planUnits(plan, folders, o.Config)
 	m.Skipped = append(m.Skipped, planSkipped...)
+	m.Errors = append(m.Errors, planErrors...)
+	if len(planErrors) > 0 {
+		exit = 2
+	}
 
 	// The total is announced before the first unit runs, and it is the same
 	// list the loop below walks — not a product of scripts and databases.

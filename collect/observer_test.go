@@ -66,7 +66,7 @@ func TestObserverCallbacksAreSafeOnTheZeroValue(t *testing.T) {
 
 func TestObserverForwardsToTheWrappedImplementation(t *testing.T) {
 	rec := &recordingObserver{}
-	o := observer{Observer: rec}
+	o := observer{o: rec}
 
 	o.Planned(5, 3)
 	o.UnitStarted("80.workload/020.query-store.sql", "SALESDB")
@@ -115,7 +115,7 @@ func TestPlanUnitsAppliesQueryStoreNarrowingBeforeTheLoop(t *testing.T) {
 	}
 	cfg := &Config{QueryStoreDBInclude: "SALES*"}
 
-	units, skipped := planUnits(plan, folders, cfg)
+	units, skipped, _ := planUnits(plan, folders, cfg)
 
 	// 1 instance + 3 databases + 1 narrowed writer. Seven would be the answer
 	// of a total computed by multiplying scripts by databases.
@@ -145,7 +145,7 @@ func TestPlanUnitsExcludesScriptsThatWillNotRun(t *testing.T) {
 			LintError: "missing @resultsets"}},
 	}
 
-	units, skipped := planUnits(plan, folders, &Config{})
+	units, skipped, _ := planUnits(plan, folders, &Config{})
 
 	if len(units) != 0 {
 		t.Fatalf("units = %+v, want none: neither entry will run", units)
@@ -177,7 +177,7 @@ func TestPlanUnitsKeepsTheManifestSkipOrder(t *testing.T) {
 	}
 	cfg := &Config{QueryStoreDBInclude: "SALES*"}
 
-	_, skipped := planUnits(plan, folders, cfg)
+	_, skipped, _ := planUnits(plan, folders, cfg)
 
 	want := []SkippedScript{
 		{Script: "10.system/072.resource-governor.sql", Reason: "needs 2016"},
@@ -189,6 +189,43 @@ func TestPlanUnitsKeepsTheManifestSkipOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(skipped, want) {
 		t.Errorf("skip order changed:\n got %+v\nwant %+v", skipped, want)
+	}
+}
+
+// m.Errors is read the same way m.Skipped is, so its lint entries are produced
+// here, in plan order, and merged by the caller in one append. A second walk of
+// the plan at the call site would order them by whatever that loop felt like,
+// and nothing would notice.
+//
+// What this test does NOT claim: that lint errors interleave with unit
+// failures. They cannot any more — the plan is resolved before the first unit
+// runs, and a script that fails lint produces no unit to interleave with — and
+// Run says so where it merges them.
+func TestPlanUnitsReturnsLintErrorsInPlanOrder(t *testing.T) {
+	folders := []DatabaseFolder{{Name: "SALESDB", Folder: "SALESDB"}}
+	plan := []plannedScript{
+		{Script: Script{Path: "10.system/005.broken.sql", Scope: ScopeInstance,
+			LintError: "missing the @resultsets directive"}},
+		{Script: Script{Path: "10.system/010.version.sql", Scope: ScopeInstance}},
+		{Script: Script{Path: "20.databases/030.also-broken.sql", Scope: ScopeDatabase,
+			LintError: "missing the @scope directive"}},
+		{Script: Script{Path: "80.workload/099.gated.sql", Scope: ScopeInstance},
+			Skip: "needs 2016"},
+	}
+
+	units, _, errs := planUnits(plan, folders, &Config{})
+
+	want := []ErrorEntry{
+		{Script: "10.system/005.broken.sql", Message: "missing the @resultsets directive"},
+		{Script: "20.databases/030.also-broken.sql", Message: "missing the @scope directive"},
+	}
+	if !reflect.DeepEqual(errs, want) {
+		t.Errorf("lint error order changed:\n got %+v\nwant %+v", errs, want)
+	}
+	// A script that does not lint runs nowhere: it is an error, never a unit
+	// and never a skip.
+	if len(units) != 1 {
+		t.Errorf("units = %d, want 1: a broken script must not be scheduled", len(units))
 	}
 }
 
@@ -220,10 +257,10 @@ func TestPlannedCountMatchesTheUnitsThatWillRun(t *testing.T) {
 	}
 	cfg := &Config{QueryStoreDBInclude: "SALES*"}
 
-	units, skipped := planUnits(plan, folders, cfg)
+	units, skipped, _ := planUnits(plan, folders, cfg)
 
 	rec := &recordingObserver{}
-	obs := observer{Observer: rec}
+	obs := observer{o: rec}
 	obs.Planned(len(units), len(folders))
 	for _, s := range skipped {
 		obs.ScriptSkipped(s.Script, s.Target, s.Reason)

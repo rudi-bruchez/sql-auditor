@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
@@ -153,6 +156,66 @@ func TestCheckStillWritesItsListingToStdout(t *testing.T) {
 	}
 	if strings.Contains(out, "cannot reach the instance") {
 		t.Errorf("the unreachable-instance line reached stdout, where a redirected listing would capture it")
+	}
+}
+
+// The four remaining stderr sites of this package cannot be exercised without
+// an instance: three of them are in Check, past the connection — the database
+// list that could not be read, a malformed DB_INCLUDE, a grant script that
+// could not be written — and the fourth is the temporary-directory branch of
+// WriteManifestWithFallback, which needs a temp directory that MkdirTemp
+// created and that then refuses a file.
+//
+// So they are checked in the source instead. This is not a substitute for a
+// behavioural test and does not pretend to be: it pins one specific claim, that
+// the two functions announcing "everything that went to stderr now goes to
+// Progress" contain no os.Stderr at all. A caller handing in a Progress and
+// receiving a quarter of the narration on the real stderr is exactly the defect
+// this catches, and it is invisible to every other test here.
+func TestCheckAndTheManifestFallbackNameNoStderrAtAll(t *testing.T) {
+	fset := token.NewFileSet()
+	for _, file := range []string{"collect.go", "manifest.go"} {
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", file, err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil {
+				continue
+			}
+			switch fn.Name.Name {
+			case "Check", "WriteManifestWithFallback", "lastResort":
+			default:
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Stderr" {
+					return true
+				}
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "os" {
+					t.Errorf("%s: %s writes to os.Stderr; Progress is meant to capture everything that used to",
+						fset.Position(sel.Pos()), fn.Name.Name)
+				}
+				return true
+			})
+		}
+	}
+}
+
+// lastResort prints to Progress, which under the wizard is an in-memory buffer
+// flushed to a file — not stderr. Telling the reader the manifest "follows on
+// stderr" would send them to a stream that never received it, for the only
+// copy of the run's record in existence.
+func TestLastResortDoesNotClaimToWriteToStderr(t *testing.T) {
+	var buf bytes.Buffer
+	lastResort([]byte(`{}`), errors.New("read-only file system"), &buf)
+	if strings.Contains(buf.String(), "stderr") {
+		t.Errorf("the last-resort trace names stderr: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "it follows:") {
+		t.Errorf("the last-resort trace does not announce the manifest that follows it: %q", buf.String())
 	}
 }
 
