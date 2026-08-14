@@ -278,13 +278,19 @@ func TestPasswordFileAndStdinTogetherAreRefused(t *testing.T) {
 // The password is never printed back. It reaches Config and stops there: no
 // echo, no confirmation line, nothing an operator could paste into a bug report
 // by accident.
-func TestPasswordNeverReachesTheFlagsUsageText(t *testing.T) {
+func TestThereIsNoBarePasswordOption(t *testing.T) {
+	// Asked of the flag set rather than of its printed help. The help writes
+	// options with one dash, so a test grepping the text for "--password"
+	// could never fail whatever the flag set contained — which is what this
+	// test did until a reviewer read it.
 	c := defineFlags("collect")
-	var b strings.Builder
-	c.fs.SetOutput(&b)
-	c.fs.PrintDefaults()
-	if strings.Contains(b.String(), "--password ") {
-		t.Error("a bare --password option exists; README says it must not")
+	if f := c.fs.Lookup("password"); f != nil {
+		t.Errorf("a bare --password option exists (%q); README says it must not", f.Usage)
+	}
+	for _, want := range []string{"password-file", "password-stdin"} {
+		if c.fs.Lookup(want) == nil {
+			t.Errorf("--%s is missing", want)
+		}
 	}
 }
 
@@ -384,5 +390,24 @@ func TestAProgramNameSetToTheDefaultStringIsStillTheOperatorsChoice(t *testing.T
 	}
 	if o.Config.AppName != collect.DefaultAppName {
 		t.Errorf("AppName = %q, want %q exactly", o.Config.AppName, collect.DefaultAppName)
+	}
+}
+
+// The suggestion is only offered when the undashed form is a command that
+// exists. `--all` is a real option written where a command belongs, and
+// answering it with `Did you mean "all"?` sends the reader straight back into
+// the same error — "all" is not a command either.
+func TestOnlyRealCommandsAreSuggested(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{
+		{"check", true}, {"collect", true}, {"env", true},
+		{"queries", true}, {"version", true},
+		{"all", false}, {"keep", false}, {"password-stdin", false}, {"", false},
+	} {
+		if got := isCommand(c.in); got != c.want {
+			t.Errorf("isCommand(%q) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }

@@ -253,13 +253,11 @@ func (p *progress) Phase(name string) {
 
 // Finished says nothing of its own. collect.Run prints the summary and the
 // archive path to stdout immediately afterwards, and a second account of the
-// same run on stderr would only invite the two to disagree.
-func (p *progress) Finished(cancelled bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.finished = true
-	p.clear()
-}
+// same run on stderr would only invite the two to disagree. It is Done under
+// another name — the run's verdict and the caller's "that is the last of it"
+// ask for exactly the same thing here — and it delegates rather than repeating
+// the body, so the two cannot drift apart.
+func (p *progress) Finished(cancelled bool) { p.Done() }
 
 // Done is called by main once Run has returned. Finished is not enough: the
 // phases after it, and any error Run comes back with, both land after the last

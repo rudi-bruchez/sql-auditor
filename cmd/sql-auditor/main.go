@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	sqlauditor "github.com/rudi-bruchez/sql-auditor"
 	"github.com/rudi-bruchez/sql-auditor/collect"
 	"github.com/rudi-bruchez/sql-auditor/tui"
+	"github.com/rudi-bruchez/sql-auditor/tui/screen"
 )
 
 // version is the source of truth between releases. The release workflow
@@ -257,6 +259,18 @@ func readPassword(c *cliFlags, stdin io.Reader) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("--password-file: %w", err)
 		}
+		// A warning and not a refusal: the file belongs to the operator, and a
+		// scheduler that cannot chmod is a real situation. But env init was
+		// just tightened to 0600 for this same secret, and saying nothing here
+		// while doing that there would be two answers to one question. Windows
+		// is excluded because it has no permission bits to read: Go reports
+		// 0666 for every file, so the test would fire on every run.
+		if runtime.GOOS != "windows" {
+			if fi, serr := os.Stat(c.passwordFile); serr == nil && fi.Mode().Perm()&0o077 != 0 {
+				fmt.Fprintf(os.Stderr, "note: %s is readable by other users (mode %04o); chmod 600 it\n",
+					c.passwordFile, fi.Mode().Perm())
+			}
+		}
 		raw = b
 	case c.passwordStdin:
 		b, err := io.ReadAll(stdin)
@@ -430,6 +444,16 @@ func mode(isTTY func(*os.File) bool, stdin, stdout *os.File, env func(string) st
 // wrong answer.
 func isTerminal(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
 
+// isCommand is the list the dispatch below actually accepts, in one place, so
+// that the "did you mean" suggestion cannot offer a word that would fail again.
+func isCommand(s string) bool {
+	switch s {
+	case "check", "collect", "env", "queries", "version":
+		return true
+	}
+	return false
+}
+
 // stderrWidth is where the gauge is cut. It is read afresh on every repaint
 // rather than once, which is how a resized window is handled without a SIGWINCH
 // handler and without the Windows equivalent that does not exist. 80 is the
@@ -525,10 +549,18 @@ func run() int {
 		switch {
 		case cmd == "":
 			fmt.Fprintln(os.Stderr, "no command given.")
-		case strings.HasPrefix(cmd, "-"):
+		// The suggestion is only made when the undashed form is a command that
+		// exists. `--check` for `check` is the mistake this branch is for; but
+		// `--all` is a real option written where a command belongs, and
+		// answering it with `Did you mean "all"?` sends the reader to the same
+		// error a second time — "all" is not a command either.
+		case strings.HasPrefix(cmd, "-") && isCommand(strings.TrimLeft(cmd, "-")):
 			fmt.Fprintf(os.Stderr,
 				"%q is not a command: check, collect, env, queries and version are written without dashes. Did you mean %q?\n\n",
 				cmd, strings.TrimLeft(cmd, "-"))
+		case strings.HasPrefix(cmd, "-"):
+			fmt.Fprintf(os.Stderr,
+				"%q is an option, not a command. Options come after one: sql-auditor collect %s\n\n", cmd, cmd)
 		default:
 			fmt.Fprintf(os.Stderr, "unknown command %q.\n\n", cmd)
 		}
@@ -559,7 +591,17 @@ func run() int {
 		// The gauge goes on stderr and OwnsScreen stays false, so Run still
 		// puts its summary and the archive path on stdout where a script reads
 		// them. `check` gets none of this: it is a listing, not a wait.
-		p := newProgress(os.Stderr, isTerminal(os.Stderr), stderrWidth, time.Now)
+		// Both questions have to be asked, and they are not the same one.
+		// Being a terminal says the output is for a person; accepting escape
+		// sequences says the line can be rewritten. On conhost the second is
+		// off by default and per handle — the wizard sets it on stdout, which
+		// does nothing for stderr — so a gauge that assumed it would print
+		// "←[K[ 12/223] …" once a second on exactly the Windows Server console
+		// this tool is usually run from. When the console says no, the run
+		// falls back to one plain line per unit.
+		restoreEscapes, escapes := screen.EnableEscapes(os.Stderr)
+		defer restoreEscapes()
+		p := newProgress(os.Stderr, isTerminal(os.Stderr) && escapes, stderrWidth, time.Now)
 		stop := p.StartTicking(time.Second)
 		opts.Observer = p
 		// collect's own commentary goes through the gauge rather than straight
