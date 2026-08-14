@@ -431,3 +431,36 @@ func TestWritingTheGrantScriptKeepsTheOperatorOnTheVerificationScreen(t *testing
 		t.Errorf("GrantPath = %q after a failure, want empty", failed.GrantPath)
 	}
 }
+
+// [enter] answers a collision, and only a collision. It used to clear Keep
+// whatever the screen said, which is harmless today — mode() opens the wizard
+// only with no arguments, so Keep is always false on arrival — and destructive
+// the day the wizard accepts --keep: probed with keep=true nothing collides, so
+// no banner is shown, and an [enter] meaning nothing but "start" would silently
+// turn the flag off and let prepareRunFolder delete the previous run's folder
+// and its zip.
+func TestEnterOnlyAnswersACollisionThatIsOnScreen(t *testing.T) {
+	probed := collect.VerifyResult{Probed: true, Collectors: 47}
+	withCollision := State{Step: StepOptions, Verify: probed, Collision: `C:\out\SRV-2026-08-14.zip`}
+	got := withCollision.keyOptions(screen.Key{Named: screen.KeyEnter})
+	if got.Step != StepCollecting {
+		t.Fatalf("Step = %v, want the collection to start", got.Step)
+	}
+	if got.Collision != "" {
+		t.Error("the collision banner survived the answer")
+	}
+	if got.Keep {
+		t.Error("[enter] on a collision means replace it, so Keep must be off")
+	}
+
+	// The same key with no question on screen starts the run and changes
+	// nothing else.
+	noCollision := State{Step: StepOptions, Verify: probed, Keep: true}
+	got = noCollision.keyOptions(screen.Key{Named: screen.KeyEnter})
+	if got.Step != StepCollecting {
+		t.Fatalf("Step = %v, want the collection to start", got.Step)
+	}
+	if !got.Keep {
+		t.Error("[enter] cleared Keep with no collision on screen: it answered a question nobody asked")
+	}
+}

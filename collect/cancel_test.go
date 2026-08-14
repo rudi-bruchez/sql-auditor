@@ -92,3 +92,37 @@ func TestAFailedUnitIsStillRecordedOnALiveContext(t *testing.T) {
 		t.Error("_run.json claims the operator stopped a run that failed on its own")
 	}
 }
+
+// The rule the run loop asks twice. The second call site is the reconnect
+// branch: recordUnitFailure has already let a real failure through, and the
+// operator stops in the few instructions before connAlive. Without this, the
+// ping runs on a dead context and cannot succeed, db.Conn cannot succeed
+// either, and the run ends at finishWith(..., 1, "reconnect failed: context
+// canceled") — exit 1, which the documentation defines as "the instance could
+// not be reached", on an instance that was answering, with no cancelled flag.
+func TestStopRequestedMarksTheManifestAndAnswersOnce(t *testing.T) {
+	live, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := NewManifest("sql-auditor", "0.19.0", "abc1234")
+
+	if stopRequested(live, m) {
+		t.Error("a live context was read as a stop")
+	}
+	if m.Run.Cancelled {
+		t.Error("the manifest was marked cancelled on a live context")
+	}
+
+	dead, cancelDead := context.WithCancel(context.Background())
+	cancelDead()
+	if !stopRequested(dead, m) {
+		t.Error("a cancelled context was not read as a stop")
+	}
+	if !m.Run.Cancelled {
+		t.Error("_run.json does not say the run was cancelled, so a short archive looks complete")
+	}
+	// And it records nothing: what stopped the run is stated by the flag, not
+	// by an error entry describing the stopping.
+	if len(m.Errors) != 0 {
+		t.Errorf("the stop added %d error(s): %+v", len(m.Errors), m.Errors)
+	}
+}

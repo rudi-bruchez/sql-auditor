@@ -1335,6 +1335,18 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// One reconnect attempt on a dead connection. The replacement is
 		// reset before the next unit uses it — the PowerShell version
 		// skipped that step and quietly broke its own invariant.
+		// Asked again here, and not only inside recordUnitFailure above. The
+		// two calls are a few instructions apart, but a stop landing between
+		// them takes the whole reconnect down the wrong path: the ping runs on
+		// a dead context and cannot succeed, db.Conn cannot succeed either, and
+		// the run ends at finishWith(..., 1, "reconnect failed: context
+		// canceled") — exit 1, documented as "the instance could not be
+		// reached", with no cancelled flag on the manifest. That is precisely
+		// the misfiling recordUnitFailure exists to prevent, reached through a
+		// door it does not cover.
+		if stopRequested(ctx, m) {
+			break
+		}
 		if !connAlive(ctx, conn, o.Config) {
 			fmt.Fprintln(o.progress(), "connection lost; attempting one reconnect")
 			conn.Close()

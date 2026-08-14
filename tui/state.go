@@ -339,8 +339,18 @@ func (s State) keyOptions(k screen.Key) State {
 		// as "start" — the banner says so above this line. Nothing is destroyed
 		// without a keystroke that names the choice, and no key defaults to
 		// replacing: the thing replaced may be the archive just mailed.
-		s.Collision = ""
-		s.Keep = false
+		//
+		// Which is why Keep is only cleared when there IS a question on screen.
+		// Clearing it unconditionally answered a question nobody asked: the day
+		// the wizard accepts --keep, an operator who passed it would be probed
+		// with keep=true, see no banner because keep=true collides with
+		// nothing, press [enter] to start — and prepareRunFolder would delete
+		// the previous run's folder and zip without a word. The [k] branch
+		// below already guards itself the same way, for the same reason.
+		if s.Collision != "" {
+			s.Collision = ""
+			s.Keep = false
+		}
 		s.Step = StepCollecting
 	case k.Rune == 'k':
 		// [k] is the second answer, and it means nothing when there is no
