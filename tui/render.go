@@ -132,7 +132,7 @@ func renderConnection(s State, width int) []string {
 		"",
 		pad + "Connection",
 		"",
-		fieldPad + fmt.Sprintf("%-11s%s", "Server", editable(s.Server, s.Field == fieldServer)) + overrideNote(s),
+		fieldPad + fmt.Sprintf("%-11s%s", "Server", editable(s.Server, s.Field == fieldServer)),
 		fieldPad + fmt.Sprintf("%-11s%s", "Database", s.Catalog),
 		fieldPad + fmt.Sprintf("%-11s%s", "Auth", authLine(s)),
 		fieldPad + fmt.Sprintf("%-11s%s", "Password", editable(mask(s.Password), s.Field == fieldPassword)),
@@ -185,17 +185,6 @@ func editable(v string, focused bool) string {
 // the manifest, and a test in this package asserts it appears in no rendered
 // line of any screen.
 func mask(p string) string { return strings.Repeat("*", utf8.RuneCountInString(p)) }
-
-// overrideNote marks a field typed over a value that came from --server. The
-// typing wins, because it is the last thing the operator did; saying so is what
-// keeps somebody who typed a command line half a minute ago from being
-// surprised about where the connection went.
-func overrideNote(s State) string {
-	if s.ServerOverridden {
-		return "  (overrides --server)"
-	}
-	return ""
-}
 
 func authLine(s State) string {
 	if s.Integrated {

@@ -565,15 +565,12 @@ func initialState(o collect.Options, ascii bool) State {
 		flags[k] = v
 	}
 	return State{
-		Step:    StepConnection,
-		Version: o.Version,
-		Build:   o.Commit,
-		Server:  cfg.Server,
-		Catalog: cfg.Database,
-		User:    cfg.User,
-		// ServerFromFlag is false and stays false: the wizard only opens when
-		// the command line was empty, so there is no --server for an edit to
-		// override. The flag exists for the day that stops being true.
+		Step:       StepConnection,
+		Version:    o.Version,
+		Build:      o.Commit,
+		Server:     cfg.Server,
+		Catalog:    cfg.Database,
+		User:       cfg.User,
 		Integrated: cfg.Integrated,
 		Encrypt:    cfg.Encrypt,
 		TrustCert:  cfg.TrustCert,

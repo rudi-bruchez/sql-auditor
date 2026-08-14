@@ -86,18 +86,6 @@ type State struct {
 	// Screen 1. Password is held here and nowhere else: it is never written
 	// to disk, never rendered, and never leaves the process.
 	Server, Password string
-	// ServerFromFlag records where the initial address came from, and exists
-	// only so ServerOverridden can be set on the first edit. A value out of
-	// .env or of the environment is not worth mentioning; one typed on the
-	// command line half a minute ago is.
-	ServerFromFlag bool
-	// ServerOverridden records that the operator typed over a value that came
-	// from a --server flag. The screen says so, because somebody who typed a
-	// command line and then edited the field must not be surprised by where
-	// the connection went. The typing wins: it is the last thing the operator
-	// did, and a flag quietly beating it would send the connection somewhere
-	// other than what the screen displays.
-	ServerOverridden bool
 	Field            int
 	// The three facts screen 1 shows and does not edit. They come from the
 	// resolved configuration — flag, then .env, then environment, then default
@@ -243,7 +231,6 @@ func (s State) keyConnection(k screen.Key) State {
 		s.Step = StepQuit
 		return s
 	case screen.KeyTab:
-		// Moving the cursor is not an edit, so it does not claim an override.
 		s.Field = (s.Field + 1) % fieldCount
 		return s
 	case screen.KeyBackspace:
@@ -267,16 +254,12 @@ func (s State) keyConnection(k screen.Key) State {
 	return s
 }
 
-// editField applies one edit to whichever of the two fields has the cursor,
-// and records the override on the way through so the three call sites above
-// cannot each forget it.
+// editField applies one edit to whichever of the two fields has the cursor, so
+// the three call sites above do not each have to choose one.
 func (s State) editField(edit func(string) string) State {
 	if s.Field == fieldPassword {
 		s.Password = edit(s.Password)
 		return s
-	}
-	if s.ServerFromFlag {
-		s.ServerOverridden = true
 	}
 	s.Server = edit(s.Server)
 	return s

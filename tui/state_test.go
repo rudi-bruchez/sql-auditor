@@ -253,22 +253,6 @@ func TestBackspaceRemovesAWholeRune(t *testing.T) {
 	}
 }
 
-func TestTypingOverAFlagValueMarksItOverridden(t *testing.T) {
-	s := State{Step: StepConnection, Server: "SRV-FROM-FLAG", ServerFromFlag: true}
-	if s.Key(named(screen.KeyTab)).ServerOverridden {
-		t.Error("merely moving between fields marked the server overridden")
-	}
-	got := s.Key(typed('X'))
-	if !got.ServerOverridden {
-		t.Error("ServerOverridden = false after typing over a --server value")
-	}
-	// Erasing the flag's value is an edit too, and the one most likely to end
-	// up pointing somewhere else entirely.
-	if !s.Key(named(screen.KeyBackspace)).ServerOverridden {
-		t.Error("ServerOverridden = false after erasing a --server value")
-	}
-}
-
 func TestARefusedConnectionStaysOnTheConnectionScreen(t *testing.T) {
 	s := State{Step: StepConnecting, Server: "invalid.invalid", Field: fieldPassword}
 	got := s.connectFailed(errConnRefusedForTest)

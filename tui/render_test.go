@@ -145,11 +145,10 @@ func TestOptionsTakesTheCollectorCountFromTheResolvedPlan(t *testing.T) {
 	contains(t, lines, "Query Store window: last 7 days (from .env)")
 }
 
-func TestConnectionMarksAServerTypedOverAFlag(t *testing.T) {
-	s := State{Step: StepConnection, Server: `SQL01\PROD`, ServerFromFlag: true, ServerOverridden: true,
+func TestConnectionSaysWhenTheCertificateIsNotValidated(t *testing.T) {
+	s := State{Step: StepConnection, Server: `SQL01\PROD`,
 		Catalog: "master", User: "AUDIT_RO", Encrypt: true, TrustCert: true}
 	lines := Render(s, testWidth, 0)
-	contains(t, lines, "(overrides --server)")
 	contains(t, lines, "yes, server certificate NOT validated")
 	contains(t, lines, "[ctrl-c] quit")
 	// [q] would close the wizard for anybody connecting to a server named
