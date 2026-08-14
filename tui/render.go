@@ -756,8 +756,13 @@ func humanBytes(n int64) string {
 	if n < unit {
 		return fmt.Sprintf("%d bytes", n)
 	}
+	// The exponent stops at the last letter there is. ZipBytes comes from an
+	// unbounded os.Stat, and "KMGT"[4] panics — in the renderer, which is
+	// documented as total on its inputs because a panic there leaves the
+	// terminal in raw mode with no wizard left to restore it. A petabyte
+	// archive then reads as "1024.0 TB", which is true.
 	div, exp := int64(unit), 0
-	for v := n / unit; v >= unit; v /= unit {
+	for v := n / unit; v >= unit && exp < len("KMGT")-1; v /= unit {
 		div *= unit
 		exp++
 	}
