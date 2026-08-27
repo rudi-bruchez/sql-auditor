@@ -130,7 +130,7 @@ take time, stamped with the time since the process started.
 
 ```
 $ sql-auditor --debug check
-debug   +0.0ms  start, sql-auditor 0.20.0 (5e81f2b5), windows/amd64, go1.26.7
+debug   +0.0ms  start, sql-auditor 0.21.0 (2edb1455), windows/amd64, go1.26.7
 debug   +0.0ms  working directory C:\audits\sql01
 debug   +0.0ms  stdin tty=false, stdout tty=false, SQL_AUDITOR_NO_TUI="", args=1 → subcommand
 debug   +0.0ms  .env read, 2 setting(s)

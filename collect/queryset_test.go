@@ -120,7 +120,7 @@ func TestStripSQLComments(t *testing.T) {
 func TestLintIgnoresForJSONInsideComments(t *testing.T) {
 	// A collector documenting why FOR JSON was removed must not fail its own
 	// lint. This is the whole reason the lint runs on stripped SQL.
-	body := "-- @resultsets: a:object\n" +
+	body := "-- @resultsets: a:object\n-- @timeout: 60\n" +
 		"-- FOR JSON was removed: the collector must work on SQL Server 2012.\n" +
 		contractPreamble +
 		"SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);"
@@ -135,7 +135,7 @@ func TestLintIgnoresForJSONInsideComments(t *testing.T) {
 }
 
 func TestDiscoverNormalisesPermissions(t *testing.T) {
-	body := "-- @resultsets: a:object\n" +
+	body := "-- @resultsets: a:object\n-- @timeout: 60\n" +
 		"-- @permissions: VIEW SERVER STATE, view any definition, msdb read\n" +
 		contractPreamble +
 		"SELECT 1 OPTION (RECOMPILE, MAXDOP 1);"
@@ -359,7 +359,7 @@ func TestLintEnforcesTheAuditorContract(t *testing.T) {
 func TestLintAcceptsMoreHintsThanResultSets(t *testing.T) {
 	// 050.tempdb.sql assigns into a variable with its own hinted statement, so
 	// the count legitimately exceeds the number of result sets.
-	body := "-- @resultsets: a:array\n" + contractPreamble +
+	body := "-- @resultsets: a:array\n-- @timeout: 60\n" + contractPreamble +
 		"DECLARE @n int;\nSELECT @n = COUNT(*) FROM sys.databases OPTION (RECOMPILE, MAXDOP 1);\n" +
 		"SELECT @n AS n OPTION (RECOMPILE, MAXDOP 1);"
 	fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
@@ -382,7 +382,7 @@ func TestDiscoverRejectsBadScopeAndTimeout(t *testing.T) {
 		{"zero timeout", "-- @timeout: 0\n", "0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := "-- @resultsets: a:object\n" + tc.header + contractPreamble +
+			body := "-- @resultsets: a:object\n-- @timeout: 60\n" + tc.header + contractPreamble +
 				"SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);"
 			fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
 			got, err := Discover(fsys, "queries")
@@ -412,9 +412,36 @@ func TestDiscoverAcceptsExplicitInstanceScope(t *testing.T) {
 	}
 }
 
+// A collector with no @timeout used to run on SQL_QUERY_TIMEOUT_SEC, sixty
+// seconds, which is the budget of a preflight probe rather than of a read of a
+// large catalogue. The fallback said nothing, so the number was never a
+// decision. Every collector in the corpus declares one; this rule is for the
+// next one written.
+func TestParseScriptRequiresATimeout(t *testing.T) {
+	sql := "-- @scope: instance\n-- @resultsets: a:object\n" +
+		contractPreamble + "SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);"
+	s := parseScript("10.system/010.a.sql", sql)
+	if !strings.Contains(s.LintError, "@timeout") {
+		t.Errorf("LintError = %q, want it to name @timeout", s.LintError)
+	}
+}
+
+// The missing-@timeout rule is checked last on purpose. A file that is also
+// missing @resultsets has a worse problem, and the message an operator reads
+// must be that one.
+func TestParseScriptPrefersTheWorseDefectOverAMissingTimeout(t *testing.T) {
+	sql := "-- @scope: instance\n" + contractPreamble +
+		"SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);"
+	s := parseScript("10.system/010.a.sql", sql)
+	if !strings.Contains(s.LintError, "@resultsets") {
+		t.Errorf("LintError = %q, want the @resultsets defect to win", s.LintError)
+	}
+}
+
 func TestParseScriptAcceptsKnownWriter(t *testing.T) {
 	sql := `-- @scope:       database
 -- @resultsets:  root:object
+-- @timeout:     60
 -- @writer:      query-store-detail
 ` + contractPreamble + "SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);\n"
 	s := parseScript("80.workload/021.query-store-detail.sql", sql)

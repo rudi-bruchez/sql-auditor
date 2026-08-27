@@ -228,6 +228,57 @@ func TestDeadlineBoundsAServerCall(t *testing.T) {
 	}
 }
 
+// A collector cut off by its own deadline used to reach the manifest as the
+// bare "context deadline exceeded", which names neither the limit that expired
+// nor its value. The reader is then three steps from a number the tool already
+// had. The message must name the knob, so that raising it is a decision and
+// not an investigation.
+func TestOutOfTimeNamesTheLimitThatExpired(t *testing.T) {
+	parent := context.Background()
+	unit, cancel := context.WithTimeout(parent, time.Millisecond)
+	defer cancel()
+	<-unit.Done()
+
+	err := outOfTime(parent, unit, 600*time.Second, "@timeout", context.DeadlineExceeded)
+	for _, want := range []string{"@timeout", "10m0s", "context deadline exceeded"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message %q does not carry %q", err, want)
+		}
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Error("the driver's error must stay unwrappable underneath")
+	}
+}
+
+// Ctrl-C kills every context in flight, the unit's included. Calling the stop a
+// timeout would send whoever reads the manifest to raise a limit that was never
+// reached — the same confusion recordUnitFailure exists to prevent, one layer
+// down.
+func TestOutOfTimeLeavesACancelledRunAlone(t *testing.T) {
+	parent, stop := context.WithCancel(context.Background())
+	unit, cancel := context.WithTimeout(parent, time.Millisecond)
+	defer cancel()
+	stop()
+	<-unit.Done()
+
+	err := outOfTime(parent, unit, time.Minute, "@timeout", context.Canceled)
+	if err != context.Canceled {
+		t.Errorf("err = %v, want the error untouched on a cancelled run", err)
+	}
+}
+
+// A unit that failed on its own merits inside its deadline is not a timeout,
+// and must not be relabelled as one.
+func TestOutOfTimeLeavesAnOrdinaryFailureAlone(t *testing.T) {
+	unit, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	boom := errors.New("Invalid object name 'sys.dm_nope'.")
+
+	if err := outOfTime(context.Background(), unit, time.Minute, "@timeout", boom); err != boom {
+		t.Errorf("err = %v, want the SQL error untouched", err)
+	}
+}
+
 func TestSkipReasonForRequiredFlag(t *testing.T) {
 	s := Script{Path: "10.system/052.session-text.sql", RequiresFlag: FlagIncludeSessionText}
 	reason, skip := skipReason(s, nil, nil, nil)

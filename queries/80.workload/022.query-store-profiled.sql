@@ -1,7 +1,7 @@
 -- @scope:        database
 -- @resultsets:   root:object, profiled:array
 -- @permissions:  CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
--- @timeout:      120
+-- @timeout:      600
 -- @min_version:  15.0
 -- @requires_flag: query_store_plan_stats
 -- @writer:       query-store-profiled
@@ -27,6 +27,16 @@
 -- values routinely share one hash, since any recompile adds another, so the
 -- candidates count travels with each row: a reader who sees candidates 4 knows
 -- what they are looking at, and a reader told nothing sees a certainty.
+--
+-- ITS @timeout IS 600 SECONDS, five times the corpus's usual ceiling, and the
+-- reason is the paragraph below. Reaching into the whole instance's plan cache
+-- means the cost of this collector is set by the size of that cache and not by
+-- the database it was pointed at: on an instance holding twenty-seven thousand
+-- plans it ran past 120 seconds and was cut off, while every other collector
+-- of the same run finished. A collector nobody gets unless they ask for it
+-- should not then fail for want of time, and a run that already accepted a
+-- deep read has accepted the minutes that go with it. The precedent is
+-- 70.schema/041.compression-savings.sql, opt-in and allowed 1800.
 --
 -- IT CARRIES ITS OWN FLAG rather than sharing query_store_detail, and the
 -- reason is scope, not volume. It reaches through sys.dm_exec_query_stats into

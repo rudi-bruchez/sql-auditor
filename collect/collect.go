@@ -1477,6 +1477,32 @@ func Run(ctx context.Context, o Options) (int, error) {
 	return code, nil
 }
 
+// outOfTime names the limit a unit ran out of, because the driver will not.
+//
+// A collector cut off by its own deadline comes back with "context deadline
+// exceeded" and nothing else. That sentence went into the manifest verbatim,
+// and it is missing the two things a reader needs: which limit expired, and
+// what its value was. Someone reading the manifest a week later has to know
+// that @timeout exists, find the collector, and read its header — three steps
+// to learn a number the tool had in hand when it gave up. Seen on a run where
+// one Query Store collector stopped at its 120 seconds while every other
+// collector had succeeded; the manifest said only that a deadline had passed.
+//
+// The parent context is consulted first, for the reason recordUnitFailure
+// documents at length: on a Ctrl-C every context in flight is dead, and a stop
+// must not be dressed up as a timeout. Only a live parent and an expired unit
+// deadline mean the query genuinely outlived its limit.
+//
+// The driver's own words are kept in the message. They are what a search
+// engine matches, and dropping them to make room for a nicer sentence would
+// trade one kind of unreadable for another.
+func outOfTime(parent, unit context.Context, limit time.Duration, knob string, err error) error {
+	if parent.Err() != nil || unit.Err() != context.DeadlineExceeded {
+		return err
+	}
+	return fmt.Errorf("still running when %s of %s expired: %w", knob, limit, err)
+}
+
 func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	rw *runWriter, s Script, u DatabaseFolder) error {
 
@@ -1495,8 +1521,10 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 		}
 	}
 	timeout := o.Config.QueryTimeout
+	knob := "SQL_QUERY_TIMEOUT_SEC"
 	if s.TimeoutSec > 0 {
 		timeout = time.Duration(s.TimeoutSec) * time.Second
+		knob = "@timeout"
 	}
 	qctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -1509,13 +1537,13 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	start := time.Now()
 	rows, err := conn.QueryContext(qctx, s.SQL, args...)
 	if err != nil {
-		return err
+		return outOfTime(ctx, qctx, timeout, knob, err)
 	}
 	defer rows.Close()
 
 	sets, err := ReadResultSets(rows, s.Results)
 	if err != nil {
-		return err
+		return outOfTime(ctx, qctx, timeout, knob, err)
 	}
 
 	var res WriteResult

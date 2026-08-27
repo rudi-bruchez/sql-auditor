@@ -295,8 +295,26 @@ func parseScript(rel, sql string) Script {
 		setLint(fmt.Sprintf("@writer: %q needs @scope: %s; %s", s.Writer,
 			scopeWord(spec.Scope), spec.ScopeReason))
 	}
+	// An absent @timeout is linted for the same reason a misspelt one is, and
+	// the reason is that the fallback is silent. A collector with no @timeout
+	// gets SQL_QUERY_TIMEOUT_SEC, which is 60 seconds and is sized for a
+	// preflight probe rather than for a read of a large catalogue. Every one of
+	// the 55 collectors in the corpus declares one today, and several needed
+	// far more than the default before they worked; the 56th is the one this
+	// rule is for. Choosing the number is part of writing a collector, and a
+	// number nobody chose is not a default, it is an oversight waiting for a
+	// big enough instance.
 	if s.LintError == "" {
 		s.LintError = lint(sql, s.Results)
+	}
+	// Last, and deliberately. A missing directive has no position in the file,
+	// so it cannot take its turn in document order the way a malformed one
+	// does; reporting it ahead of a real defect in the SQL would replace a
+	// useful message with a lesser one on the file that has both.
+	if s.LintError == "" && s.TimeoutSec == 0 {
+		setLint("@timeout: missing; every collector states its own limit in " +
+			"seconds, because the fallback of SQL_QUERY_TIMEOUT_SEC is sized " +
+			"for a probe and cuts off a large read without saying why")
 	}
 	return s
 }
