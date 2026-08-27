@@ -129,16 +129,19 @@ gap this file exists to record, and nothing below closes it.
 
 Collections have been executed against three versions, none of them 2012:
 
-| `ProductVersion` | Edition | Instance |
-| --- | --- | --- |
-| 13.0.6435.1 | Enterprise Edition (64-bit) | `SQL01` |
-| 14.0.1000.169 | Standard Edition (64-bit) | `SQL01\PROD` |
-| 16.0.4250.1 | Standard Edition (64-bit) | `SQL01` |
+| `ProductVersion` | Edition |
+| --- | --- |
+| 13.0.6435.1 | Enterprise Edition (64-bit) |
+| 14.0.1000.169 | Standard Edition (64-bit) |
+| 16.0.4250.1 | Standard Edition (64-bit) |
 
-That is SQL Server 2016 SP3, 2017 RTM and 2022. Those runs exercise the corpus
-against real instances and against the version gate — a collector wrongly gated
-shows up as a skip on an instance that should have run it — but they say
-nothing about 2012, which is two major versions below the lowest of them. The
+That is SQL Server 2016 SP3, 2017 RTM and 2022. The instances are client
+production servers and are not named here: what this claim rests on is a
+version and an edition, and a hostname adds nothing to it. Those runs exercise
+the corpus against real instances and against the version gate — a collector
+wrongly gated shows up as a skip on an instance that should have run it — but
+they say nothing about 2012, which is two major versions below the lowest of
+them. The
 2012 floor remains what it has always been: a static claim, verified by parsing
 every file under the 2012 grammar and by checking every column against
 Microsoft's documentation, and never by a run.
