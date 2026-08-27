@@ -96,9 +96,17 @@ ORDER BY CASE WHEN rs.name IS NULL THEN 1 ELSE 0 END, s.event_session_id;
    a bare name anyway. */
 DECLARE @current nvarchar(600) =
     CAST(CAST(@running AS xml).value('(/EventFileTarget/File/@name)[1]', 'nvarchar(600)') AS nvarchar(600));
+/* The extension is tested on the end of the name, not on a reversed copy of it.
+   The earlier version searched the reversed name for the extension spelled
+   forwards, which cannot match: reversing puts the dot last. The stem therefore
+   kept its extension and the path came out as 'Blocked process.xel*.xel', where
+   SQL Server writes 'Blocked process_0_133000000000000000.xel'. The collection
+   reported an empty capture on an instance whose ring buffer held two reports,
+   which is worse than an error: the audit concludes there is no blocking on a
+   server that recorded some. Found on a client instance in August 2026. */
 DECLARE @stem nvarchar(400) =
     CASE WHEN @configured IS NULL THEN NULL
-         WHEN CHARINDEX('.xel', REVERSE(@configured)) = 1
+         WHEN RIGHT(@configured, 4) = N'.xel'
               THEN LEFT(@configured, LEN(@configured) - 4)
          ELSE @configured END;
 IF @stem IS NOT NULL

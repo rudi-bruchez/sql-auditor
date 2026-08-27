@@ -248,3 +248,24 @@ func TestBlockedProcessCapsAreTheSameNumbersInTheCorpus(t *testing.T) {
 		}
 	}
 }
+
+// The stem is the configured filename without its .xel extension, and the test
+// for that extension has to look at the end of the name. Testing REVERSE(name)
+// against '.xel' never matches, because the reversed string holds 'lex.'. The
+// stem then kept its extension, the path came out as 'Blocked process.xel*.xel'
+// where SQL Server writes 'Blocked process_0_133000000000000000.xel', and the
+// collection reported an empty capture on an instance that had two reports.
+func TestBlockedProcessExtensionIsTestedOnTheEndOfTheName(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "queries", "10.system", "063.blocked-process-reports.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(b)
+	if regexp.MustCompile(`CHARINDEX\(\s*N?'\.xel'\s*,\s*REVERSE\(`).MatchString(sql) {
+		t.Error("063 tests the .xel extension against a reversed string, which never matches; " +
+			"use RIGHT(@configured, 4) = N'.xel'")
+	}
+	if !regexp.MustCompile(`RIGHT\(@configured,\s*4\)\s*=\s*N?'\.xel'`).MatchString(sql) {
+		t.Error("063 no longer tests the .xel extension on the end of the configured name")
+	}
+}
