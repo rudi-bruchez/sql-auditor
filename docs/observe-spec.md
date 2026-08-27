@@ -232,6 +232,66 @@ long the window was, how many events were lost, and whether `--detail` was on.
 Somebody reading the archive in six months must be able to tell what the tool
 did to the server.
 
+## The decoding layer
+
+Everything above says what to read. This says who reads it, because the answer
+is a package that does not exist yet and that `observe` cannot be built without.
+
+**`collect/xevents`.** One job: turn a `target_data` document into typed Go
+values. Two shapes to decode, matching the two targets that stay in memory.
+
+- A **histogram** is a list of buckets, each a slot value and a count, plus the
+  target's own attributes: how many buckets it holds, whether it overflowed, and
+  how many events were not counted because it did.
+- A **ring buffer** is a list of events, each with a name, a timestamp, its data
+  fields and its actions, plus the target's dropped count.
+
+It does not connect to SQL Server. It takes a string of XML and returns values.
+That separation is the whole point: the SQL lives in the corpus where every
+other query lives, the transport lives in the collector, and the parsing is a
+pure function with no I/O — which is what makes it testable at all.
+
+**It is tested against captures taken from real sessions**, committed as
+fixtures rather than hand-written. A document invented to match the parser
+proves the parser matches the invention. A document produced by an actual
+`CREATE EVENT SESSION` on an actual instance, saved once and replayed forever,
+proves something. The fixtures must be scrubbed before they are committed: a
+ring buffer capture carries statement text, and the rule in `CLAUDE.md` applies
+to test data exactly as it applies to code.
+
+Three behaviours the package owes its caller, all three learned from mistakes
+already made elsewhere in this repository.
+
+**It reports what it could not read rather than returning less.** `target_data`
+truncates large payloads, and truncated XML either fails to parse or — worse —
+parses into a shorter list that looks complete. The parser must distinguish
+"this document ended cleanly" from "this document was cut", and the caller must
+put the difference in the manifest. Silently returning half a capture is the
+same class of defect as the `.xel` pattern bug: an answer that looks like an
+answer.
+
+**It carries the drop count out with the data.** The count belongs to the
+target, not to the events, so a caller that only asks for the events will never
+see it. The function signature should make that impossible: return the counters
+and the payload together, or return a struct that holds both.
+
+**It does not guess at types it does not know.** An event field whose type the
+package has no mapping for comes back as its string form, labelled as
+unconverted. Guessing produces a number that is wrong in a way nothing
+downstream can detect.
+
+**Why it lives here and not in its own repository, for now.** It has one
+consumer. An interface extracted for a single caller is an interface shaped by
+that caller's accidents, and it freezes before anyone has learned what the
+second caller needs. When a second consumer appears, extraction is a rename.
+
+**Its explicit non-goal is the `.xel` binary format.** Nothing in this package
+opens a file. Reading a `.xel` without SQL Server means reverse-engineering an
+undocumented binary format, which is a project with its own scope, its own
+risks and its own audience — an auditor handed a client's capture files and no
+instance to read them on. That project should not be smuggled in as a package
+of this one.
+
 ## Output
 
 ```
@@ -304,6 +364,11 @@ measurable in an afternoon against a real instance, and both should be measured
 rather than assumed: the ring buffer is the target that makes `--detail` work
 without asking anyone for a directory, so its ceiling decides how much of the
 command's usefulness survives a locked-down server.
+
+Whether `collect/xevents` should decode the ring buffer's event fields eagerly
+or lazily. Eager is simpler and costs memory on a large buffer; lazy keeps the
+XML around, which is the thing that may be truncated. Probably eager, with the
+truncation check done before any decoding starts.
 
 Whether the state file that `start` leaves behind belongs next to the archive or
 in the user's config directory. Next to the archive is discoverable; in the
