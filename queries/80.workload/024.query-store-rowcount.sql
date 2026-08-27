@@ -9,8 +9,9 @@
 -- and 023.query-store-most-executed.sql cannot carry either.
 --
 -- WHY A SEPARATE FILE AND NOT TWO MORE COLUMNS ON 023. The rowcount columns
--- of sys.query_store_runtime_stats — count_rowcount, avg_rowcount, max_rowcount
--- and their siblings — arrived in SQL Server 2017. 023 is gated at 2016,
+-- of sys.query_store_runtime_stats — avg_rowcount, last_rowcount, min_, max_
+-- and stdev_rowcount, and there is no count_rowcount whatever the symmetry
+-- with count_executions suggests — arrived in SQL Server 2017. 023 is gated at 2016,
 -- because that is where the Query Store starts, and adding a 2017 column to it
 -- would break it on every 2016 instance in the field. The corpus already pairs
 -- a portable collector with a version sibling that adds the newer columns:
@@ -39,15 +40,31 @@
 -- not in the Query Store. What is here is the arithmetic that makes the
 -- decision possible without a second round trip to the client.
 --
--- THE TRAP IN avg_rowcount, and it is worth naming before someone quotes the
--- column. It is rows per EXECUTION of the statement, not rows per business
--- operation. An INSERT of one row reports 1, and ten thousand of them report 1
--- ten thousand times, which is the finding. But a SELECT feeding an API cursor
--- reports the rows of that fetch, not of the result set, so a cursor walked one
--- row at a time reads as one row per execution too — correctly, since that is
--- what happened, but the culprit there is the cursor and not the caller's
--- loop. Read this file next to 021's plans, which say whether a cursor is
--- involved.
+-- TWO TRAPS IN avg_rowcount, both worth naming before anyone quotes the column.
+--
+-- It is rows per EXECUTION of the statement, not rows per business operation. A
+-- SELECT feeding an API cursor reports the rows of that fetch, not of the
+-- result set, so a cursor walked one row at a time reads as one row per
+-- execution. That is correct, since it is what happened, but the culprit there
+-- is the cursor and not the caller's loop. Read this file next to 021's plans,
+-- which say whether a cursor is involved.
+--
+-- And Microsoft documents it as RETURNED rows, which leaves what a single-row
+-- INSERT reports genuinely open: 1 if the engine counts rows affected, 0 if it
+-- counts rows sent to the client. THIS HAS NOT BEEN MEASURED. Until it is, read
+-- rows.per_execution as a statement about SELECTs, and recognise a loop of
+-- writes by its execution count and its concentration instead, which is what
+-- spread.peak_interval_executions is for and which needs no rowcount at all.
+-- Measuring it takes one INSERT on a lab instance; write the answer here rather
+-- than leave the reader wondering which of the two this column does.
+--
+-- ABORTED EXECUTIONS ARE COUNTED. sys.query_store_runtime_stats carries an
+-- execution_type and this file does not filter it, so a statement that failed
+-- or was cancelled adds to the count like one that succeeded. For the question
+-- asked here, how many calls the application made, that is the right answer:
+-- the calls were made. It does mean a retry loop around a failing statement
+-- appears as a hot query, so a reader who sees an implausible count should
+-- check that the statement is succeeding before blaming the caller.
 --
 -- It aggregates the WHOLE RETAINED WINDOW and takes no window parameter, for
 -- the same reason as 023: a loop that ran a million times last month is still
@@ -78,10 +95,12 @@ OPTION (RECOMPILE, MAXDOP 1);
    per_interval collapses the plans of one query inside one interval before
    anything is measured. Without it, peak_interval_executions would be the
    busiest PLAN of the busiest interval, and a query whose load is split
-   across two plans — which every parameterised query here has, since the
-   Query Store keeps one plan per compilation — would report roughly half its
-   real burst. That is the kind of arithmetic error nothing downstream can
-   catch.
+   across two plans would report roughly half its real burst. Most
+   queries have one plan and are unaffected; the ones that have several — a
+   recompilation under different context settings, or the interval still open,
+   for which the documentation says to aggregate by plan, execution type and
+   interval before reading anything — are exactly the busy ones this file
+   ranks. That is the kind of arithmetic error nothing downstream can catch.
 
    rows_total is the product summed, not the average multiplied: a query whose
    rowcount varies by interval is common, and SUM(count_executions *

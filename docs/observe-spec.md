@@ -74,10 +74,38 @@ the snapshot, drops the session and writes the archive.
 events it has counted so far. An operator who has walked away needs that.
 
 A **maximum lifetime** applies to `start`, defaulting to 60 minutes and settable
-with `--max-minutes`. The session carries it as a `DURATION` on its own stop
-mechanism, so a `finish` that never comes does not leave a capture running for a
-week. `finish` after the deadline reports what was collected before it expired
-rather than failing.
+with `--max-minutes`. How it is enforced is the uncomfortable part of this
+design, and the first draft of this spec got it wrong: it said the session
+carries the deadline as an option of its own. **It cannot.** `CREATE EVENT
+SESSION` takes `MAX_MEMORY`, `EVENT_RETENTION_MODE`, `MAX_DISPATCH_LATENCY`,
+`MAX_EVENT_SIZE`, `MEMORY_PARTITION_MODE`, `TRACK_CAUSALITY` and
+`STARTUP_STATE`, and nothing that stops it after a while. There is no
+server-side timer to lean on.
+
+So the deadline is enforced **by the tool, at its next visit**. `start` records
+the expiry in its state file and in the session's name. Any later `observe` —
+`status`, `finish`, or a fresh run — finds a session past its expiry under the
+name it owns and stops it before doing anything else. Self-healing on the next
+pass, not expiring on its own.
+
+That is weaker than it sounds and the spec should not pretend otherwise. If the
+laptop dies during a `start`, or during a `--minutes 5` run for that matter, the
+session keeps running until somebody runs `observe` again or a DBA notices it.
+That is precisely the abandoned-capture scenario the minutes-only rule was
+written against, and the honest statement is that `observe` reduces the window
+rather than closing it.
+
+Two things make the residue tolerable. The default target holds a bounded amount
+of memory and writes nothing, so an orphan costs a few megabytes and some event
+dispatch rather than a filling disk. And the fixed session name makes an orphan
+findable by anyone, not only by the tool: a DBA who spots it knows what it is
+and can drop it in one statement.
+
+A **SQL Agent job** that stops the session at the deadline is the only real
+server-side alternative. It is offered as `--agent-stop` rather than made the
+default, because it needs the Agent to exist and be running and needs the right
+to create a job — a second dependency and a second permission, on exactly the
+locked-down instances where `--session` was supposed to help.
 
 ### Reusing a session
 
@@ -116,8 +144,14 @@ carries most of the design:
   consulted before `collect` ran, that is the difference between a yes and a
   no.
 - The text comes back afterwards, resolved server-side by joining the hashes to
-  `sys.query_store_query` and `sys.dm_exec_query_stats`. The statements it
-  cannot resolve are reported as unresolved hashes rather than dropped.
+  `sys.query_store_query` and `sys.dm_exec_query_stats`. Resolution runs at
+  `finish`, immediately after the session stops, so the plan cache is as warm as
+  it will ever be and the loss is bounded by what was evicted during the window
+  itself. The statements it cannot resolve are reported as unresolved hashes
+  rather than dropped, and **the manifest must say when the Query Store was off
+  for the database**, because resolution then had only the plan cache to work
+  from and a large unresolved count means something different than it otherwise
+  would.
 
 `--detail` keeps the whole event rather than a bucket, for the cases where the
 hash is not enough: a statement that has left the plan cache and was never in the
@@ -141,7 +175,10 @@ must read the target's own `Buffers dropped` count and put it in the manifest
 rather than presenting the events as a census. And `target_data` is known to
 truncate large payloads, so the XML can come back incomplete for a big buffer
 even when the memory holds everything. Verify that ceiling on a real instance
-before choosing a default `MAX_MEMORY`; do not take a number from a blog post.
+before choosing a default `MAX_MEMORY`, record the build it was measured on
+since the behaviour has changed between versions, and choose the default against
+the oldest version this tool supports rather than the newest one to hand. Do not
+take a number from a blog post.
 
 An **event file** has neither limit and is the target for a long capture. It
 costs a directory the SQL Server service account can write to, which
@@ -152,6 +189,15 @@ The rule between them: ring buffer up to a window and a rate the buffer can
 hold, event file beyond it. `observe` should measure `batch_requests/sec` first,
 compute what the window will produce, and say which target it is about to use
 and why.
+
+`MAX_DISPATCH_LATENCY` deserves a line of its own, because it will otherwise
+produce the first support question. It defaults to 30 seconds: events sit in
+their buffer until that latency elapses or the buffer fills, so `observe status`
+can report zero events for the first half-minute of a capture that is working
+perfectly. Stopping the session flushes the buffers, which is why `finish`
+always sees them and a mid-flight read may not. Either set it low and say so, or
+say so in the output of `status`; saying nothing means the first user concludes
+the capture is broken.
 
 The session is filtered to the database under study and excludes the collector's
 own session id. `MAX_MEMORY` is set explicitly and `EVENT_RETENTION_MODE` is
@@ -318,10 +364,14 @@ DDL into a ticket.
 
 Guarantees the implementation owes:
 
-- **Nothing survives a crash.** The session is created with `STARTUP_STATE = OFF`
-  so a service restart does not resurrect it, and with its own duration cap so
-  an abandoned `start` expires. `observe status` finds an orphan by its fixed
-  name and `observe finish --drop` removes it.
+- **Nothing survives a service restart, and an orphan is findable.** The session
+  is created with `STARTUP_STATE = OFF`, so restarting SQL Server does not bring
+  it back. What it does **not** guarantee is that nothing survives a crash of the
+  tool: as the command surface section says at length, there is no server-side
+  timer, so an orphaned session runs until the next `observe` stops it or a human
+  does. `observe status` finds it by its fixed name and `observe finish --drop`
+  removes it. Stating this as a guarantee, which an earlier draft did, would have
+  been the more comfortable sentence and the false one.
 - **A borrowed session is never dropped, never altered.** Not even to add an
   event it is missing; that is a refusal with a message, not a repair.
 - **The tool refuses rather than degrades.** No permission, no Query Store for
@@ -330,8 +380,8 @@ Guarantees the implementation owes:
 - **The cost is measured before it is paid.** `observe` reads
   `batch_requests/sec` first and says what event rate to expect. At 221 batches a
   second a five-minute histogram capture is around 66,000 events into a few
-  kilobytes of buckets; the same capture with `--detail` is a file the operator
-  should be told about before it is written.
+  kilobytes of buckets; the same capture with `--detail` is a buffer, or a file,
+  whose size the operator should be told before it is filled.
 
 ## What it does not do
 
@@ -340,6 +390,16 @@ happened between two moments; the operator supplies the meaning by choosing
 those moments. The report should say "during one *save order* performed at
 14:32, the application issued 4,812 statements", and the tool provides the
 4,812, not the *save order*.
+
+It does not see inside a batch. `rpc_completed` and `sql_batch_completed` fire
+once per call from the client, so a loop written in T-SQL — a `WHILE`, a cursor,
+a procedure iterating a set — arrives as one event however many statements it
+runs. That is consistent with what the command is for, which is the loop on the
+application side, and it is worth stating because a reader coming from
+`021.query-store-detail.sql` will have seen per-statement figures and expect
+them here. Capturing `sql_statement_completed` and `sp_statement_completed`
+instead would see inside the batch and multiply the event volume by whatever the
+batch does, which is the trade this command declines to make by default.
 
 It does not replace the Query Store analysis. `023` and `024` find the loops
 across a month without touching the server. `observe` is for attributing one of

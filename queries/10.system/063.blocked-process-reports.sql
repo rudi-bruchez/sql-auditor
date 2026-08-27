@@ -103,10 +103,18 @@ DECLARE @current nvarchar(600) =
    SQL Server writes 'Blocked process_0_133000000000000000.xel'. The collection
    reported an empty capture on an instance whose ring buffer held two reports,
    which is worse than an error: the audit concludes there is no blocking on a
-   server that recorded some. Found on a client instance in August 2026. */
+   server that recorded some. Found on a client instance in August 2026.
+
+   UPPER() rather than a bare comparison, and that is not decoration. The
+   comparison takes the collation of the context database, so under a case
+   sensitive one a session configured as '.XEL' would fail the test: the stem
+   would keep its extension and the pattern would be wrong again, silently, in
+   exactly the way the paragraph above describes. Folding the case states the
+   intention instead of inheriting it from whichever database the collector
+   happens to be pointed at. */
 DECLARE @stem nvarchar(400) =
     CASE WHEN @configured IS NULL THEN NULL
-         WHEN RIGHT(@configured, 4) = N'.xel'
+         WHEN UPPER(RIGHT(@configured, 4)) = N'.XEL'
               THEN LEFT(@configured, LEN(@configured) - 4)
          ELSE @configured END;
 IF @stem IS NOT NULL

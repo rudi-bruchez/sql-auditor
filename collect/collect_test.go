@@ -12,6 +12,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	mssql "github.com/microsoft/go-mssqldb"
 	sqlauditor "github.com/rudi-bruchez/sql-auditor"
 )
 
@@ -264,6 +265,22 @@ func TestOutOfTimeLeavesACancelledRunAlone(t *testing.T) {
 	err := outOfTime(parent, unit, time.Minute, "@timeout", context.Canceled)
 	if err != context.Canceled {
 		t.Errorf("err = %v, want the error untouched on a cancelled run", err)
+	}
+}
+
+// A SQL error that lands in the same instant as the deadline keeps its own
+// words. The context alone cannot tell the two apart, and calling a real fault
+// a timeout would file it under the wrong cause — the mistake this function
+// exists to remove, committed one level down.
+func TestOutOfTimeLeavesASQLErrorAloneEvenOnTheDeadline(t *testing.T) {
+	parent := context.Background()
+	unit, cancel := context.WithTimeout(parent, time.Millisecond)
+	defer cancel()
+	<-unit.Done()
+
+	boom := mssql.Error{Number: 208, Message: "Invalid object name."}
+	if err := outOfTime(parent, unit, time.Minute, "@timeout", boom); err.Error() != boom.Error() {
+		t.Errorf("err = %v, want the SQL error untouched", err)
 	}
 }
 

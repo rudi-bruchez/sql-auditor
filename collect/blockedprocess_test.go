@@ -265,7 +265,12 @@ func TestBlockedProcessExtensionIsTestedOnTheEndOfTheName(t *testing.T) {
 		t.Error("063 tests the .xel extension against a reversed string, which never matches; " +
 			"use RIGHT(@configured, 4) = N'.xel'")
 	}
-	if !regexp.MustCompile(`RIGHT\(@configured,\s*4\)\s*=\s*N?'\.xel'`).MatchString(sql) {
+	// Anchored on RIGHT(@configured, 4) and not on the whole comparison. The
+	// first version of this test pinned the exact expression, and the very next
+	// correct change — folding the case so a case sensitive collation cannot
+	// reject '.XEL' — broke it. A guard that fails on a fix is a guard people
+	// learn to delete.
+	if !regexp.MustCompile(`RIGHT\(@configured,\s*4\)`).MatchString(sql) {
 		t.Error("063 no longer tests the .xel extension on the end of the configured name")
 	}
 }

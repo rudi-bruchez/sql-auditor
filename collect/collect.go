@@ -1500,6 +1500,22 @@ func outOfTime(parent, unit context.Context, limit time.Duration, knob string, e
 	if parent.Err() != nil || unit.Err() != context.DeadlineExceeded {
 		return err
 	}
+	// A SQL Server error keeps its own words. A genuine failure and the deadline
+	// can land in the same instant — the server raises while the context expires
+	// — and relabelling that as a timeout files a real fault under the wrong
+	// cause, which is the class of misleading message this function exists to
+	// remove rather than to add.
+	//
+	// The test is the error number rather than errors.Is against
+	// context.DeadlineExceeded, and deliberately. Whether the driver wraps the
+	// context error or substitutes one of its own is the driver's business and
+	// has changed before; whether a failure carries a SQL Server error number is
+	// a fact about the failure. sqlErrorNumber already draws that line for the
+	// manifest, and drawing it a second way here is how the two would come to
+	// disagree.
+	if sqlErrorNumber(err) != 0 {
+		return err
+	}
 	return fmt.Errorf("still running when %s of %s expired: %w", knob, limit, err)
 }
 
