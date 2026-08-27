@@ -119,11 +119,39 @@ carries most of the design:
   `sys.query_store_query` and `sys.dm_exec_query_stats`. The statements it
   cannot resolve are reported as unresolved hashes rather than dropped.
 
-`--detail` adds an `event_file` target with statement text, for the cases where
-the hash is not enough — a statement that has left the plan cache and was never
-in the Query Store. It is off by default, it says so in the manifest, and it is
-what makes the difference between a capture that carries no application data and
-one that might.
+`--detail` keeps the whole event rather than a bucket, for the cases where the
+hash is not enough: a statement that has left the plan cache and was never in the
+Query Store, or a question that needs the duration and the row count of each
+call rather than how many calls there were. It is off by default, it says so in
+the manifest, and it is what makes the difference between a capture carrying no
+application data and one that might.
+
+It has two possible targets, and the choice between them is a real one.
+
+A **ring buffer** keeps the events in memory and returns them as XML from
+`sys.dm_xe_session_targets.target_data`. Nothing is written to disk, no
+directory has to exist, no permission is needed beyond the ones `observe`
+already requires, and Go reads it with the standard library. For a short
+capture that is plainly the better target, and it is the default for `--detail`.
+
+Its two limits decide when it stops being the better target. It is bounded by
+`MAX_MEMORY` and discards the oldest events when full, so a window that outruns
+the buffer returns its tail while looking complete — which is why `observe`
+must read the target's own `Buffers dropped` count and put it in the manifest
+rather than presenting the events as a census. And `target_data` is known to
+truncate large payloads, so the XML can come back incomplete for a big buffer
+even when the memory holds everything. Verify that ceiling on a real instance
+before choosing a default `MAX_MEMORY`; do not take a number from a blog post.
+
+An **event file** has neither limit and is the target for a long capture. It
+costs a directory the SQL Server service account can write to, which
+`--detail --file <dir>` must take as an argument rather than guess, and a file
+to clean up afterwards.
+
+The rule between them: ring buffer up to a window and a rate the buffer can
+hold, event file beyond it. `observe` should measure `batch_requests/sec` first,
+compute what the window will produce, and say which target it is about to use
+and why.
 
 The session is filtered to the database under study and excludes the collector's
 own session id. `MAX_MEMORY` is set explicitly and `EVENT_RETENTION_MODE` is
@@ -149,13 +177,14 @@ as the rest of the tool**, after the fact rather than as it happens. Which means
 the session has to accumulate into something a `SELECT` can read, and that
 decides the target before anything else does.
 
-Three consequences worth stating, because they will look like omissions
+Two consequences worth stating, because they will look like omissions
 otherwise. There is no live view: `observe status` reports counts, not a stream.
-There is no per-event callback, so filtering happens in the session definition
-where it belongs rather than in the client. And the ring buffer target, which
-looks tempting because it is a DMV read, is the wrong choice anyway: it holds
-recent events and silently discards older ones, so a five-minute window on a
-busy instance would return its last few seconds and call it a capture.
+And there is no per-event callback, so filtering happens in the session
+definition where it belongs rather than in the client.
+
+What the missing library does **not** rule out is reading a target. Both targets
+below hand back XML over a normal query, and `encoding/xml` parses it. The
+absence of a client library costs the stream, not the data.
 
 **The histogram target needs no file and no library.** Its contents are in
 `sys.dm_xe_session_targets.target_data`, an XML document read over the same
@@ -165,8 +194,13 @@ nothing that Go cannot do. This is the main reason it is the default rather than
 the event file, and it is why the histogram survives the absence of a client
 library where a live stream does not.
 
-**The event file, when `--detail` is passed, comes back the way the blocked
-process reports already do**: `sys.fn_xe_file_target_read_file` reads it
+**The ring buffer needs no file either.** Same DMV, same XML, same parser as the
+histogram; only the shape of the document differs, one element per event instead
+of one per bucket. This is what makes `--detail` usable on an instance where
+nobody will grant a directory.
+
+**The event file, when the window is too long for a buffer, comes back the way
+the blocked process reports already do**: `sys.fn_xe_file_target_read_file` reads it
 server-side and returns it as rows. The collector already does exactly this in
 `10.system/063.blocked-process-reports.sql`, including the rollover-file
 pattern, so the mechanism is proven rather than new. It is also the only way to
@@ -207,7 +241,8 @@ observe-<server>-<date>-<time>.zip
   statements.json     one row per query_hash: executions, resolved text,
                       first and last seen, source of the resolution
   unresolved.json     hashes the server could no longer name, with counts
-  detail/             only with --detail: the event file rows
+  events.json         only with --detail: one row per captured event, with
+                      the target it was read from and the dropped count
 ```
 
 `statements.json` is the deliverable. Sorted by execution count, it is the
@@ -259,7 +294,16 @@ already available.
 Whether `finish` should also snapshot `sys.dm_exec_query_stats` for the same
 window, giving rows and duration per statement rather than counts alone. It is
 cheap and it uses the subtract-two-snapshots discipline already in place. The
-argument against is scope: the command would stop being "count the calls".
+argument against is scope: the command would stop being "count the calls". It is
+also partly answered by `--detail` on a ring buffer, which carries duration and
+row count per event without a second source.
+
+What `MAX_MEMORY` a ring buffer needs for a five-minute window at a few hundred
+statements a second, and at what size `target_data` starts truncating. Both are
+measurable in an afternoon against a real instance, and both should be measured
+rather than assumed: the ring buffer is the target that makes `--detail` work
+without asking anyone for a directory, so its ceiling decides how much of the
+command's usefulness survives a locked-down server.
 
 Whether the state file that `start` leaves behind belongs next to the archive or
 in the user's config directory. Next to the archive is discoverable; in the
