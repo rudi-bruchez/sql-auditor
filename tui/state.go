@@ -10,6 +10,7 @@
 package tui
 
 import (
+	"fmt"
 	"time"
 	"unicode/utf8"
 
@@ -41,6 +42,31 @@ const (
 	StepDone
 	StepQuit
 )
+
+// String names the step for the debug timeline. A wizard that has been showing
+// an activity indicator for a minute is waiting on one of three different
+// things, and "3" does not say which.
+func (s Step) String() string {
+	switch s {
+	case StepConnection:
+		return "connection"
+	case StepConnecting:
+		return "connecting"
+	case StepVerification:
+		return "verification"
+	case StepVerifying:
+		return "verifying"
+	case StepOptions:
+		return "options"
+	case StepCollecting:
+		return "collecting"
+	case StepDone:
+		return "done"
+	case StepQuit:
+		return "quit"
+	}
+	return fmt.Sprintf("Step(%d)", int(s))
+}
 
 // The two editable fields of screen 1, in tab order. They are the only two:
 // the database, the authentication mode and the encryption settings come from

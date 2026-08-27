@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -31,7 +32,7 @@ import (
 // the tool that produced it, and "dev" told a reader nothing about which
 // collectors were in the corpus. So the number lives here and moves with the
 // corpus, while buildStamp fills in the revision from the build itself.
-var version = "0.19.0"
+var version = "0.20.0"
 var commit = ""
 
 // buildStamp returns what to print after the version. When -ldflags supplied a
@@ -118,6 +119,15 @@ func defineFlags(cmd string) *cliFlags {
 	fs.StringVar(&c.queriesDir, "queries-dir", "", "run queries from this directory instead of the embedded corpus")
 	fs.StringVar(&c.outputDir, "output-dir", "", "where to write results")
 	fs.BoolVar(&c.keep, "keep", false, "keep an existing same-day run folder, suffixing this run")
+	// Declared so it appears in the help and so `collect --debug` parses, and
+	// the value deliberately thrown away: run() resolves the trigger from the
+	// raw arguments before any flag set exists, because the first lines of the
+	// timeline — the mode decision, the .env lookup — happen before the parse.
+	// A field on cliFlags would be written and never read, which reads as an
+	// oversight rather than as the decision it is.
+	_ = fs.Bool("debug", false,
+		"print a timeline of what the program is doing on stderr, stamped with the "+
+			"time since process start")
 	// A union of the seven opt-ins below, and deliberately not a mode: it
 	// turns them on and changes nothing else. Six of them are disclosure
 	// decisions and one is a cost decision, so what this asks for is the
@@ -228,9 +238,16 @@ func defineFlags(cmd string) *cliFlags {
 // decides where it goes: a subcommand puts it on stderr, and the wizard cannot,
 // because it is about to take the screen.
 func buildOptions(cmd string, args []string, env func(string) string, stdin io.Reader) (collect.Options, int, error) {
+	return buildOptionsWithDebug(cmd, args, env, stdin, nil)
+}
+
+// buildOptionsWithDebug is the same resolution with the timeline switched on.
+// A nil log is a silent one, which is what buildOptions passes and what every
+// test gets.
+func buildOptionsWithDebug(cmd string, args []string, env func(string) string, stdin io.Reader, dbg *debugLog) (collect.Options, int, error) {
 	c := defineFlags(cmd)
 	_ = c.fs.Parse(args)
-	return optionsFrom(c, env, stdin)
+	return optionsFrom(c, env, stdin, dbg)
 }
 
 // readPassword resolves --password-file and --password-stdin into the value
@@ -298,7 +315,7 @@ func readPassword(c *cliFlags, stdin io.Reader) (string, error) {
 // always been refused before anything else is said, including before the
 // "unknown command" message — and parsing it a second time here would only
 // produce the same values.
-func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader) (collect.Options, int, error) {
+func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *debugLog) (collect.Options, int, error) {
 	// Before the .env is opened, because a password source the operator named
 	// and this program cannot read is their mistake to correct, and saying so
 	// first keeps the two refusals from arriving in an order that depends on
@@ -330,8 +347,15 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader) (collect
 			return collect.Options{}, 2, fmt.Errorf("%s: %w", c.envFile, perr)
 		}
 		dotenv = parsed
+		// The COUNT of settings, never the settings: SQL_PASSWORD is in this
+		// map, and a debug mode that puts a production password on a terminal
+		// — and from there into whatever the operator pastes the output into —
+		// would be a worse bug than any it was added to find.
+		dbg.printf("%s read, %d setting(s)", c.envFile, len(dotenv))
 	case typedEnv:
 		return collect.Options{}, 2, fmt.Errorf("--env %s: %w", c.envFile, oerr)
+	default:
+		dbg.printf("%s absent; the environment alone then", c.envFile)
 	}
 	flags := map[string]string{}
 	for k, v := range map[string]string{
@@ -375,6 +399,12 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader) (collect
 	if err != nil {
 		return collect.Options{}, 2, err
 	}
+	// The resolved connection, minus the secret. Which server, which login and
+	// which timeouts were actually settled is the first thing to check when a
+	// run hangs, and precedence between a flag, a file and an exported variable
+	// is exactly the thing an operator gets wrong.
+	dbg.printf("resolved: server=%q database=%q auth=%s connect-timeout=%s query-timeout=%s output-dir=%q",
+		cfg.Server, cfg.Database, collect.AuthLabel(cfg), cfg.ConnectTimeout, cfg.QueryTimeout, cfg.OutputDir)
 	// A DBA watching sys.dm_exec_sessions while this runs sees program_name and
 	// nothing else, and "sql-auditor" on its own does not say which corpus is
 	// on the wire — which is the question asked when two runs disagree. So the
@@ -425,6 +455,21 @@ const (
 	ModeUsage
 )
 
+// String names the mode for the debug timeline, where the decision is the
+// first interesting line and a bare "2" sends the reader to the source to find
+// out what it means.
+func (m Mode) String() string {
+	switch m {
+	case ModeSubcommand:
+		return "subcommand"
+	case ModeTUI:
+		return "wizard"
+	case ModeUsage:
+		return "usage"
+	}
+	return fmt.Sprintf("Mode(%d)", int(m))
+}
+
 // mode decides between the three, in the order the spec fixes.
 //
 // The TTY predicate is injected because no test in this repository can allocate
@@ -467,6 +512,23 @@ func mode(isTTY func(*os.File) bool, stdin, stdout *os.File, env func(string) st
 // wrong answer.
 func isTerminal(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
 
+// isVersionSwitch recognises the spellings an operator reaches for before
+// discovering that the version is a subcommand here. All four used to be
+// answered with `"--version" is not a command … Did you mean "version"?`,
+// which is a round trip for nothing: there is only one thing they can mean.
+//
+// Lowercase -v is deliberately absent. It is the reflex for "verbose"
+// everywhere else, and this program has just acquired a verbose mode for it to
+// be confused with; answering it with a version string would be the wrong
+// answer confidently given.
+func isVersionSwitch(s string) bool {
+	switch s {
+	case "--version", "-version", "-V", "--V":
+		return true
+	}
+	return false
+}
+
 // isCommand is the list the dispatch below actually accepts, in one place, so
 // that the "did you mean" suggestion cannot offer a word that would fail again.
 func isCommand(s string) bool {
@@ -491,9 +553,40 @@ func stderrWidth() int {
 }
 
 func run() int {
-	switch mode(isTerminal, os.Stdin, os.Stdout, os.Getenv, os.Args[1:]) {
+	// Resolved first, from the raw arguments, because everything below is
+	// something the timeline has to be able to describe — including the two
+	// decisions that happen before a flag set exists.
+	var dbg *debugLog
+	if debugRequested(os.Args[1:], os.Getenv) {
+		dbg = newDebugLog(os.Stderr, time.Now)
+	}
+	dbg.printf("start, %s, %s/%s, %s", banner(), runtime.GOOS, runtime.GOARCH, runtime.Version())
+	if wd, err := os.Getwd(); err == nil {
+		// The .env that gets read is the one in the CURRENT directory, and a
+		// tool launched from a shortcut or a scheduled task is rarely where its
+		// operator thinks it is. This line has settled that argument before.
+		dbg.printf("working directory %s", wd)
+	}
+
+	// The switch is taken off the front so that `sql-auditor --debug`, with no
+	// command, is the argument-less run with the log on rather than a command
+	// called "--debug" — that run being the one an operator most often wants
+	// explained.
+	argv := stripLeadingDebug(os.Args[1:])
+	m := mode(isTerminal, os.Stdin, os.Stdout, os.Getenv, argv)
+	if dbg.enabled() {
+		dbg.printf("stdin tty=%v, stdout tty=%v, SQL_AUDITOR_NO_TUI=%q, args=%d → %v",
+			isTerminal(os.Stdin), isTerminal(os.Stdout), os.Getenv("SQL_AUDITOR_NO_TUI"), len(argv), m)
+	}
+
+	switch m {
 	case ModeUsage:
-		usage()
+		// The diagnosis goes ABOVE the help rather than below it. Ninety lines
+		// of options scroll a one-line finding off the top of a terminal, and
+		// the whole complaint this answers is that the finding was never made.
+		fmt.Fprintf(os.Stderr, "%s\n\n%s\n\n", banner(), nothingToDo(fileExists, os.Getenv))
+		writeUsageBody(os.Stderr)
+		dbg.printf("nothing to do; help printed, exit 2")
 		return 2
 	case ModeTUI:
 		// The wizard resolves its configuration exactly as `collect` would,
@@ -501,15 +594,49 @@ func run() int {
 		// server and supply a password on screen 1. A refusal here is a .env
 		// the wizard cannot show, so it is reported the way a subcommand would
 		// report it — before the terminal is taken.
-		o, code, err := buildOptions("collect", nil, os.Getenv, os.Stdin)
+		o, code, err := buildOptionsWithDebug("collect", nil, os.Getenv, os.Stdin, dbg)
 		if err != nil {
+			dbg.printf("configuration refused: %v", err)
 			fmt.Fprintln(os.Stderr, err)
 			return code
 		}
-		return tui.Run(o, os.Stdin, os.Stdout)
+		// From here the wizard owns the screen, and a stamped line written to
+		// stderr would land in the middle of a frame and corrupt it. So the log
+		// is held in memory for the duration and emptied onto stderr once the
+		// terminal has been restored — beside the run log path, which is where
+		// an operator reads the rest of what happened anyway.
+		//
+		// Every write to held goes through the log's own mutex, so the
+		// collection's goroutine and the painting one can both use it.
+		var held *bytes.Buffer
+		if dbg.enabled() {
+			held = &bytes.Buffer{}
+			dbg.setWriter(held)
+		}
+		o.Debug = dbg.Writer()
+		dbg.printf("opening the wizard")
+		code = tui.Run(o, os.Stdin, os.Stdout)
+		dbg.printf("wizard finished, exit %d", code)
+		if held != nil {
+			// Discard, not stderr, and the buffer is read only after the swap:
+			// both happen under the log's mutex, so a late line is lost rather
+			// than racing the read. It is safe to lose one because there are
+			// none — the loop leaves StepCollecting only on collectDoneEvent,
+			// so collect.Run has returned before tui.Run does. That invariant
+			// is what makes this correct, and it lives in tui/run.go; if it
+			// ever stops holding, lines vanish silently in the one mode whose
+			// job is to explain a difficult run, and this becomes a leak worth
+			// draining properly rather than discarding.
+			dbg.setWriter(io.Discard)
+			_, _ = os.Stderr.Write(held.Bytes())
+		}
+		return code
 	}
 
-	cmd, args := os.Args[1], os.Args[2:]
+	cmd, args := argv[0], argv[1:]
+	if isVersionSwitch(cmd) {
+		cmd = "version"
+	}
 	// "queries export" is the one command with a subcommand, and flag.Parse
 	// stops at the first non-flag argument — so parsing os.Args[2:] whole
 	// leaves --to unset and the export refuses a destination the user did
@@ -526,7 +653,7 @@ func run() int {
 	_ = c.fs.Parse(args)
 
 	if cmd == "version" {
-		fmt.Printf("sql-auditor %s (%s)\n", version, buildStamp())
+		fmt.Println(banner())
 		return 0
 	}
 	if cmd == "queries" {
@@ -596,13 +723,17 @@ func run() int {
 	// reading .env, so a refused configuration is still attributable to a
 	// build. On stderr, so redirecting a check's listing to a file leaves this
 	// on the terminal where the operator is looking.
-	fmt.Fprintf(os.Stderr, "sql-auditor %s (%s)\n\n", version, buildStamp())
+	fmt.Fprintf(os.Stderr, "%s\n\n", banner())
 
-	opts, code, err := optionsFrom(c, os.Getenv, os.Stdin)
+	opts, code, err := optionsFrom(c, os.Getenv, os.Stdin, dbg)
 	if err != nil {
+		dbg.printf("configuration refused: %v", err)
 		fmt.Fprintln(os.Stderr, err)
 		return code
 	}
+	// The timeline follows the run into collect, where the waits actually
+	// happen. Nil when the mode is off, which that package reads as silence.
+	opts.Debug = dbg.Writer()
 	if opts.Config.TrustCert && opts.Config.Encrypt {
 		fmt.Fprintln(os.Stderr, "note: the connection is encrypted but the server certificate is NOT validated "+
 			"(SQL_TRUST_SERVER_CERTIFICATE=true)")
@@ -620,6 +751,7 @@ func run() int {
 	}
 
 	ctx := context.Background()
+	dbg.printf("dispatching to %s", cmd)
 	switch cmd {
 	case "collect":
 		// The gauge goes on stderr and OwnsScreen stays false, so Run still
@@ -653,11 +785,72 @@ func run() int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
+	dbg.printf("%s finished, exit %d", cmd, code)
 	return code
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `sql-auditor — SQL Server diagnostic collector
+// banner is how this program names itself and the build it came from. One
+// function because the line appears in four places — the help, the
+// argument-less refusal, and ahead of check and collect — and four literals
+// would eventually disagree about the format of the commit.
+func banner() string { return fmt.Sprintf("sql-auditor %s (%s)", version, buildStamp()) }
+
+// fileExists is the predicate nothingToDo asks about .env. Injected there and
+// production here, for the same reason isTerminal is: a test must not depend on
+// whatever happens to be in the directory it runs from.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// nothingToDo is the line printed above the help when the program was given no
+// command, saying what it looked for and did not find.
+//
+// It exists because the answer to a bare `sql-auditor` used to be ninety lines
+// of options with not one word about what had been looked for. The reader was
+// left to deduce that .env is a thing, that this directory has none, and that
+// the tool had therefore stopped — three inferences from a wall of text that
+// mentions none of them.
+//
+// The line always names the next command to type. A diagnosis with no cure
+// sends the reader back into the same wall of text, and the cure differs: with
+// nothing configured at all, `check` would refuse with "SQL_SERVER is not set"
+// and be a second dead end, so the empty case points at `env init` instead.
+func nothingToDo(exists func(string) bool, env func(string) string) string {
+	hasFile, hasServer := exists(".env"), env("SQL_SERVER") != ""
+	switch {
+	case !hasFile && !hasServer:
+		return "no command given, and nothing to read: there is no .env in this directory " +
+			"and SQL_SERVER is not set.\n" +
+			"start here: sql-auditor env init — it writes an annotated .env to fill in."
+	case hasFile && hasServer:
+		return "no command given. There is a .env here and SQL_SERVER is exported; the flag, " +
+			"the file and the environment resolve in that order.\n" +
+			"next: sql-auditor check — it verifies the connection and lists what a collection would run."
+	case hasFile:
+		return "no command given. There is a .env in this directory.\n" +
+			"next: sql-auditor check — it verifies the connection and lists what a collection would run."
+	default:
+		return "no command given. SQL_SERVER is set in the environment.\n" +
+			"next: sql-auditor check — it verifies the connection and lists what a collection would run."
+	}
+}
+
+// usage is what the flag set calls and what every refusal below prints. It is
+// split from writeUsage only so that a test can read the text without capturing
+// the process's stderr.
+func usage() { writeUsage(os.Stderr) }
+
+func writeUsage(w io.Writer) {
+	fmt.Fprintf(w, "%s\n\n", banner())
+	writeUsageBody(w)
+}
+
+// writeUsageBody is the help without the banner, for the one caller that has
+// already printed one: an argument-less run puts the diagnosis between the two,
+// where it is read, rather than under ninety lines where it is not.
+func writeUsageBody(w io.Writer) {
+	fmt.Fprint(w, `sql-auditor — SQL Server diagnostic collector
 
   sql-auditor check                    verify connectivity, permissions and configuration,
                                        and list what a collection would run
@@ -668,9 +861,24 @@ func usage() {
                                        --to FILE to write elsewhere (default
                                        .env), --force to replace an existing one
   sql-auditor queries export --to DIR  write the embedded queries to disk
-  sql-auditor version
+  sql-auditor version                  print the version and the build it came
+                                       from. --version, -version and -V do the
+                                       same thing.
 
 Options (check, collect):
+  --debug                     print a timeline of what the program is doing on
+                              stderr, one line per step, each stamped with the
+                              time since the process started. It is the gap
+                              between two stamps that says where a run is
+                              spending its time. Written to stderr so that a
+                              redirected listing or archive path is unaffected;
+                              under the wizard it is held back until the
+                              terminal has been restored, then written to
+                              stderr in one block, since a stamped line landing
+                              mid-frame would corrupt the screen.
+                              Given on its own — "sql-auditor --debug", with no
+                              command — it explains the argument-less run
+                              itself.
   --server HOST[,PORT]        overrides SQL_SERVER
   --user NAME                 overrides SQL_USER
   --env PATH                  .env file to read (default .env)
@@ -750,6 +958,11 @@ Environment (read from the process environment, never from .env):
                               includes "false" and "0": the test is on the
                               variable being set at all. Unset it to get the
                               wizard back.
+  SQL_AUDITOR_DEBUG           any non-empty value turns --debug on, under the
+                              same rule: "false" turns it ON. It exists because
+                              the run worth explaining is often the one with no
+                              arguments, and because a scheduled task has an
+                              environment to set and no command line to change.
 
 Exit codes: 0 success, 2 partial failure or bad configuration, 1 fatal.
 `)

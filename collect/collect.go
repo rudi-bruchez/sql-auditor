@@ -142,6 +142,40 @@ type Options struct {
 	// asked for. cmd/sql-auditor/main.go states the same distinction in words
 	// where it prints the build stamp.
 	Progress io.Writer
+	// Debug is the run's timeline: one line before each step that can take
+	// time, so an operator watching a run that seems stuck can see what it is
+	// stuck ON. Nil is the ordinary case and means silence — unlike Progress,
+	// whose nil default is stderr, because nothing here is a record anybody
+	// would miss.
+	//
+	// It is deliberately not a second Progress. Progress carries the few things
+	// the operator must be told whether they asked or not; this carries what
+	// they get only for asking, and the caller decides where it lands.
+	Debug io.Writer
+}
+
+// failureNote is the tail of a unit's debug line. Empty when it succeeded,
+// which keeps the column of durations readable: what stands out in a timeline
+// should be the outlier, not every line carrying the word "nil".
+func failureNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	return ", failed: " + err.Error()
+}
+
+// Debugf writes one line of the timeline, or nothing. Nil-safe in the same way
+// progress() is, so the twenty-odd call sites carry no `if`.
+//
+// The lines say what is ABOUT to happen rather than what just did. A run that
+// hangs prints no "finished" line, so a timeline written after the fact goes
+// silent at exactly the moment it was needed; the last line of one written
+// before names the thing that hung.
+func (o Options) Debugf(format string, args ...any) {
+	if o.Debug == nil {
+		return
+	}
+	fmt.Fprintf(o.Debug, format+"\n", args...)
 }
 
 // progress is the single place that decides where the commentary goes, so the
@@ -532,6 +566,7 @@ func Check(ctx context.Context, o Options) (int, error) {
 	// tool that has hung. It also means a redirected check that is killed
 	// halfway still holds the findings about the corpus and the output
 	// directory.
+	o.Debugf("reading and linting the corpus")
 	v, err := VerifyLocal(o)
 	if v.CorpusErr != nil {
 		// Nothing has been printed on this path, deliberately. The CLI prints
@@ -570,7 +605,10 @@ func Check(ctx context.Context, o Options) (int, error) {
 	fmt.Println()
 
 	// Only now is the instance touched.
+	o.Debugf("connecting to %s as %s, up to %s to dial, then one probe per capability at %s each",
+		o.Config.Server, AuthLabel(o.Config), o.Config.ConnectTimeout, o.Config.QueryTimeout)
 	err = VerifyServer(ctx, o, &v)
+	o.Debugf("the instance has been probed")
 
 	// The two failures that end the listing, in the order VerifyServer meets
 	// them.
@@ -1103,6 +1141,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return c, cause
 	}
 
+	o.Debugf("probing the output directory %s for writability", o.Config.OutputDir)
 	if !outputWritable(o.Config.OutputDir) {
 		err := fmt.Errorf("output directory %s is not writable", o.Config.OutputDir)
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -1115,6 +1154,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// server that was never contacted. Both paths are reachable only through
 	// --queries-dir/QUERIES_DIR — the embedded corpus is verified by a test —
 	// so both are the operator's typo and both exit 2.
+	o.Debugf("hashing the corpus")
 	sum, err := CorpusSHA256(o.Corpus, o.Root)
 	if err != nil {
 		err = corpusError(o.Config, err)
@@ -1134,8 +1174,19 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return finishWith("", 2, err)
 	}
 
+	o.Debugf("%d script(s) in the corpus", len(scripts))
+
+	// The longest silence in a failing run happens here, and until now nothing
+	// said so: a server that does not answer holds the process for
+	// SQL_CONNECT_TIMEOUT_SEC with no output at all, and a named instance
+	// spends part of that waiting on the SQL Browser over UDP 1434. Naming the
+	// budget before the wait is what tells a reader whether the run is stuck or
+	// merely patient.
+	o.Debugf("connecting to %s as %s, up to %s to dial",
+		o.Config.Server, AuthLabel(o.Config), o.Config.ConnectTimeout)
 	db, err := Open(o.Config)
 	if err != nil {
+		o.Debugf("the connection failed: %v", err)
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", openExitCode(err), err)
 	}
@@ -1155,6 +1206,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 
 	// Populated before anything can return, so Coverage is never "unknown"
 	// while the manifest goes on to make claims about the database list.
+	o.Debugf("connected; running the preflight probes, each bounded by %s", o.Config.QueryTimeout)
 	m.Preflight = runPreflightWithDeadline(ctx, conn, o.Config)
 	if PreflightExitCode(m.Preflight, 0, true) == 1 {
 		err := errors.New("the instance did not answer the preflight; nothing was collected")
@@ -1165,13 +1217,14 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// connect is not a per-script gate. Reaching here means it answered.
 	delete(denied, "connect")
 
+	o.Debugf("asking the instance its name, version and UTC offset")
 	si, err := probeWithDeadline(ctx, conn, o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 1, err)
 	}
 	m.Server = ServerBlock{Name: si.Name, Version: si.Version, Edition: si.Edition,
-		UTCOffsetMinutes: si.UTCOffsetMinutes, Auth: authLabel(o.Config)}
+		UTCOffsetMinutes: si.UTCOffsetMinutes, Auth: AuthLabel(o.Config)}
 
 	// The window is resolved here and nowhere earlier: this is the first moment
 	// the server's UTC offset is known, and the operator types what the client
@@ -1203,6 +1256,8 @@ func Run(ctx context.Context, o Options) (int, error) {
 		m.Config["query_store_to"] = windowTo.In(loc).Format(time.RFC3339)
 	}
 
+	o.Debugf("instance %s, %s, %s", si.Name, si.Edition, si.Version)
+	o.Debugf("listing the databases")
 	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -1302,11 +1357,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 	for _, s := range planSkipped {
 		obs.ScriptSkipped(s.Script, s.Target, s.Reason)
 	}
+	o.Debugf("%d unit(s) to run over %d database(s), into %s", len(units), len(folders), runFolder)
 
 	for _, u := range units {
 		s, target := u.Script, u.Target
 		obs.UnitStarted(s.Path, target.Name)
 		before, started := rw.Spent(), time.Now()
+		// Before the unit, not after it: a run that hangs prints no "done"
+		// line, and the last name printed is the one to look at.
+		o.Debugf("running %s on %s", s.Path, target.Name)
 		err := runUnit(ctx, conn, o, m, rw, s, target)
 		// The context is consulted before a single word is written down —
 		// before the ErrorEntry, and before the observer is told. Were this
@@ -1322,7 +1381,16 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// The bytes of this unit are the difference across a run-level total,
 		// which is what the writer offers. A unit that failed still reports
 		// what it managed to write before failing.
-		obs.UnitDone(s.Path, target.Name, int64(rw.Spent()-before), time.Since(started), report)
+		// Read once and handed to both. Two calls to time.Since would let the
+		// gauge and the timeline disagree about the same unit by however long
+		// the line between them took to format — a difference of microseconds
+		// that is nonetheless a second number for a reader to reconcile.
+		took, wrote := time.Since(started), rw.Spent()-before
+		obs.UnitDone(s.Path, target.Name, int64(wrote), took, report)
+		// The duration is the whole point of the pair: the slow collector in a
+		// long run is invisible in a total and obvious in a column of these.
+		o.Debugf("  %s on %s took %s, wrote %d byte(s)%s",
+			s.Path, target.Name, took.Round(time.Millisecond), wrote, failureNote(report))
 		if err == nil {
 			continue
 		}
@@ -1375,6 +1443,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// screen showing 223/223 and nothing else reads as a hang while a large
 	// run folder is being zipped.
 	obs.Phase("writing manifest")
+	o.Debugf("all units done; writing the manifest")
 	code, ferr := finish(runFolder, exit)
 	if ferr != nil {
 		return code, ferr
@@ -1384,9 +1453,11 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// packaging is missing, which is a partial failure, not a fatal one.
 	zipPath := runFolder + ".zip"
 	obs.Phase("archiving")
+	o.Debugf("archiving %s into %s", runFolder, zipPath)
 	if err := Zip(runFolder, zipPath); err != nil {
 		return 2, err
 	}
+	o.Debugf("archive written")
 	// Silenced for a caller that owns the screen, not redirected.
 	// `sql-auditor collect | tail -1` is how a script picks up the archive path,
 	// so on the command line these two lines must keep going to stdout exactly
@@ -1556,7 +1627,11 @@ func queryStoreArgs(o Options, s Script, u DatabaseFolder) ([]any, string) {
 	return nil, ""
 }
 
-func authLabel(c *Config) string {
+// AuthLabel names the authentication actually settled on, for the manifest and
+// for the debug timeline. Exported so those two cannot drift apart: an archive
+// saying "windows" while the timeline said "sql:sa" is a question nobody can
+// answer afterwards.
+func AuthLabel(c *Config) string {
 	if c.User != "" && !c.Integrated {
 		return "sql:" + c.User
 	}

@@ -575,6 +575,12 @@ worst outcome is a value fractionally staler than the instant it was requested.
 
 ### Timeouts: 15 s to connect, and why raising the query timeout may not help
 
+Before reading any of this, run the thing again with `--debug`. It prints one
+stamped line before each step, so the timeout you are actually hitting is the
+one named on the last line before the gap — which saves guessing between the two
+settings below and the per-collector `@timeout` further down. `SQL_AUDITOR_DEBUG`
+set to any non-empty value does the same for a scheduled task.
+
 `SQL_CONNECT_TIMEOUT_SEC` defaults to 15 seconds and covers establishing the
 connection, and nothing after it. Raise it if the instance is behind a slow link
 or a failover cluster that takes its time answering.

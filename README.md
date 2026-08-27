@@ -93,8 +93,18 @@ sql-auditor check                    verify connectivity, permissions and config
 sql-auditor collect                  collect, then archive
 sql-auditor env init                 write the annotated .env template
 sql-auditor queries export --to DIR  write the embedded queries to disk
-sql-auditor version
+sql-auditor version                  print the version and the build it came from
 ```
+
+`version` is also spelt `--version`, `-version` and `-V`. Lowercase `-v` is not
+the version: it is the reflex for "verbose" everywhere else, and this tool has a
+`--debug` for that. The same version line now opens the help and every
+argument-less refusal, so whatever the tool prints says which build printed it.
+
+Run with no argument on something that is not a terminal, the tool says what it
+looked for before it prints the help — whether there is a `.env` in the current
+directory, whether `SQL_SERVER` is set — and names the command to type next. It
+used to print ninety lines of options and not one word about what was missing.
 
 `env init` writes `.env.example` — the annotated template listing every setting
 this tool accepts — to `.env` in the current directory, or to `--to FILE`. It
@@ -112,6 +122,52 @@ finished unit instead, so `2> run.log` stays a file a person can read. A failed
 unit leaves a permanent line either way. Nothing of this touches **stdout**,
 which still carries only the summary and the archive path — `sql-auditor collect
 | tail -1` reads the same thing it always did.
+
+### When you cannot tell what it is doing
+
+`--debug` prints a timeline on **stderr**: one line before each step that can
+take time, stamped with the time since the process started.
+
+```
+$ sql-auditor --debug check
+debug   +0.0ms  start, sql-auditor 0.20.0 (5e81f2b5), windows/amd64, go1.26.7
+debug   +0.0ms  working directory C:\audits\sql01
+debug   +0.0ms  stdin tty=false, stdout tty=false, SQL_AUDITOR_NO_TUI="", args=1 → subcommand
+debug   +0.0ms  .env read, 2 setting(s)
+debug   +0.0ms  resolved: server="192.0.2.1" database="master" auth=windows connect-timeout=3s query-timeout=1m0s output-dir="output"
+debug   +0.5ms  dispatching to check
+debug   +0.5ms  reading and linting the corpus
+debug  +19.2ms  connecting to 192.0.2.1 as windows, up to 3s to dial, then one probe per capability at 1m0s each
+debug   +3.02s  the instance has been probed
+debug   +3.02s  check finished, exit 1
+```
+
+It is the **gap between two stamps** that answers the question, which is why
+every line is written before the thing it names rather than after: a run that
+hangs prints no "finished" line, so the last line you see is the one that hung.
+The counting from process start is deliberate too — if the first line itself
+arrives seconds after you pressed enter, the time went into loading twelve
+megabytes of executable past a virus scanner, and nothing inside the program
+would ever have shown you that.
+
+Three things about where it goes and how it is turned on:
+
+- **stderr, always.** `check` writes its listing to stdout and `collect` writes
+  the archive path there, because `sql-auditor collect | tail -1` is how a
+  script picks it up. Under the wizard the lines are held back until the
+  terminal is restored, so a stamped line cannot land in the middle of a frame.
+- **`SQL_AUDITOR_DEBUG`** does the same thing from the process environment, under
+  the same rule as `SQL_AUDITOR_NO_TUI`: any non-empty value turns it on,
+  `false` and `0` included. It exists for the scheduled task that has an
+  environment to set and no command line to change.
+- **`sql-auditor --debug` on its own**, with no command, explains the
+  argument-less run itself rather than being read as a command called
+  `--debug`.
+
+The timeline carries no password. The `.env` line reports how many settings were
+read and never which; the resolved line names the server, the database, the
+authentication kind and the timeouts, and stops there. It is meant to be pasted
+into a ticket.
 
 `check` and `collect` are the non-interactive path, and they are that in their
 own right rather than as a leftover from before the wizard. They are what a
@@ -303,9 +359,9 @@ twelve-factor ordering and is
 The set is closed. An unrecognised key is an error, not a warning, so a typo
 cannot silently change what the collector does. `SQL_LOGIN` was renamed
 `SQL_USER`; the old name is refused by name rather than ignored. That closure is
-also why `SQL_AUDITOR_NO_TUI` is absent from this table: it is not a connection
-setting, it is read from the process environment only, and writing it into
-`.env` refuses the file.
+also why `SQL_AUDITOR_NO_TUI` and `SQL_AUDITOR_DEBUG` are absent from this
+table: neither is a connection setting, both are read from the process
+environment only, and writing either into `.env` refuses the file.
 
 ## Exit codes
 

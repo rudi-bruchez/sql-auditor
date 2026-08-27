@@ -379,6 +379,11 @@ func (r *runner) stateChanged(prev, next State) {
 			// returned and cancelling its context costs nothing.
 			r.stopWork()
 		}
+		// The step the wizard has just entered, for the timeline. The three
+		// below are the ones with a server at the end of them, and a screen
+		// that has been spinning for a minute says which of the three it is
+		// spinning on only here.
+		r.opts.Debugf("wizard step %v → %v", prev.Step, next.Step)
 		switch next.Step {
 		case StepConnecting:
 			r.startTicker()
