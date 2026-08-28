@@ -72,7 +72,7 @@ carry:
   that produced it.
 
 Until a release exists, a binary somebody handed you cannot be checked against
-anything except its own query corpus — and no amount of tooling will ever give
+anything except its own query corpus, and no amount of tooling will ever give
 you a byte-identical rebuild to compare against. What can and cannot be verified
 is set out in full in
 [docs/dba-guide.md](docs/dba-guide.md#can-i-verify-the-binary).
@@ -85,12 +85,12 @@ Run `sql-auditor` with no argument on a terminal and it opens a four-step
 wizard. That is the default because the three things a first run gets wrong are
 all invisible from a command line.
 
-**Step 1 — Connection.** Shows the address, the initial database, the
-authentication mode and whether the server certificate is actually validated —
-resolved from `.env` and the environment exactly as `collect` would resolve them
-— and lets you correct the server and type a password.
+**Step 1: connection.** Shows the address, the initial database, the
+authentication mode and whether the server certificate is actually validated,
+resolved from `.env` and the environment exactly as `collect` would resolve
+them. It lets you correct the server and type a password.
 
-**Step 2 — Verification.** Probes the instance and lists every capability with
+**Step 2: verification.** Probes the instance and lists every capability with
 the full consequence of each refusal, never truncated, because that sentence is
 the only place the cost of a missing `GRANT` is ever spelled out.
 
@@ -98,12 +98,12 @@ the only place the cost of a missing `GRANT` is ever spelled out.
 - the screen refuses to continue at all when the coverage of a run cannot be
   established.
 
-**Step 3 — What to collect.** Lists the opt-ins with what each one discloses
+**Step 3: what to collect.** Lists the opt-ins with what each one discloses
 beside it, and the number of collectors resolved *for this instance* rather than
 the size of the corpus, since the version gates close some of them on every
 server.
 
-**Step 4 — The collection.** Shows the collector, the database, the elapsed time
+**Step 4: the collection.** Shows the collector, the database, the elapsed time
 and the bytes written so far. It ends on the path of the archive alone on its
 line, indented, so that it can be selected with one drag and pasted into a mail.
 
@@ -113,7 +113,7 @@ The keys are written at the bottom of every screen.
 
 | Key | What it does |
 | --- | --- |
-| `[q]` | quit — on the later screens only |
+| `[q]` | quit (on the later screens only) |
 | `[b]` | go back |
 | `[r]` | run the probe again |
 | `ctrl-c` | cancel whatever is being waited on |
@@ -162,15 +162,15 @@ whatever the tool prints says which build printed it.
 
 ### No argument, and no terminal
 
-The tool says what it looked for before it prints the help — whether there is a
-`.env` in the current directory, whether `SQL_SERVER` is set — and names the
+The tool says what it looked for before it prints the help: whether there is a
+`.env` in the current directory, whether `SQL_SERVER` is set. Then it names the
 command to type next. It used to print ninety lines of options and not one word
 about what was missing.
 
 ### `env init`
 
-Writes `.env.example` — the annotated template listing every setting this tool
-accepts — to `.env` in the current directory, or to `--to FILE`.
+Writes `.env.example`, the annotated template listing every setting this tool
+accepts, to `.env` in the current directory, or to `--to FILE`.
 
 - It refuses to write over an existing file unless `--force` is given, since
   that file is where your server and password live.
@@ -190,7 +190,7 @@ accepts — to `.env` in the current directory, or to `--to FILE`.
 - **a failed unit** leaves a permanent line either way.
 
 Nothing of this touches **stdout**, which still carries only the summary and the
-archive path — `sql-auditor collect | tail -1` reads the same thing it always
+archive path. `sql-auditor collect | tail -1` reads the same thing it always
 did.
 
 ### When you cannot tell what it is doing
@@ -261,7 +261,7 @@ Exactly three cases.
 
 - **`SQL_AUDITOR_NO_TUI` is set** to any non-empty value. This is the escape
   hatch for a terminal that is real but that you do not want a full-screen
-  program on — a nested session, a logging wrapper, a shell inside an editor. It
+  program on: a nested session, a logging wrapper, a shell inside an editor. It
   is read from the **process environment**, and it is deliberately **not** a
   `.env` key: that set is closed, an unrecognised key there is a hard failure
   rather than a warning, and this is not a connection setting. Putting it in
@@ -297,7 +297,7 @@ Exactly three cases.
 
 | Flag | Meaning |
 | --- | --- |
-| `--all` | turn on all seven options below at once — the six off for disclosure and the one off for cost. See the note under these tables |
+| `--all` | turn on all seven options below at once: the six off for disclosure and the one off for cost. See the note under these tables |
 | `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
 | `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
 | `--include-deadlock-graphs` | also collect the deadlock reports `system_health` still holds, one `.xdl` file each |
@@ -338,7 +338,7 @@ it back out.
 
 `--password-file` and `--password-stdin` exist because that objection is about
 the argument, not about scripting. A path is not a secret, and a pipe is read by
-this process alone — neither appears in the process table, and a secret store
+this process alone. Neither appears in the process table, and a secret store
 that prints to stdout can hand the password over without it ever touching disk:
 
 ```
@@ -353,7 +353,7 @@ Both read the value the same way:
   step that wrote nothing would otherwise fall through to integrated
   authentication and measure the wrong login;
 - giving both at once is refused too;
-- the value obeys the ordinary precedence — it beats `SQL_PASSWORD` in `.env`,
+- the value obeys the ordinary precedence: it beats `SQL_PASSWORD` in `.env`,
   which beats the environment.
 
 Otherwise, put it in `SQL_PASSWORD` in `.env`. The wizard's step 1 remains the
@@ -391,8 +391,8 @@ A plan is not merely a longer statement: it carries the parameter values the
 plan was compiled for, the literal predicates, and the name of every object the
 query touches.
 
-The cost to the instance is not the reason to hesitate — the Query Store is data
-already on disk and the collector takes no lock — what ends up in the archive
+The cost to the instance is not the reason to hesitate. The Query Store is data
+already on disk and the collector takes no lock. What ends up in the archive
 is.
 
 ### `--include-object-definitions`
@@ -406,7 +406,7 @@ else again:
   have touched it.
 
 It routinely names linked servers and their addresses, and an `OPENQUERY` or an
-`EXECUTE AS` can hold a credential in clear — most often in the procedure nobody
+`EXECUTE AS` can hold a credential in clear, most often in the procedure nobody
 has opened in years, which is precisely the kind an audit goes looking for.
 
 Encrypted modules are listed but their source is not, because the server does
@@ -419,7 +419,7 @@ many deadlocks the `system_health` ring buffer holds and when they happened, on
 every run and without a flag; it stops there because a deadlock report carries
 the verbatim SQL of both victims.
 
-This option crosses exactly that line and no other — it writes each report as an
+This option crosses exactly that line and no other: it writes each report as an
 `.xdl` file, which SSMS opens as the deadlock diagram. Nothing on the instance
 is modified or cleared to read them.
 
@@ -429,7 +429,7 @@ The only option in this tool that reads the server's file system. The reports
 live in an Extended Events session's `.xel` files, which
 `sys.fn_xe_file_target_read_file` opens as the SQL Server service account rather
 than as the login you connected with. A report names the blocked session and the
-one blocking it, with the SQL of both — the blocker included, which was doing
+one blocking it, with the SQL of both, the blocker included, which was doing
 nothing but holding a lock.
 
 It only produces anything if somebody turned the capture on:
@@ -459,8 +459,8 @@ Both options, and the window the bounds describe, are covered in
 ## Configuration
 
 Settings are read from a `.env` file in the working directory. Copy
-[`.env.example`](.env.example) to `.env` — or run `sql-auditor env init`, which
-writes the same file from inside the binary — and fill in `SQL_SERVER`. Every
+[`.env.example`](.env.example) to `.env`, or run `sql-auditor env init`, which
+writes the same file from inside the binary, and fill in `SQL_SERVER`. Every
 other key in it is already set to the value the tool would use anyway.
 
 Precedence is **flag, then `.env`, then the process environment, then the
@@ -522,9 +522,9 @@ what the collector does.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | success — possibly degraded, if a permission was refused |
+| `0` | success, possibly degraded if a permission was refused |
 | `2` | partial failure, or a configuration the tool will not act on |
-| `1` | fatal — the instance could not be reached, so nothing was collected |
+| `1` | fatal: the instance could not be reached, so nothing was collected |
 
 A refused permission exits `0`. It reduces what is collected, and the omission
 is recorded in the archive, but it is not a failure of the run.
@@ -547,9 +547,9 @@ Where the collector has actually been executed:
 | SQL Server 2016 SP3 (13.0.6435) | once |
 | anything below 2016 | none yet |
 
-The 2012 floor is a **static claim** — every file has been parsed under the 2012
-grammar and every version-gated column checked against Microsoft's documentation
-— and it has not yet been confirmed by a run.
+The 2012 floor is a **static claim**: every file has been parsed under the 2012
+grammar and every version-gated column checked against Microsoft's
+documentation. It has not yet been confirmed by a run.
 [docs/verification-2012.md](docs/verification-2012.md) records exactly what has
 and has not been verified, and is the checklist to fill in when the 2012 pass
 happens.

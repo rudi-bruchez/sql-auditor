@@ -25,8 +25,8 @@ paragraph.
 
 - parses every file in the corpus with
   `Microsoft.SqlServer.TransactSql.ScriptDom`, under the T-SQL grammar matching
-  that file's own declared floor — `TSql110Parser`, the SQL Server 2012 grammar,
-  for the four ungated collectors;
+  that file's own declared floor (`TSql110Parser`, the SQL Server 2012 grammar,
+  for the four ungated collectors);
 - checks each file's declared `@resultsets` count against the number of
   result-returning top-level `SELECT` statements in the parse tree.
 
@@ -41,7 +41,7 @@ The output of the last run is committed as
 
 - the date;
 - the ScriptDom build used;
-- the git tree object of `queries/` — which is what tells you the artifact still
+- the git tree object of `queries/`, which is what tells you the artifact still
   describes the corpus in front of you:
 
 ```
@@ -56,7 +56,7 @@ name the commit before the one containing the file, and amending to fix it would
 change the id again.)
 
 As recorded, all 14 files parse with zero errors and every result-set count
-matches — including the four that carry the 2012 claim:
+matches, including the four that carry the 2012 claim:
 
 > **The corpus has grown since this pass.** It is 55 files today. The 14 below
 > are the ones this run covered, and the number is left as recorded rather than
@@ -73,8 +73,8 @@ matches — including the four that carry the 2012 claim:
 
 The predecessor's originals fail the same parse with "XML expected, JSON found",
 which is independent confirmation that the rework was necessary rather than
-cosmetic. That comparison is not reproducible from this repository — the
-originals are not in it — so take it as background rather than as evidence.
+cosmetic. That comparison is not reproducible from this repository, since the
+originals are not in it, so take it as background rather than as evidence.
 
 ### Version applicability of every column
 
@@ -108,8 +108,8 @@ provides. The gated files and their floors:
 | `80.workload/023.query-store-most-executed.sql` | `13` | SQL Server 2016 |
 
 Two more carry a floor and a flag both, so on a 2012 instance without the flag
-they are skipped for the flag rather than for the version — the flag gate is
-tested first:
+they are skipped for the flag rather than for the version, because the flag gate
+is tested first:
 
 | File | `@min_version` | Version | Flag |
 | --- | --- | --- | --- |
@@ -124,9 +124,9 @@ of one answer and the split was read wrongly on a real audit.
 
 `014` declares `13.0.5026`, and the reason is not the one the merge left behind.
 It briefly declared `13.0`, justified by `softnuma_configuration` alone. But four
-of its columns are documented as SQL Server 2016 **SP2** and later —
-`socket_count`, `cores_per_socket`, `numa_node_count` and
-`softnuma_configuration` — and all four sit in the root SELECT, so on 2016 RTM
+of its columns are documented as SQL Server 2016 **SP2** and later
+(`socket_count`, `cores_per_socket`, `numa_node_count` and
+`softnuma_configuration`), and all four sit in the root SELECT, so on 2016 RTM
 or SP1 the batch fails on an invalid column name and the collector produces
 nothing at all. The floor is back where the columns put it.
 
@@ -139,8 +139,8 @@ It compares **dotted versions** rather than the major component alone, because a
 major-only gate would let 2016 RTM attempt columns that arrived in 2016 SP2 and
 fail with `Invalid column name`.
 
-**One known limitation.** `sql_memory_model_desc` has disjoint applicability —
-2012 SP4 and 2016 SP1 and later, but no 12.x — which no single numeric floor can
+**One known limitation.** `sql_memory_model_desc` has disjoint applicability
+(2012 SP4 and 2016 SP1 and later, but no 12.x) which no single numeric floor can
 express. It sits behind the 2016 SP1 gate, so a 2012 SP4 instance will not
 collect a column it does in fact have.
 
@@ -162,9 +162,9 @@ production servers and are not named here: what this claim rests on is a version
 and an edition, and a hostname adds nothing to it.
 
 Those runs exercise the corpus against real instances and against the version
-gate — a collector wrongly gated shows up as a skip on an instance that should
-have run it — but they say nothing about 2012, which is two major versions below
-the lowest of them.
+gate, since a collector wrongly gated shows up as a skip on an instance that
+should have run it. But they say nothing about 2012, which is two major versions
+below the lowest of them.
 
 The 2012 floor remains what it has always been: a static claim, verified by
 parsing every file under the 2012 grammar and by checking every column against
@@ -242,12 +242,12 @@ of the form:
 needs SQL Server 12 or later; this instance reports 11.0.7001.0
 ```
 
-— the gate on the left, the instance's own `ProductVersion` on the right.
+The gate is on the left, the instance's own `ProductVersion` on the right.
 Confirm none of them ran and none produced an error.
 
 The seven flag-gated collectors are skipped for the **flag** instead, whatever
 the version, because the flag gate is tested first. Two of them also carry a
-floor, so their skip line will name the flag and not the version — that is
+floor, so their skip line will name the flag and not the version. That is
 correct, not a missed gate.
 
 | Check | Result |
