@@ -4,32 +4,45 @@ The project claims a SQL Server 2012 (11.x) floor. This file exists so that
 claim traces to a recorded artifact instead of to somebody's memory of having
 checked once.
 
-**Status: the 2012 pass has not been run.** The sections below are written in two
-parts — what has been verified and by what method, and what has not. The value
-columns in [The pass](#the-pass) are deliberately empty. Fill them in when
-someone runs it, and commit the result.
+**Status: the 2012 pass has not been run.**
+
+The sections below are written in two parts:
+
+- [what has been verified](#what-has-been-verified), and by what method;
+- [what has not](#what-has-not-been-verified).
+
+The value columns in [The pass](#the-pass) are deliberately empty. Fill them in
+when someone runs it, and commit the result.
 
 ## What has been verified
 
 ### Static parse under the 2012 grammar
 
 This half is reproducible, and you should reproduce it rather than believe the
-paragraph. `tools/verify-corpus-grammar.ps1` parses every file in the corpus
-with `Microsoft.SqlServer.TransactSql.ScriptDom`, under the T-SQL grammar
-matching that file's own declared floor — `TSql110Parser`, the SQL Server 2012
-grammar, for the four ungated collectors — and checks each file's declared
-`@resultsets` count against the number of result-returning top-level `SELECT`
-statements in the parse tree.
+paragraph.
+
+`tools/verify-corpus-grammar.ps1`:
+
+- parses every file in the corpus with
+  `Microsoft.SqlServer.TransactSql.ScriptDom`, under the T-SQL grammar matching
+  that file's own declared floor — `TSql110Parser`, the SQL Server 2012 grammar,
+  for the four ungated collectors;
+- checks each file's declared `@resultsets` count against the number of
+  result-returning top-level `SELECT` statements in the parse tree.
 
 ```
 pwsh -File tools/verify-corpus-grammar.ps1
 ```
 
-It exits 0 when everything passes and 1 otherwise. The output of the last run is
-committed as [`verification-2012-parse.txt`](verification-2012-parse.txt),
-recording the date, the ScriptDom build used, and the git tree object of
-`queries/` — which is what tells you the artifact still describes the corpus in
-front of you:
+It exits 0 when everything passes and 1 otherwise.
+
+The output of the last run is committed as
+[`verification-2012-parse.txt`](verification-2012-parse.txt), recording:
+
+- the date;
+- the ScriptDom build used;
+- the git tree object of `queries/` — which is what tells you the artifact still
+  describes the corpus in front of you:
 
 ```
 git rev-parse HEAD:queries
@@ -66,11 +79,14 @@ originals are not in it — so take it as background rather than as evidence.
 ### Version applicability of every column
 
 This half is **not** reproducible from the repository, and it is the weaker of
-the two. Every column referenced by a collector was checked by hand against its
-Microsoft Learn page for the version in which it appeared. There is no script
-and no recorded output; the evidence is the `@min_version` directives themselves
-and the review history. Read it as a careful manual pass, not as a check you can
-re-run.
+the two.
+
+Every column referenced by a collector was checked by hand against its Microsoft
+Learn page for the version in which it appeared. There is no script and no
+recorded output; the evidence is the `@min_version` directives themselves and
+the review history.
+
+Read it as a careful manual pass, not as a check you can re-run.
 
 Columns that postdate 2012 were moved into separate files carrying a
 `@min_version` directive, so the ungated collectors reference only what 2012
@@ -100,27 +116,33 @@ tested first:
 | `80.workload/021.query-store-detail.sql` | `13` | SQL Server 2016 | `--query-store-detail` |
 | `80.workload/022.query-store-profiled.sql` | `15.0` | SQL Server 2019 | `--query-store-plan-stats` |
 
+#### A note on `014.cpu-topology.sql`
+
 `10.system/012.soft-numa.sql` used to be in this table and no longer exists: it
 was merged into `10.system/014.cpu-topology.sql`, because the two each held half
-of one answer and the split was read wrongly on a real audit. `014` declares
-`13.0.5026`, and the reason is not the one the merge left behind. It briefly
-declared `13.0`, justified by `softnuma_configuration` alone. Four of its
-columns are documented as SQL Server 2016 **SP2** and later — `socket_count`,
-`cores_per_socket`, `numa_node_count` and `softnuma_configuration` — and all
-four sit in the root SELECT, so on 2016 RTM or SP1 the batch fails on an
-invalid column name and the collector produces nothing at all. The floor is
-back where the columns put it. The gap was invisible on every instance this
-corpus has been run against, all of which are SP2 or later; it was found by
-reading this table against the file.
+of one answer and the split was read wrongly on a real audit.
 
-The gate compares dotted versions rather than the major component alone,
-because a major-only gate would let 2016 RTM attempt columns that arrived in
-2016 SP2 and fail with `Invalid column name`.
+`014` declares `13.0.5026`, and the reason is not the one the merge left behind.
+It briefly declared `13.0`, justified by `softnuma_configuration` alone. But four
+of its columns are documented as SQL Server 2016 **SP2** and later —
+`socket_count`, `cores_per_socket`, `numa_node_count` and
+`softnuma_configuration` — and all four sit in the root SELECT, so on 2016 RTM
+or SP1 the batch fails on an invalid column name and the collector produces
+nothing at all. The floor is back where the columns put it.
 
-One known limitation of the numeric gate: `sql_memory_model_desc` has disjoint
-applicability — 2012 SP4 and 2016 SP1 and later, but no 12.x — which no single
-numeric floor can express. It sits behind the 2016 SP1 gate, so a 2012 SP4
-instance will not collect a column it does in fact have.
+The gap was invisible on every instance this corpus has been run against, all of
+which are SP2 or later; it was found by reading this table against the file.
+
+#### How the gate compares
+
+It compares **dotted versions** rather than the major component alone, because a
+major-only gate would let 2016 RTM attempt columns that arrived in 2016 SP2 and
+fail with `Invalid column name`.
+
+**One known limitation.** `sql_memory_model_desc` has disjoint applicability —
+2012 SP4 and 2016 SP1 and later, but no 12.x — which no single numeric floor can
+express. It sits behind the 2016 SP1 gate, so a 2012 SP4 instance will not
+collect a column it does in fact have.
 
 ## What has not been verified
 
@@ -136,18 +158,20 @@ Collections have been executed against three versions, none of them 2012:
 | 16.0.4250.1 | Standard Edition (64-bit) |
 
 That is SQL Server 2016 SP3, 2017 RTM and 2022. The instances are client
-production servers and are not named here: what this claim rests on is a
-version and an edition, and a hostname adds nothing to it. Those runs exercise
-the corpus against real instances and against the version gate — a collector
-wrongly gated shows up as a skip on an instance that should have run it — but
-they say nothing about 2012, which is two major versions below the lowest of
-them. The
-2012 floor remains what it has always been: a static claim, verified by parsing
-every file under the 2012 grammar and by checking every column against
+production servers and are not named here: what this claim rests on is a version
+and an edition, and a hostname adds nothing to it.
+
+Those runs exercise the corpus against real instances and against the version
+gate — a collector wrongly gated shows up as a skip on an instance that should
+have run it — but they say nothing about 2012, which is two major versions below
+the lowest of them.
+
+The 2012 floor remains what it has always been: a static claim, verified by
+parsing every file under the 2012 grammar and by checking every column against
 Microsoft's documentation, and never by a run.
 
-Everything supporting that claim is static analysis: a parse and a
-documentation check. Neither can detect
+Everything supporting that claim is static analysis: a parse and a documentation
+check. Neither can detect:
 
 - a DMV that exists on 2012 but returns a different shape or type than expected;
 - a `SERVERPROPERTY` name that is valid on 2022 and returns `NULL` on 2012
@@ -210,16 +234,21 @@ came back, and whether the output JSON is well-formed and populated.
 
 ### The gated collectors
 
-On a 2012 instance all twelve of the version-only gated collectors should be
-skipped, each with a reason recorded in `MANIFEST.txt` under "Queries not run"
-of the form `needs SQL Server 12 or later; this instance reports 11.0.7001.0` —
-the gate on the left, the instance's own `ProductVersion` on the right. Confirm
-none of them ran and none produced an error.
+On a 2012 instance, all twelve of the version-only gated collectors should be
+skipped, each with a reason recorded in `MANIFEST.txt` under "Queries not run",
+of the form:
 
-The seven flag-gated collectors are skipped for the flag instead, whatever the
-version, because the flag gate is tested first. Two of them also carry a floor,
-so their skip line will name the flag and not the version — that is correct, not
-a missed gate.
+```
+needs SQL Server 12 or later; this instance reports 11.0.7001.0
+```
+
+— the gate on the left, the instance's own `ProductVersion` on the right.
+Confirm none of them ran and none produced an error.
+
+The seven flag-gated collectors are skipped for the **flag** instead, whatever
+the version, because the flag gate is tested first. Two of them also carry a
+floor, so their skip line will name the flag and not the version — that is
+correct, not a missed gate.
 
 | Check | Result |
 | --- | --- |

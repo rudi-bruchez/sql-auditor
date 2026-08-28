@@ -4,6 +4,18 @@ You have been handed a binary and asked to run it against an instance you are
 responsible for. This document answers, in the order you are likely to ask them,
 the questions you need answered before you do.
 
+**The short version:**
+
+```
+sql-auditor check --grant-script grants.sql   # what is missing, and the T-SQL that fixes it
+sql-auditor collect                           # collect, then archive
+```
+
+Read [what it does](#what-it-does-and-what-it-does-not-do) and
+[what is in the archive](#what-is-in-the-archive) before the second command.
+
+### Contents
+
 - [What it does, and what it does not do](#what-it-does-and-what-it-does-not-do)
 - [What permissions it needs](#what-permissions-it-needs)
 - [Run `check` first](#run-check-first)
@@ -28,7 +40,7 @@ It connects to one instance, runs a fixed set of `SELECT` statements against
 system catalog views and dynamic management views, writes each result to a JSON
 file, and packs the result into a zip.
 
-It does not:
+It does **not**:
 
 - read any user or application table;
 - run `INSERT`, `UPDATE`, `DELETE`, or any DDL;
@@ -36,8 +48,10 @@ It does not:
 - install anything on the server;
 - take a lock that your workload has to wait behind.
 
-The queries it runs are not hidden. They are compiled into the binary, and you
-can write them out and read them before you run anything:
+### The queries are not hidden
+
+They are compiled into the binary, and you can write them out and read them
+before you run anything:
 
 ```
 sql-auditor queries export --to ./queries-to-review
@@ -46,7 +60,9 @@ sql-auditor queries export --to ./queries-to-review
 The corpus is 55 files. The archive records the SHA-256 of the exact corpus that
 was used, so a run can be tied to the questions it asked.
 
-Seven of those files are opt-in and produce nothing unless you ask for them:
+### Seven files are opt-in
+
+They produce nothing unless you ask for them:
 
 | File | Option |
 | --- | --- |
@@ -59,15 +75,19 @@ Seven of those files are opt-in and produce nothing unless you ask for them:
 | `80.workload/022.query-store-profiled.sql` | `--query-store-plan-stats` |
 
 Six of the seven change what kind of data ends up in the archive and have
-sections of their own below; `--estimate-compression` is opt-in for cost rather
+sections of their own below. `--estimate-compression` is opt-in for cost rather
 than for disclosure.
 
-It collects; it does not judge. There are no thresholds and no recommendations
-in the tool or in its output. It gathers facts and records what it could not
-gather.
+### It collects; it does not judge
 
-The tool is MIT licensed — see [LICENSE](../LICENSE). Running it, modifying it
-and passing it on are all permitted, and nothing here asks you to accept terms.
+There are no thresholds and no recommendations in the tool or in its output. It
+gathers facts and records what it could not gather.
+
+### Licence
+
+MIT — see [LICENSE](../LICENSE). Running it, modifying it and passing it on are
+all permitted, and nothing here asks you to accept terms.
+
 The source is published at `github.com/rudi-bruchez/sql-auditor`, so reading it
 and building your own binary from it are both open to you. What that does and
 does not prove about the binary you were handed is set out in
@@ -83,20 +103,28 @@ sql-auditor check --grant-script grants.sql
 
 `check` probes each permission, then writes the T-SQL that grants exactly the
 ones that came back refused — for the login the server reports, not the one in
-your `.env`, which is not always the same principal. Each statement in the file
-carries the reason for it, the collectors it unlocks, and, where there is one,
-the security consequence to weigh. Nothing is executed: the login being
-measured cannot grant anything by definition. Read the file, then hand it to
-someone who can run it.
+your `.env`, which is not always the same principal.
+
+Each statement in the file carries:
+
+- the reason for it;
+- the collectors it unlocks;
+- where there is one, the security consequence to weigh.
+
+Nothing is executed: the login being measured cannot grant anything by
+definition. Read the file, then hand it to someone who can run it.
 
 The rest of this section is what that script contains, for the reader who wants
 to know before running anything.
 
+### The six rights, and what each one costs when missing
+
 The login must be able to connect. Beyond that there are six rights the
-collector uses, and none of them is required: it probes each one before it
+collector uses, and **none of them is required**: it probes each one before it
 starts and carries on without whatever it was refused, recording the omission.
-This is what each one costs when it is missing, in the collector's own words —
-the wording below is the same string the tool prints and writes into the archive.
+
+The wording below is the same string the tool prints and writes into the
+archive.
 
 | Capability | Grant | If it is missing |
 | --- | --- | --- |
@@ -109,38 +137,47 @@ the wording below is the same string the tool prints and writes into the archive
 | Read the log shipping tables | `SELECT` on the six `msdb.dbo.log_shipping_*` tables | log shipping configuration and lag not collected — the report must not read this as 'no log shipping' |
 | Read the SQL Server error log | covered by `VIEW SERVER STATE` before 2022; `VIEW ANY ERROR LOG` from 2022 | the error log is not collected — the report must not read this as 'no errors were logged' |
 
-Three of those deserve a second look before you grant them.
+### Three of those deserve a second look
 
-`SQLAgentReaderRole` implies `SQLAgentUserRole`, whose members can create and
+**`SQLAgentReaderRole` implies `SQLAgentUserRole`**, whose members can create and
 run jobs they own, through any proxy already granted to that role. On an
-instance with permissive proxies that is a real privilege. Leaving it out is a
-supported outcome: the Agent collector is skipped and the archive says so.
+instance with permissive proxies that is a real privilege.
 
-The job **steps** are a separate right because `SQLAgentReaderRole` does not
+Leaving it out is a supported outcome: the Agent collector is skipped and the
+archive says so.
+
+**The job *steps* are a separate right**, because `SQLAgentReaderRole` does not
 carry them: it shows the job inventory and refuses `msdb.dbo.sysjobsteps`. That
 is why the two are probed separately — an instance can report every job and
 nothing about what any of them runs, and a manifest claiming the Agent is
-covered when only half of it is would be worse than one admitting the gap. The
-generated script grants `SELECT` on that one table and nothing else. Weigh it:
-job step commands are the one place in msdb where a connection string or a
-password is routinely written in clear by whoever wrote the job. The collector
-projects the first 200 characters of T-SQL steps only, and for CmdExec,
-PowerShell or SSIS steps nothing but the subsystem and the length — but the
-grant itself lets the login read every command in full, so the decision is
-about the login rather than about the collector.
+covered when only half of it is would be worse than one admitting the gap.
 
-On SQL Server 2022 and later the generated script asks for `VIEW SERVER
+The generated script grants `SELECT` on that one table and nothing else. Weigh
+it:
+
+- job step commands are the one place in msdb where a connection string or a
+  password is routinely written in clear by whoever wrote the job;
+- the collector projects the first 200 characters of T-SQL steps only, and for
+  CmdExec, PowerShell or SSIS steps nothing but the subsystem and the length;
+- but the grant itself lets the login read every command in full, so the
+  decision is about the login rather than about the collector.
+
+**On SQL Server 2022 and later** the generated script asks for `VIEW SERVER
 PERFORMANCE STATE` rather than `VIEW SERVER STATE`. It covers the dynamic
 management views the collector reads without also opening the security-related
 ones, and it is the narrower of the two.
 
-One caution about `VIEW ANY DEFINITION`. SQL Server does not raise an error when
-it is missing. Metadata visibility filters catalog views row by row, so a query
-against `sys.databases` still succeeds and simply returns fewer rows — only the
-databases the login owns or is mapped to. Such a login can produce an archive
-that lists no user databases at all while every query reports success. The
-collector detects this case specifically and says so in the archive, but it is
-worth granting the right so the picture is complete.
+### One caution about `VIEW ANY DEFINITION`
+
+SQL Server does not raise an error when it is missing. Metadata visibility
+filters catalog views row by row, so a query against `sys.databases` still
+succeeds and simply returns fewer rows — only the databases the login owns or is
+mapped to.
+
+Such a login can produce an archive that lists **no user databases at all** while
+every query reports success. The collector detects this case specifically and
+says so in the archive, but it is worth granting the right so the picture is
+complete.
 
 ### Step 1: the instance-scope rights
 
@@ -157,20 +194,26 @@ From there, run `check` with that login and let it write the rest:
 sql-auditor check --user sqlauditor --grant-script grants.sql
 ```
 
-The generated file grants `VIEW ANY DEFINITION` and `VIEW SERVER STATE` at the
-server, creates a user in msdb, and grants `SELECT` on `msdb.dbo.backupset` and
-on `msdb.dbo.sysjobsteps` plus `SQLAgentReaderRole` — and nothing else. In
-particular it does **not** put
-the login in `db_datareader` on msdb, which an earlier version of this guide
-suggested: that role also hands over Database Mail contents, job step commands
-and operator addresses, none of which the collector reads.
+The generated file grants:
 
-**Step 1 alone is not the whole recipe, and stopping here is the mistake to
-avoid.** A login with exactly these rights passes every permission probe —
-green `ok` lines, no warning — and then collects roughly two thirds of what it
-should, because every per-database collector is skipped. Measured on SQL Server
-2022, against the corpus of the day: 9 results instead of 13. The corpus has
-grown since, and so has the gap; the ratio is what the number is there for.
+- `VIEW ANY DEFINITION` and `VIEW SERVER STATE` at the server;
+- a user in msdb;
+- `SELECT` on `msdb.dbo.backupset` and on `msdb.dbo.sysjobsteps`, plus
+  `SQLAgentReaderRole`.
+
+And nothing else. In particular it does **not** put the login in `db_datareader`
+on msdb, which an earlier version of this guide suggested: that role also hands
+over Database Mail contents, job step commands and operator addresses, none of
+which the collector reads.
+
+> **Step 1 alone is not the whole recipe, and stopping here is the mistake to
+> avoid.**
+>
+> A login with exactly these rights passes every permission probe — green `ok`
+> lines, no warning — and then collects roughly two thirds of what it should,
+> because every per-database collector is skipped. Measured on SQL Server 2022,
+> against the corpus of the day: 9 results instead of 13. The corpus has grown
+> since, and so has the gap; the ratio is what the number is there for.
 
 The generated script covers this too, which is why it is written at the end of
 `check` rather than straight after the probes: it needs the list of databases
@@ -179,35 +222,40 @@ the run would skip. Those get a section of their own.
 ### Step 2: access to each database
 
 Per-database collectors run inside each database and need the login to be able
-to connect to it. Without that, the database is skipped with the reason
-`no access for this login` and the archive is missing the file layout, backup
-history, index and fragmentation data for it. The skip is recorded in
-`MANIFEST.txt` under "Databases skipped", so the omission is visible — but only
-if you read that far.
+to connect to it.
 
-The generated script writes this section for you, one block per database the
-run reported as skipped. What it emits is a user and nothing else:
+Without that, the database is skipped with the reason `no access for this login`
+and the archive is missing the file layout, backup history, index and
+fragmentation data for it. The skip is recorded in `MANIFEST.txt` under
+"Databases skipped", so the omission is visible — but only if you read that far.
+
+The generated script writes this section for you, one block per database the run
+reported as skipped. What it emits is a user and nothing else:
 
 ```sql
 USE AppDb;
 CREATE USER sqlauditor FOR LOGIN sqlauditor;
 ```
 
-No role membership. A user with none carries `CONNECT` and that is all the
-per-database collectors need: the metadata they read is already covered by
-`VIEW ANY DEFINITION` at the server, and the dynamic management views by
-`VIEW SERVER STATE`, which implies `VIEW DATABASE STATE` everywhere.
+**No role membership.** A user with none carries `CONNECT` and that is all the
+per-database collectors need:
 
-There is one exception, and it is opt-in. `--estimate-compression` runs
-`sp_estimate_data_compression_savings`, which samples the actual rows of a
-table into tempdb and therefore needs `SELECT` on the data. Without it that
-collector fails with error 229 and the run says so. If you want compression
-estimates, that flag is the only reason to grant read access to user tables —
-and it is worth granting narrowly, on the tables you care about, rather than
-through `db_datareader`.
+- the metadata they read is already covered by `VIEW ANY DEFINITION` at the
+  server;
+- the dynamic management views by `VIEW SERVER STATE`, which implies
+  `VIEW DATABASE STATE` everywhere.
 
-Or, to cover the whole instance including databases created later, one
-server-level grant does it (SQL Server 2014 and later):
+**One exception, and it is opt-in.** `--estimate-compression` runs
+`sp_estimate_data_compression_savings`, which samples the actual rows of a table
+into tempdb and therefore needs `SELECT` on the data. Without it that collector
+fails with error 229 and the run says so.
+
+If you want compression estimates, that flag is the only reason to grant read
+access to user tables — and it is worth granting narrowly, on the tables you
+care about, rather than through `db_datareader`.
+
+**Or cover the whole instance**, including databases created later, with one
+server-level grant (SQL Server 2014 and later):
 
 ```sql
 GRANT CONNECT ANY DATABASE TO sqlauditor;
@@ -224,15 +272,16 @@ is the only route.
 
 ### Confirming you got it right
 
-Run `check` and look at the database list, not only at the permission lines.
-Green probes above a `Databases that would be collected (0)` line mean step 2
-is missing. Re-running with --grant-script writes the fix.
+Run `check` and look at the **database list**, not only at the permission lines.
+
+Green probes above a `Databases that would be collected (0)` line mean step 2 is
+missing. Re-running with `--grant-script` writes the fix.
 
 ## Run `check` first
 
-`check` connects, probes each permission, prints the query list and the exact set
-of databases a collection would touch, then exits without collecting anything.
-Run it before you run `collect`.
+`check` connects, probes each permission, prints the query list and the exact
+set of databases a collection would touch, then exits without collecting
+anything. Run it before you run `collect`.
 
 ```
 sql-auditor check
@@ -305,11 +354,16 @@ Databases that would be collected (1):
 The first line goes to stderr, before anything else happens, so a transcript
 always says which build produced it.
 
-The annotations on the right are the conditions attached to a query: `per
-database` means it runs once for each selected database, `SQL Server 13+` means
-it is skipped on older instances, the flag name and its state mean it is opt-in,
-and the sentence after those on the two Query Store lines says that the
-collector writes a directory rather than a single JSON document.
+### Reading the annotations on the right
+
+They are the conditions attached to a query:
+
+| Annotation | Meaning |
+| --- | --- |
+| `per database` | runs once for each selected database |
+| `SQL Server 13+` | skipped on older instances |
+| a flag name and its state | the query is opt-in |
+| a sentence after those | on the two Query Store lines: the collector writes a directory rather than a single JSON document |
 
 ### A `denied` line is a warning, not a failure
 
@@ -343,12 +397,16 @@ Databases that would be collected (0):
 **`check` exits `0` here.** That is deliberate. A denied permission degrades the
 run; it does not break it. If a missing `VIEW ANY DEFINITION` exited non-zero,
 the reasonable conclusion would be that the tool is broken, and the run would
-stop — which costs more than the missing data does. So read the exit code and
-the `denied` lines as answering two different questions: the exit code says
-whether the tool can proceed, and the `denied` lines say how much of the picture
-you will get.
+stop — which costs more than the missing data does.
 
-`check` and `collect` use the same three codes:
+So read the two independently:
+
+- **the exit code** says whether the tool can proceed;
+- **the `denied` lines** say how much of the picture you will get.
+
+### The three exit codes
+
+`check` and `collect` use the same three:
 
 | Code | Meaning |
 | --- | --- |
@@ -357,19 +415,22 @@ you will get.
 | `2` | the configuration is unusable, or the run was partial: a `SQL_SERVER` that cannot be parsed, a `--queries-dir` that cannot be read, a query corpus that fails its lint, an output directory that cannot be written, or, for `collect`, a collector that failed |
 
 A mistyped address is `2`, not `1`. `HOST\` with no instance name, or a bare
-`::1,1433` missing its brackets, is refused before a socket is opened, so
-nothing has been asked of any server and `1` would send you to check a machine
+`::1,1433` missing its brackets, is refused before a socket is opened — so
+nothing has been asked of any server, and `1` would send you to check a machine
 that was never contacted.
 
 Whenever either command exits non-zero it prints the reason on stderr first. If
 you get a bare `1` with nothing above it, that is a bug — please report it.
 
-There is a real difference between `denied` and `error` in that list.
-`denied` means the server was reached, understood the query, and refused it —
-a permission problem. `error` means no answer came back at all: a dropped
-socket, a failed login, an unreachable host. The tool never reports one as the
-other, so a `denied` line always means a `GRANT` is the fix and an `error` line
-never does.
+### `denied` and `error` are not the same thing
+
+- **`denied`** means the server was reached, understood the query, and refused
+  it — a permission problem.
+- **`error`** means no answer came back at all: a dropped socket, a failed
+  login, an unreachable host.
+
+The tool never reports one as the other, so a `denied` line always means a
+`GRANT` is the fix and an `error` line never does.
 
 ## Then run `collect`
 
@@ -412,28 +473,39 @@ output/
   SQLPROD01-2026-08-08.zip
 ```
 
-One file per collector, one folder per database for the collectors that run
-inside one. The Query Store extraction is the single exception and writes a
-directory instead of a document; that shape is described in
-[its own section](#--query-store-detail-and---query-store-plan-stats).
+The shape is simple:
 
-The last line of output is the path to the zip. That file is the deliverable;
-everything else is the same content unpacked.
+- one file per collector;
+- one folder per database, for the collectors that run inside one;
+- the Query Store extraction is the single exception and writes a directory
+  instead of a document — that shape is described in
+  [its own section](#--query-store-detail-and---query-store-plan-stats).
 
-Running `collect` twice on the same day replaces the earlier run — both the
-folder and the zip. It warns on stderr before it does. Pass `--keep` to write
-this run alongside the previous one instead; the new run gets a time suffix.
+**The last line of output is the path to the zip.** That file is the
+deliverable; everything else is the same content unpacked.
 
-Runs are quick. On a small instance the whole collection finishes in about a
-second; on a large estate the per-database collectors dominate, so budget by
-database count.
+Two things worth knowing:
+
+- **Running `collect` twice on the same day replaces the earlier run** — both
+  the folder and the zip. It warns on stderr before it does. Pass `--keep` to
+  write this run alongside the previous one instead; the new run gets a time
+  suffix.
+- **Runs are quick.** On a small instance the whole collection finishes in about
+  a second; on a large estate the per-database collectors dominate, so budget by
+  database count.
 
 ## What is in the archive
 
 `MANIFEST.txt` sits at the top of the archive and is written for whoever has to
-approve the transfer. It states which server this is, when it was read, how much
-was read, what could not be read and why, and what kind of data is inside. This
-is its central paragraph, verbatim from a real run:
+approve the transfer. It states:
+
+- which server this is;
+- when it was read;
+- how much was read;
+- what could not be read, and why;
+- what kind of data is inside.
+
+This is its central paragraph, verbatim from a real run:
 
 ```
 What this archive contains
@@ -462,92 +534,107 @@ login names above are attributable to people, so treat this as internal
 infrastructure documentation rather than public material.
 ```
 
+### The manifest describes the run it came from
+
 That paragraph is generated from what the run actually did, not fixed at compile
 time. Each of the six options that widen what the archive holds adds its own
 line to it:
 
-- `--include-session-text` discloses the captured statement text and the login,
-  host and program names behind it;
-- `--query-store-detail` discloses the full text of the heaviest Query Store
-  queries, their execution plans in XML and their statistics per interval, and
+- **`--include-session-text`** discloses the captured statement text and the
+  login, host and program names behind it.
+- **`--query-store-detail`** discloses the full text of the heaviest Query Store
+  queries, their execution plans in XML and their statistics per interval — and
   says in the same breath that a plan carries the compiled parameter values, the
-  literal predicates and the name of every object the query touches;
-- `--query-store-plan-stats` discloses that the last profiled plan was looked
-  up as well, and that finding it meant reading the plan cache of the whole
-  instance rather than only the databases listed above;
-- `--include-object-definitions` discloses the source of the views, procedures,
-  functions and triggers, and says that this is code written on your side which
-  can name linked servers and carry a credential in clear;
-- `--include-deadlock-graphs` discloses the deadlock reports, and says that each
-  one carries the SQL of both victims;
-- `--include-blocked-process-reports` discloses the blocked process reports, says
-  that each names both sessions and carries their SQL, and states that they were
-  read off the server's own file system without any file being modified.
+  literal predicates and the name of every object the query touches.
+- **`--query-store-plan-stats`** discloses that the last profiled plan was
+  looked up as well, and that finding it meant reading the plan cache of the
+  whole instance rather than only the databases listed above.
+- **`--include-object-definitions`** discloses the source of the views,
+  procedures, functions and triggers, and says that this is code written on your
+  side which can name linked servers and carry a credential in clear.
+- **`--include-deadlock-graphs`** discloses the deadlock reports, and says that
+  each one carries the SQL of both victims.
+- **`--include-blocked-process-reports`** discloses the blocked process reports,
+  says that each names both sessions and carries their SQL, and states that they
+  were read off the server's own file system without any file being modified.
 
-Any one of the six also changes the closing paragraph, from "metadata about
-the estate" to a statement that the archive should be treated as potentially
-containing personal data. Which form was used is a property of the archive:
-whoever receives it can read which options were on without taking anyone's word
-for it.
+Any one of the six also changes the closing paragraph, from "metadata about the
+estate" to a statement that the archive should be treated as potentially
+containing personal data.
+
+Which form was used is a property of the archive: whoever receives it can read
+which options were on without taking anyone's word for it.
 
 `_run.json` beside it holds the same facts in machine-readable form, plus the
 full list of output files, per-query timings and byte counts, and the SHA-256 of
 the query corpus.
 
-**The archive identifies the server.** Its name is in the zip filename, in
-`MANIFEST.txt` and in `_run.json`, along with its version, edition, file paths
-and the names of every database collected. Nothing is anonymised or hashed, and
-there is no option to do so — the facts would be useless without the names
-attached. Where that archive goes and how it gets there is your decision, made
-under your organisation's rules. The tool does not transmit it anywhere; it
-writes a file and stops.
+### The archive identifies the server
+
+Its name is in the zip filename, in `MANIFEST.txt` and in `_run.json`, along
+with its version, edition, file paths and the names of every database collected.
+
+Nothing is anonymised or hashed, and there is no option to do so — the facts
+would be useless without the names attached.
+
+Where that archive goes and how it gets there is your decision, made under your
+organisation's rules. The tool does not transmit it anywhere; it writes a file
+and stops.
 
 ## Can I verify the binary?
 
 Partly, and it is worth being precise about which bucket each thing falls into.
 
-**What you can do today.** Two things:
+### What you can do today
 
-- **Read the source and build your own.** It is published at
-  `github.com/rudi-bruchez/sql-auditor`, and nothing else here comes close to
-  compiling from source you have read:
+**Read the source and build your own.** It is published at
+`github.com/rudi-bruchez/sql-auditor`, and nothing else here comes close to
+compiling from source you have read:
 
-  ```
-  git clone https://github.com/rudi-bruchez/sql-auditor
-  cd sql-auditor
-  go build ./cmd/sql-auditor
-  ```
+```
+git clone https://github.com/rudi-bruchez/sql-auditor
+cd sql-auditor
+go build ./cmd/sql-auditor
+```
 
-  A binary you built yourself answers the question completely. Everything below
-  is about the case where you were handed one instead.
+A binary you built yourself answers the question completely. Everything below is
+about the case where you were handed one instead.
 
-- **Check which questions the binary will ask.** Write the queries out of the
-  binary you were handed and read them:
+**Check which questions the binary will ask.** Write the queries out of the
+binary you were handed and read them:
 
-  ```
-  sql-auditor queries export --to ./from-binary
-  ```
+```
+sql-auditor queries export --to ./from-binary
+```
 
-  Whatever that binary collects, it collects with those files, and they are
-  plain SQL. `MANIFEST.txt` also records the SHA-256 of the corpus each run
-  used, so an archive can be tied to the questions behind it.
+Whatever that binary collects, it collects with those files, and they are plain
+SQL. `MANIFEST.txt` also records the SHA-256 of the corpus each run used, so an
+archive can be tied to the questions behind it.
 
-  Note what this does *not* establish. It tells you what the collector asks. It
-  does not prove that a binary somebody handed you contains nothing else.
+Note what this does *not* establish. It tells you what the collector asks. It
+does not prove that a binary somebody handed you contains nothing else.
 
-**What does not exist yet.** No release has been published, so there is no
-releases page, no published SHA-256 to check a download against, and no build
-provenance attestation. When the first version is released it will carry a
-digest for every asset and an attestation tying each binary to the commit and
-workflow that produced it. Until then, a binary you were handed cannot be
-checked against anything except its own query corpus — so if that is not enough
-assurance for your situation, build it yourself from the source above.
+### What does not exist yet
 
-**And what none of it will ever give you** is a reproducible build. The source
-being public does not mean you can compile it and get a byte-identical binary
-to compare against, so the attestation, when it exists, will be a statement by
-the build system about what it did rather than something you can independently
-recompute.
+No release has been published, so there is:
+
+- no releases page;
+- no published SHA-256 to check a download against;
+- no build provenance attestation.
+
+When the first version is released it will carry a digest for every asset and an
+attestation tying each binary to the commit and workflow that produced it.
+
+Until then, a binary you were handed cannot be checked against anything except
+its own query corpus — so if that is not enough assurance for your situation,
+build it yourself from the source above.
+
+### What none of it will ever give you
+
+A reproducible build. The source being public does not mean you can compile it
+and get a byte-identical binary to compare against, so the attestation, when it
+exists, will be a statement by the build system about what it did rather than
+something you can independently recompute.
 
 ## Three things that are not obvious from the outside
 
@@ -564,38 +651,51 @@ by it. That is the point: a diagnostic tool that takes shared locks on catalog
 views can end up queued behind a long transaction, or contribute to the
 contention it was brought in to measure.
 
-The cost of `READ UNCOMMITTED` is that a read can see uncommitted changes, or
-miss rows that move during a scan. For what this tool reads — catalog metadata
-and DMV counters, not business tables — that trade is worth making. Object
-counts and file sizes are moving targets anyway, and a wait-statistics snapshot
-is a sample of a live counter regardless of isolation level. Nobody is
-reconciling these numbers to the penny. There is no case in this corpus where a
-dirty read produces a wrong answer that a clean read would have got right; the
-worst outcome is a value fractionally staler than the instant it was requested.
+**The cost** is that a read can see uncommitted changes, or miss rows that move
+during a scan. For what this tool reads — catalog metadata and DMV counters, not
+business tables — that trade is worth making:
+
+- object counts and file sizes are moving targets anyway;
+- a wait-statistics snapshot is a sample of a live counter regardless of
+  isolation level;
+- nobody is reconciling these numbers to the penny.
+
+There is no case in this corpus where a dirty read produces a wrong answer that
+a clean read would have got right. The worst outcome is a value fractionally
+staler than the instant it was requested.
 
 ### Timeouts: 15 s to connect, and why raising the query timeout may not help
 
-Before reading any of this, run the thing again with `--debug`. It prints one
+**Before reading any of this, run the thing again with `--debug`.** It prints one
 stamped line before each step, so the timeout you are actually hitting is the
 one named on the last line before the gap — which saves guessing between the two
-settings below and the per-collector `@timeout` further down. `SQL_AUDITOR_DEBUG`
-set to any non-empty value does the same for a scheduled task.
+settings below and the per-collector `@timeout` further down.
+`SQL_AUDITOR_DEBUG` set to any non-empty value does the same for a scheduled
+task.
 
-`SQL_CONNECT_TIMEOUT_SEC` defaults to 15 seconds and covers establishing the
+**`SQL_CONNECT_TIMEOUT_SEC`** defaults to 15 seconds and covers establishing the
 connection, and nothing after it. Raise it if the instance is behind a slow link
 or a failover cluster that takes its time answering.
 
-`SQL_QUERY_TIMEOUT_SEC` defaults to 60 seconds. It bounds every round trip the
-pipeline makes on its own account: the permission probes, the server
-identification query, listing the databases, each `USE`, the session reset before
-every collector, and the liveness ping after a failure. Nothing here should take
-anywhere near a minute, so if this timeout is what expires, the instance is in
-trouble rather than merely busy.
+**`SQL_QUERY_TIMEOUT_SEC`** defaults to 60 seconds. It bounds every round trip
+the pipeline makes on its own account:
 
-There is one thing it does **not** bound, and it is the one you probably came
-here for. Each collector declares its own timeout in the query file, and a
-declared timeout wins over `SQL_QUERY_TIMEOUT_SEC` outright. Every file in the
-shipped corpus declares one, across five tiers:
+- the permission probes;
+- the server identification query;
+- listing the databases;
+- each `USE`;
+- the session reset before every collector;
+- the liveness ping after a failure.
+
+Nothing here should take anywhere near a minute, so if this timeout is what
+expires, the instance is in trouble rather than merely busy.
+
+#### The one thing it does not bound
+
+And it is the one you probably came here for. **Each collector declares its own
+timeout in the query file, and a declared timeout wins over
+`SQL_QUERY_TIMEOUT_SEC` outright.** Every file in the shipped corpus declares
+one, across five tiers:
 
 | `@timeout` | Files |
 | --- | --- |
@@ -608,30 +708,35 @@ shipped corpus declares one, across five tiers:
 So raising `SQL_QUERY_TIMEOUT_SEC` will not give a slow collector longer to
 finish.
 
-Two collectors are the candidates to run out of time first, for different
-reasons.
+#### The two collectors that run out of time first
 
-`20.databases/020.properties.sql` has 300 seconds and is the schema-heavy one:
-index fragmentation, largest objects, and missing and unused indexes are all
-result sets inside that single file, and all of them walk every object in the
-database. It runs once per database, so its 300 seconds is per database rather
-than for the run. A database with tens of thousands of objects, or a heavily
-fragmented one, can pass even that mark.
+They do so for different reasons.
 
-`70.schema/041.compression-savings.sql` has the corpus's longest timeout at 1800
-seconds and is the only collector that samples real data —
+**`20.databases/020.properties.sql`** has 300 seconds and is the schema-heavy
+one: index fragmentation, largest objects, and missing and unused indexes are
+all result sets inside that single file, and all of them walk every object in
+the database.
+
+It runs once per database, so its 300 seconds is per database rather than for
+the run. A database with tens of thousands of objects, or a heavily fragmented
+one, can pass even that mark.
+
+**`70.schema/041.compression-savings.sql`** has the corpus's longest timeout at
+1800 seconds and is the only collector that samples real data —
 `sp_estimate_data_compression_savings` copies rows into tempdb to measure them.
+
 It runs only under `--estimate-compression`, and half an hour per database is
 what it was given because the objects worth asking about are the large ones.
 That is a collector to run deliberately, not one to leave on.
+
+#### Giving a collector longer
 
 A collector that times out is recorded as an error, the run continues to the
 next one, and the process exits `2`; the archive is written either way, missing
 that one file. A partial archive with timeouts in the error list is the signal
 to give that file longer.
 
-To do that, take a copy of the corpus, edit its `@timeout` line, and run against
-the copy:
+Take a copy of the corpus, edit its `@timeout` line, and run against the copy:
 
 ```
 sql-auditor queries export --to ./my-queries
@@ -663,7 +768,7 @@ it is embedded in the executable — to `.env` in the current directory, or to
 `--to FILE`. It refuses to write over a file that already exists unless you pass
 `--force`.
 
-Precedence is: **command-line flag, then `.env`, then the process environment,
+**Precedence is: command-line flag, then `.env`, then the process environment,
 then the built-in default.**
 
 `.env` beating the exported environment is the reverse of what most tooling
@@ -671,7 +776,9 @@ does, and it is deliberate — it matches the PowerShell collector that this too
 replaces, and the configurations written for it. It is called out here because
 it is the kind of surprise that costs an hour.
 
-A worked example. Suppose your shell has:
+#### A worked example
+
+Suppose your shell has:
 
 ```
 export SQL_USER=svc_monitoring
@@ -695,9 +802,10 @@ Authenticated: sql:sqlauditor
 
 Setting the key to an empty value in `.env` does **not** pin it to empty — an
 empty value is treated as absent, so `SQL_USER=` in `.env` lets the exported
-`svc_monitoring` through. To make the exported value win, either delete the line
-or leave it empty; to override both, use the command line, which beats
-everything:
+`svc_monitoring` through. So:
+
+- **to make the exported value win**, delete the line or leave it empty;
+- **to override both**, use the command line, which beats everything:
 
 ```
 sql-auditor collect --user svc_monitoring
@@ -736,37 +844,52 @@ fail with a confusing login error or, worse, succeed as the wrong identity.
 
 #### What the `.env` parser accepts
 
-One `KEY=VALUE` per line. Blank lines and lines starting with `#` are ignored. A
-leading `export ` is accepted and stripped. Values may be wrapped in single or
-double quotes, and anything after the closing quote is discarded. An unquoted
-value can carry a trailing comment, which must be preceded by a space: `KEY=value # comment`.
+- one `KEY=VALUE` per line;
+- blank lines and lines starting with `#` are ignored;
+- a leading `export ` is accepted and stripped;
+- values may be wrapped in single or double quotes, and anything after the
+  closing quote is discarded;
+- an unquoted value can carry a trailing comment, which must be preceded by a
+  space: `KEY=value # comment`.
 
-It does not support escaped quotes inside a quoted value, values spanning more
-than one line, or line continuations. A password containing an awkward character
-is the usual reason to hit one of these — quote the whole value.
+It does **not** support:
+
+- escaped quotes inside a quoted value;
+- values spanning more than one line;
+- line continuations.
+
+A password containing an awkward character is the usual reason to hit one of
+these — quote the whole value.
 
 ## `--include-session-text`
 
-This is the first of the options that change what kind of data the archive
-holds — the other five are `--query-store-detail`, `--query-store-plan-stats`,
+This is the first of the options that change what kind of data the archive holds
+— the other five are `--query-store-detail`, `--query-store-plan-stats`,
 `--include-object-definitions`, `--include-deadlock-graphs` and
-`--include-blocked-process-reports`, below — and it is off by default for that
-reason, not for performance. It costs one extra query.
+`--include-blocked-process-reports`, below.
 
-With it on, one more collector runs: `10.system/052.session-text.sql`. It reads
-the five longest-running snapshot transactions open against the instance at the
-moment of collection, and for each one it records
+It is off by default for that reason, not for performance. It costs one extra
+query.
 
-- the verbatim SQL text of the batch that session is executing, and
+### What it collects
+
+One more collector runs: `10.system/052.session-text.sql`. It reads the five
+longest-running snapshot transactions open against the instance at the moment of
+collection, and for each one it records:
+
+- the verbatim SQL text of the batch that session is executing;
 - the session's login, host and program names.
 
-The SQL text is the problem. `sys.dm_exec_sql_text` returns a live batch exactly
-as it was sent, so a statement built by string concatenation arrives with its
-literals intact — a customer email address in a `WHERE` clause, a name, an
-account number, an entire `VALUES` list. Nothing filters it, because nothing
-could: the collector cannot tell which literal in somebody else's SQL is
-sensitive. The login and host names are attributable to individuals in their own
-right.
+### Why it is off by default
+
+**The SQL text is the problem.** `sys.dm_exec_sql_text` returns a live batch
+exactly as it was sent, so a statement built by string concatenation arrives with
+its literals intact — a customer email address in a `WHERE` clause, a name, an
+account number, an entire `VALUES` list.
+
+Nothing filters it, because nothing could: the collector cannot tell which
+literal in somebody else's SQL is sensitive. The login and host names are
+attributable to individuals in their own right.
 
 The scope is narrow — five rows, and only sessions holding a snapshot
 transaction open — but narrow is not the same as safe. One row is enough to
@@ -774,17 +897,23 @@ carry a customer's details out of your building. A session that opened its
 transaction and then went idle has no batch running, so its text comes back
 empty; that is luck, not a safeguard.
 
-Turn it on when the question is why the tempdb version store is growing or why
-it will not shrink, and you need to know which transaction is pinning it and
-what that transaction is doing. Without the flag, `10.system/050.tempdb.sql`
-still reports those same transactions, by session ID and age, with no statement
-text and no names attached; that is usually enough to identify the culprit from
-the server side. Leave the flag off for a routine inventory or configuration
-review, where it adds nothing you need.
+### When to turn it on
+
+**Turn it on** when the question is why the tempdb version store is growing or
+why it will not shrink, and you need to know which transaction is pinning it and
+what that transaction is doing.
+
+**Leave it off** for a routine inventory or configuration review, where it adds
+nothing you need. Without the flag, `10.system/050.tempdb.sql` still reports
+those same transactions, by session ID and age, with no statement text and no
+names attached; that is usually enough to identify the culprit from the server
+side.
+
+### What the manifest says
 
 If you do turn it on, `MANIFEST.txt` says so. The disclosure section gains a line
 naming the captured statement text, and the closing paragraph changes to the one
-any of the three widening options produces:
+any of the widening options produces:
 
 ```
 Most of this is metadata about the estate rather than the data held in it,
@@ -799,10 +928,12 @@ collected without it carries the narrower claim.
 
 ## `--query-store-detail` and `--query-store-plan-stats`
 
-These are the other two options that change what kind of data the archive holds,
-and they are the widest ones. Everything the collector reads without them is
-metadata and counters. With them, the archive carries the untruncated SQL of
-your heaviest production queries and the execution plans behind them.
+These are the widest of the options that change what kind of data the archive
+holds.
+
+Everything the collector reads without them is metadata and counters. With them,
+the archive carries **the untruncated SQL of your heaviest production queries
+and the execution plans behind them**.
 
 They are two options rather than one because they are two decisions. The rest of
 this section says what each one gathers, what a plan actually contains, how the
@@ -812,29 +943,36 @@ window is chosen, and where the collector records what it left out.
 
 It adds `80.workload/021.query-store-detail.sql`, which runs once per database
 on SQL Server 2016 and later, and reads the Query Store of that database over a
-window you choose. For each database it retains, by default, fifty queries — the
+window you choose.
+
+For each database it retains, by default, fifty queries — the
 `--query-store-top` cap — selected by a round robin over four rankings computed
 across the window:
 
-- total duration,
-- total CPU time,
-- total logical reads,
+- total duration;
+- total CPU time;
+- total logical reads;
 - execution count.
 
-The round robin takes every metric's first place, then every metric's second
+**The round robin** takes every metric's first place, then every metric's second
 place, and so on, so a query that leads logical reads and sits eightieth on
-everything else is retained on the first pass. Execution count is in the list
-for the query that is invisible on the other three: four million calls at
-0.3 ms rank nowhere on duration, CPU or reads, and a row-by-row loop is exactly
-that shape. Queries with a forced plan are added on top of the cap, whether or
-not they ran in the window, because someone took a decision about them — and
-because a plan that can no longer be forced stops being applied without anything
-raising an error.
+everything else is retained on the first pass.
 
-No ranking is a verdict. Nothing is labelled a regression, no threshold is
+**Execution count is in the list** for the query that is invisible on the other
+three: four million calls at 0.3 ms rank nowhere on duration, CPU or reads, and
+a row-by-row loop is exactly that shape.
+
+**Queries with a forced plan are added on top of the cap**, whether or not they
+ran in the window, because someone took a decision about them — and because a
+plan that can no longer be forced stops being applied without anything raising
+an error.
+
+**No ranking is a verdict.** Nothing is labelled a regression, no threshold is
 applied, and the four ranks a query holds are written out raw beside it: rank 3
 on CPU and rank 812 on logical reads is a fact about a query, and it is not the
 collector's business to say what it means.
+
+### The shape on disk
 
 Instead of one JSON document, this collector writes a directory per database:
 
@@ -851,12 +989,16 @@ Instead of one JSON document, this collector writes a directory per database:
       ...
 ```
 
-`_index.json` is the table of contents and is always written, even when the
-directory is otherwise empty: it carries the Query Store's state, the window
-that was asked for beside the window that was actually available, the four ranks
-of each query, and every omission. "The Query Store is off in this database" and
-"the collector never ran here" are different facts, and an empty directory
-states neither.
+`_index.json` is the table of contents and is **always** written, even when the
+directory is otherwise empty. It carries:
+
+- the Query Store's state;
+- the window that was asked for, beside the window that was actually available;
+- the four ranks of each query;
+- every omission.
+
+"The Query Store is off in this database" and "the collector never ran here" are
+different facts, and an empty directory states neither.
 
 `--query-store-plan-stats` adds a second directory of the same shape,
 `022.query-store-profiled/`, holding files named `.actual.sqlplan`.
@@ -868,7 +1010,7 @@ no truncation. That alone is more than `--include-session-text` gathers, which
 is five live sessions; this is the top fifty queries of every database
 collected, drawn from however much history the store holds.
 
-The plan files are wider still. A Showplan is not a longer copy of the
+**The plan files are wider still.** A Showplan is not a longer copy of the
 statement. It carries:
 
 - **the parameter values the plan was compiled for** — the literal argument that
@@ -890,8 +1032,8 @@ collection: they truncate the statement to 500 characters and collect no plan at
 all. Enough to identify a query, not enough to reconstruct a payload. The moment
 that trade stops being made, a flag appears.
 
-Turn it on when the question is which queries are heavy and why, and you have
-somewhere appropriate to put the answer. Leave it off for an inventory or a
+**Turn it on** when the question is which queries are heavy and why, and you have
+somewhere appropriate to put the answer. **Leave it off** for an inventory or a
 configuration review, where the summary collectors already say which queries
 dominate.
 
@@ -903,65 +1045,81 @@ to remember how it was collected.
 
 The Query Store keeps the *estimated* plan: the shape the optimiser chose, with
 the row counts it expected. `sys.dm_exec_query_plan_stats` returns the last plan
-the engine still holds with the row counts it actually got, which is the
-difference between "the optimiser expected 12 rows" and "it got 4 million" —
+the engine still holds with the row counts it **actually got** — which is the
+difference between "the optimiser expected 12 rows" and "it got 4 million", and
 often the whole diagnosis.
 
-The reason it has its own flag is scope, not volume. Finding that plan means
+**The reason it has its own flag is scope, not volume.** Finding that plan means
 reading `sys.dm_exec_query_stats`, which is the plan cache of the **whole
 instance** — every database on the server, including the ones you excluded from
-the collection and the ones this login was never pointed at. The database filter
-restricts what is **kept**, not what is **read**. Only plans belonging to the
-databases being collected are written out, but the cache is scanned entire to
-find them, and an operator who consented to a deep read of one database has not
-thereby consented to that. So it is asked for separately, and
-`--query-store-plan-stats` does nothing at all without `--query-store-detail`,
-which is what produces the list of queries to look for.
+the collection and the ones this login was never pointed at.
 
-**Getting nothing back is an ordinary outcome, not a fault.** Four conditions
-must all hold:
+The database filter restricts what is **kept**, not what is **read**. Only plans
+belonging to the databases being collected are written out, but the cache is
+scanned entire to find them, and an operator who consented to a deep read of one
+database has not thereby consented to that.
 
-- the instance is SQL Server 2019 or later — below that the collector is skipped
-  with the reason recorded;
-- `LAST_QUERY_PLAN_STATS` is on for the database, which is **off by default** and
-  is a decision someone has to have taken, or trace flag 2451 is set on the
+So it is asked for separately, and `--query-store-plan-stats` does nothing at
+all without `--query-store-detail`, which is what produces the list of queries
+to look for.
+
+#### Getting nothing back is an ordinary outcome, not a fault
+
+Four conditions must all hold:
+
+- the instance is **SQL Server 2019 or later** — below that the collector is
+  skipped with the reason recorded;
+- **`LAST_QUERY_PLAN_STATS` is on** for the database, which is off by default and
+  is a decision someone has to have taken — or trace flag 2451 is set on the
   instance, which turns it on globally;
-- the plan is still resident in the cache, which a restart, memory pressure or a
-  recompile ends at any moment;
-- the cached plan matches a Query Store plan by `query_plan_hash`.
+- **the plan is still resident in the cache**, which a restart, memory pressure
+  or a recompile ends at any moment;
+- **the cached plan matches a Query Store plan** by `query_plan_hash`.
 
-Any one of them being false gives you `matched_plans: 0`. The index reports
-`last_query_plan_stats` beside that zero precisely so the commonest two
-explanations can be told apart: a database with the feature switched off and a
-plan cache holding nothing look identical otherwise. Read that field for what it
-is — the value of the database scoped configuration and nothing more, read from
-`sys.database_scoped_configurations`. An instance running trace flag 2451 shows
-it off there while plans arrive anyway. Off with plans beside it means the trace
-flag is doing the work; off with no plans means either explanation.
+Any one of them being false gives you `matched_plans: 0`.
 
-The match is made on `query_plan_hash`, which is an MD5, so it is declared and
-never asserted: each row records `"match": "plan_hash"` and a `candidates`
-count of how many cached plans shared that hash. A `candidates` of 4 is not a
-red flag by itself — a bare recompile adds another — but a reader told nothing
-would see a certainty. Prepared statements come back from the DMF with a NULL
-database id and are dropped, which is one of the reasons the profiled directory
-usually holds fewer plans than the detail directory.
+The index reports `last_query_plan_stats` beside that zero precisely so the
+commonest two explanations can be told apart: a database with the feature
+switched off and a plan cache holding nothing look identical otherwise.
 
-**A profiled plan showing a single operator is not a broken collection.** For a
-query simple enough — which is to say, most of an OLTP workload — the DMF
+Read that field for what it is — the value of the database scoped configuration
+and nothing more, read from `sys.database_scoped_configurations`. An instance
+running trace flag 2451 shows it off there while plans arrive anyway:
+
+- **off, with plans beside it** — the trace flag is doing the work;
+- **off, with no plans** — either explanation.
+
+#### The match is declared, never asserted
+
+It is made on `query_plan_hash`, which is an MD5. Each row records
+`"match": "plan_hash"` and a `candidates` count of how many cached plans shared
+that hash.
+
+A `candidates` of 4 is not a red flag by itself — a bare recompile adds another
+— but a reader told nothing would see a certainty.
+
+Prepared statements come back from the DMF with a NULL database id and are
+dropped, which is one of the reasons the profiled directory usually holds fewer
+plans than the detail directory.
+
+#### A profiled plan showing a single operator is not a broken collection
+
+For a query simple enough — which is to say, most of an OLTP workload — the DMF
 returns a Showplan reduced to its root node. Nothing in the file distinguishes
-it from any other profiled plan, because it *is* one. If you open a
-one-operator `.actual.sqlplan` and conclude the extraction is faulty, that is
-the documentation's failure and not the file's.
+it from any other profiled plan, because it *is* one.
+
+If you open a one-operator `.actual.sqlplan` and conclude the extraction is
+faulty, that is the documentation's failure and not the file's.
 
 ### Choosing the window
 
-Two forms, and they are mutually exclusive — asking for both stops the run
-rather than silently picking one. The refusal is decided on `QUERY_STORE_DAYS`
-being *present*, not on its value, so a `.env` carrying `QUERY_STORE_DAYS=7`
-makes every run that passes a bound fail with `QUERY_STORE_DAYS cannot be
-combined with QUERY_STORE_FROM or QUERY_STORE_TO`. Delete or comment the line;
-absent already means seven days.
+Two forms, and they are **mutually exclusive** — asking for both stops the run
+rather than silently picking one.
+
+The refusal is decided on `QUERY_STORE_DAYS` being *present*, not on its value,
+so a `.env` carrying `QUERY_STORE_DAYS=7` makes every run that passes a bound
+fail with `QUERY_STORE_DAYS cannot be combined with QUERY_STORE_FROM or
+QUERY_STORE_TO`. Delete or comment the line; absent already means seven days.
 
 **Sliding**, which is the default: `--query-store-days N`, seven days counting
 back from the moment of collection. This is the right form for "what does this
@@ -969,87 +1127,102 @@ instance normally do".
 
 **Absolute**: `--query-store-from` and `--query-store-to`, written as
 `YYYY-MM-DDTHH:MM` or `YYYY-MM-DD`, and read in the **server's** local time —
-not your laptop's, not UTC. The operator types what the client said. Giving
-`--query-store-to` on its own implies a seven-day window ending at that bound;
-giving `--query-store-from` on its own runs from there to the moment of
-collection.
+not your laptop's, not UTC. The operator types what the client said.
 
-The absolute form exists for the question the sliding one cannot answer. A
-client reports that everything was unusable between 14:00 and 15:00 on the 26th,
-eighteen days ago. Widening the sliding window to eighteen days does not find
-that hour — it dissolves it, because an hour of trouble inside 432 hours of
-normal operation moves an average by nothing at all. You have to ask for the
-hour:
+- `--query-store-to` on its own implies a seven-day window ending at that bound;
+- `--query-store-from` on its own runs from there to the moment of collection.
+
+#### Why the absolute form exists
+
+For the question the sliding one cannot answer. A client reports that everything
+was unusable between 14:00 and 15:00 on the 26th, eighteen days ago.
+
+Widening the sliding window to eighteen days does not find that hour — it
+dissolves it, because an hour of trouble inside 432 hours of normal operation
+moves an average by nothing at all. You have to ask for the hour:
 
 ```
 sql-auditor collect --query-store-detail \
   --query-store-from 2026-07-26T14:00 --query-store-to 2026-07-26T15:00
 ```
 
-Three things to know about the answer.
+#### Three things to know about the answer
 
 **It is rounded to the Query Store's interval length.** The store aggregates into
 buckets — 60 minutes by default — and the collector keeps every bucket that
 *overlaps* the request rather than every bucket contained in it, so a one-hour
-question is answered by one or two hourly buckets. Demanding containment would
-silently drop the bucket straddling the start, which is usually the one you
-wanted. `_index.json` reports `window.interval_minutes` so you know the
-precision of what you got.
+question is answered by one or two hourly buckets.
+
+Demanding containment would silently drop the bucket straddling the start, which
+is usually the one you wanted. `_index.json` reports `window.interval_minutes` so
+you know the precision of what you got.
 
 **The window you asked for and the window you got are both recorded.** A store
 that retains two days cannot answer a question about the 26th, and it does not
 say so on its own: it returns what it has, which looks exactly like a quiet hour.
-So `_index.json` carries `window.requested_from`/`requested_to` beside
-`window.effective_from`/`effective_to`, clamped to what the store still holds,
-and `window.intervals` — the number of buckets that actually intersected the
-request. Zero there, on a healthy store, means the window fell outside the
-retention. That is the number to read before concluding anything about a quiet
-hour.
+
+So `_index.json` carries:
+
+- `window.requested_from` / `requested_to`;
+- `window.effective_from` / `effective_to`, clamped to what the store still
+  holds;
+- `window.intervals` — the number of buckets that actually intersected the
+  request.
+
+Zero there, on a healthy store, means the window fell outside the retention.
+That is the number to read before concluding anything about a quiet hour.
 
 **A bound in the future is refused**, and so is a window whose start is not
 before its end, both before anything is collected. A bound in the future is
 almost always a bound typed in the wrong timezone, and the Query Store has
 nothing to say about it either way.
 
-`--query-store-databases` narrows which of the collected databases the
-extraction reads, with the same `*`/`?` wildcards as `DB_INCLUDE`. It only
-narrows: a database excluded from the run cannot be brought back by naming it
-here. Each database it removes is recorded by name in the manifest, so a
-selection can be reconstructed after the fact.
+#### Narrowing the databases
+
+`--query-store-databases` narrows which of the collected databases the extraction
+reads, with the same `*`/`?` wildcards as `DB_INCLUDE`.
+
+It only narrows: a database excluded from the run cannot be brought back by
+naming it here. Each database it removes is recorded by name in the manifest, so
+a selection can be reconstructed after the fact.
 
 ### The caps, and where an omission is recorded
 
-Two caps apply, and neither ever truncates: a truncation nobody is told about
+Two caps apply, and **neither ever truncates**: a truncation nobody is told about
 reads as "everything is here".
 
 **8 MiB per plan.** A plan larger than that is not sent and not written; the
 index records an omission naming the query, the plan and the plan's actual size,
-and a warning with the same content goes into `MANIFEST.txt`. The size is
-measured with `DATALENGTH`, which counts bytes, and the plan XML is `nvarchar`
-— two bytes per character — so the effective ceiling is about four million
-characters of XML. That is a very large plan; a query with a few hundred
+and a warning with the same content goes into `MANIFEST.txt`.
+
+The size is measured with `DATALENGTH`, which counts bytes, and the plan XML is
+`nvarchar` — two bytes per character — so the effective ceiling is about four
+million characters of XML. That is a very large plan; a query with a few hundred
 operators is nowhere near it.
 
-**256 MiB for the whole run.** When the run reaches it, further files are
-refused with the omission recorded as `the run reached the 256 MiB extraction
-cap`. `_index.json` itself is written outside that budget, so the record of what
-was left out cannot be the thing that gets left out.
+**256 MiB for the whole run.** When the run reaches it, further files are refused
+with the omission recorded as `the run reached the 256 MiB extraction cap`.
+`_index.json` itself is written outside that budget, so the record of what was
+left out cannot be the thing that gets left out.
 
-Everything else the collector could not gather is recorded the same way: a query
-whose text the Query Store no longer holds, a plan the store has no XML for, a
-query with no profiled plan in the cache. Each is a line in the index with a
-reason, and a warning in `MANIFEST.txt` for a reader who never opens the JSON.
+Everything else the collector could not gather is recorded the same way — a
+query whose text the Query Store no longer holds, a plan the store has no XML
+for, a query with no profiled plan in the cache. Each is a line in the index with
+a reason, and a warning in `MANIFEST.txt` for a reader who never opens the JSON.
 
 ### Both Query Store states are read
 
 Every state except `OFF` is read: `READ_WRITE`, `READ_ONLY`, `ERROR` and
-`READ_CAPTURE_SECONDARY` alike. A store that stopped recording still holds the
-history from before it stopped, and that history exists nowhere else on the
-instance — not in the plan cache, which a restart empties, and not in any DMV,
-which knows only about now. A store found `READ_ONLY` is often exactly the
-interesting case: it filled up and stopped, and what it stopped on is what you
-came for. The state, the desired state and `readonly_reason` are reported raw in
-the index, so a reader learns not only that it stopped but why.
+`READ_CAPTURE_SECONDARY` alike.
+
+A store that stopped recording still holds the history from before it stopped,
+and that history exists nowhere else on the instance — not in the plan cache,
+which a restart empties, and not in any DMV, which knows only about now.
+
+A store found `READ_ONLY` is often exactly the interesting case: it filled up and
+stopped, and what it stopped on is what you came for. The state, the desired
+state and `readonly_reason` are reported raw in the index, so a reader learns not
+only that it stopped but why.
 
 A database whose Query Store is `OFF` still gets its `_index.json`, saying so.
 
@@ -1058,52 +1231,59 @@ A database whose Query Store is `OFF` still gets its `_index.json`, saying so.
 `VIEW SERVER STATE` at the server implies `VIEW DATABASE STATE` in every
 database, which is what the Query Store catalog views require, and
 `--grant-script` already emits it — including the narrower `VIEW SERVER
-PERFORMANCE STATE` on SQL Server 2022 and later. Nothing about these two options
-adds a `GRANT` to that script. If `check` came back clean, the extraction has
-what it needs.
+PERFORMANCE STATE` on SQL Server 2022 and later.
+
+Nothing about these two options adds a `GRANT` to that script. If `check` came
+back clean, the extraction has what it needs.
 
 ### What it costs the instance
 
 Little. The Query Store is a set of catalog views over data already on disk, and
 the collector reads them under `READ UNCOMMITTED` like every other file in the
-corpus, so it takes no lock your workload has to wait behind. The detail
-collector declares a 300-second timeout per database and the profiled lookup
-120 seconds; the work is the aggregation over the window, which grows with the
-number of intervals the window spans rather than with the size of the database.
+corpus, so it takes no lock your workload has to wait behind.
 
-The one thing that is not free is the archive. Fifty queries per database, each
-with its text, its statistics and one file per plan, is a larger archive than a
-metadata-only run — and the plans are what makes it a document to handle
+The detail collector declares a 300-second timeout per database and the profiled
+lookup 120 seconds; the work is the aggregation over the window, which grows
+with the number of intervals the window spans rather than with the size of the
+database.
+
+**The one thing that is not free is the archive.** Fifty queries per database,
+each with its text, its statistics and one file per plan, is a larger archive
+than a metadata-only run — and the plans are what makes it a document to handle
 carefully rather than a big one.
 
 ## `--include-object-definitions`
 
 The fourth option that changes what the archive holds, and the only one whose
-content nobody's query ever produced: this is source code written on your side.
+content nobody's query ever produced: **this is source code written on your
+side.**
 
-With it on, one more collector runs per database:
-`70.schema/080.modules.sql`. It reads `sys.sql_modules` and writes one `.sql`
-file per view, stored procedure, function and trigger, under
-`70.schema/<database>/080.modules/`, with an `_index.json` listing every module
-— including the ones whose source is not there.
+With it on, one more collector runs per database: `70.schema/080.modules.sql`. It
+reads `sys.sql_modules` and writes one `.sql` file per view, stored procedure,
+function and trigger, under `70.schema/<database>/080.modules/`, with an
+`_index.json` listing every module — including the ones whose source is not
+there.
 
-Why it is off by default. A module body is the one artifact in this archive that
-was authored rather than measured. In practice it carries:
+### Why it is off by default
 
-- the names and addresses of linked servers, in every `OPENQUERY` and
+A module body is the one artifact in this archive that was authored rather than
+measured. In practice it carries:
+
+- the names and addresses of **linked servers**, in every `OPENQUERY` and
   four-part name;
-- values embedded as literals — thresholds, account numbers, email addresses in
-  a `WHERE` clause;
-- occasionally a credential in clear, in an `OPENROWSET` connection string or
+- **values embedded as literals** — thresholds, account numbers, email addresses
+  in a `WHERE` clause;
+- occasionally **a credential in clear**, in an `OPENROWSET` connection string or
   behind an `EXECUTE AS`. This is not hypothetical, and it is likeliest in the
   procedure nobody has opened in a decade.
 
 Nothing filters any of it, for the same reason nothing filters session text: the
 collector cannot tell which literal in somebody else's code is sensitive.
 
-**Four things can leave a definition out, and the index says which.** They are
-kept apart deliberately, because reading one as another would make the archive
-state something false about your server:
+### Four things can leave a definition out, and the index says which
+
+They are kept apart deliberately, because reading one as another would make the
+archive state something false about your server:
 
 | In `_index.json` | What happened |
 | --- | --- |
@@ -1116,44 +1296,60 @@ Every module is listed either way, with its type, its size and its dates. A
 module the archive cannot show you is still a module the archive tells you
 exists.
 
-**What it costs the instance.** Almost nothing: `sys.sql_modules` is a catalog
-view and the read is metadata only. The cost is in the archive — a database of
-2000 procedures is a few tens of megabytes of text before compression, and it is
-a document to handle carefully rather than a large one.
+### What it costs the instance
+
+Almost nothing: `sys.sql_modules` is a catalog view and the read is metadata
+only.
+
+The cost is in the archive — a database of 2000 procedures is a few tens of
+megabytes of text before compression, and it is a document to handle carefully
+rather than a large one.
 
 ## `--include-deadlock-graphs`
 
 The narrowest of the options that change what the archive holds, and the one
-with the clearest line: `10.system/060.system-health.sql` already reports, on
-every run and without any flag, how many deadlocks the `system_health` ring
-buffer holds and when each happened. It stops exactly there, because the report
-itself carries the verbatim SQL of both victims. This option collects the
-reports.
+with the clearest line.
+
+`10.system/060.system-health.sql` already reports, on every run and without any
+flag, how many deadlocks the `system_health` ring buffer holds and when each
+happened. It stops exactly there, because the report itself carries the verbatim
+SQL of both victims. **This option collects the reports.**
 
 With it on, one more collector runs: `10.system/061.deadlock-graphs.sql`. It
 writes one `.xdl` file per deadlock under `10.system/061.deadlock-graphs/`, plus
 an `_index.json`. SSMS opens an `.xdl` as the deadlock diagram rather than as
 XML; the bytes are the same either way.
 
-**Why the graph is worth having.** Wait statistics say sessions waited on locks.
-The counts say how many deadlocks and when. Neither says which two statements,
-on which resource, in which order, or which one the engine chose as victim — and
-that is the difference between an audit that reports "lock contention" and one
-that names the pattern. It is in the graph and nowhere else within reach.
+### Why the graph is worth having
 
-**What it reads, and what it does not touch.** The `system_health` session has
-run by default since SQL Server 2008 and writes to a memory ring of bounded
-size. Reading it costs one query. Nothing is modified, cleared or consumed:
-collecting a graph does not remove it from the ring.
+- Wait statistics say sessions waited on locks.
+- The counts say how many deadlocks, and when.
+- Neither says **which two statements, on which resource, in which order, or
+  which one the engine chose as victim** — and that is the difference between an
+  audit that reports "lock contention" and one that names the pattern.
 
-**What the ring does not owe you.** It is a window, not an archive. Old events
-are overwritten and a restart empties it entirely, so what you get is whatever
-it still held at the moment of collection. `_index.json` carries the earliest
-and latest timestamps for exactly that reason — "412 deadlocks" means one thing
-over two days and another over twenty minutes, and "no deadlocks" can mean a
-healthy instance or one restarted an hour ago.
+It is in the graph and nowhere else within reach.
 
-**Three things can leave a graph out, and the index says which:**
+### What it reads, and what it does not touch
+
+The `system_health` session has run by default since SQL Server 2008 and writes
+to a memory ring of bounded size. Reading it costs one query.
+
+Nothing is modified, cleared or consumed: collecting a graph does not remove it
+from the ring.
+
+### What the ring does not owe you
+
+It is a window, not an archive. Old events are overwritten and a restart empties
+it entirely, so what you get is whatever it still held at the moment of
+collection.
+
+`_index.json` carries the earliest and latest timestamps for exactly that reason:
+
+- "412 deadlocks" means one thing over two days and another over twenty minutes;
+- "no deadlocks" can mean a healthy instance or one restarted an hour ago.
+
+### Three things can leave a graph out, and the index says which
 
 | In `_index.json` | What happened |
 | --- | --- |
@@ -1164,6 +1360,37 @@ healthy instance or one restarted an hour ago.
 Every deadlock is listed either way, with its timestamp. A cluster of forty in
 one minute is visible even when only the newest hundred carry a file.
 
+## `--include-blocked-process-reports`
+
+The sixth option that changes what the archive holds, and **the only option in
+this tool that reads the server's file system.**
+
+With it on, one more collector runs: `10.system/063.blocked-process-reports.sql`.
+It writes one `.xml` file per report.
+
+### What it discloses
+
+The reports live in an Extended Events session's `.xel` files, which
+`sys.fn_xe_file_target_read_file` opens **as the SQL Server service account**
+rather than as the login you connected with.
+
+A report names the blocked session and the one blocking it, with the SQL of both
+— the blocker included, which was doing nothing but holding a lock.
+
+### It only produces anything if somebody turned the capture on
+
+Two conditions:
+
+- `blocked process threshold (s)` must be non-zero;
+- a session must subscribe to `blocked_process_report` and write to a file.
+
+`sql-auditor check` tests all of that and tells you which piece is missing, with
+a link to a script that sets it up.
+
+`10.system/062.xe-sessions.sql` records the same facts in every archive, without
+any flag, so an empty result can always be told apart from a capture that was
+never running.
+
 ## Authentication
 
 **SQL authentication** works everywhere. Set `SQL_USER` and `SQL_PASSWORD` in
@@ -1171,35 +1398,45 @@ one minute is visible even when only the newest hundred carry a file.
 
 **Windows integrated authentication** works on Windows. Leave `SQL_USER` empty,
 or set `SQL_INTEGRATED_SECURITY=true`, and the run uses the account the process
-is running as. Both of these are first-class: they are what the tool is built
-around and what it is tested with.
+is running as.
+
+Both of these are first-class: they are what the tool is built around and what
+it is tested with.
 
 **Kerberos on Linux is best-effort.** It is not a third supported mode of equal
 standing. The driver can use a Kerberos ticket, but it needs a working `krb5`
-configuration on the machine — a correct `/etc/krb5.conf`, a resolvable realm, a
-valid ticket in the cache (`kinit`, then `klist` to confirm), and the SQL Server
-SPN registered correctly. When any of that is wrong, the failure surfaces as a
-generic login error that says nothing about Kerberos. If you are running from
-Linux and do not already have a working Kerberos setup for other tools, use SQL
-authentication. It will take less of your afternoon.
+configuration on the machine:
+
+- a correct `/etc/krb5.conf`;
+- a resolvable realm;
+- a valid ticket in the cache (`kinit`, then `klist` to confirm);
+- the SQL Server SPN registered correctly.
+
+When any of that is wrong, the failure surfaces as a generic login error that
+says nothing about Kerberos. If you are running from Linux and do not already
+have a working Kerberos setup for other tools, use SQL authentication. It will
+take less of your afternoon.
 
 Note that `MANIFEST.txt` reports the authentication mode as either `sql:<login>`
 or `windows`. A Kerberos run is recorded as `windows`, since from the
 configuration's point of view it is the same integrated path.
 
-#### Supplying the password without a `.env`
+### Supplying the password without a `.env`
 
 `--password-file FILE` and `--password-stdin` read `SQL_PASSWORD` from somewhere
 other than the `.env`, for a scheduled run or a pipeline that has no business
-leaving a credential on disk. They are mutually exclusive, and both read the
-value the same way: exactly one trailing `\n` or `\r\n` is removed, and nothing
-else is. A trailing space, a `#`, a quote — all part of the password. This is
-deliberately stricter than the `.env` parser, which strips a trailing comment
-from an unquoted value: here there is no line to comment, so there is nothing to
-strip and no ambiguity to resolve.
+leaving a credential on disk.
 
-An empty file, or an empty standard input, stops the run. It is not read as "no
-password": with `SQL_USER` set and `SQL_PASSWORD` empty the tool would try
+They are mutually exclusive, and both read the value the same way: **exactly one
+trailing `\n` or `\r\n` is removed, and nothing else is.** A trailing space, a
+`#`, a quote — all part of the password.
+
+This is deliberately stricter than the `.env` parser, which strips a trailing
+comment from an unquoted value: here there is no line to comment, so there is
+nothing to strip and no ambiguity to resolve.
+
+**An empty file, or an empty standard input, stops the run.** It is not read as
+"no password": with `SQL_USER` set and `SQL_PASSWORD` empty the tool would try
 integrated authentication and measure whichever identity the scheduler runs as,
 which is the failure the closed key set exists to prevent elsewhere.
 
@@ -1211,7 +1448,9 @@ thing these two options are not.
 The connection is encrypted by default (`SQL_ENCRYPT=true`), but the server
 certificate is not validated (`SQL_TRUST_SERVER_CERTIFICATE=true`), which is the
 only default that works against the self-signed certificate most instances ship
-with. The tool prints a notice on every run to make sure this is not a silent
+with.
+
+The tool prints a notice on every run to make sure this is not a silent
 assumption:
 
 ```
@@ -1224,9 +1463,10 @@ If your instance has a certificate your machine trusts, set
 ## Reproducing a run locally
 
 To try the tool against a throwaway instance rather than yours, run SQL Server in
-a container. The repository has a `compose.yaml`, but `podman compose` needs a
-provider that is not installed on every machine, so this one-liner is the
-reliable form:
+a container.
+
+The repository has a `compose.yaml`, but `podman compose` needs a provider that
+is not installed on every machine, so this one-liner is the reliable form:
 
 ```
 podman run -d --name sqlauditor-test \
@@ -1238,11 +1478,13 @@ podman run -d --name sqlauditor-test \
 Substitute `docker run` for `podman run` if that is what you have; the arguments
 are identical.
 
-`mcr.microsoft.com/mssql/server:2022-latest` is the tag pinned in the
-repository's `compose.yaml`. Port 11433 on the host keeps it clear of a local
-SQL Server on 1433. The collector has also been run repeatedly against SQL
-Server 2017 (14.0.1000) and once against 2016 SP3 (13.0.6435); nothing older
-has been exercised yet.
+Notes on that command:
+
+- `mcr.microsoft.com/mssql/server:2022-latest` is the tag pinned in the
+  repository's `compose.yaml`;
+- port 11433 on the host keeps it clear of a local SQL Server on 1433;
+- the collector has also been run repeatedly against SQL Server 2017 (14.0.1000)
+  and once against 2016 SP3 (13.0.6435); nothing older has been exercised yet.
 
 Then point a `.env` at it:
 
