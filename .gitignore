@@ -42,3 +42,5 @@ output/
 # Editor/IDE
 # .idea/
 # .vscode/
+
+local/
