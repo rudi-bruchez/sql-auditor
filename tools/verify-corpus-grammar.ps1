@@ -49,16 +49,45 @@ Add-Type -Path $ScriptDomPath
 # would fail the 2016 files for reasons that are not defects, and using the
 # newest for all of them would accept 2016 syntax in an ungated file and let the
 # 2012 floor rot silently.
+$parserMap = @{
+    11 = @('TSql110Parser', 'TSql110 (SQL Server 2012)')
+    12 = @('TSql120Parser', 'TSql120 (SQL Server 2014)')
+    13 = @('TSql130Parser', 'TSql130 (SQL Server 2016)')
+    14 = @('TSql140Parser', 'TSql140 (SQL Server 2017)')
+    15 = @('TSql150Parser', 'TSql150 (SQL Server 2019)')
+    16 = @('TSql160Parser', 'TSql160 (SQL Server 2022)')
+    17 = @('TSql170Parser', 'TSql170 (SQL Server 2025)')
+}
+
+# Returns the parser and its label, or $null and the reason it could not be
+# built. It does NOT throw, and that is the point.
+#
+# It used to throw on an unmapped version, and the map stopped at 15. When
+# 073.accelerators.sql arrived declaring @min_version: 16, the run died on it —
+# at file 073 of the corpus, in alphabetical order — and every file after it
+# went unchecked. The exception looked like a broken tool rather than an
+# unverified corpus, so nothing was verified for as long as it took to notice.
+#
+# One gated file must never stop the corpus being checked. An unmapped version
+# is now one failing line among the others, which is loud in the right place:
+# the file is reported, the run continues, and the exit code is still non-zero.
+#
+# The type is resolved by name at run time because ScriptDom builds differ. A
+# machine whose SSMS predates SQL Server 2022 has no TSql160Parser, and the
+# honest answer there is "this build cannot check that file", not a crash.
 function Get-ParserFor([string]$minVersion) {
-    switch -Regex ($minVersion) {
-        '^$'    { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql110Parser]::new($true), 'TSql110 (SQL Server 2012)' }
-        '^11'   { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql110Parser]::new($true), 'TSql110 (SQL Server 2012)' }
-        '^12'   { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql120Parser]::new($true), 'TSql120 (SQL Server 2014)' }
-        '^13'   { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql130Parser]::new($true), 'TSql130 (SQL Server 2016)' }
-        '^14'   { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql140Parser]::new($true), 'TSql140 (SQL Server 2017)' }
-        '^15'   { return [Microsoft.SqlServer.TransactSql.ScriptDom.TSql150Parser]::new($true), 'TSql150 (SQL Server 2019)' }
-        default { throw "no parser mapped for @min_version '$minVersion'" }
+    $major = 11                       # no @min_version means the 2012 floor
+    if ($minVersion -match '^(\d+)') { $major = [int]$Matches[1] }
+
+    $entry = $parserMap[$major]
+    if (-not $entry) {
+        return $null, "no parser mapped for @min_version '$minVersion'"
     }
+    $type = "Microsoft.SqlServer.TransactSql.ScriptDom.$($entry[0])" -as [type]
+    if (-not $type) {
+        return $null, "$($entry[0]) is not in this ScriptDom build ($ScriptDomPath)"
+    }
+    return $type::new($true), $entry[1]
 }
 
 $files = Get-ChildItem -Path $QueriesDir -Recurse -Filter '*.sql' | Sort-Object FullName
@@ -108,6 +137,13 @@ foreach ($f in $files) {
     }
 
     $parser, $grammar = Get-ParserFor $minVersion
+    if (-not $parser) {
+        # $grammar carries the reason here, not a label.
+        "{0,-46} {1,-28} resultsets {2}/{3}  {4}" -f $rel, '(no parser)', '-', $declared, 'NOT CHECKED'
+        "      $grammar"
+        $failures++
+        continue
+    }
     $errors = $null
     $reader = [IO.StringReader]::new($text)
     $fragment = $parser.Parse($reader, [ref]$errors)
