@@ -18,8 +18,8 @@
 -- ran successfully. It cannot say what it did. On a real audit, heap
 -- fragmentation of 90-99% alongside 22-25% on the non-clustered indexes
 -- established that the heaps were escaping the maintenance job — but the
--- @Indexes argument that would have proved it lives in a step command, and the
--- finding had to be written as a deduction.
+-- argument named @Indexes, which would have proved it, lives in a step
+-- command, and the finding had to be written as a deduction.
 --
 -- THE COMMAND BODY IS ONLY PROJECTED FOR T-SQL STEPS, AND ONLY ITS BEGINNING.
 -- Job step commands are the one place in msdb where a connection string or a
@@ -28,9 +28,9 @@
 -- so for those subsystems this file projects the subsystem and the length and
 -- stops there. A T-SQL step runs inside the instance and its text is the same
 -- class of thing as this corpus, so its first 200 characters are projected —
--- enough for "EXECUTE dbo.IndexOptimize @Databases = 'USER_DATABASES',
--- @FragmentationLevel1 = ..." to be readable, which is the question this file
--- was written for.
+-- enough for a call to dbo.IndexOptimize naming its @Databases and its
+-- fragmentation-level arguments to be readable, which is the question this
+-- file was written for.
 --
 -- The residual risk is stated rather than hidden: a T-SQL step whose first 200
 -- characters contain a literal password would carry it into the archive. That

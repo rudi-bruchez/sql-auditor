@@ -275,6 +275,21 @@ func parseScript(rel, sql string) Script {
 		case "correlated":
 			setLint("correlated result sets are not supported: a result set must not " +
 				"reference a column of another; split it into its own query")
+		default:
+			// A name this switch does not know used to fall through in
+			// silence, which is the worst outcome available: the file lints
+			// clean, ships, and does nothing the directive was written to do.
+			// A misspelt "@minversion" gates on no version at all, and the
+			// archive says nothing — the same failure the @scope and @timeout
+			// rules were written against.
+			//
+			// This also means a header line may not OPEN with an @ word,
+			// because the parser cannot tell prose from a directive. Write
+			// "the @timeout directive is 60 here", not "@timeout is 60 here".
+			setLint(fmt.Sprintf("unknown directive @%s; expected one of "+
+				"scope, timeout, permissions, resultsets, min_version, "+
+				"requires_flag, writer, correlated — and note that a header "+
+				"line must not begin with an @ word, even in prose", key))
 		}
 	}
 	// The scope a writer needs is the writer's own property, declared beside it

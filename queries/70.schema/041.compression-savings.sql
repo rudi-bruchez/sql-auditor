@@ -36,8 +36,9 @@
 -- PAGE looks unattractive on a specific candidate, ROW is a follow-up on that
 -- candidate, not a second sweep of everything.
 --
--- @index_id and @partition_number are passed as NULL so the procedure does
--- every index of a table in one call. The originating scripts cursor per
+-- The parameters @index_id and @partition_number are passed as NULL so the
+-- procedure does every index of a table in one call. The scripts this came
+-- from cursor per
 -- index and per partition, which multiplies the number of sampling passes
 -- for the same answer.
 --

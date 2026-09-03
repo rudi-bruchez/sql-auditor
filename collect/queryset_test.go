@@ -82,6 +82,12 @@ func TestDiscoverLintErrors(t *testing.T) {
 		{"unknown permission name", "queries/10.system/010.a.sql",
 			"-- @resultsets: a:object\n-- @permissions: SELECT ANY DICTIONARY\nSELECT 1;",
 			"SELECT ANY DICTIONARY"},
+		// A misspelt directive used to be ignored in silence, so a file
+		// carrying @minversion shipped ungated on every build with nothing
+		// anywhere saying so. The whole point of a gate is that its absence
+		// is visible.
+		{"misspelt directive name", "queries/10.system/010.a.sql",
+			"-- @resultsets: a:object\n-- @minversion: 13\nSELECT 1;", "minversion"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
