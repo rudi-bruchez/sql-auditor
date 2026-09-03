@@ -2,21 +2,25 @@
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
 **Status:** specification, except section 8, which is implemented.
+**Revised:** 3 September 2026, after a five-reader external review. Every claim
+below that says "measured" was measured on SQL Server 2022 (16.0.4265.3,
+Developer, on Linux) unless another version is named. Four of the five
+specified collectors carried a defect that would have cost a failed or
+misleading collection run; what follows is what survived.
 
-Seven gaps, each one found because an audit could not answer a question from the
+Nine gaps, each one found because an audit could not answer a question from the
 archive and had to go back to the client. That is the bar for entry: a gap is
 something the analysis actually needed, not something that would be nice to
 have.
 
-One of the seven is not a missing collector at all: the facts are collected and
-the arithmetic that turns them into a finding is left to a reader who has no
-reason to attempt it. That case is section 5, and it is the cheapest of the
-five to fix.
+One of them is not a missing collector at all: the facts are collected and the
+arithmetic that turns them into a finding is left to a reader who has no reason
+to attempt it. That case is section 5.
 
-Section 8 breaks that rule deliberately: two views that no instance audited so
-far even has, collected because writing the file now costs nothing and means the
-first modern instance arrives with the collector already in place. Those two are
-written, not specified.
+Section 8 breaks the entry rule deliberately: two views that no instance
+audited so far even has, collected because writing the file now costs nothing
+and means the first modern instance arrives with the collector already in
+place. Those two are written, not specified.
 
 A last idea is recorded at the end **because it is already implemented**, and
 the point of writing it down is to stop it being built a second time.
@@ -31,6 +35,29 @@ flag status, the version store and the error log are all collected today. It
 also arrived independently at the ring buffer of section 5, naming the same
 four-hour window — which is agreement worth recording, because a gap two
 sources find separately is not an opinion.
+
+## What the review changed, in one place
+
+Three lessons run through the revisions and are worth stating once rather than
+seven times.
+
+**A declared permission that does not cover the collector is worse than no
+collector.** `@permissions` drives the skip gate: declare something the login
+holds and the file *runs and fails*, landing in `Errors` instead of "Queries
+not run". Two sections did exactly that. The rule now: the declared permission
+is the one the read actually needs, measured, and where the real permission is
+one this practice will not ask a client for, the collector tries anyway and
+records the refusal rather than pretending it was never needed.
+
+**The corpus floor includes Linux, and the first draft was written as though
+every instance were Windows.** Two formulas printed false findings there —
+one a negative number, one a constant 100%. Platform is now a first-class axis
+beside version.
+
+**The corpus runs on one pinned connection** (`db.SetMaxOpenConns(1)`,
+`collect/runner.go`), so a `#temp` table outlives the batch that made it and
+the second database of a run fails with error 2714. The corpus has hit this
+twice. Nothing specified here creates a `#temp` table.
 
 ---
 
@@ -50,116 +77,198 @@ grown in 10% increments there is a good chance it is badly fragmented". That
 sentence is a guess wearing an audit's clothes. Run by hand afterwards, the
 real answer was 46, which is fine. **The guess was wrong, and it was printed.**
 
-### The mechanism
+### One file, not two, and no new directive
 
-`DBCC LOGINFO` predates everything the corpus supports and returns one row per
-VLF. Counting the rows is the whole collector.
+The first draft proposed a second file, `025.log-vlf-dbcc.sql`, gated by a new
+`@max_version` directive so the two mechanisms could not both fire. The review
+took that design apart, and the replacement is smaller in every dimension.
 
-Two constraints shape the design.
+**`@max_version` is not needed.** The condition that matters is not "which
+build is this" but "does the DMV exist here", and a collector can ask that
+directly. `023.log-vlf.sql` loses its `@min_version` gate and answers the
+question itself: read `sys.dm_db_log_info` when it is there, `DBCC LOGINFO`
+when it is not, and say in the output which one produced the numbers. One
+file, one shape, no overlap and no hole by construction rather than by
+arithmetic on version strings.
 
-**It needs sysadmin, and we will not ask for it.** `DBCC LOGINFO` is documented
-as requiring membership in the sysadmin fixed server role, and on some builds
-`db_owner` in the database is enough. Either way it is well above the read-only
-posture of this collector, and `collect/grants.go` must **never** emit a role
-addition for it. The rule stands: a permission we cannot ask for is a
-capability we probe and skip.
+That deletes a long list of work the first draft under-priced: a `MaxVersion`
+field and parse case, a comparison that is *not* `VersionAtLeast` (an upper
+bound cannot reuse prefix-matching semantics), an inverted skip reason, a
+`scriptNote` branch, a rewrite of the "gated collectors" pass in
+`docs/verification-2012.md` — which is written for a min-only world — and a
+`tools/verify-corpus-grammar.ps1` that inspects only `@min_version` and would
+parse a max-gated file under the 2012 grammar. It also removes a trap nobody
+had noticed: Azure SQL Database and Managed Instance report ProductVersion
+12.0.x indefinitely, so a file gated at "13.0.5025 and below" would be selected
+there.
 
-The existing preflight machinery does this already, and nothing new is needed
-beyond one entry. `Capabilities()` in `collect/preflight.go` gains:
+And it removes an ordering hazard that is real today: **an unknown directive is
+silently ignored.** `parseScript` switches on directive names with no default
+case, so a file carrying `@max_version` on a binary whose parser predates it
+lints clean and runs on *every* version — writing the duplicate VLF count the
+design existed to prevent, under a manifest saying nothing. See section 11.
 
-```go
-{Name: "dbcc_loginfo", Label: "Count virtual log files (DBCC LOGINFO)",
-    SQL:    "DBCC LOGINFO WITH NO_INFOMSGS",
-    Impact: "VLF count not collected on instances below 2016 SP2"},
-```
+### The permission, and why nothing is probed
 
-The probe runs in whatever database the connection lands in — `master`, whose
-log is small — and a login without the permission gets an error, so the
-ordinary raising path applies and `NeedsRows` stays false. `NormalisePermission`
-gains the `DBCC LOGINFO` spelling so `@permissions` and the capability name stay
-one vocabulary, which `preflight_test.go` already enforces in both directions.
+`DBCC LOGINFO` is documented as requiring sysadmin. The first draft hedged that
+"on some builds `db_owner` in the database is enough"; measured on 2022, it is
+not — a `db_owner` of the database got the same `Msg 2571` as a bare login, and
+so did `VIEW SERVER PERFORMANCE STATE`.
 
-**It must not run where the DMV works.** Running both on a modern instance
-would write two VLF counts into the archive from two different mechanisms, and
-a reader would have to know which to believe. This calls for a directive the
-corpus does not have yet:
+The first draft's answer was a `dbcc_loginfo` capability, probed and never
+granted. The review costed it and the answer is no:
 
-```
--- @max_version: 13.0.5025
-```
+- It breaks an existing test. `TestEveryProbedCapabilityCanBeGranted` fails
+  with "capability `dbcc_loginfo` is probed but nothing grants it" — and the
+  rule that causes the failure is the draft's own ("`grants.go` must never emit
+  a role addition for it").
+- It makes `Coverage: COMPLETE` unreachable. `refreshCoverage` marks the
+  archive incomplete for any probe that is not `ok`, and no grant script could
+  ever fix it. Every client would be handed an archive that says it is
+  incomplete, forever, for a capability nobody should grant.
+- It is measured once, in `master`, for a permission that is per-database.
 
-Symmetric to `@min_version` in every respect: parsed in `collect/queryset.go`
-into `Script.MaxVersion []int`, checked in `collect.go` beside the existing
-`VersionAtLeast` call, and reported in the manifest note as
-`SQL Server <version> and below`. The skip reason is the same shape as the
-existing one, so nothing downstream changes.
-
-Two files then cover every supported build with no overlap and no hole:
-`023.log-vlf.sql` from 13.0.5026 up, `025.log-vlf-dbcc.sql` below it.
+So: **nothing is probed and nothing is asked for.** The collector attempts the
+`DBCC` path and records `Msg 2571` when refused, which is the same opportunistic
+posture `docs/replication-spec.md` adopts for the publication catalog. On a
+read-only audit login below 2016 SP2 the VLF count stays uncollected, and the
+archive says why in the row rather than by omission. That is a smaller promise
+than the first draft made, and it is one the tool can keep.
 
 ### The collector
 
-`20.databases/025.log-vlf-dbcc.sql`, `@scope: database`, one result set.
+`20.databases/023.log-vlf.sql`, `@scope: database`, `@resultsets: root:object,
+vlf_per_file:array`, `@permissions: CONNECT, VIEW SERVER STATE`,
+`@timeout: 60`. No `@min_version`.
+
+The guard is the pattern `docs/replication-spec.md` specifies and measures:
+`OBJECT_ID` decides, the read runs inside `sp_executesql` so that a missing
+object raises an error the handler can catch, the rows land in a **table
+variable**, and the result sets are emitted unconditionally from it.
 
 ```sql
-CREATE TABLE #loginfo (
-    RecoveryUnitId int NULL, FileId int, FileSize bigint, StartOffset bigint,
-    FSeqNo bigint, Status int, Parity int, CreateLSN nvarchar(48));
+DECLARE @vlf TABLE (file_id int, vlf_size_mb decimal(18,3), vlf_active bit);
+DECLARE @source varchar(20) = 'none', @err int = 0, @msg nvarchar(2048) = N'';
 
-INSERT INTO #loginfo EXEC ('DBCC LOGINFO WITH NO_INFOMSGS');
+IF OBJECT_ID(N'sys.dm_db_log_info') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        INSERT INTO @vlf (file_id, vlf_size_mb, vlf_active)
+        EXEC sys.sp_executesql
+            N'SELECT li.file_id, li.vlf_size_mb, li.vlf_active
+              FROM sys.dm_db_log_info(DB_ID()) AS li OPTION (RECOMPILE, MAXDOP 1)';
+        SET @source = 'dm_db_log_info';
+    END TRY
+    BEGIN CATCH
+        SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+    END CATCH
+END
+ELSE
+BEGIN
+    BEGIN TRY
+        DECLARE @dbcc TABLE (RecoveryUnitId int NULL, FileId int, FileSize bigint,
+                             StartOffset bigint, FSeqNo bigint, Status int,
+                             Parity int, CreateLSN nvarchar(48));
+        INSERT INTO @dbcc EXEC ('DBCC LOGINFO WITH NO_INFOMSGS');
+        INSERT INTO @vlf (file_id, vlf_size_mb, vlf_active)
+        SELECT d.FileId, d.FileSize / 1048576.0, CASE WHEN d.Status = 2 THEN 1 ELSE 0 END
+        FROM @dbcc AS d;
+        SET @source = 'dbcc_loginfo';
+    END TRY
+    BEGIN CATCH
+        SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+    END CATCH
+END
 ```
 
-`RecoveryUnitId` is the trap. It was added in SQL Server 2012 and the column
-list of `DBCC LOGINFO` differs on either side of that boundary, so an `INSERT
-... EXEC` against a fixed table shape fails with error 213 on the wrong version.
-The corpus floor is 2012, so the nine-column shape is the one to declare — but
-the file must say so, because the next person to read it will not know why a
-column nobody projects is in the table definition.
+Four details, each one a review finding:
 
-Projected: `vlf_count` (the row count), `vlf_active_count` (`Status = 2`),
-`vlf_min_size_mb`, `vlf_avg_size_mb`, `vlf_max_size_mb`, `vlf_under_1mb_count`,
-and `log_file_count` (distinct `FileId`). The same names as
-`023.log-vlf.sql` projects, so an analysis reads one shape whatever produced it.
+**`FileSize` is in bytes.** Measured: `DBCC LOGINFO` returns 253952 and 262144
+for VLFs that `sys.dm_db_log_info` would report as 0.242 and 0.25 MB. Without
+the division the archive is wrong by six orders of magnitude, and wrong in the
+direction that looks like a catastrophic log.
 
-The per-VLF rows are not projected, for the same reason as in the existing
-file: a badly grown log holds tens of thousands of them and the aggregate says
-everything.
+**The shape is `023`'s, not a new one.** The first draft listed unprefixed
+names and omitted one. `023` projects `[space.vlf_count]`,
+`[space.vlf_active_count]`, `[space.vlf_inactive_count]`,
+`[space.vlf_min_size_mb]`, `[space.vlf_avg_size_mb]`, `[space.vlf_max_size_mb]`,
+`[space.vlf_under_1mb_count]` and `[space.log_file_count]`, plus a
+`vlf_per_file` array. The `space.` prefix nests them in the JSON; an unprefixed
+projection would have produced a different document while claiming to produce
+the same one.
+
+**The table is eight columns.** The first draft's prose said nine, twice, in
+the paragraph whose stated purpose was to stop the next reader getting it
+wrong. `RecoveryUnitId` was added in 2012, taking the shape from seven columns
+to eight; there is no nine-column shape. Anyone who "corrects" the declaration
+to match the old prose produces exactly the `Msg 213` the paragraph warns about
+— reproduced, both directions.
+
+**`@source` goes in the root object.** A reader must never have to infer which
+mechanism produced a number, and an analysis that compares two archives must be
+able to tell "no VLF count because the login was refused" from "no VLF count
+because nothing ran". `@source`, `@err` and `@msg` say all three.
 
 ---
 
-## 2. The Windows version and the host
+## 2. The operating system and the host
 
 ### The gap
 
-The archive says nothing about the operating system. `10.system/020.host-services.sql`
-reads `sys.dm_server_services` and the registry, which gives the service
-accounts and the startup parameters, not the OS.
+The archive says nothing about the operating system.
+`10.system/020.host-services.sql` reads `sys.dm_server_services` and the
+registry, which gives the service accounts and the startup parameters, not the
+OS.
 
-An audit needs the OS build for three things it is routinely asked: whether the
-host is still supported, whether a known storage or scheduler fix applies, and
+An audit needs the OS for three things it is routinely asked: whether the host
+is still supported, whether a known storage or scheduler fix applies, and
 whether the memory configuration makes sense against the physical machine. All
 three were asked in September 2026 and the answer was "the collection does not
 report it today".
 
+### The axis is platform, not version
+
+The first draft proposed splitting by version — `sys.dm_os_windows_info`
+unconditionally, `sys.dm_os_host_info` behind a `min_version` sibling. Two
+measurements broke that.
+
+`sys.dm_os_host_info` does not carry the same columns. It has `host_platform`,
+`host_distribution`, `host_release`, `host_service_pack_level`, `host_sku`,
+`os_language_version`, `host_architecture` — every one prefixed `host_`.
+Selecting `windows_release` from it fails with `Msg 207`. Two files projecting
+"the same" fields would have projected two different key sets.
+
+And `sys.dm_os_windows_info` on Linux does not fail. It returns one row of
+`windows_release = ''`, `windows_service_pack_level = ''`, `windows_sku = NULL`,
+`os_language_version = 0`. Microsoft documents its behaviour on a non-Windows
+host as "undefined"; in practice undefined means a well-formed row of nothing,
+which sits in the archive looking like a measurement. The file's own stated bar
+is that a wrong value is worse than none.
+
 ### The collector
 
-`10.system/021.windows-info.sql`, `@scope: instance`,
+`10.system/021.host-info.sql`, `@scope: instance`,
 `@permissions: CONNECT, VIEW SERVER STATE`, one result set.
 
-`sys.dm_os_windows_info` gives `windows_release`, `windows_service_pack_level`,
-`windows_sku` and `os_language_version`. `sys.dm_os_host_info` gives the same
-plus `host_platform` and `host_distribution`, and exists from 2017 — so the
-file reads `dm_os_windows_info` unconditionally and `dm_os_host_info` behind a
-`min_version` sibling, or projects NULLs. Prefer two files over a branch: the
-corpus already splits on version by filename (`011.all-databases-2014.sql`,
-`021.always-on-2016.sql`) and that convention is worth keeping.
+One file, guarded the same way as section 1: `sys.dm_os_host_info` when
+`OBJECT_ID` says it is there (2017 and later), `sys.dm_os_windows_info`
+otherwise. Below 2017 there is no ambiguity to resolve — SQL Server on Linux
+began with 2017, so an instance without `dm_os_host_info` is on Windows by
+construction. The projection is one shape with a `platform` column that is
+`Windows` by deduction on the old path and `host_platform` verbatim on the new
+one.
 
-**`windows_release` is a number, and it is not the marketing name.** `10.0`
-covers Windows Server 2016, 2019, 2022 and 2025 alike, and Windows 10 and 11
-with it. The collector projects the raw value and **must not** map it to a
-product name: the mapping needs the build number, which this DMV does not give,
-and a wrong product name in an audit is worse than a version number the reader
-has to look up. `windows_sku` is likewise projected as its integer.
+**`host_release` is a number and it is not the marketing name.** `10.0` covers
+Windows Server 2016, 2019, 2022 and 2025 alike, and Windows 10 and 11 with it.
+The collector projects the raw value and **must not** map it to a product name:
+the mapping needs the build number, which neither view exposes, and a wrong
+product name in an audit is worse than a version number the reader has to look
+up. `host_sku` is likewise projected as its integer.
+
+That limitation is worth stating rather than hiding, because it means this
+collector answers the third question (memory against the machine) and only
+half of the first: it says which Windows *family*, not which release, so
+supportability still needs the build number from somewhere else.
 
 ---
 
@@ -186,24 +295,34 @@ Three findings depend on it and none could be made:
 ### The collector
 
 `10.system/042.connection-security.sql`, `@scope: instance`,
-`@permissions: CONNECT, VIEW SERVER STATE`.
+`@permissions: CONNECT, VIEW SERVER STATE`. All four columns verified present
+and readable under that grant.
 
 Aggregate, never per session. One row per
 `(net_transport, auth_scheme, encrypt_option, protocol_version)` with a count,
-plus the number of distinct client hosts in each group. A per-session dump
-would carry `client_net_address` and hostnames into the archive for no
-analytical gain, and the aggregate answers all three questions above.
+plus the number of distinct `client_net_address` values in each group. A
+per-session dump would carry client addresses and hostnames into the archive
+for no analytical gain.
 
-The collector's own session is in the result and cannot be excluded honestly —
-the auditor's connection is a connection. It is marked rather than filtered:
-one boolean column `is_collector_session`, set from `@@SPID`.
+The count is of **addresses, not hosts**. `sys.dm_exec_connections` has
+`client_net_address`; host names live in `sys.dm_exec_sessions` and reaching
+them means a join the first draft did not mention, for a number that is less
+reliable — a host name is client-supplied.
+
+The collector's own session is in the result and cannot be excluded honestly.
+It is marked rather than filtered, but the marking is a group property, not a
+session one: written as `CASE WHEN session_id = @@SPID ...` beside a `GROUP BY`
+it does not compile at all (`Msg 8120`, reproduced), and written as
+`MAX(CASE WHEN session_id = @@SPID THEN 1 ELSE 0 END)` it says "this tuple
+contains the collector". The column is therefore named
+`contains_collector_session`, which is what it means.
 
 ### What the sessions do, and what the server demands
 
-`encrypt_option` says what the sessions happen to be doing. It does not say what
-the server requires, and the two answer different questions: a run where every
-session shows `TRUE` may be a server forcing encryption, or a set of clients
-that all happened to ask for it while the next one will not.
+`encrypt_option` says what the sessions happen to be doing. It does not say
+what the server requires, and the two answer different questions: a run where
+every session shows `TRUE` may be a server forcing encryption, or a set of
+clients that all happened to ask for it while the next one will not.
 
 `ForceEncryption` lives in the instance's own registry hive and is readable
 through `sys.dm_server_registry`, which `10.system/020.host-services.sql`
@@ -211,12 +330,23 @@ already reads for the startup parameters. The setting belongs beside
 `encrypt_option`, and the pair is the finding: forced and encrypted is a
 configuration, unforced and encrypted is a coincidence.
 
-The certificate the instance presents is in the same hive and is worth the same
-trip. A self-signed certificate is the default and is not a finding by itself,
-but it is what the reader asks about next.
+**This half is Windows-only, and the file must say so in its output.** Measured:
+`sys.dm_server_registry` exists on Linux and returns **zero rows** — no error,
+nothing. On Linux the setting lives in `mssql-conf`, which no DMV exposes. An
+empty registry read is indistinguishable from "encryption is not forced" to a
+reader who does not know the platform, which is the answer-that-looks-like-an-
+answer this document objects to everywhere else. The projection carries a
+`force_encryption` value and a separate `registry_readable` flag, and the
+platform from section 2 is what makes the pair legible.
 
-What is **not** reachable is the SCHANNEL configuration: whether TLS 1.0 and 1.1
-are disabled at the OS level lives outside SQL Server's hive, and
+The certificate the instance presents is in the same hive and is worth the same
+trip, with the same caveat. Note that the value stored is a SHA-1 thumbprint,
+not the certificate: no expiry, no issuer. A self-signed certificate is the
+default and is not a finding by itself, but it is what the reader asks about
+next.
+
+What is **not** reachable is the SCHANNEL configuration: whether TLS 1.0 and
+1.1 are disabled at the OS level lives outside SQL Server's hive, and
 `sys.dm_server_registry` does not expose it. That stays a question for the
 client.
 
@@ -236,25 +366,38 @@ That file is why a recent audit had 138 plans in the archive.
 
 ### The gap
 
-**When the Query Store is off, the archive contains no plan at all.** Nothing
-reads `sys.dm_exec_query_plan`. On such an instance the analysis has aggregate
-counters and no way to see a plan shape, which is the difference between "this
-procedure is expensive" and "this procedure is expensive because a CTE is
-expanded five times".
+**When the Query Store is off, the archive contains no plan at all.** The first
+draft said "nothing reads `sys.dm_exec_query_plan`", which is not quite true —
+`80.workload/030.implicit-conversions.sql` does, to LIKE-search the XML — but
+nothing *keeps* a plan. On such an instance the analysis has aggregate counters
+and no way to see a plan shape, which is the difference between "this procedure
+is expensive" and "this procedure is expensive because a CTE is expanded five
+times".
 
 ### The collector
 
-`80.workload/041.plan-cache-plans.sql`, `@scope: database`,
-`@requires_flag: plan_cache_plans`, `@writer: plan-cache-plans`, following
-`021` in every structural respect so that an analysis reads one shape.
+`80.workload/041.plan-cache-plans.sql`, **`@scope: instance`**,
+`@requires_flag: plan_cache_plans`, `@writer: plan-cache-plans`.
 
-Selection is the same round robin over four metrics from
-`sys.dm_exec_query_stats`, capped by the same kind of parameter. Deduplication
-is on `query_plan_hash`: the cache holds one entry per plan handle and a
-procedure called with different `SET` options has several, all identical.
+Instance scope, not database scope, and this is a correction. The plan cache is
+an instance-wide structure: `sys.dm_exec_query_stats` has no `database_id`, and
+filtering by database means `CROSS APPLY sys.dm_exec_plan_attributes` over the
+whole cache. A database-scoped file would scan and sort the entire cache once
+per database — fifty times on a fifty-database instance — and write largely the
+same plans into each database's directory.
 
-Three things the file must say about itself, because each one is a way to read
-it wrongly:
+**Deduplication is on `plan_handle`, not `query_plan_hash`.** The first draft
+had this backwards. `sys.dm_exec_query_stats` holds one row per *statement*,
+and every statement of a procedure shares one `plan_handle` while carrying its
+own `query_plan_hash`. Deduplicating on the hash selects all ten statements of
+a ten-statement procedure, and `sys.dm_exec_query_plan(plan_handle)` returns
+the plan for the whole procedure — so the same XML would be written ten times.
+Statement-level plans need
+`sys.dm_exec_text_query_plan(plan_handle, start_offset, end_offset)`, which
+returns text rather than typed XML; whether that is worth the shape change is
+the one design question left open here.
+
+Three things the file must say about itself:
 
 - **The cache is not history.** A plan absent from it was evicted or has not run
   since the last restart. `021` can say a query was not among the top N; this
@@ -266,20 +409,35 @@ it wrongly:
   large or containing an XML-invalid construct. A NULL is written as a NULL and
   counted, never silently dropped.
 
+### What this costs in Go, which the first draft did not say
+
+`@requires_flag` and `@writer` are closed vocabularies (`KnownFlags`,
+`KnownWriters` in `collect/queryset.go`); a file naming an unknown one fails
+discovery lint. The flag needs a `BoolVar` and help text in
+`cmd/sql-auditor/main.go`. The writer needs an implementation — the dispatch is
+a switch in `collect.go`, and `021`'s writer is a substantial piece of code that
+plans, deduplicates and writes directories. None of that is a `.sql` file.
+
+There is also a disclosure question the first draft skipped. Resolving text
+from the cache means `sys.dm_exec_sql_text`, which is the string
+`readsSessionText` matches on, so the manifest would disclose "the SQL text of
+statements running during collection" for text that came from the cache. Cached
+text may contain literal parameter values where Query Store text is
+parameterised — `observe-spec.md` treats those as materially different
+disclosures. This collector owes a `CollectedKinds` entry and a MANIFEST.txt
+paragraph of its own.
+
 ### What this deliberately does not do
 
 **It does not compile a plan for a procedure that has none.** Obtaining an
-estimated plan for an arbitrary procedure means `SET SHOWPLAN_XML ON` and
-executing the batch, which requires parameter values the collector cannot
-invent, compiles on the production instance, and would break the read-only
-promise the corpus makes everywhere else. "Every plan we can get" therefore
-means "every plan already materialised in the Query Store or the cache", and
-that set is the bound.
+estimated plan means `SET SHOWPLAN_XML ON` and executing the batch, which
+requires parameter values the collector cannot invent, compiles on the
+production instance, and would break the read-only promise. "Every plan we can
+get" means "every plan already materialised in the Query Store or the cache".
 
 **It does not collect all procedures.** A database of eight hundred procedures
-whose plans run from 0.5 to 2 MB would produce a multi-gigabyte archive to
-carry mostly plans nobody reads. The cap is what makes the collector usable,
-and it stays.
+whose plans run from 0.5 to 2 MB would produce a multi-gigabyte archive. The
+cap is what makes the collector usable.
 
 ---
 
@@ -293,66 +451,84 @@ surfaced only because the client mentioned it in passing.
 
 **Part of the answer is already in the archive and nobody was reading it.**
 `10.system/010.properties.sql` collects `total_physical_ram_mb`,
-`available_physical_ram_mb` and `sql_ram_in_use_mb`. The subtraction is the
-finding:
+`available_physical_ram_mb`, `sql_ram_in_use_mb` and `sql_locked_pages_mb`.
+
+### The arithmetic, and the two ways the first draft got it wrong
+
+The subtraction the first draft proposed —
+`total - available - sql_ram_in_use` — **goes negative**. Measured on an idle
+instance with nothing else running: −3041 MB. Two independent causes. The three
+counters are not sampled atomically, so small negatives are ordinary. And
+`physical_memory_in_use_kb` is the process working set, which excludes locked
+pages, so on an instance using Lock Pages in Memory the residue is overstated
+by exactly the locked allocation — which `010` already collects and the first
+draft did not use.
+
+So the projection is
 
 ```
-other_processes_mb = total_physical_ram - available_physical_ram - sql_ram_in_use
+other_processes_mb = MAX(0, total - available - (sql_ram_in_use + sql_locked_pages))
 ```
 
-On the instance in question that came to 18.5 GB of RAM held by something other
-than the database engine, on a machine of 64 GB. Nothing in the report said so,
-because the three numbers sat in three fields and the arithmetic was left to a
-reader who had no reason to attempt it.
+with the clamp, the fourth operand, and a note that on Linux the OS page cache
+inflates `available_physical_memory_kb`, which makes the residue an
+underestimate there rather than a measurement. A derived value that can be
+negative is not a finding, it is a bug with a decimal point.
 
-**The first change is therefore not a collector.** `010.properties.sql` should
-project the derived value beside its operands, the way `014.cpu-topology.sql`
-projects the hardware-versus-soft-NUMA answer rather than leaving it to be
-inferred. A fact that is meaningless without an operation on its neighbours does
-not get to stay implicit.
+`014.cpu-topology.sql` is the precedent for deriving at all: it projects the
+hardware-versus-soft-NUMA answer rather than leaving it to be inferred. A fact
+that is meaningless without an operation on its neighbours does not get to stay
+implicit.
 
 ### What is genuinely missing: the CPU half
 
 Memory says something else is resident. It does not say something else is
-*running*. The ring buffer does.
+*running*. `RING_BUFFER_SCHEDULER_MONITOR` records carry a `<SystemHealth>`
+element with `<ProcessUtilization>` — the CPU percentage used by the SQL Server
+process — and `<SystemIdle>`. What is left over is everybody else.
 
-`RING_BUFFER_SCHEDULER_MONITOR` records carry a `<SystemHealth>` element with
-`<ProcessUtilization>` — the CPU percentage used by the SQL Server process —
-and `<SystemIdle>`. What is left over is everybody else:
+**That formula is Windows-only, and unguarded it prints a false finding.**
+Measured: on Linux every scheduler-monitor record carries
+`ProcessUtilization = 0` and `SystemIdle = 0`, on all 256 of them, so
+`100 - 0 - 0` reports that other processes are using the entire CPU, all the
+time, on every Linux instance. The record shape exists, so the collector would
+not error — it would lie.
 
-```
-other_processes_pct = 100 - ProcessUtilization - SystemIdle
-```
+`10.system/043.cpu-neighbours.sql` therefore projects the residue only where
+both operands are not zero, records `platform` beside it, and clamps at zero
+(scheduling jitter can push the sum past 100). Where the operands are zero it
+says so rather than computing.
 
-That is the standard reading and it is a time series, one record per minute,
-which is better than any instantaneous figure: it shows whether the neighbour is
-constant or spikes at the hour a batch runs.
+It inherits two constraints from `041.connectivity.sql`, both learned the hard
+way there:
 
-`10.system/041.connectivity.sql` already reads `sys.dm_os_ring_buffers` and
-already reports the span of every buffer, but it projects only the connectivity
-records. The scheduler-monitor records need their own collector,
-`10.system/043.cpu-neighbours.sql`, and it inherits two constraints from its
-sibling, both learned the hard way there:
-
-- **The buffer wraps at 256 records.** Measured on a real instance: a span of
-  4 hours 15 minutes. The window must be reported beside the numbers, because a
-  short window *is* the finding when someone reads a quiet afternoon as a quiet
-  server.
-- **The ms_ticks arithmetic is done in seconds**, not milliseconds, or it
-  overflows a 32-bit int after 24 days of uptime — which is exactly the
-  population worth auditing.
+- **The buffer wraps at 256 records.** Confirmed on the test instance, which
+  reached exactly 256. Measured span on a real instance: 4 hours 15 minutes.
+  The window must be reported beside the numbers, because a short window *is*
+  the finding when someone reads a quiet afternoon as a quiet server.
+- **The `ms_ticks` arithmetic is done in seconds.** The columns themselves are
+  `bigint`; what overflows is `DATEADD`'s increment argument, which is an `int`
+  and gives up after 24 days of uptime — exactly the population worth auditing.
+  The file's comment should blame `DATEADD`, not the column type.
 
 ### The third signal: who connects from the machine itself
 
 Covered by collector 3 above. `net_transport = 'Shared memory'` means the
-session originates on the server, and a local TCP connection means the same
-thing. Add `program_name` from `sys.dm_exec_sessions`, aggregated with a count,
-and the archive says *which* application is co-resident rather than only that
-one is.
+session originates on the server — **on Windows**. Shared Memory does not exist
+on Linux, where every local session arrives over TCP loopback, so the test is
+`net_transport = 'Shared memory' OR client_net_address IN ('127.0.0.1', '::1',
+'<local>')`.
 
+Add `program_name` from `sys.dm_exec_sessions`, aggregated with a count, and the
+archive says *which* application is co-resident rather than only that one is.
 `program_name` is client-supplied and therefore not evidence: it is empty for a
 default `SqlClient` connection and can say anything. It corroborates, it does
 not prove.
+
+That addition changes what `042` carries, so it changes what the manifest
+discloses. `052.session-text.sql` states an invariant about session-derived
+text; adding a client-supplied string to an ungated file has to be reconciled
+with it rather than slipped in.
 
 ### The honest limit, which belongs in the file
 
@@ -361,17 +537,18 @@ no read-only DMV for it, and the paths that exist — `xp_cmdshell`, a CLR
 assembly, WMI through a linked server — all require permissions this collector
 refuses to ask for and would break the read-only promise.
 
-So the finding this makes possible is *"SQL Server is not alone on this machine,
-here is how much memory and how much CPU it is not getting, and here is what
-connects locally"*. It is not a process list, and the collector must not be
-written as though it were producing one. That phrasing matters: an audit that
-says "18.5 GB is used by other processes" is reporting a measurement, while one
-that names the application is repeating what somebody said.
+So the finding this makes possible is *"SQL Server is not alone on this
+machine, here is how much memory and how much CPU it is not getting, and here
+is what connects locally"*. It is not a process list. An audit that says
+"18.5 GB is used by other processes" is reporting a measurement; one that names
+the application is repeating what somebody said.
 
 `sys.dm_server_services`, already collected by `020.host-services.sql`, closes
 the last corner: it reports the SQL-family services on the host, so a Reporting
 Services or Analysis Services instance sharing the machine is visible without
 any of the above.
+
+---
 
 ## 6. The default trace — who changed what, and when
 
@@ -383,109 +560,177 @@ audit. Nothing in the corpus reads it.
 
 It is the only free record of what happened to the instance: `sp_configure`
 changes, database creation and deletion, file autogrowth and autoshrink events,
-DDL on objects, changes to server role membership, login failures, and full-text
-and backup errors. It retains five rolling 20 MB files, which on a quiet
-instance is weeks and on a busy one is days.
+DDL on objects, changes to server role membership, login failures, and
+full-text and backup errors. It retains five rolling 20 MB files, which on a
+quiet instance is weeks and on a busy one is days.
 
 The audit that raised this found a `sp_configure` with a pending reconfigure —
 someone had changed a setting and never run `RECONFIGURE`. The report could say
 what the state was, and had to write "it is better to look at what happened
 before settling it", which is an instruction to the client to go and find out.
-**The trace had the answer, with a timestamp and a login name.**
+**The trace had the answer, with a timestamp.**
 
-The same file closes a question that has no other answer on a stock instance:
-SQL Server records a login's last use nowhere, so a dormant account cannot be
-identified from `sys.server_principals`. The default trace's login-failure and
-audit events are the nearest thing that exists.
+### The permission is the whole problem
+
+`sys.traces` and `sys.fn_trace_gettable` require **ALTER TRACE**, not
+`VIEW SERVER STATE`. Measured with a login holding exactly CONNECT and
+`VIEW SERVER STATE`: `Msg 8189, You do not have permission to run 'SYS.TRACES'`,
+and the same for `FN_TRACE_GETTABLE` even when the path is passed as a literal,
+bypassing `sys.traces` entirely. Granting `ALTER TRACE` alone makes both work.
+
+`ALTER TRACE` allows creating, modifying and stopping traces. It is the
+Profiler permission, and it is exactly the class section 1 refuses to ask a
+client for. The first draft declared `VIEW SERVER STATE` and predicted that a
+failure would surface "at read time … reported as a skip"; neither is true. The
+declared permission is granted, so the skip gate never fires, and the file
+lands in `Errors` on every ordinary audit run.
+
+The posture is the one section 1 now takes: **ask for nothing, try, and record
+the refusal.** The collector attempts the read and writes `collected = 0` with
+`Msg 8189` when it cannot. Where a DBA runs the tool themselves, or the client
+grants it deliberately, the archive gets the trace; otherwise it gets a row
+saying why not. `docs/dba-guide.md` describes what is thinner without it and
+does not ask for it.
 
 ### The collector
 
-`10.system/044.default-trace.sql`, `@scope: instance`,
-`@permissions: CONNECT, VIEW SERVER STATE`, `@requires_flag: default_trace`.
+Two files, because one cannot be both gated and ungated.
 
-The path comes from `sys.traces WHERE is_default = 1`, and
-`sys.fn_trace_gettable` reads the whole rollover set when passed the base file
-with `DEFAULT` as the file count. Both are read-only.
+`10.system/044.default-trace.sql`, `@scope: instance`, no flag: the aggregate.
+One row per `(EventClass, ObjectType)` with a count and the first and last
+timestamp, plus the span in the root object. No text.
 
-Aggregated, never dumped. One row per `(EventClass, ObjectType)` with a count
-and the first and last timestamp, plus the retained rows for the event classes
-that carry a decision: 22 error log, 46 and 47 object created and deleted, 92
-and 93 data and log file autogrow, 94 and 95 autoshrink, 104 and 105 server
-role and login changes, 116 `DBCC`, 152 `sp_configure`.
+`10.system/045.default-trace-detail.sql`, `@requires_flag: default_trace`: the
+retained rows for the event classes that carry a decision. `@requires_flag`
+gates the whole file (`skipReason`), so the first draft's "the aggregate half
+runs without it" was not buildable as one file.
+
+**The event-class list was wrong and is corrected.** Measured against
+`sys.trace_events`:
+
+| Class | What it actually is |
+| --- | --- |
+| 20 | Audit Login Failed — the dormant-account argument needs this one |
+| 22 | ErrorLog — **and this is where `sp_configure` changes arrive** |
+| 46, 47 | Object:Created, Object:Deleted |
+| 92, 93 | Data / Log File Auto Grow |
+| 94, 95 | Data / Log File Auto Shrink |
+| 104 | Audit Addlogin — login creation, not role membership |
+| 105 | Audit Login GDR — grant/deny/revoke |
+| 108 | Audit Add Login to Server Role — the one the first draft wanted |
+| 115 | Backup/Restore |
+| 116 | Audit DBCC |
+| 164 | Object:Altered |
+
+There is **no `sp_configure` event class**. The first draft's "152
+`sp_configure`" names `Audit Change Database Owner`; a collector built from
+that list would have labelled database-owner changes as configuration changes,
+in an archive a client acts on. The real record is a class-22 row whose text
+reads "Configuration option 'show advanced options' changed from 0 to 1. Run
+the RECONFIGURE statement to install." — read live on the test instance.
 
 **The window is the finding as often as the content is.** A trace whose oldest
 record is four hours old, on a server up for eighty days, says the instance
-generates events fast enough to roll 100 MB in an afternoon, and that is worth
-a line of its own. The span goes in the root object beside the counts, the same
-discipline `041.connectivity.sql` applies to its ring buffers.
+generates events fast enough to roll 100 MB in an afternoon. The span goes in
+the root object beside the counts, the same discipline `041.connectivity.sql`
+applies to its ring buffers.
 
-Three cautions belong in the file:
+Three cautions belong in the files:
 
-- **It is a trace, so it carries text.** `TextData` on a `sp_configure` or a DDL
-  event holds the statement, and on an object event it holds an object name.
-  Hence the flag: the collector is opt-in like the other text-carrying files,
-  and the aggregate half runs without it.
-- **Absence proves nothing**, for the same reason as the plan cache: the files
-  rolled. The report must not read an empty autogrow count as "the files never
-  grew".
-- **`sys.fn_trace_gettable` needs the file readable by the service account**,
-  not by the collector's login, because the engine does the reading. A trace
-  directory the service cannot reach fails at read time rather than at
-  permission-check time, so the error is caught and reported as a skip.
+- **The path may not exist.** With `default trace enabled = 0`,
+  `sys.traces WHERE is_default = 1` returns no rows, and
+  `fn_trace_gettable(NULL, DEFAULT)` raises `Msg 19050` rather than returning
+  nothing. The path is tested before it is used.
+- **`DEFAULT` reads the rollover set** — verified, 264 rows across files — but
+  `sys.traces.path` names the *current* file, so the set read is the one from
+  that file forward. The span reported is the span actually read, not the span
+  the five files hold.
+- **Absence proves nothing.** The files rolled. The report must not read an
+  empty autogrow count as "the files never grew".
 
 ---
 
 ## 7. Enterprise features persisted in a database
 
-### The gap
+### The gap, corrected
 
 `sys.dm_db_persisted_sku_features` reports the Enterprise-only features
 physically present in a database: partitioning, data compression, online index
-rebuild artefacts, change data capture, transparent encryption, memory-optimized
-tables. One row per feature, per database, and it costs nothing.
+rebuild artefacts, change data capture, transparent encryption,
+memory-optimized tables. One row per feature, per database, and it costs
+nothing.
 
-Nothing in the corpus reads it, and it answers two questions that come up in
-every migration conversation.
+Nothing in the corpus reads it. But the first draft's motivating claim is out
+of date, and it matters because it would have produced a false finding.
 
-**Can this database be restored on this edition?** A backup taken on Enterprise
-restores onto Standard only if this view is empty. A restore that fails for this
-reason fails at the end, after the data has been copied, which is the worst
-moment to find out.
+**"A backup taken on Enterprise restores onto Standard only if this view is
+empty" has not been true since SQL Server 2016 SP1.** That release moved
+compression, partitioning, change data capture and In-Memory OLTP into
+Standard. The view still lists them — measured: a table created with
+`DATA_COMPRESSION = PAGE` puts a `Compression` row there on a Developer
+instance — but the database restores onto Standard and the feature works.
+Written as the first draft had it, an audit would have reported a defect
+against healthy Standard instances. The instances that motivated the section
+were 2016 SP1.
 
-**Is an Enterprise feature in use on a Standard instance?** It happens: the
-database was created on Enterprise or Developer and moved. The feature then sits
-there, unusable and invisible, until an operation touches it.
+What the view still answers, and what the collector is for:
 
-Both instances of the September 2026 audit are Standard Edition, and neither
-question could be answered from the archive.
+- **Which Enterprise-era features are physically present**, which is a
+  migration and licensing conversation rather than a defect.
+- **The genuinely edition-bound ones** — transparent data encryption before
+  2019, and the features that remain Enterprise-only — where the restore
+  question is still real.
+
+The finding is therefore "this database carries these features; here is which
+of them constrain the target edition", and the edition boundary belongs to the
+analysis layer with the target version in hand, not to the collector.
 
 ### The collector
 
 `20.databases/026.persisted-sku-features.sql`, `@scope: database`,
-`@permissions: CONNECT, VIEW ANY DEFINITION`. One result set, one row per
-feature, plus a count in the root object so that the ordinary case — zero rows,
-nothing persisted — is distinguishable from a collector that did not run.
+`@permissions: CONNECT, VIEW SERVER STATE`, `@resultsets: root:object,
+features:array`.
 
-The view is empty on a database that never carried an Enterprise feature, so
-**an empty result is the answer and not a failure.** That has to be said in the
-file, because every other array in the corpus is empty only when something went
+**The permission is `VIEW SERVER STATE`, not `VIEW ANY DEFINITION`.** Measured:
+a login holding exactly CONNECT and `VIEW ANY DEFINITION` gets `Msg 262,
+VIEW DATABASE PERFORMANCE STATE permission denied`, then `Msg 297`. This is a
+dynamic management view, not a catalog view; `VIEW ANY DEFINITION` governs
+metadata visibility and does not imply it. `VIEW SERVER STATE` carries
+`VIEW DATABASE STATE` into every database, which `grants.go` already notes, and
+the read then succeeds.
+
+**Two result sets, not one.** The first draft asked for "one result set, one
+row per feature, plus a count in the root object", which the encoder cannot
+express: a `root:object` set must return at most one row, and an array set
+cannot merge a value into the root. The count that distinguishes "nothing
+persisted" from "the collector did not run" lives in the root object, and the
+features are the array.
+
+The view is empty on a database that never carried such a feature, so **an empty
+result is the answer and not a failure.** That has to be said in the file,
+because every other array in the corpus is empty only when something went
 wrong.
 
 ---
 
 ## 8. Two views for builds we do not audit yet — implemented
 
-Everything above is a specification. These two are **written and in the corpus**,
-which is the point: they cost two files, they are gated on the build, and
-writing them now means the first 2022 or 2025 instance this practice audits
-arrives with the collector already there instead of producing an archive that
-has to be explained.
+Everything above is a specification. These two are **written and in the
+corpus**: they cost two files, they are gated on the build, and writing them
+now means the first 2022 or 2025 instance this practice audits arrives with the
+collector already there instead of producing an archive that has to be
+explained.
 
 The version gate is not a formality. Both views are absent on every instance
 audited so far, and a collector that referenced them ungated would fail the
-whole script on a batch-level error. With `@min_version` the file is skipped and
-the skip is recorded, so the archive says "not applicable on this build" rather
-than being silently short of a file.
+whole script on a batch-level error. With `@min_version` the file is skipped
+and the skip is recorded, so the archive says "not applicable on this build"
+rather than being silently short of a file.
+
+Both files were run or parsed during the review: `073` executes verbatim on
+2022 under a `VIEW SERVER STATE` login, `074`'s view is absent there
+(`Msg 208`) which is what makes its gate load-bearing, and both pass the corpus
+lint and `go test ./...`.
 
 ### `10.system/073.accelerators.sql` — `@min_version: 16`
 
@@ -502,8 +747,11 @@ that was supposed to have been freed.
 `mode_reason_desc` is what separates them and it is projected verbatim. Its
 values name the cause — `SOFTWARE_MODE_ACCELERATOR_HARDWARE_NOT_FOUND` is a
 broken deployment, `SOFTWARE_MODE_NON_ENTERPRISE_SKU` is a licensing decision,
-`NONE_HARDWARE_OFFLOAD_NOT_ENABLED` is the untouched default. Collapsing them to
-a verdict here would throw away the distinction the next release extends.
+`NONE_HARDWARE_OFFLOAD_NOT_ENABLED` is the untouched default. The review turned
+up a fourth this document had not seen,
+`NONE_HARDWARE_OFFLOAD_LINUX_NOT_SUPPORTED`, which is the argument for
+projecting verbatim making itself: collapsing these to a verdict would have
+thrown away a value nobody knew to enumerate.
 
 One property worth knowing when reading the output: **the view is never empty on
 a supported build.** A row for QAT is present from 2022 onwards whether or not
@@ -529,9 +777,7 @@ could still hand out, and the memory it could reclaim by shrinking caches.
 
 **The window is 256 snapshots, which is one hour and four minutes, and a restart
 resets it.** So it is excellent evidence of a problem and no evidence at all of
-its absence. The span goes in the root object beside the counts, the same
-discipline `041.connectivity.sql` applies to its ring buffers and for the same
-reason.
+its absence. The span goes in the root object beside the counts.
 
 Two projection decisions are worth recording because both are about what *not*
 to collect.
@@ -561,9 +807,24 @@ and the encoder refuses that rather than writing a document with two meanings
 for one key. The prefix became `offload`.
 
 And a directive name written in the prose of a header is parsed as a directive.
-Explaining in a comment which permission the directive declares broke the header
-parser, which read the next line of the sentence as a permission. Header
-directives are not quotable inside a header.
+The mechanism is narrower than this document first described it: the parser
+matches any header comment line beginning `-- @word` and, for a name it knows,
+takes **the rest of that same line** as the value. It does not read the next
+line. Explaining in a comment which permission a directive declares therefore
+breaks the header only if the sentence starts with the directive name. The
+lesson stands — do not open a header line with `@`— but the next author should
+test the right thing.
+
+### And what they broke
+
+Both files declare versions the corpus's own grammar checker did not know.
+`tools/verify-corpus-grammar.ps1` mapped `@min_version` to parsers 11 through
+15 and threw on anything else, so from the moment `073` landed the run died on
+it — in alphabetical order, which left every file after `072` unchecked, and
+the exception looked like a broken tool rather than an unverified corpus. Fixed
+separately: 16 and 17 are mapped, an unmapped version is now a `NOT CHECKED`
+line rather than an abort, and the committed artefact — which had described 38
+files and a three-week-old corpus tree — describes all 58.
 
 ---
 
@@ -592,3 +853,108 @@ What is genuinely missing is not a collector. It is that nothing joins them: an
 analysis wanting "the procedures ranked by frequency" reads two files with two
 different windows and reconciles them by hand. That belongs in the analysis
 step, not here.
+
+---
+
+## 10. The other ring buffers
+
+`10.system/041.connectivity.sql` already emits one row per
+`ring_buffer_type` — count, oldest, newest, span. So the archive already says
+which buffers exist and how fast each one turns over. The only question left is
+which ones are worth **decoding**, and the rule is:
+
+> Decode a buffer when Microsoft documents its record shape and it answers a
+> question no other collector answers. Everything else is covered by the
+> summary row, which costs nothing and lets an analyst ask for more when a
+> number looks wrong.
+
+Fourteen types exist on a bare 2022 instance. Two are worth decoding, one is
+worth an aggregate, and the rest are not.
+
+### `10.system/045.resource-pressure.sql` — `RING_BUFFER_RESOURCE_MONITOR`
+
+The strongest of them. Its records carry a `<Notification>` —
+`RESOURCE_MEMPHYSICAL_LOW`, `RESOURCE_MEMPHYSICAL_HIGH`,
+`RESOURCE_MEMVIRTUAL_LOW` — with per-process, per-system and per-pool
+indicators and the node.
+
+This is the historical record of memory pressure, and every other memory
+reading in the archive is an instant. Section 8 makes exactly that argument for
+`074.memory-health.sql`, but that view is 2025 and later; this buffer covers
+the whole supported range. One record on a healthy idle instance, which is
+itself the reading: an instance stacking `LOW` notifications is under pressure,
+and nothing else in the archive says so.
+
+Aggregate by notification and node, with counts and the first and last
+timestamp, plus the buffer's span. `@scope: instance`,
+`@permissions: CONNECT, VIEW SERVER STATE`.
+
+### `10.system/046.security-errors.sql` — `RING_BUFFER_SECURITY_ERROR`
+
+Records carry `<SPID>`, `<APIName>`, `<CallingAPIName>`, `<ErrorCode>` and
+`<SQLErrorCode>` — the security API talking: SSPI negotiation failures,
+Kerberos problems, impersonation refused.
+
+It is not the same thing as a failed login, and that is why it is worth having.
+`040.error-log.sql` counts 18456s, which says an authentication attempt failed;
+this buffer says whether the cause was a wrong password or a broken SPN. Read
+beside the `auth_scheme` distribution from section 3 — NTLM where Kerberos was
+expected is the symptom, these error codes are the cause.
+
+Aggregate by `APIName` and `ErrorCode` with counts and the window. No per-SPID
+dump: the records carry a session id and no user name, and the aggregate
+answers the question.
+
+### `RING_BUFFER_EXCEPTION` — an aggregate, folded into `041`
+
+459 records on an instance doing nothing. It carries the error number,
+severity, state and SPID, and it survives a cycle of the error log. An
+aggregate by error number and severity, with counts and the window, is cheap
+and would say "this instance throws three thousand 8134s an hour", which the
+error log's filtered read can miss. A dump would be noise.
+
+### The refusals, and why
+
+`RING_BUFFER_SCHEDULER` (5257 records), `RING_BUFFER_HOBT_SCHEMAMGR` (791),
+`RING_BUFFER_QE_MEM_BUFF_POOL_RESERVE`, both `RING_BUFFER_MEMORY_BROKER*`,
+`RING_BUFFER_SECURITY_CACHE` and `RING_BUFFER_CLRHOSTTASK` are undocumented
+internals, high in volume, and their shape changes between builds. An audit
+tool that publishes undocumented internals invites a client question nobody can
+answer.
+
+`RING_BUFFER_XE_LOG` and `RING_BUFFER_XE_BUFFER_STATE` are Extended Events
+plumbing. They matter when diagnosing why an XE session drops events, which is
+`observe`'s territory, not `collect`'s.
+
+### Two inherited traps
+
+Both were solved in `041.connectivity.sql` and both must be reused rather than
+rediscovered: the `ms_ticks` arithmetic is done in seconds, because `DATEADD`'s
+increment is an `int` and gives up after 24 days of uptime; and the buffer's
+window is reported beside its numbers, because a short window *is* the finding
+when someone reads a quiet afternoon as a quiet server.
+
+---
+
+## 11. Two things the review found in the repository, not in this document
+
+Neither belongs to this specification's work. Both are recorded because the
+next person to read this will wonder.
+
+**An unknown directive is silently ignored.** `parseScript` switches on
+directive names with no default case, so `-- @minversion:` or any other
+misspelling produces no lint error and no effect — the file ships ungated with
+nothing anywhere saying so. It is the same class of silent failure the `@scope`
+and `@timeout` rules were written against, and it is why section 1 no longer
+introduces a new directive. It wants its own fix and its own test, and that fix
+should land before any future directive does.
+
+**The manifest's promise is already inexact.** MANIFEST.txt states the
+collector "issues only read-only SELECT statements" and "runs no INSERT,
+UPDATE, DELETE or DDL". `040.error-log.sql` creates a temp table and does
+`INSERT ... EXEC sys.sp_readerrorlog`; `041.compression-savings.sql` does the
+same. The sentence is what makes a DBA willing to approve the tool without
+reading the corpus, and it does not currently describe the corpus. Section 1's
+`INSERT ... EXEC` into a table variable does not widen the gap in kind, but the
+gap is real and unaddressed, and the audience for the decision is a security
+officer reading the manifest beside the corpus.
