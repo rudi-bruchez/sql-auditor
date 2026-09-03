@@ -165,23 +165,70 @@ BEGIN
 END
 ELSE
 BEGIN
+    -- Eight columns first, seven on Msg 213. See "the column count is not
+    -- knowable from here" below.
     BEGIN TRY
-        DECLARE @dbcc TABLE (RecoveryUnitId int NULL, FileId int, FileSize bigint,
-                             StartOffset bigint, FSeqNo bigint, Status int,
-                             Parity int, CreateLSN nvarchar(48));
-        INSERT INTO @dbcc EXEC ('DBCC LOGINFO WITH NO_INFOMSGS');
-        INSERT INTO @vlf (file_id, vlf_size_mb, vlf_active)
-        SELECT d.FileId, d.FileSize / 1048576.0, CASE WHEN d.Status = 2 THEN 1 ELSE 0 END
-        FROM @dbcc AS d;
-        SET @source = 'dbcc_loginfo';
+        INSERT INTO @dbcc8 EXEC ('DBCC LOGINFO WITH NO_INFOMSGS');
+        SET @source = 'dbcc_loginfo_8';
     END TRY
     BEGIN CATCH
         SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
     END CATCH
+
+    IF @err = 213
+    BEGIN
+        SELECT @err = 0, @msg = N'';
+        BEGIN TRY
+            INSERT INTO @dbcc7 EXEC ('DBCC LOGINFO WITH NO_INFOMSGS');
+            SET @source = 'dbcc_loginfo_7';
+        END TRY
+        BEGIN CATCH
+            SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+        END CATCH
+    END
+
+    INSERT INTO @vlf (file_id, vlf_size_mb, vlf_active)
+    SELECT d.FileId, d.FileSize / 1048576.0, CASE WHEN d.Status = 2 THEN 1 ELSE 0 END
+    FROM @dbcc8 AS d
+    UNION ALL
+    SELECT d.FileId, d.FileSize / 1048576.0, CASE WHEN d.Status = 2 THEN 1 ELSE 0 END
+    FROM @dbcc7 AS d;
 END
+
+-- Then, unconditionally, the two declared result sets: the root object
+-- carrying @source, @err and @msg beside the aggregates over @vlf, and the
+-- vlf_per_file array. Both are emitted whatever happened above; that is the
+-- whole point of staging. Note the wrapping: a comment line must never begin
+-- with an @ word, or the header parser reads it as a directive.
 ```
 
-Four details, each one a review finding:
+The snippet in the first version of this section stopped at the `CATCH` and
+emitted **no result set at all**, while its header declared two. That is not a
+formatting slip — a reviewer ran it verbatim, as this document tells reviewers
+to, and got zero result sets against a declared two. An artefact printed in a
+specification is going to be run; it ends where the file ends.
+
+### The column count is not knowable from here, so the file tries both
+
+The first version asserted that `RecoveryUnitId` arrived in 2012, taking
+`DBCC LOGINFO` from seven columns to eight. A reviewer contested it and placed
+the column in 2016 SP2 instead. Neither can be settled: **Microsoft does not
+document `DBCC LOGINFO` at all** — there is no page, which is why
+`sys.dm_db_log_info` exists — and no 2012, 2014 or 2016 SP1 instance is
+available here. The container is 2022 and returns eight.
+
+If the reviewer is right, the consequence is severe and silent: the eight-column
+declaration would mismatch on **every build where the DBCC branch runs**,
+raise `Msg 213`, be caught, and record nothing — a collector dead on arrival on
+exactly the versions it was written for, failing closed and saying so only in an
+error number nobody reads.
+
+So the file does not depend on the answer. It attempts the eight-column shape,
+and on `Msg 213` — reproduced, it is precisely the shape-mismatch error — it
+attempts the seven-column one. `@source` records which succeeded, which turns
+the open question into a measurement the first real run answers for good.
+
+Three further details, each one a review finding:
 
 **`FileSize` is in bytes.** Measured: `DBCC LOGINFO` returns 253952 and 262144
 for VLFs that `sys.dm_db_log_info` would report as 0.242 and 0.25 MB. Without
@@ -197,12 +244,25 @@ names and omitted one. `023` projects `[space.vlf_count]`,
 projection would have produced a different document while claiming to produce
 the same one.
 
-**The table is eight columns.** The first draft's prose said nine, twice, in
+The `vlf_per_file` array names each log file, so `@vlf` stages
+`logical_name` alongside `file_id` — from `sys.database_files`, which both
+paths can join and which the first draft's staging table had no column for.
+
+**Neither shape is nine columns.** The first draft's prose said nine, twice, in
 the paragraph whose stated purpose was to stop the next reader getting it
-wrong. `RecoveryUnitId` was added in 2012, taking the shape from seven columns
-to eight; there is no nine-column shape. Anyone who "corrects" the declaration
-to match the old prose produces exactly the `Msg 213` the paragraph warns about
-— reproduced, both directions.
+wrong, while the T-SQL beside it declared eight. Anyone who "corrected" the
+declaration to match the prose would produce exactly the `Msg 213` the
+paragraph warns about — reproduced, both directions.
+
+**The two mechanisms do not round alike, and the archive should not pretend
+they do.** `DBCC LOGINFO` gives bytes, converted here to
+`decimal(18,3)`; `sys.dm_db_log_info.vlf_size_mb` is a `float` and reports the
+same VLF as 0.24 where the conversion gives 0.242. Per VLF the difference is
+noise; across a log with tens of thousands of them the totals diverge
+visibly, and an analysis comparing an archive from a 2014 instance with one
+from a 2016 SP2 instance would see a difference that is arithmetic, not
+fragmentation. `@source` is what lets the reader tell; it is not a defect to
+fix but a fact to record.
 
 **`@source` goes in the root object.** A reader must never have to infer which
 mechanism produced a number, and an analysis that compares two archives must be
@@ -418,14 +478,21 @@ discovery lint. The flag needs a `BoolVar` and help text in
 a switch in `collect.go`, and `021`'s writer is a substantial piece of code that
 plans, deduplicates and writes directories. None of that is a `.sql` file.
 
-There is also a disclosure question the first draft skipped. Resolving text
-from the cache means `sys.dm_exec_sql_text`, which is the string
-`readsSessionText` matches on, so the manifest would disclose "the SQL text of
-statements running during collection" for text that came from the cache. Cached
-text may contain literal parameter values where Query Store text is
-parameterised — `observe-spec.md` treats those as materially different
-disclosures. This collector owes a `CollectedKinds` entry and a MANIFEST.txt
-paragraph of its own.
+There is also a disclosure question the first draft skipped, and it is a
+defect rather than a documentation gap. Resolving text from the cache means
+`sys.dm_exec_sql_text`, and `readsSessionText` matches that string on **any**
+script whose flag is not `include_session_text`. So this collector would make
+the manifest warn, on every run, that the archive holds "the SQL text of
+statements running during collection" and that the file should have declared
+`--include-session-text` — a warning that is both wrong about the provenance
+and wrong about the flag.
+
+Cached text may carry literal parameter values where Query Store text is
+parameterised, and `observe-spec.md` treats those as materially different
+disclosures. So this collector owes three things, none of them a `.sql` file: a
+`CollectedKinds` entry of its own, a MANIFEST.txt paragraph describing
+cache-resolved text, and a change to `readsSessionText` so that
+`plan_cache_plans` is a recognised reader rather than an accident.
 
 ### What this deliberately does not do
 
@@ -467,13 +534,24 @@ draft did not use.
 So the projection is
 
 ```
-other_processes_mb = MAX(0, total - available - (sql_ram_in_use + sql_locked_pages))
+residue            = total - available - (sql_ram_in_use + sql_locked_pages)
+other_processes_mb = CASE WHEN residue < 0 THEN 0 ELSE residue END
 ```
 
-with the clamp, the fourth operand, and a note that on Linux the OS page cache
-inflates `available_physical_memory_kb`, which makes the residue an
-underestimate there rather than a measurement. A derived value that can be
-negative is not a finding, it is a bug with a decimal point.
+`MAX(0, x)` is not how the clamp is written, and the first version wrote it
+that way: `MAX` in T-SQL is an aggregate taking one argument — measured,
+`Msg 174` — and the scalar `GREATEST` arrived only in 2022, above the floor.
+The clamp is a `CASE`.
+
+The clamp does not rescue Linux, and the first version's word for it —
+"underestimate" — was too kind. Measured on the container: total 12756,
+available 11708, SQL in use 4178, residue **−3130**. The OS page cache counts
+as available, so the residue is not merely low, it is negative on an idle
+machine, and the clamp turns it into a flat zero on every Linux host. So the
+projection carries `platform` beside it and the value is reported as
+unavailable rather than as zero where the platform is not Windows. A derived
+value that can be negative is not a finding, and a zero that means "we cannot
+compute this here" is worse than no column.
 
 `014.cpu-topology.sql` is the precedent for deriving at all: it projects the
 hardware-versus-soft-NUMA answer rather than leaving it to be inferred. A fact
@@ -494,10 +572,19 @@ Measured: on Linux every scheduler-monitor record carries
 time, on every Linux instance. The record shape exists, so the collector would
 not error — it would lie.
 
-`10.system/043.cpu-neighbours.sql` therefore projects the residue only where
-both operands are not zero, records `platform` beside it, and clamps at zero
-(scheduling jitter can push the sum past 100). Where the operands are zero it
-says so rather than computing.
+`10.system/043.cpu-neighbours.sql` therefore projects the residue **only where
+the host platform is Windows**, records `platform` beside it, and clamps at
+zero (scheduling jitter can push the sum past 100). Elsewhere it reports the
+records and their window without the derived percentage.
+
+The guard is on the platform, never on the values, and the first version of
+this section got that wrong in a way worth keeping as a warning. It said to
+compute "only where both operands are not zero". On a Windows host running at
+100% CPU — SQL Server at 35%, something else at 65% — `SystemIdle` is exactly
+zero. The value-based guard would suppress the residue precisely on the
+saturated machine where the neighbour is the finding. A guard that fails on the
+interesting case is worse than no guard, because it looks like a measurement
+that came back empty.
 
 It inherits two constraints from `041.connectivity.sql`, both learned the hard
 way there:
@@ -519,11 +606,25 @@ on Linux, where every local session arrives over TCP loopback, so the test is
 `net_transport = 'Shared memory' OR client_net_address IN ('127.0.0.1', '::1',
 '<local>')`.
 
-Add `program_name` from `sys.dm_exec_sessions`, aggregated with a count, and the
-archive says *which* application is co-resident rather than only that one is.
-`program_name` is client-supplied and therefore not evidence: it is empty for a
-default `SqlClient` connection and can say anything. It corroborates, it does
-not prove.
+`program_name` from `sys.dm_exec_sessions` would say *which* application is
+co-resident rather than only that one is. It is client-supplied and therefore
+not evidence: empty for a default `SqlClient` connection, and it can say
+anything. It corroborates, it does not prove.
+
+**It goes in its own file, `10.system/046.local-sessions.sql`, not into
+`042`.** Section 3 defines `042` as an aggregate over
+`sys.dm_exec_connections` and explicitly refuses the join to
+`sys.dm_exec_sessions`; adding `program_name` to it would change the grouping
+key and contradict that section two pages later. A reviewer found the two
+sections describing the same file incompatibly, which is what happens when a
+collector is specified in two places.
+
+The disclosure question is real but smaller than the first version implied.
+`052.session-text.sql`'s invariant governs *statement text*, and the manifest's
+disclosure is driven by `readsSessionText`, which matches `dm_exec_sql_text`
+only. A client-supplied `program_name` does not flip it. One line in the file's
+header saying the column is client-supplied and aggregated is the whole
+reconciliation.
 
 That addition changes what `042` carries, so it changes what the manifest
 discloses. `052.session-text.sql` states an invariant about session-derived
@@ -600,10 +701,34 @@ Two files, because one cannot be both gated and ungated.
 One row per `(EventClass, ObjectType)` with a count and the first and last
 timestamp, plus the span in the root object. No text.
 
+For the autogrow classes — 92 and 93 — the aggregate also carries `Duration`
+and `IntegerData`, summed and at their maximum. A count of growth events
+without their duration throws away the finding: log autogrowth cannot use
+instant file initialisation, so it is unbuffered, and a single 40-second growth
+stalls every writer on the database. "The log grew 180 times" is a curiosity;
+"the log grew 180 times and the slowest took 41 seconds" is the report.
+
 `10.system/045.default-trace-detail.sql`, `@requires_flag: default_trace`: the
 retained rows for the event classes that carry a decision. `@requires_flag`
 gates the whole file (`skipReason`), so the first draft's "the aggregate half
 runs without it" was not buildable as one file.
+
+**That flag is not free, and this section owes what section 4 pays.**
+`KnownFlags` in `collect/queryset.go` is a closed map; `default_trace` is not
+in it, so the file fails discovery lint and the binary refuses to start until
+the entry exists, along with a `BoolVar` and help text in
+`cmd/sql-auditor/main.go` for `--include-default-trace`. Section 4 states this
+cost for `plan_cache_plans`; section 6 omitted it entirely, which is the kind
+of asymmetry that makes an estimate wrong by a day.
+
+**Both files read `sys.traces` through dynamic SQL into a table variable, and
+that is not decoration.** Measured: under a login without `ALTER TRACE`, a
+plain `SELECT id FROM sys.traces` inside a `TRY` emits the column metadata as
+an **empty result set** before raising `Msg 8189`, so the `CATCH` fires, the
+handler's own set follows, and the unit returns one result set more than it
+declared. `sys.traces` is a table-valued function and the engine sends its
+shape before it evaluates the permission. Staging it the way every other guard
+here works suppresses the phantom set.
 
 **The event-class list was wrong and is corrected.** Measured against
 `sys.trace_events`:
@@ -863,20 +988,40 @@ step, not here.
 which buffers exist and how fast each one turns over. The only question left is
 which ones are worth **decoding**, and the rule is:
 
-> Decode a buffer when Microsoft documents its record shape and it answers a
-> question no other collector answers. Everything else is covered by the
-> summary row, which costs nothing and lets an analyst ask for more when a
-> number looks wrong.
+> Decode a buffer when its record shape has been stable across the supported
+> range and it answers a question no other collector answers. Everything else
+> is covered by the summary row, which costs nothing and lets an analyst ask
+> for more when a number looks wrong.
+
+The first version of this rule said "when Microsoft documents its record
+shape", and a reviewer pointed out that the rule then forbids everything it
+goes on to propose: Microsoft documents `sys.dm_os_ring_buffers` as
+*"identified for informational purposes only, not supported, future
+compatibility is not guaranteed"*, and publishes the record schema of **no**
+buffer — not `RESOURCE_MONITOR`, not `SECURITY_ERROR`, not the ones refused
+below. A criterion that excludes its own conclusions is not a criterion.
+
+So the honest rule is the one above, and it comes with an obligation: what is
+decoded here is unsupported, its shape is asserted from observation, and every
+projection must survive an element that is missing or renamed — an XPath that
+returns NULL rather than a query that fails. The files say so in their headers.
+
+**File numbers.** These take `047` and `048` in `10.system`. The first version
+gave the first of them `045`, which section 6 had already taken — two files in
+one document claiming one number, in a corpus where nothing checks for that.
 
 Fourteen types exist on a bare 2022 instance. Two are worth decoding, one is
 worth an aggregate, and the rest are not.
 
-### `10.system/045.resource-pressure.sql` — `RING_BUFFER_RESOURCE_MONITOR`
+### `10.system/047.resource-pressure.sql` — `RING_BUFFER_RESOURCE_MONITOR`
 
 The strongest of them. Its records carry a `<Notification>` —
 `RESOURCE_MEMPHYSICAL_LOW`, `RESOURCE_MEMPHYSICAL_HIGH`,
-`RESOURCE_MEMVIRTUAL_LOW` — with per-process, per-system and per-pool
-indicators and the node.
+`RESOURCE_MEMVIRTUAL_LOW` — with `<IndicatorsProcess>`, `<IndicatorsSystem>`
+and `<IndicatorsPool>`, and the node, which is `<NodeId>` and not `<Node>` as
+the first version wrote it. An XPath on the wrong name returns NULL rather than
+failing, so this is the class of error that ships and produces a column of
+nulls nobody questions.
 
 This is the historical record of memory pressure, and every other memory
 reading in the archive is an instant. Section 8 makes exactly that argument for
@@ -889,11 +1034,17 @@ Aggregate by notification and node, with counts and the first and last
 timestamp, plus the buffer's span. `@scope: instance`,
 `@permissions: CONNECT, VIEW SERVER STATE`.
 
-### `10.system/046.security-errors.sql` — `RING_BUFFER_SECURITY_ERROR`
+### `10.system/048.security-errors.sql` — `RING_BUFFER_SECURITY_ERROR`
 
-Records carry `<SPID>`, `<APIName>`, `<CallingAPIName>`, `<ErrorCode>` and
-`<SQLErrorCode>` — the security API talking: SSPI negotiation failures,
-Kerberos problems, impersonation refused.
+Records carry `<SPID>`, `<APIName>`, `<CallingAPIName>`, `<ErrorCode>`,
+`<SQLErrorCode>` and `<SQLErrorState>` — the security API talking: SSPI
+negotiation failures, Kerberos problems, impersonation refused.
+
+**`ErrorCode` is a hexadecimal string, not a number.** A live record carries
+`0x139F`, and `CAST('0x139F' AS int)` fails with `Msg 245` — measured. It is
+projected as `varchar(32)` verbatim; a reader who wants the decimal can convert
+through `varbinary`, and the archive keeps the form the engine wrote, which is
+also the form every search engine will match.
 
 It is not the same thing as a failed login, and that is why it is worth having.
 `040.error-log.sql` counts 18456s, which says an authentication attempt failed;
@@ -907,11 +1058,14 @@ answers the question.
 
 ### `RING_BUFFER_EXCEPTION` — an aggregate, folded into `041`
 
-459 records on an instance doing nothing. It carries the error number,
-severity, state and SPID, and it survives a cycle of the error log. An
-aggregate by error number and severity, with counts and the window, is cheap
-and would say "this instance throws three thousand 8134s an hour", which the
-error log's filtered read can miss. A dump would be noise.
+459 records on an instance doing nothing. Its `<Exception>` node carries
+`<Task>`, `<Error>`, `<Severity>`, `<State>`, `<UserDefined>` and `<Origin>`,
+followed by a `<Stack>` — and **no `<SPID>`**, which the first version claimed
+by confusing it with the security buffer above. It survives a cycle of the
+error log. An aggregate by error number and severity, with counts and the
+window, is cheap and would say "this instance throws three thousand 8134s an
+hour", which the error log's filtered read can miss. A dump would be noise, and
+the `<Stack>` is never projected.
 
 ### The refusals, and why
 
@@ -936,25 +1090,57 @@ when someone reads a quiet afternoon as a quiet server.
 
 ---
 
-## 11. Two things the review found in the repository, not in this document
+## 10 bis. One gap the review named that this document does not close
 
-Neither belongs to this specification's work. Both are recorded because the
-next person to read this will wonder.
+**The missing-index DMVs.** `sys.dm_db_missing_index_group_stats` and its
+siblings are absent from the corpus and from this specification, and a reviewer
+was right to notice: aggregating them is a fixture of every performance audit,
+and the tool collects index *usage* and *operational* statistics without ever
+saying which index the optimiser wished for.
 
-**An unknown directive is silently ignored.** `parseScript` switches on
+It is not added here, and the reason is the one the query-plan discipline
+already states elsewhere in this practice: the missing-index DMVs are a
+suggestion engine, not a measurement. Their `improvement_measure` is a
+heuristic, they propose overlapping indexes, they ignore write cost, and their
+DDL is famously not to be pasted. Collecting them is easy; collecting them
+without inviting a report that pastes them is the design question, and it wants
+its own section rather than a line here.
+
+The honest position: it is a real gap, it is deliberate, and it is the next one
+to write.
+
+## 11. Two things the review found in the repository — both now fixed
+
+Neither belonged to this specification's work. Both are recorded because this
+document argued from them, and both changed under it while it was being
+reviewed.
+
+**An unknown directive was silently ignored.** `parseScript` switched on
 directive names with no default case, so `-- @minversion:` or any other
-misspelling produces no lint error and no effect — the file ships ungated with
-nothing anywhere saying so. It is the same class of silent failure the `@scope`
-and `@timeout` rules were written against, and it is why section 1 no longer
-introduces a new directive. It wants its own fix and its own test, and that fix
-should land before any future directive does.
+misspelling produced no lint error and no effect — the file shipped ungated
+with nothing anywhere saying so. It is now a lint error. Writing the test first
+turned up three header lines in the shipped corpus that opened with an `@` word
+in prose and had been parsed as directives all along; all three are reworded,
+and the rule for the next author is that a header line never begins with an
+`@` word, even in prose.
 
-**The manifest's promise is already inexact.** MANIFEST.txt states the
-collector "issues only read-only SELECT statements" and "runs no INSERT,
-UPDATE, DELETE or DDL". `040.error-log.sql` creates a temp table and does
-`INSERT ... EXEC sys.sp_readerrorlog`; `041.compression-savings.sql` does the
-same. The sentence is what makes a DBA willing to approve the tool without
-reading the corpus, and it does not currently describe the corpus. Section 1's
-`INSERT ... EXEC` into a table variable does not widen the gap in kind, but the
-gap is real and unaddressed, and the audience for the decision is a security
-officer reading the manifest beside the corpus.
+Section 1 still declines to introduce `@max_version` — the self-guarding file
+is smaller for other reasons — but the argument that a new directive is
+dangerous to ship no longer holds, and that is worth knowing before the next
+one is proposed.
+
+**The manifest's promise was inexact and is reworded.** It used to say the
+collector "runs no INSERT, UPDATE, DELETE or DDL", which
+`040.error-log.sql` and `041.compression-savings.sql` had already contradicted
+by capturing `sp_readerrorlog` and `sp_estimate_data_compression_savings`
+through `INSERT ... EXEC` — and which section 1's redesigned `023` would have
+contradicted a third time. A reviewer found it by reading this document beside
+the replication specification, which quotes the same promise as a binding
+constraint while building its guard pattern on an INSERT.
+
+The sentence now promises what the reader actually needs: only SELECT against
+catalog and dynamic management views, no user or application table, the few
+command-only diagnostics captured into scratch storage in tempdb, and **no
+permanent object created, altered or deleted**. That is true of the corpus,
+true of everything specified here, and it keeps the line that makes `observe` a
+separate command — `CREATE EVENT SESSION` creates a permanent object.

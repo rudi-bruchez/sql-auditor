@@ -35,8 +35,10 @@ duplicate them:
   `REPL-Distribution` and `REPL-Snapshot` categories, and a failing agent is
   the most common replication finding in an audit.
 - `20.databases/024.log-stats.sql` reports `log_reuse_wait_desc` beside the log
-  size and the VLF count. A publisher whose log is held by `REPLICATION` is
-  visible there today.
+  size and its growth settings. A publisher whose log is held by `REPLICATION`
+  is visible there today. It does **not** carry the VLF count, and says so in
+  its own header — `023.log-vlf.sql` owns that, because two files reporting the
+  same count is how they come to disagree.
 - `90.availability/040.replication.sql` reports the flags, which remain the
   cheapest way to see a database that was restored from a publisher and kept a
   flag nobody cleared.
@@ -86,7 +88,7 @@ FROM sys.databases AS d WHERE d.database_id = DB_ID();
 
 DECLARE @pub TABLE (…);                       -- staging; exists unconditionally
 
-IF @applies = 1 AND OBJECT_ID(N'dbo.syspublications', N'U') IS NOT NULL
+IF @applies = 1
 BEGIN
     BEGIN TRY
         INSERT INTO @pub (…)
@@ -106,14 +108,14 @@ SELECT … FROM @pub AS p OPTION (RECOMPILE, MAXDOP 1);
 
 Four properties, each doing work:
 
-- **`OBJECT_ID` is the guard, not the flag.** It answers the question that
-  actually matters — does the object exist here — and it never raises. The role
-  flag is tested too, because it says what the collector is *for*, but the
-  `OBJECT_ID` test is what makes the file safe.
+- **The guard is the role flag, and nothing else.** It says what the collector
+  is *for*. It deliberately does **not** test whether the object exists: see
+  the next paragraph, which is the correction that produced this version of the
+  document.
 - **`sp_executesql` defers name resolution**, which turns an uncatchable
   compile error into a catchable runtime one. Measured: the same read raises
   208 uncaught when written directly and returns 208 as a caught error inside
-  `sp_executesql`.
+  `sp_executesql`. This is the whole safety mechanism; nothing else is needed.
 - **`IF` guards only the staging, never a statement that returns rows.** The
   result sets are emitted unconditionally at the end, reading from table
   variables. The declared `@resultsets` count is therefore constant, which is
@@ -122,18 +124,45 @@ Four properties, each doing work:
   `CATCH` is an extra result set and would fail the unit on the very runs the
   degradation exists to rescue.
 
+### Why there is no `OBJECT_ID` test, which there was
+
+An earlier version of this section guarded with
+`@applies = 1 AND OBJECT_ID(N'dbo.syspublications', N'U') IS NOT NULL`, on the
+reasoning that `OBJECT_ID` answers "does this object exist here" and never
+raises. It does not answer that question. **`OBJECT_ID` returns NULL both for
+an object that is absent and for one the caller may not see**, and metadata
+visibility is exactly what a bare audit login lacks.
+
+Measured: a table created by `sa`, read by a login with a user in the database
+and no rights on the table, returns `OBJECT_ID` = NULL, while the same read
+sent through `sp_executesql` raises 229. With the test in place the collector
+skips the read and reports `applies = 1, collected = 1, no rows` — which this
+document's own table calls *"there is genuinely nothing there"*. A publisher
+with publications would have been recorded as one with none, silently, on
+precisely the login this tool is built for.
+
+Two independent readers found it, and the evidence was already in
+`docs/verification-replication-guard.md`: the failure path there was obtained
+"with the guard forced open". The note recorded that the mechanism only
+produces its error state when the guard is removed, and nobody read it that
+way.
+
+Removing the test makes the design smaller and strictly better. The absent
+object raises 208, the refused read raises 229, both are caught, and the
+difference between them is the information the archive needs.
+
 **Three states, and the archive can tell them apart:**
 
 | `applies` | `collected` | Meaning |
 | --- | --- | --- |
 | 0 | 1 | The database does not carry the role. Nothing was attempted. |
-| 1 | 0 | It does, and the read failed. `error_number` says whether the object was missing (208) or the login was refused (229). |
+| 1 | 0 | It does, and the read failed. `error_number` says whether the object was missing (208), the login was refused (229), or something else. |
 | 1 | 1, no rows | It does, the read succeeded, and there is genuinely nothing there. |
 
 Measured on a database with no replication: two result sets,
-`applies=0, collected=1, error_number=0`, second set empty. Forced down the
-failure path: `applies=1, collected=0, error_number=208`, message intact, still
-two result sets.
+`applies=0, collected=1, error_number=0`, second set empty. On the failure
+path: `applies=1, collected=0, error_number=208`, message intact, still two
+result sets.
 
 **The state this cannot distinguish**, and it must be said rather than
 discovered: if a replication catalog view filters by visibility instead of
@@ -190,8 +219,35 @@ struct change reaching `check`'s database listing and `writeTargets` in
 ### The widened database is not a general target
 
 A database retained by the second pass is retained **for the replication
-collectors only**. `planUnits` skips it for every other `@scope: database`
-collector.
+collectors only**. `planUnits` pairs it with those collectors and with nothing
+else.
+
+**How it knows, which the first version of this section did not say.** Four
+readers pointed out the same hole: `planUnits` receives `[]DatabaseFolder`,
+which is `{Name, Folder}` and carries no provenance, and `Script` has no field
+saying "this is a replication collector". Left unspecified, an implementer
+reaches for a hardcoded path prefix in the orchestrator — the silent, unlinted
+coupling that `KnownFlags`, `KnownWriters` and `permissionKeys` exist to
+prevent, and one that `--queries-dir` would defeat without a word.
+
+So both halves are declared:
+
+- `DatabaseFolder` gains `WidenedFor string`, empty for an ordinarily selected
+  database and `"replication"` for one the second pass brought back.
+- The three collectors declare `-- @widened: replication`, parsed in
+  `collect/queryset.go` into `Script.Widened` against a closed vocabulary, like
+  every other directive.
+
+`planUnits` then pairs a widened folder only with a script whose `Widened`
+matches. That is a change to `queryset.go`, and the change list below says so;
+the earlier claim that nothing there changes was wrong.
+
+**It also costs manifest noise, which is worth pricing.** Roughly thirty
+database-scoped collectors exist. Skipping each of them for the retained
+database would write thirty "Queries not run" entries into every widened run.
+It is therefore not a skip: a widened folder is never offered to those scripts
+in the first place, so nothing is recorded as skipped, and the manifest's
+retention reason on the database is where a reader learns what happened.
 
 This is not tidiness. Left as an ordinary target, the distribution database
 would receive the whole database-scoped corpus, and two collectors there are
@@ -220,11 +276,31 @@ is in `data_source`. `040.replication.sql` reports
 One per role, each `@scope: database`, each built on the pattern above.
 
 Directives are part of the specification, because a missing `@timeout` is a
-hard lint error and an unknown directive name is silently ignored (see "A
-defect this uncovered"). Each file declares `@scope: database`, an explicit
-`@resultsets` list, `@timeout: 60`, and `@permissions: CONNECT, VIEW ANY
-DEFINITION` — the rights the corpus already asks for, and no more. See
-"Permissions" for why nothing more is asked.
+hard lint error, and an unknown directive name is now a lint error too — that
+was fixed while this document was under review, so a misspelling fails loudly
+rather than shipping ungated.
+
+Each file declares `@scope: database`, an explicit `@resultsets` list,
+`-- @widened: replication`, and `@permissions: CONNECT, VIEW ANY DEFINITION` —
+the rights the corpus already asks for, and no more. See "Permissions" for why
+nothing more is asked.
+
+`@timeout` is **120**, not the 60 the first version wrote without measuring it.
+`041.connectivity.sql` already declares 120 for decoding a single ring buffer;
+`042` aggregates seven days of two history tables with a `PERCENTILE_CONT` sort
+under `MAXDOP 1`. A timeout fails the whole unit and the degradation pattern
+does not catch it, so the number is the one place here where guessing low costs
+the run.
+
+**`042` needs `VIEW SERVER STATE` for one reading and must not pretend
+otherwise.** `sys.dm_db_partition_stats`, used for the `MSrepl_commands` row
+count, is a database-scoped DMV requiring `VIEW DATABASE STATE` — measured,
+`Msg 262` then `Msg 297` under `VIEW ANY DEFINITION` alone, and readable with
+`VIEW SERVER STATE`, which carries `VIEW DATABASE STATE` into every database.
+Rather than raise the whole file's declared permission and have it skipped on
+logins that could collect everything else, the row count moves to its own
+statement guarded like the rest: if it fails, `collected = 0` for that section
+and the topology still lands.
 
 Every projection is an explicit column list. `MSlogreader_agents` carries
 `publisher_password` and `job_password`, and `syspublications` carries
@@ -311,8 +387,10 @@ on one leg or the other, and which one decides where to look.
 Per agent: the most recent session with its `runstatus` and time, the latest
 `delivery_latency`, the maximum over the window, and the median. The median is
 not `MEDIAN()`, which does not exist in T-SQL, and it is not
-`PERCENTILE_CONT(0.5) WITHIN GROUP (…)` used as an aggregate, which is a
-SQL Server 2022 construct. At the 2012 floor it is the analytic form,
+`PERCENTILE_CONT(0.5) WITHIN GROUP (…)` used as an aggregate, which exists in
+Azure SQL and Fabric and on **no** version of SQL Server — measured,
+`Msg 10753, the function 'PERCENTILE_CONT' must have an OVER clause`, on 2022.
+At the 2012 floor and everywhere else it is the analytic form,
 `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delivery_latency)
 OVER (PARTITION BY agent_id)`, computed in a CTE and collapsed by a grouping
 outside it. The file is parsed under the 2012 grammar by
@@ -370,14 +448,36 @@ whole signal.
 Both are instance-scoped, need no right the corpus does not already hold, and
 belong beside the flags rather than in a new file:
 
-- **The oldest un-replicated transaction.** When `log_reuse_wait_desc` is
-  `REPLICATION`, `sys.dm_tran_database_transactions` names the transaction
-  holding the log and when it began. `024.log-stats.sql` says the log is held;
-  this says by what.
 - **Replication performance counters**, from
   `sys.dm_os_performance_counters` (`SQLServer:Replication Logreader`,
-  `SQLServer:Replication Dist.`). Live throughput under `VIEW SERVER STATE`,
-  without touching a history table.
+  `SQLServer:Replication Dist.`). Live throughput without touching a history
+  table.
+
+**And one thing that was here and cannot be done.** An earlier version of this
+section proposed reading `sys.dm_tran_database_transactions` to name "the
+oldest un-replicated transaction" when `log_reuse_wait_desc` is `REPLICATION`.
+That view lists only transactions that are still **active**. When the log is
+held by replication, the transactions holding it have *committed* and are
+waiting for the Log Reader; they left that view at the instant of commit —
+measured, the count drops to zero on `COMMIT`. On the three-week-old failure
+this document opens with, the query returns nothing. Naming the watermark needs
+`DBCC OPENTRAN` or a comparison of `MSrepl_commands.xact_seqno` against the
+publisher's LSN, neither of which is proposed here. The gap is real and stays
+open rather than being closed by a query that cannot answer it.
+
+**The permission changes, and that is not free.** Today `040.replication.sql`
+declares `CONNECT, VIEW ANY DEFINITION` and succeeds on a login holding exactly
+that. `sys.dm_os_performance_counters` needs `VIEW SERVER STATE` — measured,
+`Msg 300` then `Msg 297` without it. Since `@permissions` drives the skip gate,
+the file must declare `VIEW SERVER STATE`, and a login that lacks it then loses
+the four replication flags it collects today.
+
+That trade is not worth making in one file. The counters go in their own file,
+`90.availability/044.replication-counters.sql` — 041, 042 and 043 are taken by
+the collectors above — declaring `VIEW SERVER STATE`, so a login without that
+right loses the counters and keeps the flags. The
+existing `040` keeps its permissions and gains only the `sys.servers` reading,
+which needs nothing new.
 
 The file's header is rewritten. Most of it argues that distribution metadata is
 unreachable, and that argument stops being true here. What stays: the flags are
@@ -408,18 +508,39 @@ shaped for the job: its probes are instance-level and run before the database
 list exists, while the right in question lives inside a database whose name is
 learned later. Requiring nothing removes all three changes.
 
-The cost is honest and stated: on a bare audit login, `041` will often record
-`collected = 0` with error 229, and the publisher side of the picture will be
-thinner than the distributor side. An archive that says so is worth more than
-one that demanded a grant nobody should give.
+The cost is honest and stated, and the first version stated it wrongly. It said
+that on a bare audit login `041` would record `collected = 0` with error 229.
+It would not: `@permissions` drives the skip gate, so a login that lacks
+`VIEW ANY DEFINITION` never runs the file at all — it lands under "Queries not
+run" in the manifest, which is a different and better-labelled outcome. The 229
+path is reached only by a login that holds `VIEW ANY DEFINITION` and still
+cannot read `syspublications`, which is the ordinary audit login this practice
+is given.
+
+Either way the publisher side of the picture is thinner than the distributor
+side, and the archive says which of the two happened. That is worth more than a
+grant nobody should give.
 
 ## The read-only promise is a design constraint
 
-The manifest of every archive says the collector issues only read-only SELECT
-statements, runs no INSERT, UPDATE, DELETE or DDL, and reads no user or
-application table. `observe` exists as a separate command because
-`CREATE EVENT SESSION` is DDL and a promise with one exception is not a
-promise. The same reasoning binds here:
+The manifest of every archive says the collector reads: only SELECT statements
+against catalog and dynamic management views, no user or application table, and
+— the sentence that matters — **it creates no permanent object; nothing that
+belongs to the server or its databases is created, altered or deleted.**
+`observe` exists as a separate command because `CREATE EVENT SESSION` creates
+one, and a promise with one exception is not a promise.
+
+That wording is new, and this document is part of why. The sentence used to
+read "runs no INSERT, UPDATE, DELETE or DDL", which the guard pattern above
+contradicts in its first line: `INSERT INTO @pub … EXEC sp_executesql` is an
+INSERT. So were two collectors already shipped, which capture `sp_readerrorlog`
+and `sp_estimate_data_compression_savings` the same way. An external reader
+found the contradiction here, in the section that quotes the promise as
+binding. The sentence was corrected rather than the corpus, because what a
+security officer needs to know is not which SQL verb is used but what the
+server keeps afterwards — nothing — and the staging happens in tempdb.
+
+The same reasoning binds the rest of the design:
 
 **No `sp_posttracertoken`.** Posting a tracer token is the sanctioned way to
 measure end-to-end latency, and it is a write. Where a client already posts
@@ -471,9 +592,16 @@ whole of it:
 - **`collect.SelectTargets`** gains the second pass, including removal of the
   superseded `SkipReason`.
 - **`collect.Selection`** gains a retention reason for an included database,
-  which `check`'s listing and `manifest.writeTargets` render.
-- **`collect.planUnits`** skips a database retained by the second pass for
-  every `@scope: database` collector except the replication ones.
+  which `check`'s listing and `manifest.writeTargets` render. `writeTargets`
+  iterates `m.Targets.Databases`, which is `[]DatabaseFolder`, so the reason
+  travels on `DatabaseFolder` rather than on `Selection.Included` — the first
+  version named the wrong struct.
+- **`collect.DatabaseFolder`** gains `WidenedFor string`.
+- **`collect.queryset`** gains the `@widened` directive and its closed
+  vocabulary, and `Script` gains the field. The first version claimed nothing
+  here changed; that was only true of the permissions work.
+- **`collect.planUnits`** pairs a widened folder only with a script whose
+  `@widened` matches, and offers it to no other `@scope: database` collector.
 - **`queries/90.availability/040.replication.sql`** — header rewritten, plus
   the two instance-scoped additions.
 - **`docs/dba-guide.md`** — a paragraph saying that no new grant is asked for,
@@ -534,22 +662,61 @@ The floor stays SQL Server 2012, spelled `@min_version` where a file needs it.
 No file is expected to need it, and `tools/verify-corpus-grammar.ps1` is what
 confirms that rather than this paragraph.
 
-## A defect this uncovered, which is not part of this work
+## A defect this uncovered, since fixed
 
-`parseScript` in `collect/queryset.go` switches on directive names with no
-default case, so a directive whose name it does not recognise is silently
-ignored. A file carrying `-- @minversion:` — the misspelling the first draft of
-this document itself used — would be ungated on every version, and nothing
-anywhere would say so. That is the same class of silent failure the `@scope`
-and `@timeout` lint rules were written against. It deserves its own fix and its
-own test, and it is mentioned here only because the review found it while
-reading this specification.
+`parseScript` switched on directive names with no default case, so a name it
+did not recognise was silently ignored. A file carrying `-- @minversion:` — the
+misspelling the first draft of this document itself used — would have been
+ungated on every version with nothing anywhere saying so.
+
+It is fixed: an unknown directive is now a lint error. Writing the test first
+turned up three header lines in the shipped corpus that opened with an `@` word
+in prose, which the parser had been reading as directives all along; all three
+are reworded. The rule that follows is worth carrying into the three new files:
+**a header line never begins with an `@` word, even in prose.**
+
+This mattered here beyond tidiness. It is what makes the `@widened` directive
+above safe to introduce — a misspelling of it now fails loudly instead of
+quietly widening nothing.
+
+## What a competent audit will still ask for, and this does not collect
+
+Three gaps a reviewer named, kept here rather than quietly widened into the
+scope:
+
+**Article filters.** `041` collects article names and destination objects but
+not `sysarticles.filter` and `filter_clause`, nor the column list from
+`sysarticlecolumns`. When a subscriber is missing rows, a horizontal row filter
+or a dropped column is the first cause to check, and the archive would not
+show it. This is cheap to add and the only reason it is not in the projection
+is that nobody has yet said which of the two matters more often.
+
+**The un-replicated watermark.** With the `sys.dm_tran_database_transactions`
+idea withdrawn, nothing says how far behind the Log Reader is in log terms.
+The real answer compares `MSrepl_commands.xact_seqno` on the distributor with
+the publisher's current LSN, which crosses the two databases this design keeps
+apart. It is the most valuable thing missing.
+
+**Retention actually honoured.** `MSdistributiondbs` gives the configured
+retention; nothing checks whether `MSrepl_commands` holds transactions older
+than `max_distretention`, which is the signature of a cleanup job that runs and
+deletes nothing. The cleanup-agent history above says whether cleanup ran; this
+would say whether it worked.
 
 ## Open questions
 
 **Should the widening extend to `is_merge_published`?** Today it does not,
 because merge is out of scope. If a merge collector is ever written, the rule
 needs one word changed, and the decision belongs to that moment.
+
+**A stale flag widens the run.** `is_published` survives a restore from a
+publisher — this document says so itself, twice — so a leftover flag on an
+included database retains the distribution database into a narrowed run. The
+guards make it harmless: `042` finds nothing and records that it found nothing.
+But an operator will see a database they did not name, and the manifest's
+retention reason is where they will learn why. That is acceptable, and it is
+written down here so that the first person it surprises can find it. It gets a
+test fixture with a stale flag.
 
 **Does the `planUnits` restriction want an escape?** An auditor who genuinely
 wants the distribution database inventoried can name it in `DB_INCLUDE`, at

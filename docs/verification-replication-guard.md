@@ -77,7 +77,41 @@ after
 Deferring name resolution to a lower execution level turns an uncatchable
 compile error into a catchable runtime one, and execution continues.
 
-## 4. The specified pattern, both branches
+## 4. `OBJECT_ID` cannot be the guard: it hides a refusal as an absence
+
+An earlier version of the specification guarded the read with
+`OBJECT_ID(...) IS NOT NULL`, on the reasoning that it asks whether the object
+exists and never raises. It asks a different question.
+
+As `sa`, in a scratch database: `CREATE TABLE dbo.hidden_7b2e (id int)`, and a
+login with a user in the database and no rights on the table. As that login:
+
+```sql
+SELECT OBJECT_ID(N'dbo.hidden_7b2e', N'U') AS objet_id_vu;
+BEGIN TRY EXEC sys.sp_executesql N'SELECT id FROM dbo.hidden_7b2e';
+END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS err, LEFT(ERROR_MESSAGE(),50) AS msg; END CATCH
+```
+
+```
+objet_id_vu
+-----------
+NULL
+
+err msg
+--- ---
+229 The SELECT permission was denied on the object 'hi
+```
+
+The object exists. `OBJECT_ID` returns NULL because the login cannot see it in
+metadata, so the guard skips the read and the collector reports "nothing here".
+The same read, unguarded, raises 229 and is caught.
+
+That is why the specified pattern guards on the role flag alone. The test in
+section 5 below was originally obtained "with the guard forced open" — which
+was the evidence that the guard defeated the mechanism, recorded here and not
+noticed until two external readers pointed at it.
+
+## 5. The specified pattern, both branches
 
 The pattern from the specification, run unchanged on a database that carries no
 replication role:
@@ -93,8 +127,9 @@ name  immediate_sync  allow_anonymous
 
 Two result sets, the second empty with its declared shape, no error.
 
-The same file with the guard forced open, so the dynamic read runs against an
-object that is not there:
+The same file on the failure path, the dynamic read running against an object
+that is not there — which is what the specified pattern now does by default,
+since the `OBJECT_ID` test that used to prevent it has been removed:
 
 ```
 applies collected error_number error_message
