@@ -79,7 +79,8 @@ DECLARE @first_err int = 0, @first_msg nvarchar(2048) = N'', @first_obj sysname 
    #candidates". This guard is in the originating tsql-scripts and removing it
    was a mistake — an interactive script gets away without it because the DBA
    opens a new window; an unattended sweep of eleven databases does not.
-   Measured: DATAWAREHOUSE succeeded, DSA_M3 failed on the very next call. */
+   Measured on a client instance in August 2026: the first database succeeded
+   and the very next call failed. */
 IF OBJECT_ID('tempdb..#candidates') IS NOT NULL DROP TABLE #candidates;
 IF OBJECT_ID('tempdb..#savings')    IS NOT NULL DROP TABLE #savings;
 
