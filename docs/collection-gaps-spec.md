@@ -3,12 +3,17 @@
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
 **Status:** specification. Nothing here is implemented yet.
 
-Four gaps, each one found because an audit could not answer a question from the
+Five gaps, each one found because an audit could not answer a question from the
 archive and had to go back to the client. That is the bar for entry: a gap is
 something the analysis actually needed, not something that would be nice to
 have.
 
-A fifth idea is recorded at the end **because it is already implemented**, and
+One of the five is not a missing collector at all: the facts are collected and
+the arithmetic that turns them into a finding is left to a reader who has no
+reason to attempt it. That case is section 5, and it is the cheapest of the
+five to fix.
+
+A sixth idea is recorded at the end **because it is already implemented**, and
 the point of writing it down is to stop it being built a second time.
 
 ---
@@ -240,7 +245,97 @@ and it stays.
 
 ---
 
-## 5. Procedure execution frequency — already collected, do not build again
+## 5. Is SQL Server alone on this machine?
+
+### The gap, and what already answers half of it
+
+An application server sharing a host with its database is a finding an audit
+should make on its own, and today it is made by accident. In September 2026 it
+surfaced only because the client mentioned it in passing.
+
+**Part of the answer is already in the archive and nobody was reading it.**
+`10.system/010.properties.sql` collects `total_physical_ram_mb`,
+`available_physical_ram_mb` and `sql_ram_in_use_mb`. The subtraction is the
+finding:
+
+```
+other_processes_mb = total_physical_ram - available_physical_ram - sql_ram_in_use
+```
+
+On the instance in question that came to 18.5 GB of RAM held by something other
+than the database engine, on a machine of 64 GB. Nothing in the report said so,
+because the three numbers sat in three fields and the arithmetic was left to a
+reader who had no reason to attempt it.
+
+**The first change is therefore not a collector.** `010.properties.sql` should
+project the derived value beside its operands, the way `014.cpu-topology.sql`
+projects the hardware-versus-soft-NUMA answer rather than leaving it to be
+inferred. A fact that is meaningless without an operation on its neighbours does
+not get to stay implicit.
+
+### What is genuinely missing: the CPU half
+
+Memory says something else is resident. It does not say something else is
+*running*. The ring buffer does.
+
+`RING_BUFFER_SCHEDULER_MONITOR` records carry a `<SystemHealth>` element with
+`<ProcessUtilization>` — the CPU percentage used by the SQL Server process —
+and `<SystemIdle>`. What is left over is everybody else:
+
+```
+other_processes_pct = 100 - ProcessUtilization - SystemIdle
+```
+
+That is the standard reading and it is a time series, one record per minute,
+which is better than any instantaneous figure: it shows whether the neighbour is
+constant or spikes at the hour a batch runs.
+
+`10.system/041.connectivity.sql` already reads `sys.dm_os_ring_buffers` and
+already reports the span of every buffer, but it projects only the connectivity
+records. The scheduler-monitor records need their own collector,
+`10.system/043.cpu-neighbours.sql`, and it inherits two constraints from its
+sibling, both learned the hard way there:
+
+- **The buffer wraps at 256 records.** Measured on a real instance: a span of
+  4 hours 15 minutes. The window must be reported beside the numbers, because a
+  short window *is* the finding when someone reads a quiet afternoon as a quiet
+  server.
+- **The ms_ticks arithmetic is done in seconds**, not milliseconds, or it
+  overflows a 32-bit int after 24 days of uptime — which is exactly the
+  population worth auditing.
+
+### The third signal: who connects from the machine itself
+
+Covered by collector 3 above. `net_transport = 'Shared memory'` means the
+session originates on the server, and a local TCP connection means the same
+thing. Add `program_name` from `sys.dm_exec_sessions`, aggregated with a count,
+and the archive says *which* application is co-resident rather than only that
+one is.
+
+`program_name` is client-supplied and therefore not evidence: it is empty for a
+default `SqlClient` connection and can say anything. It corroborates, it does
+not prove.
+
+### The honest limit, which belongs in the file
+
+**Nothing inside SQL Server can enumerate the processes of its host.** There is
+no read-only DMV for it, and the paths that exist — `xp_cmdshell`, a CLR
+assembly, WMI through a linked server — all require permissions this collector
+refuses to ask for and would break the read-only promise.
+
+So the finding this makes possible is *"SQL Server is not alone on this machine,
+here is how much memory and how much CPU it is not getting, and here is what
+connects locally"*. It is not a process list, and the collector must not be
+written as though it were producing one. That phrasing matters: an audit that
+says "18.5 GB is used by other processes" is reporting a measurement, while one
+that names the application is repeating what somebody said.
+
+`sys.dm_server_services`, already collected by `020.host-services.sql`, closes
+the last corner: it reports the SQL-family services on the host, so a Reporting
+Services or Analysis Services instance sharing the machine is visible without
+any of the above.
+
+## 6. Procedure execution frequency — already collected, do not build again
 
 Recorded here because it was proposed as new twice, from two directions, and
 the second proposal is the reason this section exists.
