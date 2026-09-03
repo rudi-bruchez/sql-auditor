@@ -62,9 +62,8 @@ as its measurement record. Read both before Task 6.
 | `043.replication-subscriber.sql` | create | subscription-side catalog |
 | `044.replication-counters.sql` | create | replication performance counters, `VIEW SERVER STATE` |
 
-Tasks 1–7 are the socle and are shippable on their own: they change no
-collector output and are covered by unit tests plus one live check. Task 7 is
-the natural review gate before any SQL is written.
+Tasks 1–8 are the socle and are shippable on their own: they change no
+collector output and are covered by unit tests plus one live check. Task 8 is the natural review gate before any SQL is written.
 
 ---
 
@@ -146,6 +145,24 @@ Add the case to `parseScript`'s switch, before `default`:
 				break
 			}
 			s.Widened = val
+```
+
+The `default` case's message hand-lists the accepted directive names and must
+gain `widened`, or the first person to misspell it is told to use a vocabulary
+that does not contain the word they wanted:
+
+```go
+			setLint(fmt.Sprintf("unknown directive @%s; expected one of "+
+				"scope, timeout, permissions, resultsets, min_version, "+
+				"requires_flag, writer, widened, correlated — and note that a "+
+				"header line must not begin with an @ word, even in prose", key))
+```
+
+Add a case to the lint table that pins it, so the list cannot drift again:
+
+```go
+		{"the unknown-directive message lists widened", "queries/10.system/010.a.sql",
+			"-- @resultsets: a:object\n-- @widning: replication\nSELECT 1;", "widened"},
 ```
 
 - [ ] **Step 4: Run the tests and watch them pass**
@@ -371,10 +388,12 @@ Append to `SelectTargets`, after the existing loop and before `return`:
 	//
 	// "Retained after filtering" is exact: a publisher the operator excluded,
 	// or one the login cannot reach, does not trigger it.
+	// "Retained" is the whole test: sel.Included already encodes every reason
+	// the first pass had for keeping or dropping a database, so re-testing
+	// DB_INCLUDE here would be a tautology.
 	published := 0
 	for _, d := range c {
-		if d.IsPublished && matchAny(inc, d.Name) == (len(inc) > 0) &&
-			containsString(sel.Included, d.Name) {
+		if d.IsPublished && containsString(sel.Included, d.Name) {
 			published++
 		}
 	}
@@ -590,7 +609,13 @@ In `planUnits`, inside the `if s.Scope == ScopeDatabase` branch, after
 			// one per ordinary collector would write thirty "Queries not run"
 			// lines into every widened run, describing a pairing nobody asked
 			// for.
-			kept := targets[:0]
+			// A new slice, never targets[:0]. queryStoreUnits returns the
+			// caller's slice unchanged for every script without a @writer, so
+			// targets aliases folders, and filtering in place would rewrite
+			// the shared list for every later script. Demonstrated: after one
+			// ordinary script, folders becomes [SALESDB, SALESDB] — one
+			// database collected twice and the other gone.
+			kept := make([]DatabaseFolder, 0, len(targets))
 			for _, t := range targets {
 				if t.WidenedFor == "" || t.WidenedFor == s.Widened {
 					kept = append(kept, t)
@@ -599,12 +624,26 @@ In `planUnits`, inside the `if s.Scope == ScopeDatabase` branch, after
 			targets = kept
 ```
 
-At the call site in `collect.go`, where `ResolveDatabaseFolders` is called on
-the selection, wrap it:
+`ResolveDatabaseFolders` has **two** call sites and both need the marking, or
+`check` and `collect` disagree about the same run:
+
+`collect/collect.go:1278`:
 
 ```go
 	folders := MarkWidened(ResolveDatabaseFolders(sel.Included), sel.Widened)
 ```
+
+`collect/verify.go:155` — this is what `check` prints under "Databases that
+would be collected", and it is the one place a DBA looks *before* authorising
+the run. Without it, `check` shows the distribution database with nothing
+saying the operator did not ask for it:
+
+```go
+		v.Folders = MarkWidened(ResolveDatabaseFolders(sel.Included), sel.Widened)
+```
+
+The test file needs `"strings"` in its imports for the skip assertion below;
+`observer_test.go` does not import it today.
 
 - [ ] **Step 4: Run it and watch it pass**
 
@@ -634,8 +673,8 @@ git commit -m "N'offrir une base réintégrée qu'aux collecteurs pour qui elle 
 
 ```go
 func TestManifestExplainsAWidenedDatabase(t *testing.T) {
-	m := NewManifest()
-	m.Server.Name = "SQL01"
+	m := NewManifest("SQL01", "11.0.7001.0", "")
+	// Name, version and commit are constructor arguments, not fields.
 	m.Targets.Databases = []DatabaseFolder{
 		{Name: "SALESDB", Folder: "SALESDB"},
 		{Name: "DISTDB", Folder: "DISTDB",
@@ -762,9 +801,12 @@ git commit -m "Projeter les trois drapeaux de réplication dans la liste des can
 
 ---
 
-## Review gate
+## Review gate — after Task 8, not here
 
-**Stop here.** Tasks 1–7 are the socle: they change no archive content and are
+Task 8 belongs to the socle and comes next; take the gate after it, when the
+whole Go side is done and no SQL exists yet.
+
+**Stop then.** Tasks 1–8 are the socle: they change no archive content and are
 covered by unit tests plus one live check. Before writing any SQL, hand the
 diff to a fresh reviewer. The questions worth asking are whether the second
 pass can retain a database the first pass skipped for a reason other than
@@ -773,7 +815,136 @@ that should have had it.
 
 ---
 
-### Task 8: `041.replication-publisher.sql`
+### Task 8: Teach the collision test that a hint inside a string is not a statement
+
+**Files:**
+- Modify: `collect/queryset.go`
+- Modify: `queries_test.go:120`
+- Test: `collect/queryset_test.go`, `queries_test.go`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: `collect.BlankSQLStrings(sql string) string`, which returns `sql`
+  with the *contents* of single-quoted literals replaced by spaces, leaving
+  every other byte and the total length untouched.
+
+**Why this comes before any SQL is written.** `TestEmbeddedCorpusHasNoTopLevelKeyCollision`
+counts emitting statements by splitting the raw file on the literal string
+`OPTION (RECOMPILE, MAXDOP 1)`. The guard pattern puts that hint inside the
+`sp_executesql` string as well as on the outer statement, so every collector in
+this slice reports two to nine more emitting statements than it has result sets
+and the test fails. Measured on all four: 7 for 4, 16 for 7, 5 for 3, 3 for 2.
+
+The collector files are not wrong. The test's model of "an emitting statement"
+predates dynamic SQL, and the guard pattern is now the house pattern for any
+collector that reads an object which may not exist. Left alone, this test
+blocks the pattern everywhere and the obvious workaround — dropping the inner
+hints — would run a distributor's history aggregate without `MAXDOP 1` on the
+one instance where that matters.
+
+Note that `contractLint` in `queryset.go` deliberately *does* see hints inside
+literals, and should keep doing so: it asks "does every statement carry the
+hint", and a dynamic statement carrying it is a correct answer. Only the
+counting test needs the narrower view.
+
+- [ ] **Step 1: Write the failing test for the helper**
+
+In `collect/queryset_test.go`:
+
+```go
+func TestBlankSQLStringsKeepsCodeAndLength(t *testing.T) {
+	in := `SELECT 'a''b' AS x, 1 OPTION (RECOMPILE, MAXDOP 1);
+EXEC sp_executesql N'SELECT 1 OPTION (RECOMPILE, MAXDOP 1)';`
+	got := BlankSQLStrings(in)
+	if len(got) != len(in) {
+		t.Fatalf("length changed: %d -> %d", len(in), len(got))
+	}
+	if strings.Count(got, "OPTION (RECOMPILE, MAXDOP 1)") != 1 {
+		t.Errorf("the hint inside the literal should be blanked; got:\n%s", got)
+	}
+	if !strings.Contains(got, "EXEC sp_executesql") {
+		t.Errorf("code outside literals must survive; got:\n%s", got)
+	}
+	if strings.Contains(got, "a''b") {
+		t.Errorf("literal contents must be blanked; got:\n%s", got)
+	}
+}
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `go test ./collect/ -run TestBlankSQLStrings`
+Expected: compile error — `undefined: BlankSQLStrings`.
+
+- [ ] **Step 3: Implement**
+
+In `collect/queryset.go`, beside `StripSQLComments`:
+
+```go
+// BlankSQLStrings replaces the contents of single-quoted literals with spaces,
+// keeping every other byte and the total length. It exists so that a test can
+// count statements in code without seeing the SQL a collector passes to
+// sp_executesql: the guard pattern repeats the query hint inside that string,
+// and a naive split on the hint text counts the dynamic statement as a second
+// emitting one.
+//
+// It is deliberately not StripSQLComments' job. That function keeps literals
+// because contractLint must see a hint wherever it is written, including
+// inside dynamic SQL. The two callers want opposite things from the same text.
+func BlankSQLStrings(sql string) string {
+	b := []byte(sql)
+	inString := false
+	for i := 0; i < len(b); i++ {
+		if b[i] == '\'' {
+			// '' inside a string is an escaped quote, not a close: the state
+			// flips twice and lands where it started, which is correct.
+			inString = !inString
+			continue
+		}
+		if inString && b[i] != '\n' && b[i] != '\r' {
+			b[i] = ' '
+		}
+	}
+	return string(b)
+}
+```
+
+- [ ] **Step 4: Run it and watch it pass**
+
+Run: `go test ./collect/ -run TestBlankSQLStrings -v`
+Expected: PASS.
+
+- [ ] **Step 5: Use it in the collision test**
+
+In `queries_test.go`, change the split to work on the blanked text while the
+alias scan keeps working on the real one — the aliases live in code, so
+blanking changes nothing for them, and using one string for both keeps the
+positional match honest:
+
+```go
+		chunks := strings.Split(collect.BlankSQLStrings(s.SQL), "OPTION (RECOMPILE, MAXDOP 1)")
+```
+
+- [ ] **Step 6: Prove the change does not weaken the test**
+
+Run: `go test . -run TestEmbeddedCorpusHasNoTopLevelKeyCollision -v`
+Expected: PASS on the current 58-file corpus — no file loses coverage, because
+no shipped collector uses dynamic SQL with a hint inside it yet.
+
+Then confirm the test still catches what it was written for, by temporarily
+adding a root column `[waits.n]` to a file declaring a `waits` array, running
+the test, seeing it fail with "claims the top-level key", and reverting.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add collect/queryset.go collect/queryset_test.go queries_test.go
+git commit -m "Ne plus compter comme instruction un hint écrit dans une chaîne dynamique"
+```
+
+---
+
+### Task 9: `041.replication-publisher.sql`
 
 **Files:**
 - Create: `queries/90.availability/041.replication-publisher.sql`
@@ -914,8 +1085,13 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 - [ ] **Step 2: Run the corpus lint**
 
-Run: `go test . -run TestEmbeddedCorpusIsValid -v`
-Expected: PASS. A failure here names the directive or contract rule broken.
+This task adds a file, so `queries_test.go:18` — which asserts
+`len(scripts) != 58` — must be raised by one in the same commit. The slice adds
+four files in all, ending at 62.
+
+Run: `go test . -run TestEmbeddedCorpus -v`
+Expected: PASS. A failure names the directive or contract rule broken. If it
+reports "N emitting statements for M result sets", Task 8 was skipped.
 
 - [ ] **Step 3: Check the grammar and the result-set count**
 
@@ -943,7 +1119,7 @@ git commit -m "Collecter le catalogue de publication, gardé par sp_executesql"
 
 ---
 
-### Task 9: `043.replication-subscriber.sql`
+### Task 10: `043.replication-subscriber.sql`
 
 **Files:**
 - Create: `queries/90.availability/043.replication-subscriber.sql`
@@ -1057,8 +1233,12 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 - [ ] **Step 2: Lint, grammar, live run**
 
+This task adds a file, so `queries_test.go:18` — which asserts
+`len(scripts) != 58` — must be raised by one in the same commit. The slice adds
+four files in all, ending at 62.
+
 ```bash
-go test . -run TestEmbeddedCorpusIsValid
+go test . -run TestEmbeddedCorpus
 pwsh -File tools/verify-corpus-grammar.ps1
 sqlcmd -S "[::1],11433" -U sa -P 'Str0ng!Passw0rd' -C -d master \
   -i queries/90.availability/043.replication-subscriber.sql
@@ -1076,7 +1256,7 @@ git commit -m "Collecter le catalogue d'abonnement"
 
 ---
 
-### Task 10: `044.replication-counters.sql`
+### Task 11: `044.replication-counters.sql`
 
 **Files:**
 - Create: `queries/90.availability/044.replication-counters.sql`
@@ -1156,8 +1336,12 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 - [ ] **Step 2: Lint, grammar, live run**
 
+This task adds a file, so `queries_test.go:18` — which asserts
+`len(scripts) != 58` — must be raised by one in the same commit. The slice adds
+four files in all, ending at 62.
+
 ```bash
-go test . -run TestEmbeddedCorpusIsValid
+go test . -run TestEmbeddedCorpus
 pwsh -File tools/verify-corpus-grammar.ps1
 sqlcmd -S "[::1],11433" -U sa -P 'Str0ng!Passw0rd' -C \
   -i queries/90.availability/044.replication-counters.sql
@@ -1176,7 +1360,7 @@ git commit -m "Collecter les compteurs de performance de réplication, dans leur
 
 ---
 
-### Task 11: `040.replication.sql` — header rewrite and the remote distributor
+### Task 12: `040.replication.sql` — header rewrite and the remote distributor
 
 **Files:**
 - Modify: `queries/90.availability/040.replication.sql`
@@ -1208,7 +1392,16 @@ Replace the paragraphs from "WHAT THIS FILE DELIBERATELY DOES NOT DO" through
 -- second pass finds the database by its is_distributor flag.
 ```
 
-- [ ] **Step 2: Add the remote-distributor result set**
+- [ ] **Step 2: Remove the two root columns the rewrite makes false**
+
+The file's root object carries
+`'distribution_database_name_not_fixed' AS [not_collected.reason]` and
+`'50.agent/010.jobs.sql' AS [not_collected.see]`. Both were true when nothing
+read the distribution database. After Task 13 they are a machine-readable claim
+contradicting the header above them, and the analysis layer was told to match
+on the first. Delete both columns.
+
+- [ ] **Step 3: Add the remote-distributor result set**
 
 Append, and change `@resultsets` to
 `root:object, databases:array, distributor_servers:array`:
@@ -1230,10 +1423,13 @@ ORDER BY s.[server_id]
 OPTION (RECOMPILE, MAXDOP 1);
 ```
 
-- [ ] **Step 3: Lint, grammar, live run**
+- [ ] **Step 4: Lint, grammar, live run**
+
+This task modifies a file rather than adding one, so the script count in
+`queries_test.go:18` does not move here.
 
 ```bash
-go test . -run TestEmbeddedCorpusIsValid
+go test . -run TestEmbeddedCorpus
 pwsh -File tools/verify-corpus-grammar.ps1
 sqlcmd -S "[::1],11433" -U sa -P 'Str0ng!Passw0rd' -C \
   -i queries/90.availability/040.replication.sql
@@ -1242,7 +1438,7 @@ sqlcmd -S "[::1],11433" -U sa -P 'Str0ng!Passw0rd' -C \
 Expected: `resultsets 3/3 ok`; three result sets, the third empty on an
 instance with no replication.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add queries/90.availability/040.replication.sql
@@ -1251,7 +1447,7 @@ git commit -m "Réécrire l'en-tête de 040 et nommer le distributeur distant"
 
 ---
 
-### Task 12: `042.replication-distribution.sql`
+### Task 13: `042.replication-distribution.sql`
 
 **Files:**
 - Create: `queries/90.availability/042.replication-distribution.sql`
@@ -1270,7 +1466,38 @@ three agent tables, profiles from `msdb.dbo.MSagent_profiles` and
 `MSdistribution_history` and `MSlogreader_history`, and the last 50 rows of
 `MSrepl_errors`.
 
-Three constraints specific to this file, each from a measurement:
+**What this file does not collect, and why that is a decision.** The
+specification's section on `042` also names `MSsubscriptions` for the
+publication-to-subscriber mapping, the agent profiles in
+`msdb.dbo.MSagent_profiles` and `MSagent_profile_parameters`, the tracer-token
+history, the cleanup agents' throughput, and the `error_id` join from the
+history tables to `MSrepl_errors`. None of them is in the result sets below.
+
+That is deliberate slicing and it was not written down until a reviewer noticed
+the gap. All five need a configured topology to be worth anything — a profile
+list on an instance with no agents is seven rows of defaults — and all five are
+additions to an existing file rather than new plumbing. They belong to the
+slice that follows the first real audit run, when the verification questions
+the specification lists are answered at the same time. `@resultsets` gains its
+slots then.
+
+**`@permissions` omits `MSDB READ` although step 3 reads
+`msdb.dbo.MSdistributiondbs`.** That is consistent with this specification's
+posture — nothing is required, the read is attempted, and a refusal is recorded
+by the handler around it — but Task 11 argues the opposite trade at length for
+`sys.dm_os_performance_counters`. The difference is that losing the counters
+costs a whole file, while losing the retention row costs one array inside a
+file whose other six sections still land. Declaring `MSDB READ` would make the
+skip gate drop all seven.
+
+**`errors.last_message` keeps only the last failure.** Six families each have
+their own error number and all six survive; the message text does not, because
+one variable holds it. That is the right trade for a root object — six message
+columns would be six mostly-empty strings — and the numbers are what an
+analysis matches on. Worth knowing when reading an archive where two sections
+failed for different reasons.
+
+Four constraints specific to this file, each from a measurement:
 
 - **The msdb replication tables do not exist on an instance that was never a
   distributor.** They are created by `sp_adddistributor`, not by setup. Each
@@ -1291,7 +1518,7 @@ Three constraints specific to this file, each from a measurement:
 
 ```sql
 -- @scope:       database
--- @resultsets:  root:object, configuration:array, publications:array, articles:array, agents:array, latency:array, errors:array
+-- @resultsets:  root:object, configuration:array, publications:array, articles:array, agents:array, latency:array, repl_errors:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION
 -- @timeout:     120
 -- @widened:     replication
@@ -1363,14 +1590,14 @@ DECLARE @agents TABLE ([kind] varchar(12), [id] int, [name] nvarchar(100),
                        [subscriber_db] sysname NULL, [job_id] binary(16) NULL,
                        [local_job] bit NULL);
 
-DECLARE @hist TABLE ([leg] varchar(20), [agent_id] int, [runstatus] int,
+DECLARE @hist TABLE ([leg] varchar(40), [agent_id] int, [runstatus] int,
                      [last_time] datetime NULL, [last_duration] int NULL,
                      [last_latency_ms] int NULL, [max_latency_ms] int NULL,
                      [median_latency_ms] float NULL, [sessions] int,
                      [delivered_commands] bigint NULL,
                      [last_comment] nvarchar(512) NULL);
 
-DECLARE @errs TABLE ([id] int, [time] datetime, [error_code] nvarchar(50) NULL,
+DECLARE @errs TABLE ([id] int, [time] datetime, [error_code] sysname NULL,
                      [error_text] nvarchar(512) NULL, [source_type_id] int NULL);
 
 DECLARE @size TABLE ([table_name] sysname, [row_count] bigint);
@@ -1506,7 +1733,7 @@ without a second scan.
     BEGIN TRY
         INSERT INTO @errs
         EXEC sys.sp_executesql N'
-            SELECT TOP (50) e.id, e.[time], e.error_code, LEFT(e.error_text, 512),
+            SELECT TOP (50) e.id, e.[time], e.error_code, LEFT(CONVERT(nvarchar(4000), e.error_text), 512),
                    e.source_type_id
             FROM dbo.MSrepl_errors AS e
             WHERE e.[time] >= DATEADD(day, -@days, GETDATE())
@@ -1595,8 +1822,12 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 - [ ] **Step 8: Lint, grammar, live run**
 
+This task adds a file, so `queries_test.go:18` — which asserts
+`len(scripts) != 58` — must be raised by one in the same commit. The slice adds
+four files in all, ending at 62.
+
 ```bash
-go test . -run TestEmbeddedCorpusIsValid
+go test . -run TestEmbeddedCorpus
 pwsh -File tools/verify-corpus-grammar.ps1
 sqlcmd -S "[::1],11433" -U sa -P 'Str0ng!Passw0rd' -C -d master \
   -i queries/90.availability/042.replication-distribution.sql
@@ -1606,7 +1837,7 @@ Expected: `resultsets 7/7 ok`; seven result sets on a bare instance, `applies`
 0, `collected` 1, every array empty. **No `Msg 208`** — if one appears, a read
 escaped `sp_executesql`.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add queries/90.availability/042.replication-distribution.sql
