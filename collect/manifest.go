@@ -412,8 +412,14 @@ settings, database options, file layout and sizes, wait statistics, index
 and backup metadata.
 
 The collector issues only read-only SELECT statements against system
-catalog views and dynamic management views. It runs no INSERT, UPDATE,
-DELETE or DDL, and it does not read any user or application table.
+catalog views and dynamic management views, and it does not read any user
+or application table. A few diagnostics exist only as a command rather
+than a view — DBCC, sp_readerrorlog — and for those it runs the command
+and captures its output into scratch storage of its own, in tempdb.
+
+It creates no permanent object: nothing that belongs to this server or
+its databases is created, altered or deleted, and no data of yours is
+written anywhere by this tool.
 
 What is in here that names things:
   - this server's name, version, edition and file paths

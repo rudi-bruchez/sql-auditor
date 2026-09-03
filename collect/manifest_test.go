@@ -27,6 +27,15 @@ func TestManifestHumanStatesDataNature(t *testing.T) {
 		"SRV01", "11.0.7001.0", "AppProd",
 		"read-only SELECT statements",
 		"does not read any user or application table",
+		// The promise has to survive a reader who diffs it against the
+		// corpus. Three shipped collectors capture the output of a command
+		// that has no view — DBCC, sp_readerrorlog — into scratch storage of
+		// their own, which is an INSERT. An absolute "runs no INSERT" is
+		// therefore false, and false in the paragraph a security officer
+		// reads before approving the tool. The guarantee that is both true
+		// and worth as much is about what the server keeps.
+		"creates no permanent object",
+		"nothing that belongs to this server or its databases is created, altered or deleted",
 		// Scoped to what the collector actually masks. An unqualified claim
 		// that "secrets are masked" describes nothing this program does.
 		"The password of the login used for this run is recorded nowhere",

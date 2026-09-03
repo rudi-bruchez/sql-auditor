@@ -26,10 +26,12 @@ counts the statements, and returns the counts.
 The manifest of every `collect` archive says this, and clients read it:
 
 > The collector issues only read-only SELECT statements against system catalog
-> views and dynamic management views. It runs no INSERT, UPDATE, DELETE or DDL,
-> and it does not read any user or application table.
+> views and dynamic management views, and it does not read any user or
+> application table. […] It creates no permanent object: nothing that belongs
+> to this server or its databases is created, altered or deleted, and no data
+> of yours is written anywhere by this tool.
 
-`CREATE EVENT SESSION` is DDL. That sentence is why a DBA runs this tool on
+`CREATE EVENT SESSION` creates a permanent object. That sentence is why a DBA runs this tool on
 production without auditing it line by line, and it is worth more than any
 feature. A promise with one exception is not a promise.
 
