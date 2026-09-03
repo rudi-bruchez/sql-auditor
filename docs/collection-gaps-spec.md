@@ -3,18 +3,29 @@
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
 **Status:** specification. Nothing here is implemented yet.
 
-Five gaps, each one found because an audit could not answer a question from the
+Seven gaps, each one found because an audit could not answer a question from the
 archive and had to go back to the client. That is the bar for entry: a gap is
 something the analysis actually needed, not something that would be nice to
 have.
 
-One of the five is not a missing collector at all: the facts are collected and
+One of the seven is not a missing collector at all: the facts are collected and
 the arithmetic that turns them into a finding is left to a reader who has no
 reason to attempt it. That case is section 5, and it is the cheapest of the
 five to fix.
 
-A sixth idea is recorded at the end **because it is already implemented**, and
+A last idea is recorded at the end **because it is already implemented**, and
 the point of writing it down is to stop it being built a second time.
+
+Sections 6 and 7 came out of a cross-check against a comprehensive audit
+checklist assembled from sp_Blitz, Glenn Berry's diagnostic queries and this
+practice's own topic corpus. What that cross-check mostly established is that
+the corpus already covers those reference sets: buffer descriptors, memory
+clerks, per-node page life expectancy, statistics properties, physical index
+fragmentation, waiting tasks, scheduler counts, single-use cached plans, trace
+flag status, the version store and the error log are all collected today. It
+also arrived independently at the ring buffer of section 5, naming the same
+four-hour window — which is agreement worth recording, because a gap two
+sources find separately is not an opinion.
 
 ---
 
@@ -182,6 +193,28 @@ The collector's own session is in the result and cannot be excluded honestly —
 the auditor's connection is a connection. It is marked rather than filtered:
 one boolean column `is_collector_session`, set from `@@SPID`.
 
+### What the sessions do, and what the server demands
+
+`encrypt_option` says what the sessions happen to be doing. It does not say what
+the server requires, and the two answer different questions: a run where every
+session shows `TRUE` may be a server forcing encryption, or a set of clients
+that all happened to ask for it while the next one will not.
+
+`ForceEncryption` lives in the instance's own registry hive and is readable
+through `sys.dm_server_registry`, which `10.system/020.host-services.sql`
+already reads for the startup parameters. The setting belongs beside
+`encrypt_option`, and the pair is the finding: forced and encrypted is a
+configuration, unforced and encrypted is a coincidence.
+
+The certificate the instance presents is in the same hive and is worth the same
+trip. A self-signed certificate is the default and is not a finding by itself,
+but it is what the reader asks about next.
+
+What is **not** reachable is the SCHANNEL configuration: whether TLS 1.0 and 1.1
+are disabled at the OS level lives outside SQL Server's hive, and
+`sys.dm_server_registry` does not expose it. That stays a question for the
+client.
+
 ---
 
 ## 4. Execution plans when the Query Store is off
@@ -335,7 +368,107 @@ the last corner: it reports the SQL-family services on the host, so a Reporting
 Services or Analysis Services instance sharing the machine is visible without
 any of the above.
 
-## 6. Procedure execution frequency — already collected, do not build again
+## 6. The default trace — who changed what, and when
+
+### The gap
+
+The default trace runs on every instance audited so far. It is on by default,
+and `default trace enabled` was 1 on both instances of the September 2026
+audit. Nothing in the corpus reads it.
+
+It is the only free record of what happened to the instance: `sp_configure`
+changes, database creation and deletion, file autogrowth and autoshrink events,
+DDL on objects, changes to server role membership, login failures, and full-text
+and backup errors. It retains five rolling 20 MB files, which on a quiet
+instance is weeks and on a busy one is days.
+
+The audit that raised this found a `sp_configure` with a pending reconfigure —
+someone had changed a setting and never run `RECONFIGURE`. The report could say
+what the state was, and had to write "it is better to look at what happened
+before settling it", which is an instruction to the client to go and find out.
+**The trace had the answer, with a timestamp and a login name.**
+
+The same file closes a question that has no other answer on a stock instance:
+SQL Server records a login's last use nowhere, so a dormant account cannot be
+identified from `sys.server_principals`. The default trace's login-failure and
+audit events are the nearest thing that exists.
+
+### The collector
+
+`10.system/044.default-trace.sql`, `@scope: instance`,
+`@permissions: CONNECT, VIEW SERVER STATE`, `@requires_flag: default_trace`.
+
+The path comes from `sys.traces WHERE is_default = 1`, and
+`sys.fn_trace_gettable` reads the whole rollover set when passed the base file
+with `DEFAULT` as the file count. Both are read-only.
+
+Aggregated, never dumped. One row per `(EventClass, ObjectType)` with a count
+and the first and last timestamp, plus the retained rows for the event classes
+that carry a decision: 22 error log, 46 and 47 object created and deleted, 92
+and 93 data and log file autogrow, 94 and 95 autoshrink, 104 and 105 server
+role and login changes, 116 `DBCC`, 152 `sp_configure`.
+
+**The window is the finding as often as the content is.** A trace whose oldest
+record is four hours old, on a server up for eighty days, says the instance
+generates events fast enough to roll 100 MB in an afternoon, and that is worth
+a line of its own. The span goes in the root object beside the counts, the same
+discipline `041.connectivity.sql` applies to its ring buffers.
+
+Three cautions belong in the file:
+
+- **It is a trace, so it carries text.** `TextData` on a `sp_configure` or a DDL
+  event holds the statement, and on an object event it holds an object name.
+  Hence the flag: the collector is opt-in like the other text-carrying files,
+  and the aggregate half runs without it.
+- **Absence proves nothing**, for the same reason as the plan cache: the files
+  rolled. The report must not read an empty autogrow count as "the files never
+  grew".
+- **`sys.fn_trace_gettable` needs the file readable by the service account**,
+  not by the collector's login, because the engine does the reading. A trace
+  directory the service cannot reach fails at read time rather than at
+  permission-check time, so the error is caught and reported as a skip.
+
+---
+
+## 7. Enterprise features persisted in a database
+
+### The gap
+
+`sys.dm_db_persisted_sku_features` reports the Enterprise-only features
+physically present in a database: partitioning, data compression, online index
+rebuild artefacts, change data capture, transparent encryption, memory-optimized
+tables. One row per feature, per database, and it costs nothing.
+
+Nothing in the corpus reads it, and it answers two questions that come up in
+every migration conversation.
+
+**Can this database be restored on this edition?** A backup taken on Enterprise
+restores onto Standard only if this view is empty. A restore that fails for this
+reason fails at the end, after the data has been copied, which is the worst
+moment to find out.
+
+**Is an Enterprise feature in use on a Standard instance?** It happens: the
+database was created on Enterprise or Developer and moved. The feature then sits
+there, unusable and invisible, until an operation touches it.
+
+Both instances of the September 2026 audit are Standard Edition, and neither
+question could be answered from the archive.
+
+### The collector
+
+`20.databases/026.persisted-sku-features.sql`, `@scope: database`,
+`@permissions: CONNECT, VIEW ANY DEFINITION`. One result set, one row per
+feature, plus a count in the root object so that the ordinary case — zero rows,
+nothing persisted — is distinguishable from a collector that did not run.
+
+The view is empty on a database that never carried an Enterprise feature, so
+**an empty result is the answer and not a failure.** That has to be said in the
+file, because every other array in the corpus is empty only when something went
+wrong.
+
+---
+
+## 8. Procedure execution frequency — already collected, do not build again
 
 Recorded here because it was proposed as new twice, from two directions, and
 the second proposal is the reason this section exists.
