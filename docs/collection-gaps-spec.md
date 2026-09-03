@@ -1,7 +1,7 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** specification. Nothing here is implemented yet.
+**Status:** specification, except section 8, which is implemented.
 
 Seven gaps, each one found because an audit could not answer a question from the
 archive and had to go back to the client. That is the bar for entry: a gap is
@@ -12,6 +12,11 @@ One of the seven is not a missing collector at all: the facts are collected and
 the arithmetic that turns them into a finding is left to a reader who has no
 reason to attempt it. That case is section 5, and it is the cheapest of the
 five to fix.
+
+Section 8 breaks that rule deliberately: two views that no instance audited so
+far even has, collected because writing the file now costs nothing and means the
+first modern instance arrives with the collector already in place. Those two are
+written, not specified.
 
 A last idea is recorded at the end **because it is already implemented**, and
 the point of writing it down is to stop it being built a second time.
@@ -468,7 +473,101 @@ wrong.
 
 ---
 
-## 8. Procedure execution frequency — already collected, do not build again
+## 8. Two views for builds we do not audit yet — implemented
+
+Everything above is a specification. These two are **written and in the corpus**,
+which is the point: they cost two files, they are gated on the build, and
+writing them now means the first 2022 or 2025 instance this practice audits
+arrives with the collector already there instead of producing an archive that
+has to be explained.
+
+The version gate is not a formality. Both views are absent on every instance
+audited so far, and a collector that referenced them ungated would fail the
+whole script on a batch-level error. With `@min_version` the file is skipped and
+the skip is recorded, so the archive says "not applicable on this build" rather
+than being silently short of a file.
+
+### `10.system/073.accelerators.sql` — `@min_version: 16`
+
+`sys.dm_server_accelerator_status`, SQL Server 2022 and later. Intel QuickAssist
+offload for backup compression.
+
+The finding is not whether the feature exists. Three outcomes look identical
+from outside — never enabled, enabled and running in hardware, or enabled and
+quietly running in **software** because the card is absent, the driver failed to
+load, or the edition does not allow it. Only the third is a defect, and it is
+invisible everywhere else: the backups keep working, a little slower, on the CPU
+that was supposed to have been freed.
+
+`mode_reason_desc` is what separates them and it is projected verbatim. Its
+values name the cause — `SOFTWARE_MODE_ACCELERATOR_HARDWARE_NOT_FOUND` is a
+broken deployment, `SOFTWARE_MODE_NON_ENTERPRISE_SKU` is a licensing decision,
+`NONE_HARDWARE_OFFLOAD_NOT_ENABLED` is the untouched default. Collapsing them to
+a verdict here would throw away the distinction the next release extends.
+
+One property worth knowing when reading the output: **the view is never empty on
+a supported build.** A row for QAT is present from 2022 onwards whether or not
+the hardware exists and whether or not the driver is installed. So an empty
+array is a collection failure, not an answer, and the count in the root object
+is what makes the two distinguishable.
+
+The gate is the bare major `16`: the view arrived with 2022 RTM, so unlike
+`023.log-vlf.sql` there is no cumulative-update floor to respect.
+
+### `10.system/074.memory-health.sql` — `@min_version: 17`
+
+`sys.dm_os_memory_health_history`, SQL Server 2025 and later.
+
+Every other memory reading in the archive is an instant. `015.buffer-pool.sql`
+and `010.properties.sql` say what memory looked like at the moment of
+collection, and a collection is one moment. An instance that spends five minutes
+an hour unable to satisfy allocations, and is comfortable the rest of the time,
+reads as comfortable — which is the reading that sends an audit looking
+somewhere else entirely. This view is the engine keeping that history itself: a
+snapshot every fifteen seconds with its own severity verdict, the memory it
+could still hand out, and the memory it could reclaim by shrinking caches.
+
+**The window is 256 snapshots, which is one hour and four minutes, and a restart
+resets it.** So it is excellent evidence of a problem and no evidence at all of
+its absence. The span goes in the root object beside the counts, the same
+discipline `041.connectivity.sql` applies to its ring buffers and for the same
+reason.
+
+Two projection decisions are worth recording because both are about what *not*
+to collect.
+
+`top_memory_clerks` is a JSON document of up to 4000 characters on every one of
+the 256 rows. Projecting all of them would put a megabyte of near-identical JSON
+into the archive to answer a question that has one interesting instant. So the
+series carries the numbers without the JSON, and the clerks are expanded once,
+for the snapshot with the highest severity — ties broken by the least allocation
+potential, then by the most recent.
+
+Three columns are documented as "identified for informational purposes only, not
+supported, future compatibility is not guaranteed": `out_of_memory_event_count`,
+`memgrant_timeout_count` and `memgrant_waiter_count`. They are not read. A column
+Microsoft declines to stand behind has no place in a document a client acts on,
+and `80.workload/010.wait-stats.sql` already carries the supported reading of
+memory grant pressure.
+
+### What both files taught about the corpus lint
+
+Two things the test suite caught that are worth knowing before writing the next
+collector.
+
+A root-object column prefix may not collide with the name of a result set: the
+first draft projected `[accelerators.reported]` beside an `accelerators` array,
+and the encoder refuses that rather than writing a document with two meanings
+for one key. The prefix became `offload`.
+
+And a directive name written in the prose of a header is parsed as a directive.
+Explaining in a comment which permission the directive declares broke the header
+parser, which read the next line of the sentence as a permission. Header
+directives are not quotable inside a header.
+
+---
+
+## 9. Procedure execution frequency — already collected, do not build again
 
 Recorded here because it was proposed as new twice, from two directions, and
 the second proposal is the reason this section exists.
