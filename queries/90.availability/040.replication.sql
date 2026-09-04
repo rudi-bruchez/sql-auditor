@@ -1,23 +1,21 @@
 -- @scope:       instance
--- @resultsets:  root:object, databases:array
+-- @resultsets:  root:object, databases:array, distributor_servers:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION
 -- @timeout:     60
 --
 -- Whether this instance publishes, subscribes or distributes anything.
 --
--- WHAT THIS FILE DELIBERATELY DOES NOT DO, and it is the whole design. The
--- interesting replication metadata — publications, articles, distribution
--- history, tracer tokens, latency — lives in the DISTRIBUTION DATABASE, whose
--- name is chosen when replication is configured and is not fixed. An
--- instance-scoped collector cannot USE a database whose name it only learns at
--- run time, and the pipeline has no way to target one either: the database list
--- is settled before any query runs. Reaching it would be a change to the
--- collector, not a new file.
+-- WHERE THE REST OF IT IS. The interesting replication metadata — publications,
+-- articles, distribution history, latency — lives in the publication,
+-- distribution and subscription databases, and is collected by 041, 042 and
+-- 043. This file keeps the instance-level answer: which databases carry which
+-- role, and whether the distributor is somewhere else entirely.
 --
--- So this reads what is answerable from master and msdb with no dynamic name,
--- and says so. That is less than the reference diagnostic script offers and it
--- is honest about the gap; the alternative was a file that works on the author's
--- machine and fails on a distributor named anything else.
+-- The distribution database's name is chosen when replication is configured
+-- and sp_adddistributiondb has no default for it — "distribution" is the name
+-- the SSMS wizard suggests. Nothing here depends on that name: the selection's
+-- second pass finds the database by its is_distributor flag and offers it to
+-- the collectors that declare @widened: replication.
 --
 -- THE AGENTS ARE ALREADY COLLECTED, BY 50.agent/010.jobs.sql, and this file
 -- deliberately does not repeat them. Replication runs as SQL Agent jobs in the
@@ -40,8 +38,7 @@
 -- NO JUDGEMENT IS APPLIED. A failing agent may be a decommissioned publication
 -- nobody removed.
 --
--- SQL Server 2012 is the floor. Not collected for that reason: nothing — the
--- limit here is the distribution database's name, not any version.
+-- SQL Server 2012 is the floor. Not collected for that reason: nothing.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -50,7 +47,7 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_
        (SELECT COUNT(*) FROM sys.databases AS d WHERE d.is_published = 1)       AS [counts.published],
        (SELECT COUNT(*) FROM sys.databases AS d WHERE d.is_merge_published = 1) AS [counts.merge_published],
        (SELECT COUNT(*) FROM sys.databases AS d WHERE d.is_subscribed = 1)      AS [counts.subscribed],
-       (SELECT COUNT(*) FROM sys.databases AS d WHERE d.is_distributor = 1)     AS [counts.distributor],
+       (SELECT COUNT(*) FROM sys.databases AS d WHERE d.is_distributor = 1)     AS [counts.distributor]
        /* No SERVERPROPERTY here, and that is a correction rather than an
           omission. This projected IsPublisher and IsSubscriber until a live run
           returned NULL for both: neither name exists. SERVERPROPERTY does not
@@ -59,14 +56,6 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_
           apply, which is the failure docs/verification-2012.md warns about in
           those words. The database flags below are the real answer and they
           come from a catalog view that would have errored on a wrong column. */
-       /* An omission has to be IN the archive — rule 2 — but a paragraph of
-          English in a result set is prose wearing the clothes of data: it
-          repeats the header, it is identical on every run, and the file path
-          inside it drifts the first time something is renamed with nothing to
-          catch it. A stable key plus a pointer, so the analysis layer can match
-          on the first and a human can follow the second. */
-       'distribution_database_name_not_fixed'                     AS [not_collected.reason],
-       '50.agent/010.jobs.sql'                                    AS [not_collected.see]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* Only the databases carrying a replication flag. Every database on the instance
@@ -83,4 +72,19 @@ FROM sys.databases AS d
 WHERE d.is_published = 1 OR d.is_merge_published = 1
    OR d.is_subscribed = 1 OR d.is_distributor = 1
 ORDER BY d.name
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* Where the distributor is, when it is not here. sys.servers carries the flag,
+   but the row's name is the alias 'repl_distributor' rather than the server:
+   the instance is in data_source. Projecting name alone would put a constant
+   in the archive and call it a finding. */
+SELECT s.[server_id]                                              AS [server_id],
+       s.[name]                                                   AS [entry_name],
+       COALESCE(NULLIF(s.[data_source], N''), s.[name])           AS [server],
+       CONVERT(int, s.[is_publisher])                             AS [is_publisher],
+       CONVERT(int, s.[is_subscriber])                            AS [is_subscriber],
+       CONVERT(int, s.[is_distributor])                           AS [is_distributor]
+FROM sys.servers AS s
+WHERE s.[is_publisher] = 1 OR s.[is_subscriber] = 1 OR s.[is_distributor] = 1
+ORDER BY s.[server_id]
 OPTION (RECOMPILE, MAXDOP 1);
