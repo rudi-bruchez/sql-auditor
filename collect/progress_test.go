@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Progress exists so a caller that owns the screen — the wizard — can keep the
@@ -81,7 +82,7 @@ func TestProgressRoutesTheReplacementWarning(t *testing.T) {
 	var buf bytes.Buffer
 	var perr error
 	leaked := captureStderr(t, func() {
-		perr = prepareRunFolder(run, false, &buf)
+		_, perr = prepareRunFolder(run, false, time.Now(), &buf)
 	})
 	if perr != nil {
 		t.Fatalf("prepareRunFolder: %v", perr)

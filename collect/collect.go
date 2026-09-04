@@ -198,7 +198,7 @@ func (o Options) progress() io.Writer {
 // results is worse than deleting it: it is named for the same server and day,
 // so whoever picks it up has no way to tell it is not the run they just
 // watched finish.
-func prepareRunFolder(path string, keep bool, progress io.Writer) error {
+func prepareRunFolder(path string, keep bool, now time.Time, progress io.Writer) ([]string, error) {
 	if keep {
 		// --keep must never land on an occupied name. RunFolderFor already
 		// looks for a free one, but if it ever hands back a taken path the
@@ -208,21 +208,73 @@ func prepareRunFolder(path string, keep bool, progress io.Writer) error {
 		// run collected without it puts session text inside an archive whose
 		// own MANIFEST.txt says there is none. Refuse loudly instead.
 		if taken, what := RunNameTaken(path); taken {
-			return fmt.Errorf("--keep: %s already exists; this run would be written into "+
+			return nil, fmt.Errorf("--keep: %s already exists; this run would be written into "+
 				"the same place as an earlier one and the two would be indistinguishable", what)
 		}
-		return os.MkdirAll(path, 0o755)
+		return nil, os.MkdirAll(path, 0o755)
 	}
 	if warning := replacingRunWarning(path); warning != "" {
 		fmt.Fprintln(progress, warning)
 	}
-	if err := os.RemoveAll(path); err != nil {
-		return err
+	// Set aside, never deleted here. This used to be RemoveAll on the folder
+	// followed by Remove on the .zip, both before the first query ran, and the
+	// order was the defect: an operator rerunning the same day to add one
+	// option lost the morning's archive at once, and a rerun that then failed —
+	// a timeout, a lost connection, a Ctrl-C in the first seconds, a right
+	// missing on the option just added — left them with neither run. The
+	// snapshot of a given day cannot be collected again.
+	//
+	// Renaming is also what makes the failure mode safe on Windows: a .zip
+	// still open in another program cannot be renamed, so the run refuses
+	// instead of destroying it.
+	base := fmt.Sprintf("%s.superseded-%s", path, now.Format("150405"))
+	dest := base
+	for i := 2; supersededNameTaken(dest); i++ {
+		dest = fmt.Sprintf("%s-%d", base, i)
 	}
-	if err := os.Remove(path + ".zip"); err != nil && !os.IsNotExist(err) {
-		return err
+	var aside []string
+	if _, err := os.Stat(path); err == nil {
+		if err := os.Rename(path, dest); err != nil {
+			return nil, err
+		}
+		aside = append(aside, dest)
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
-	return os.MkdirAll(path, 0o755)
+	if _, err := os.Stat(path + ".zip"); err == nil {
+		if err := os.Rename(path+".zip", dest+".zip"); err != nil {
+			return aside, err
+		}
+		aside = append(aside, dest+".zip")
+	} else if !os.IsNotExist(err) {
+		return aside, err
+	}
+	// Named, because a rerun that dies is exactly when this matters and the
+	// operator has no other way to learn where their previous run went.
+	for _, p := range aside {
+		fmt.Fprintf(progress, "  kept at %s until this run has written its archive\n", p)
+	}
+	return aside, os.MkdirAll(path, 0o755)
+}
+
+func supersededNameTaken(dest string) bool {
+	if _, err := os.Stat(dest); err == nil {
+		return true
+	}
+	if _, err := os.Stat(dest + ".zip"); err == nil {
+		return true
+	}
+	return false
+}
+
+// discardSuperseded deletes what prepareRunFolder set aside. It is called at
+// one place only — after the new archive exists — and it is best effort: a run
+// that produced its archive must not be reported as failed because the folder
+// it replaced could not be removed. What is left behind is named and inert.
+func discardSuperseded(paths []string) {
+	for _, p := range paths {
+		os.RemoveAll(p)
+	}
 }
 
 // RunNameTaken and RunFolderFor are exported for one caller and one reason:
@@ -1327,7 +1379,8 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// other configuration refusals rather than 1, which claims the instance was
 	// unreachable when it has in fact just been read successfully.
 	runFolder := RunFolderFor(o.Config.OutputDir, si.Name, o.Now, o.Keep)
-	if err := prepareRunFolder(runFolder, o.Keep, o.progress()); err != nil {
+	superseded, err := prepareRunFolder(runFolder, o.Keep, o.Now, o.progress())
+	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)
 	}
@@ -1465,6 +1518,10 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return 2, err
 	}
 	o.Debugf("archive written")
+	// Only now. The run this one replaced has been on disk the whole time, so
+	// a rerun that died anywhere above leaves it there rather than leaving the
+	// operator with neither run.
+	discardSuperseded(superseded)
 	// Silenced for a caller that owns the screen, not redirected.
 	// `sql-auditor collect | tail -1` is how a script picks up the archive path,
 	// so on the command line these two lines must keep going to stdout exactly

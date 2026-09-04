@@ -376,8 +376,9 @@ func (s State) keyOptions(k screen.Key) State {
 		// Clearing it unconditionally answered a question nobody asked: the day
 		// the wizard accepts --keep, an operator who passed it would be probed
 		// with keep=true, see no banner because keep=true collides with
-		// nothing, press [enter] to start — and prepareRunFolder would delete
-		// the previous run's folder and zip without a word. The [k] branch
+		// nothing, press [enter] to start — and prepareRunFolder would set the
+		// previous run's folder and zip aside and drop them at the end
+		// without a word. The [k] branch
 		// below already guards itself the same way, for the same reason.
 		if s.Collision != "" {
 			s.Collision = ""
@@ -441,7 +442,7 @@ func (s State) writeGrantScript(outputDir, tool string, now time.Time) State {
 // spellings coincide only when the DBA types the instance name exactly: with
 // SQL_SERVER=10.42.7.19,1433 or an FQDN they differ. Asking about the typed
 // address answers questions about a path no run will ever touch — the
-// collision prompt never appears and prepareRunFolder deletes the previous
+// collision prompt never appears and prepareRunFolder replaces the previous
 // run's folder and archive unannounced, and the final screen looks for the
 // archive where there is none and reports that no archive was produced.
 //
@@ -453,8 +454,10 @@ func runFolderFor(s State, o collect.Options) string {
 
 // collisionFor names what an earlier run of the same day already occupies, or
 // "" when the way is clear. It is the whole of the wizard's guard against the
-// destructive half of prepareRunFolder, and it runs BEFORE collect.Run:
-// afterwards the folder and the archive are already gone.
+// replacing half of prepareRunFolder, and it runs BEFORE collect.Run. That
+// half no longer deletes on the spot — it renames the previous run aside and
+// discards it only once the new archive exists — but a replacement is still a
+// replacement, and the operator is the one who gets to say so.
 //
 // An unprobed instance has no resolved name to build a path from, and it can
 // start nothing anyway — canStart() is false — so nothing is asked.

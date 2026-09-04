@@ -505,6 +505,14 @@ Two things worth knowing:
   the folder and the zip. It warns on stderr before it does. Pass `--keep` to
   write this run alongside the previous one instead; the new run gets a time
   suffix.
+
+  The earlier run is not deleted when the second one starts. It is renamed
+  to `<name>.superseded-HHMMSS`, kept there for the whole collection, and
+  removed only once the new archive has been written. So a rerun that fails —
+  a timeout, a lost connection, a Ctrl-C, a right missing on an option you
+  just added — leaves you with the run you already had, under that name. If
+  you find one lying around, a run died: it is the previous day's work, not
+  a duplicate of anything.
 - **Runs are quick.** On a small instance the whole collection finishes in about
   a second; on a large estate the per-database collectors dominate, so budget by
   database count.

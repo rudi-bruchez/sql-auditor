@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ func TestPrepareRunFolderClearsStaleFiles(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareRunFolder(run, false, os.Stderr); err != nil {
+	if _, err := prepareRunFolder(run, false, time.Now(), os.Stderr); err != nil {
 		t.Fatalf("prepareRunFolder: %v", err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
@@ -66,7 +67,7 @@ func TestPrepareRunFolderRemovesTheStaleArchive(t *testing.T) {
 	if err := os.WriteFile(zip, []byte("PK"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareRunFolder(run, false, os.Stderr); err != nil {
+	if _, err := prepareRunFolder(run, false, time.Now(), os.Stderr); err != nil {
 		t.Fatalf("prepareRunFolder: %v", err)
 	}
 	if _, err := os.Stat(zip); !os.IsNotExist(err) {
@@ -88,7 +89,7 @@ func TestPrepareRunFolderRefusesAnOccupiedKeepTarget(t *testing.T) {
 	if err := os.WriteFile(keeper, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareRunFolder(run, true, os.Stderr); err == nil {
+	if _, err := prepareRunFolder(run, true, time.Now(), os.Stderr); err == nil {
 		t.Error("--keep silently merged this run into an existing folder")
 	}
 	if _, err := os.Stat(keeper); err != nil {
@@ -102,7 +103,7 @@ func TestPrepareRunFolderRefusesAnOccupiedKeepTarget(t *testing.T) {
 	if err := os.WriteFile(fresh+".zip", []byte("PK"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareRunFolder(fresh, true, os.Stderr); err == nil {
+	if _, err := prepareRunFolder(fresh, true, time.Now(), os.Stderr); err == nil {
 		t.Error("--keep accepted a name whose archive already exists")
 	}
 }
@@ -110,7 +111,7 @@ func TestPrepareRunFolderRefusesAnOccupiedKeepTarget(t *testing.T) {
 func TestPrepareRunFolderCreatesAFreeKeepTarget(t *testing.T) {
 	dir := t.TempDir()
 	run := filepath.Join(dir, "SRV01-2026-08-08-1200")
-	if err := prepareRunFolder(run, true, os.Stderr); err != nil {
+	if _, err := prepareRunFolder(run, true, time.Now(), os.Stderr); err != nil {
 		t.Fatalf("prepareRunFolder: %v", err)
 	}
 	if fi, err := os.Stat(run); err != nil || !fi.IsDir() {
@@ -548,7 +549,7 @@ func TestKeepRunsNeverLandOnAnExistingRun(t *testing.T) {
 			t.Fatalf("run %d was pointed at %q, which already holds %d file(s)",
 				i+1, folder, len(entries))
 		}
-		if err := prepareRunFolder(folder, true, os.Stderr); err != nil {
+		if _, err := prepareRunFolder(folder, true, time.Now(), os.Stderr); err != nil {
 			t.Fatalf("run %d: prepareRunFolder(%q): %v", i+1, folder, err)
 		}
 		// Each run leaves a result file and an archive behind, as a real one does.
@@ -1034,5 +1035,102 @@ func TestTheDaysBoundsConflictOnlyStopsARunThatReadsTheWindow(t *testing.T) {
 			t.Errorf("%s is on and the conflict was accepted: the collection would have read "+
 				"one of two windows with no way to say which", flag)
 		}
+	}
+}
+
+// The previous run is moved aside, not destroyed. prepareRunFolder used to
+// RemoveAll the folder and delete the .zip beside it before the first query
+// ran, so a rerun that then failed — a timeout, a lost connection, a Ctrl-C in
+// the first seconds — left the operator with neither run. What it now does is
+// rename both out of the way and hand the names back; Run deletes them once
+// the new archive exists.
+func TestPrepareRunFolderSetsThePreviousRunAsideRatherThanDeletingIt(t *testing.T) {
+	dir := t.TempDir()
+	run := filepath.Join(dir, "SRV01-2026-08-08")
+	if err := os.MkdirAll(run, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(run, "result.json"), []byte(`{"a":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(run+".zip", []byte("PK"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 8, 8, 15, 4, 5, 0, time.UTC)
+
+	aside, err := prepareRunFolder(run, false, at, io.Discard)
+	if err != nil {
+		t.Fatalf("prepareRunFolder: %v", err)
+	}
+	if len(aside) != 2 {
+		t.Fatalf("both the folder and the archive have to be set aside; got %v", aside)
+	}
+	var foundFolder, foundZip bool
+	for _, p := range aside {
+		if _, serr := os.Stat(p); serr != nil {
+			t.Errorf("%s was named as set aside but is not there: %v", p, serr)
+		}
+		if strings.HasSuffix(p, ".zip") {
+			foundZip = true
+			continue
+		}
+		foundFolder = true
+		b, rerr := os.ReadFile(filepath.Join(p, "result.json"))
+		if rerr != nil || string(b) != `{"a":1}` {
+			t.Errorf("the previous run's results did not survive intact: %q, %v", b, rerr)
+		}
+	}
+	if !foundFolder || !foundZip {
+		t.Errorf("expected one folder and one archive set aside; got %v", aside)
+	}
+	// And the new run starts on an empty folder of its own.
+	entries, err := os.ReadDir(run)
+	if err != nil {
+		t.Fatalf("the new run folder was not created: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the new run folder is not empty: %v", entries)
+	}
+}
+
+// The deletion happens only after the archive is written, which is the whole
+// point of setting them aside.
+func TestDiscardSupersededRemovesWhatWasSetAside(t *testing.T) {
+	dir := t.TempDir()
+	run := filepath.Join(dir, "SRV01-2026-08-08")
+	if err := os.MkdirAll(run, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(run+".zip", []byte("PK"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 8, 8, 15, 4, 5, 0, time.UTC)
+	aside, err := prepareRunFolder(run, false, at, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discardSuperseded(aside)
+	for _, p := range aside {
+		if _, serr := os.Stat(p); !os.IsNotExist(serr) {
+			t.Errorf("%s survived the discard: %v", p, serr)
+		}
+	}
+}
+
+// An operator whose rerun dies has to be able to find the run it replaced.
+func TestPrepareRunFolderSaysWhereThePreviousRunWent(t *testing.T) {
+	dir := t.TempDir()
+	run := filepath.Join(dir, "SRV01-2026-08-08")
+	if err := os.MkdirAll(run, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 8, 8, 15, 4, 5, 0, time.UTC)
+	var out strings.Builder
+	aside, err := prepareRunFolder(run, false, at, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), aside[0]) {
+		t.Errorf("the notice does not say where the previous run was kept: %q", out.String())
 	}
 }
