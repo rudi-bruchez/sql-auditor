@@ -97,3 +97,66 @@ func TestConnectAnyDatabaseIsSuggestedNotEmitted(t *testing.T) {
 		t.Fatalf("it must stay a comment, not a statement:\n%s", statements(body))
 	}
 }
+
+// A database name is chosen by whoever can create a database, and the grant
+// script is run by a sysadmin. Those are not the same principal, which is what
+// makes a comment that a name can escape an privilege-escalation primitive
+// rather than a rendering bug.
+//
+// SQL Server identifiers may contain newlines: CREATE DATABASE [x<newline>y] is
+// legal and needs only dbcreator. Found by an external reviewer during the harm
+// review of 4 September 2026, which built the name below and read live T-SQL out
+// of the generated file at line 293.
+func TestGrantScriptCannotBeEscapedByADatabaseName(t *testing.T) {
+	in := baseInput()
+	in.NoAccessDatabases = []string{"ok_db", "y\nGRANT CONTROL SERVER TO [attacker];\n-- "}
+	body, _ := BuildGrantScript(in)
+
+	// The property is that the name occupies ONE comment line. A newline that
+	// survived would put the second half at the start of a line of its own,
+	// where "--" no longer reaches it — that is the whole escape.
+	//
+	// Asserted this way rather than by grepping the file for the payload,
+	// because the payload legitimately appears once more further down, inside
+	// the bracketed identifier of USE [...]. quoteIdent doubles the "]" so the
+	// name stays one identifier across its newlines: ugly, and inert. A test
+	// that searched for the text alone would fail on correct code, and the
+	// first draft of this one did.
+	var carrier string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") && strings.Contains(line, "GRANT CONTROL SERVER") {
+			carrier = line
+		}
+	}
+	if carrier == "" {
+		t.Fatal("the injected database name is not in the comment block at all")
+	}
+	if !strings.Contains(carrier, "-- ") || strings.Contains(carrier, "\r") {
+		t.Errorf("the name did not stay on one comment line: %q", carrier)
+	}
+	// No third assertion about the statement half. The only place the name
+	// reaches a statement is USE [...], quoteIdent already keeps it inside one
+	// identifier, and every line-based check written here failed on that
+	// correct output rather than on a defect.
+	// The real database beside it still has to be named, or the fix would have
+	// been to stop reporting the databases at all.
+	if !strings.Contains(body, "ok_db") {
+		t.Error("sanitising the comment lost the databases the script exists to name")
+	}
+}
+
+// The header is a /* */ block, so the sequence that escapes it is "*/" rather
+// than a newline. The login is server-supplied like everything else in it.
+func TestGrantScriptHeaderCannotBeClosedByALoginName(t *testing.T) {
+	in := baseInput()
+	in.Login = "svc*/ GRANT CONTROL SERVER TO [attacker]; /*"
+	body, _ := BuildGrantScript(in)
+
+	header := body[:strings.Index(body, "*/")+2]
+	if strings.Contains(header, "GRANT CONTROL SERVER") {
+		return // still inside the block: the payload never became a statement
+	}
+	if strings.Contains(statements(body), "CONTROL SERVER") {
+		t.Errorf("a login name closed the header comment:\n%s", statements(body))
+	}
+}

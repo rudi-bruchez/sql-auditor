@@ -114,6 +114,34 @@ func quoteIdent(s string) string {
 	return "[" + strings.ReplaceAll(s, "]", "]]") + "]"
 }
 
+// commentSafe neutralises the two sequences that let a server-supplied string
+// stop being a comment. It is the comment-side counterpart of quoteIdent, and
+// it exists because quoting the statements was not enough.
+//
+// THE ATTACK IT CLOSES. This file writes a script whose header tells the reader
+// to run it as sysadmin, and it interpolates names the server reported —
+// database names, the login, the edition — into comment lines. A SQL Server
+// identifier may contain a newline: CREATE DATABASE [x<newline>y] is legal, and
+// creating it needs only dbcreator. A database named
+//
+//	y
+//	GRANT CONTROL SERVER TO [attacker];
+//	--
+//
+// ends the "-- " line it was pasted into and leaves live T-SQL behind, carried
+// by the tool's own least-privilege recommendation and executed by a principal
+// far more powerful than the one who chose the name. Inside the /* */ header
+// the same job is done by "*/".
+//
+// So: CR and LF become spaces, and "*/" is broken with a space. Both are
+// deliberately lossy — a name that needs either one back is a name whose
+// rendering matters less than the script staying inert.
+func commentSafe(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.ReplaceAll(s, "*/", "* /")
+}
+
 // quoteLiteral renders a string literal, doubling embedded quotes for the same
 // reason.
 func quoteLiteral(s string) string {
@@ -490,14 +518,14 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 			current = sectionOwnsContext
 		}
 		b.WriteString("-- " + strings.Repeat("-", 72) + "\n")
-		b.WriteString("-- " + s.title + "\n--\n")
+		b.WriteString("-- " + commentSafe(s.title) + "\n--\n")
 		for _, line := range s.why {
-			b.WriteString(strings.TrimRight("-- "+line, " ") + "\n")
+			b.WriteString(strings.TrimRight("-- "+commentSafe(line), " ") + "\n")
 		}
 		if len(s.caveat) > 0 {
 			b.WriteString("--\n-- WEIGH THIS ONE:\n")
 			for _, line := range s.caveat {
-				b.WriteString(strings.TrimRight("-- "+line, " ") + "\n")
+				b.WriteString(strings.TrimRight("-- "+commentSafe(line), " ") + "\n")
 			}
 		}
 		b.WriteString("\n")
@@ -557,7 +585,9 @@ func writeGrantHeader(b *strings.Builder, in GrantScriptInput, major int, denied
     HOW TO UNDO IT. Replace GRANT with REVOKE, ALTER ROLE ... ADD MEMBER with
     DROP MEMBER, and DROP USER in msdb. The order does not matter.
 
-`, orUnknown(in.Tool), orUnknown(in.Instance), orUnknown(in.Version), orUnknown(in.Edition), in.Login)
+`, commentSafe(orUnknown(in.Tool)), commentSafe(orUnknown(in.Instance)),
+		commentSafe(orUnknown(in.Version)), commentSafe(orUnknown(in.Edition)),
+		commentSafe(in.Login))
 
 	b.WriteString("    WHAT THE PROBE FOUND\n\n")
 	for _, c := range in.Checks {
