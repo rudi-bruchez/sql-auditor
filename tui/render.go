@@ -41,11 +41,24 @@ func Render(s State, width, height int) []string {
 	case StepDone:
 		lines = renderDone(s, width)
 	}
+	// Control characters go first, and for the same reason ToASCII is applied
+	// here rather than at the twenty places a string enters a frame: one pass
+	// over the finished frame cannot be forgotten by the next screen somebody
+	// writes.
+	//
+	// The strings this wizard paints include a server name, a login and a list
+	// of database names, all of them chosen on the far side of the connection.
+	// An ESC in one of them moves the cursor, clears the line or repaints what
+	// is above it — and the last screen shows an archive path the operator is
+	// expected to copy into an email. Render emits no escape sequence of its
+	// own, so there is nothing here for this to damage; the cursor work belongs
+	// to draw, after this.
+	for i, l := range lines {
+		lines[i] = collect.SafeForTerminal(l)
+	}
 	if s.ASCII {
-		// The last transformation, applied once to the finished frame rather
-		// than at the twenty places a collect text enters it: a console whose
-		// output code page could not be moved to UTF-8 would otherwise draw the
-		// em dash of an Impact as two bytes of mojibake.
+		// A console whose output code page could not be moved to UTF-8 would
+		// otherwise draw the em dash of an Impact as two bytes of mojibake.
 		for i, l := range lines {
 			lines[i] = screen.ToASCII(l)
 		}

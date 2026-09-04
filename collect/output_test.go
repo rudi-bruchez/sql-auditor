@@ -153,3 +153,30 @@ func TestMarkWidenedTagsOnlyTheWidenedFolders(t *testing.T) {
 		}
 	}
 }
+
+// The display counterpart of the SafeFolderName tests above. A database name is
+// chosen on the far side of the connection, and it reached the screen exactly as
+// the server sent it while being carefully sanitised on its way to a directory.
+func TestSafeForTerminalNeutralisesEscapes(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"escape", "SALES\x1b[2KDB", "SALES\uFFFD[2KDB"},
+		{"carriage return can repaint the line", "SALES\rDROPPED", "SALES\uFFFDDROPPED"},
+		{"newline can push a row out of a measured frame", "a\nb", "a\uFFFDb"},
+		{"tab breaks a fixed column", "a\tb", "a\uFFFDb"},
+		{"del", "a\x7fb", "a\uFFFDb"},
+		{"C1 range, which some terminals still act on", "a\x9bb", "a\uFFFDb"},
+		{"printable non-ASCII is left alone", "VENTES_ÉTÉ_日本", "VENTES_ÉTÉ_日本"},
+		{"ordinary name untouched", "SALESDB", "SALESDB"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SafeForTerminal(tc.in); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// One rune in, one rune out, so a column that lined up still does.
+	in := "a\x1b\x1b\x1bb"
+	if got := len([]rune(SafeForTerminal(in))); got != len([]rune(in)) {
+		t.Errorf("rune count changed: %d in, %d out", len([]rune(in)), got)
+	}
+}

@@ -793,8 +793,9 @@ func Check(ctx context.Context, o Options) (int, error) {
 	}
 
 	if v.Probed {
-		fmt.Printf("\nServer   : %s  %s  %s\n", v.Server.Name, v.Server.Version, v.Server.Edition)
-		fmt.Printf("Login    : %s\n", v.Server.Login)
+		fmt.Printf("\nServer   : %s  %s  %s\n", SafeForTerminal(v.Server.Name),
+			SafeForTerminal(v.Server.Version), SafeForTerminal(v.Server.Edition))
+		fmt.Printf("Login    : %s\n", SafeForTerminal(v.Server.Login))
 		if excess := v.Server.ExcessPrivilege(); excess != "" {
 			fmt.Printf("  !! %s\n", excess)
 		}
@@ -833,7 +834,7 @@ func Check(ctx context.Context, o Options) (int, error) {
 			// the moment the DBA decides whether to authorise the run rather
 			// than in the manifest afterwards.
 			if f.RetentionReason != "" {
-				fmt.Printf("  - %s -> %s/ (%s)\n", f.Name, f.Folder, f.RetentionReason)
+				fmt.Printf("  - %s -> %s/ (%s)\n", SafeForTerminal(f.Name), f.Folder, f.RetentionReason)
 				// What it reaches, not only why it is here. This is the moment
 				// the operator authorises the run, so it is the moment to say
 				// that this one database is not narrowed by their DB_INCLUDE
@@ -843,12 +844,12 @@ func Check(ctx context.Context, o Options) (int, error) {
 				}
 				continue
 			}
-			fmt.Printf("  - %s -> %s/\n", f.Name, f.Folder)
+			fmt.Printf("  - %s -> %s/\n", SafeForTerminal(f.Name), f.Folder)
 		}
 		if len(v.Selection.Skipped) > 0 {
 			fmt.Printf("\nDatabases skipped (%d):\n", len(v.Selection.Skipped))
 			for _, s := range v.Selection.Skipped {
-				fmt.Printf("  - %s (%s)\n", s.Name, s.Reason)
+				fmt.Printf("  - %s (%s)\n", SafeForTerminal(s.Name), s.Reason)
 			}
 		}
 	}

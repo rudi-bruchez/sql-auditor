@@ -739,7 +739,9 @@ SET LOCK_TIMEOUT 10000;
 ```
 
 Ten seconds, then the read gives up with error 1222 instead of waiting for its
-own `@timeout`, which for the widest collector is five minutes. Driven against
+own `@timeout`, which for the widest collector that runs by default is five
+minutes — and thirty for `--estimate-compression`, which is opt-in precisely
+because of what it costs. Driven against
 a database with one `ALTER TABLE` open in another session, four collectors met
 it: `20.databases/020.properties.sql`, `70.schema/010.objects.sql`,
 `70.schema/020.index-usage.sql` and `70.schema/030.index-operational.sql`.

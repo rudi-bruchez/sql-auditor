@@ -156,3 +156,35 @@ const (
 	dirPerm  = 0o700
 	filePerm = 0o600
 )
+
+// SafeForTerminal makes a server-supplied string safe to paint on a terminal.
+//
+// It is the display counterpart of SafeFolderName, and it exists because the
+// codebase already knew these strings were hostile-shaped in one direction and
+// not the other: a database name is sanitised before it becomes a directory,
+// and went to the screen exactly as the server sent it.
+//
+// A name may contain ESC. That is enough to move the cursor, clear the line,
+// repaint what is above it, or set a colour that hides the rest — and the
+// screen is where an operator reads which databases were skipped and which
+// archive path to send on. Rewriting that is not a cosmetic problem: the
+// wizard ends by showing a path the operator is expected to copy.
+//
+// C0 controls, DEL and the C1 range become U+FFFD, kept as one rune each so a
+// column that was aligned before still is. Tab and newline are included: this
+// renders inside a fixed-width row, and a name that can open a second line can
+// push a row off the frame the caller measured. Everything printable, in any
+// script, is left alone — the names this tool reads are legitimately not ASCII.
+func SafeForTerminal(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r < 0x20 || r == 0x7f, r >= 0x80 && r <= 0x9f:
+			b.WriteRune('�')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}

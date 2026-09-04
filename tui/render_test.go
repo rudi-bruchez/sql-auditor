@@ -566,3 +566,28 @@ func TestTheNewFindingsDoNotChangeWhatTheKeysDo(t *testing.T) {
 	}
 	contains(t, Render(s, 100, 60), "[enter] continue")
 }
+
+// Every frame is swept, not every call site. The wizard paints a server name, a
+// login and database names, all chosen on the far side of the connection, and
+// its last screen shows an archive path the operator is asked to copy into an
+// email — which is exactly what a cursor escape would rewrite.
+func TestNoFrameCarriesAnEscapeFromTheServer(t *testing.T) {
+	v := probedVerify()
+	v.Server.Name = "SQL01\x1b[2K\x1b[Apwned"
+	v.Server.Login = "AUDIT_RO\rroot"
+	v.Folders = []collect.DatabaseFolder{{Name: "SALES\x1b[31m", Folder: "SALES_"}}
+	v.NoAccess = []string{"RH\x1b[2J"}
+	v.Selection.Skipped = []collect.SkipReason{{Name: "RH\x1b[2J", Reason: collect.SkipNoAccess}}
+
+	for _, st := range []Step{StepConnection, StepConnecting, StepVerification,
+		StepVerifying, StepOptions, StepCollecting, StepDone} {
+		s := State{Step: st, Verify: v, Server: "SQL01\x1b[2K", Catalog: "master\x1b[1m",
+			User: "AUDIT_RO\x1b[7m", Flags: map[string]bool{},
+			ZipPath: `C:\out\a` + "\x1b[2Kb.zip", Units: 10, DoneUnits: 4}
+		for i, line := range Render(s, testWidth, 0) {
+			if strings.ContainsAny(line, "\x1b\r\n\t") {
+				t.Errorf("step %v line %d carries a control character: %q", st, i, line)
+			}
+		}
+	}
+}
