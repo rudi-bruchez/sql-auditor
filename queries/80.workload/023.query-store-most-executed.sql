@@ -3,6 +3,7 @@
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     120
 -- @min_version: 13
+-- @discloses:   query_text
 --
 -- The most frequently executed queries, plain call counts, nothing about what
 -- they mean. A row-by-row loop is recognised by its call count and its

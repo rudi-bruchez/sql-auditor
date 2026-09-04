@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,7 +53,20 @@ type Script struct {
 	// reason @requires_flag's is: a misspelt name would silently fall back to
 	// the encoder and emit a single JSON file where a directory of plans was
 	// expected, with nothing anywhere saying so.
-	Writer    string
+	Writer string
+	// Discloses names what this collector puts in the archive that a reader
+	// approving the transfer has to be told about, in the vocabulary of
+	// KnownDisclosures. It is for collectors that run by DEFAULT: a gated one
+	// is disclosed through @requires_flag, and the gate is itself the notice.
+	//
+	// It exists because three default collectors were capturing text that names
+	// things — 500 characters of Query Store SQL, 200 of every Agent job step,
+	// samples of the error log — and MANIFEST.txt listed none of them. Driving
+	// the list from the corpus rather than from prose in the manifest writer is
+	// what keeps the two from drifting: a collector that starts capturing text
+	// declares it here, and the paragraph a security officer reads grows with
+	// it.
+	Discloses []string
 	LintError string
 }
 
@@ -234,7 +248,7 @@ func filepathRel(root, p string) (string, error) {
 // what the nine are.
 var knownDirectives = []string{
 	"scope", "timeout", "permissions", "resultsets", "min_version",
-	"requires_flag", "writer", "widened", "correlated",
+	"requires_flag", "writer", "widened", "correlated", "discloses",
 }
 
 func parseScript(rel, sql string) Script {
@@ -344,6 +358,25 @@ func parseScript(rel, sql string) Script {
 				break
 			}
 			s.Widened = name
+		case "discloses":
+			// Closed for the reason the two above are, and with the failure
+			// that matters most here: a misspelt value would mean "discloses
+			// nothing", so the archive would carry the text and the manifest
+			// would not list it. The whole directive exists to stop that.
+			for _, part := range strings.Split(val, ",") {
+				name := strings.ToLower(strings.TrimSpace(part))
+				if name == "" {
+					continue
+				}
+				if _, ok := KnownDisclosures[name]; !ok {
+					setLint(fmt.Sprintf("@discloses: unknown value %q; expected one of %s",
+						part, strings.Join(knownDisclosureNames(), ", ")))
+					break
+				}
+				if !slices.Contains(s.Discloses, name) {
+					s.Discloses = append(s.Discloses, name)
+				}
+			}
 		case "correlated":
 			setLint("correlated result sets are not supported: a result set must not " +
 				"reference a column of another; split it into its own query")
@@ -427,6 +460,40 @@ func knownFlagNames() []string {
 func knownWriterNames() []string {
 	names := make([]string, 0, len(KnownWriters))
 	for n := range KnownWriters {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// KnownDisclosures is the closed set of values @discloses accepts, mapped to
+// the sentences MANIFEST.txt prints for them. The prose lives here, beside the
+// token, for the reason KnownWidened's does: the alternative is a paragraph in
+// the manifest writer that has to be kept in step with a corpus it cannot see.
+//
+// Each entry is written for someone deciding whether to send the archive on, so
+// it says what the text IS rather than which DMV it came from, and it says the
+// worst thing that can plausibly be in it.
+var KnownDisclosures = map[string][]string{
+	"query_text": {
+		"the first 500 characters of the SQL of the heaviest queries the Query",
+		"Store recorded, which is application code and can carry the literal",
+		"values a statement was written with",
+	},
+	"job_step_text": {
+		"the first 200 characters of every step of every SQL Server Agent job,",
+		"which is application code too and, on some instances, a password typed",
+		"into a step rather than kept in a credential",
+	},
+	"error_log": {
+		"samples of the SQL Server error log, which name logins, databases,",
+		"file paths and client addresses",
+	},
+}
+
+func knownDisclosureNames() []string {
+	names := make([]string, 0, len(KnownDisclosures))
+	for n := range KnownDisclosures {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -691,6 +758,12 @@ func lint(sql string, results []ResultSpec) string {
 	}
 	if len(results) == 0 {
 		return "missing the @resultsets directive; declare each result set as name:object or name:array"
+	}
+	// Before the contract, because the contract is about how a collector reads
+	// and this is about whether it reads at all. A file that changes the server
+	// is not a badly-formed collector, it is not a collector.
+	if msg := statementLint(stripped); msg != "" {
+		return msg
 	}
 	// Blanked, because contractLint counts hints against the number of declared
 	// result sets and a hint inside dynamic SQL emits nothing. The guard pattern

@@ -3,6 +3,7 @@
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     120
 -- @min_version: 13.0
+-- @discloses:   query_text
 --
 -- What the Query Store recorded: the heaviest queries, and any plan someone
 -- has forced.

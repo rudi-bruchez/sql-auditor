@@ -3,6 +3,7 @@
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     180
 -- @min_version: 14
+-- @discloses:   query_text
 --
 -- How many rows each execution returned, and how the executions were spread
 -- over time. Those are the two facts that turn a call count into a diagnosis,

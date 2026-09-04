@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -516,6 +518,29 @@ func planScripts(scripts []Script, denied map[string]bool, serverVersion []int, 
 		}
 		out = append(out, p)
 	}
+	return out
+}
+
+// plannedDisclosures gathers the @discloses tokens of the collectors this run
+// will actually execute, sorted and deduplicated.
+//
+// Read from the plan for the reason collectsSessionText is: the archive's
+// disclosure paragraph and the set of queries that ran have to come from one
+// decision. A collector skipped for a denied permission or an old server puts
+// nothing in the archive, so it must put nothing in the paragraph either.
+func plannedDisclosures(plan []plannedScript) []string {
+	var out []string
+	for _, p := range plan {
+		if p.Skip != "" || p.Script.LintError != "" {
+			continue
+		}
+		for _, name := range p.Script.Discloses {
+			if !slices.Contains(out, name) {
+				out = append(out, name)
+			}
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -1350,6 +1375,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// archive from the one beside it.
 	sessionTextBy := collectsSessionText(plan)
 	m.Collected.SessionText = len(sessionTextBy) > 0
+	m.Disclosed = plannedDisclosures(plan)
 	for _, path := range sessionTextBy {
 		if scriptByPath(scripts, path).RequiresFlag == FlagIncludeSessionText {
 			continue

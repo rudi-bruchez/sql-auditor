@@ -178,11 +178,15 @@ type Manifest struct {
 	Preflight []CapabilityCheck     `json:"preflight"`
 	Coverage  CoverageBlock         `json:"coverage"`
 	Collected CollectedKinds        `json:"collected"`
-	Targets   TargetBlock           `json:"targets"`
-	Results   []ResultEntry         `json:"results"`
-	Skipped   []SkippedScript       `json:"skipped_scripts"`
-	Warnings  []string              `json:"warnings"`
-	Errors    []ErrorEntry          `json:"errors"`
+	// Disclosed is the sorted set of @discloses tokens carried by the
+	// collectors this run planned to execute. It drives the "names things"
+	// list, so a corpus that captures no text produces no line about text.
+	Disclosed []string        `json:"disclosed"`
+	Targets   TargetBlock     `json:"targets"`
+	Results   []ResultEntry   `json:"results"`
+	Skipped   []SkippedScript `json:"skipped_scripts"`
+	Warnings  []string        `json:"warnings"`
+	Errors    []ErrorEntry    `json:"errors"`
 }
 
 // NewManifest starts a manifest with the tool identity and a start timestamp
@@ -410,22 +414,29 @@ What this archive contains
 Server and database metadata, and performance counters: configuration
 settings, database options, file layout and sizes, wait statistics, index
 and backup metadata.
-
-The collector issues only read-only SELECT statements against system
-catalog views and dynamic management views, and it does not read any user
-or application table. A few diagnostics exist only as a command rather
-than a view — DBCC, sp_readerrorlog — and for those it runs the command
-and captures its output into scratch storage of its own, in tempdb.
-
-It creates no permanent object: nothing that belongs to this server or
-its databases is created, altered or deleted, and no data of yours is
-written anywhere by this tool.
-
+`)
+	m.writeReadOnlyClaim(b)
+	b.WriteString(`
 What is in here that names things:
   - this server's name, version, edition and file paths
   - database, schema and object names
   - the Windows or SQL login names of database owners
 `)
+	// The default-path disclosures, driven by what the corpus declared and
+	// what the plan actually ran — never by prose fixed here. See KnownDisclosures.
+	for _, name := range m.Disclosed {
+		lines, ok := KnownDisclosures[name]
+		if !ok {
+			continue
+		}
+		for i, line := range lines {
+			if i == 0 {
+				fmt.Fprintf(b, "  - %s\n", line)
+				continue
+			}
+			fmt.Fprintf(b, "    %s\n", line)
+		}
+	}
 	if m.Collected.SessionText {
 		b.WriteString(`  - the SQL text of statements running during collection, which may
     contain values from application tables, together with the login,
@@ -504,6 +515,51 @@ infrastructure documentation rather than public material.
 `)
 	}
 	m.writeCorpusProvenance(b)
+}
+
+// writeReadOnlyClaim is the sentence the whole document is read for, and the
+// one place where who wrote the queries changes what may honestly be said.
+//
+// The published corpus gets the claim flat. It is this project's own, every
+// file of it is in the repository, and the statement-class lint refuses
+// anything but a read before a run starts — so the sentence is backed by
+// review, by publication and by a rule.
+//
+// A corpus supplied with --queries-dir gets the lint and nothing else. That is
+// worth saying rather than skipping: the lint is what stops a maintenance
+// script pasted into the directory, and it ran here too. But it is a syntactic
+// rule over T-SQL and not a sandbox, nobody in this project read the file, and
+// a reader who takes the flat sentence for the published corpus's guarantee has
+// been misled. Until 4 September 2026 this document printed the flat sentence
+// over any corpus at all: an external reviewer pointed --queries-dir at two
+// files, lost a database, and got an archive attesting that nothing had been
+// deleted.
+func (m *Manifest) writeReadOnlyClaim(b *strings.Builder) {
+	if src, ok := m.Sources["queries"]; ok && src.From != "embedded" {
+		b.WriteString(`
+The queries for this run did not come from the published corpus: they were
+supplied from a local directory. Every one of them passed the statement-class
+lint before anything ran — it refuses anything but a read, allowing writes
+only to a table variable or a #temp table, and it reads inside dynamic SQL —
+so no file that changes this server was executed. That lint is a syntactic
+rule over the text of the queries and is not a sandbox: it bounds what a
+mistake can do, it does not vouch for the intent of an author this project
+has never seen. Check the SHA-256 recorded under "Query corpus" below against
+the directory the run was given.
+`)
+		return
+	}
+	b.WriteString(`
+The collector issues only read-only SELECT statements against system
+catalog views and dynamic management views, and it does not read any user
+or application table. A few diagnostics exist only as a command rather
+than a view — DBCC, sp_readerrorlog — and for those it runs the command
+and captures its output into scratch storage of its own, in tempdb.
+
+It creates no permanent object: nothing that belongs to this server or
+its databases is created, altered or deleted, and no data of yours is
+written anywhere by this tool.
+`)
 }
 
 // writeCorpusProvenance says where the questions came from. The published-

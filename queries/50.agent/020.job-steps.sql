@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, steps:array
 -- @permissions: CONNECT, AGENT JOB STEPS
 -- @timeout:     60
+-- @discloses:   job_step_text
 --
 -- What the Agent jobs actually run, step by step.
 --

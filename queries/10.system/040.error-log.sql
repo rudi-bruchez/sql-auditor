@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, status:object, top_messages:array, by_source:array, notable:array, database_mounts:array
 -- @permissions: CONNECT, ERROR LOG
 -- @timeout:     300
+-- @discloses:   error_log
 --
 -- The current SQL Server error log, summarised.
 --

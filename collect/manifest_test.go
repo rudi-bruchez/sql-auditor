@@ -673,3 +673,66 @@ func TestManifestSaysAWidenedDatabaseReachesBeyondTheSelection(t *testing.T) {
 			"databases outside the selection:\n%s", m.Human())
 	}
 }
+
+// The paragraph a security officer reads before releasing the archive says
+// that nothing on the server was created, altered or deleted. That is a claim
+// about the queries that ran, and it is true of the published corpus because
+// this project wrote it and the statement-class lint enforces it. A corpus
+// supplied with --queries-dir is neither: the lint still refuses anything but a
+// read, but nobody here reviewed the file, and the sentence has to say which of
+// the two vouched for the run. Saying it flatly, as this document did until the
+// external panel of 4 September 2026 pointed --queries-dir at a corpus that
+// dropped a database, is the manifest attesting the opposite of what happened.
+func TestManifestAttributesTheReadOnlyClaimToWhoVouchedForIt(t *testing.T) {
+	embedded := NewManifest("sql-auditor", "test", "abc")
+	embedded.Sources = map[string]SourceInfo{"queries": {From: "embedded", SHA256: "abc"}}
+	h := flatten(embedded.Human())
+	if !strings.Contains(h, "creates no permanent object") {
+		t.Errorf("the published corpus should carry the flat attestation:\n%s", embedded.Human())
+	}
+	if strings.Contains(h, "statement-class lint") {
+		t.Errorf("the published corpus should not need the lint hedge:\n%s", embedded.Human())
+	}
+
+	foreign := NewManifest("sql-auditor", "test", "abc")
+	foreign.Sources = map[string]SourceInfo{
+		"queries": {From: "filesystem", Path: "C:/scripts", SHA256: "def"}}
+	f := flatten(foreign.Human())
+	for _, unwanted := range []string{
+		"creates no permanent object",
+		"nothing that belongs to this server or its databases is created, altered or deleted",
+	} {
+		if strings.Contains(f, unwanted) {
+			t.Errorf("a corpus this project never saw must not carry %q:\n%s", unwanted, foreign.Human())
+		}
+	}
+	for _, want := range []string{
+		"did not come from the published corpus",
+		"statement-class lint",
+		"is not a sandbox",
+	} {
+		if !strings.Contains(f, want) {
+			t.Errorf("a foreign corpus should say %q:\n%s", want, foreign.Human())
+		}
+	}
+}
+
+// The default archive already holds three kinds of captured text that name
+// things: the SQL of the heaviest Query Store queries, the first 200 characters
+// of every Agent job step, and samples of the error log. None needs a flag, and
+// none was in the list a reader checks before releasing the archive.
+func TestManifestListsTheTextTheDefaultRunCaptures(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "abc")
+	m.Sources = map[string]SourceInfo{"queries": {From: "embedded", SHA256: "abc"}}
+	m.Disclosed = []string{"error_log", "job_step_text", "query_text"}
+	h := flatten(m.Human())
+	for _, want := range []string{
+		"first 500 characters",
+		"first 200 characters",
+		"error log",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("MANIFEST.txt should disclose %q on the default path:\n%s", want, m.Human())
+		}
+	}
+}
