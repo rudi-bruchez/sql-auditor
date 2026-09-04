@@ -22,8 +22,9 @@ Read [what it does](#what-it-does-and-what-it-does-not-do) and
 - [Then run `collect`](#then-run-collect)
 - [What is in the archive](#what-is-in-the-archive)
 - [Can I verify the binary?](#can-i-verify-the-binary)
-- [Three things that are not obvious from the outside](#three-things-that-are-not-obvious-from-the-outside)
+- [Four things that are not obvious from the outside](#four-things-that-are-not-obvious-from-the-outside)
   - [`READ UNCOMMITTED`](#the-collector-runs-under-read-uncommitted)
+  - [A narrowed run and the distribution database](#a-narrowed-run-may-still-collect-the-distribution-database)
   - [Timeouts](#timeouts-15-s-to-connect-and-why-raising-the-query-timeout-may-not-help)
   - [`.env` precedence](#env-overrides-exported-environment-variables)
 - [`--include-session-text`](#--include-session-text)
@@ -136,6 +137,19 @@ archive.
 | Read the Agent job steps | `SELECT` on `msdb.dbo.sysjobsteps` | job steps not collected — the report can say a job exists but not what it runs |
 | Read the log shipping tables | `SELECT` on the six `msdb.dbo.log_shipping_*` tables | log shipping configuration and lag not collected — the report must not read this as 'no log shipping' |
 | Read the SQL Server error log | covered by `VIEW SERVER STATE` before 2022; `VIEW ANY ERROR LOG` from 2022 | the error log is not collected — the report must not read this as 'no errors were logged' |
+
+**Replication metadata asks for no right you are not already granting.** The
+five replication collectors read the instance flags, the performance counters
+and the publication, distribution and subscription catalogs with whatever the
+audit login has, and each records in its own result set which reads returned
+and which were refused — `applies`, `collected`, and an error number per area. A login without `replmonitor` or membership in a
+publication access list still gets the instance-level answer: which databases
+carry which role, and where a remote distributor is. Nothing fails, and nothing
+goes missing in silence — the archive says which of the two you are looking at.
+
+There is deliberately no new grant to ask for here. If your organisation would
+have to raise the audit login's rights to collect this, run without it and read
+the error numbers.
 
 ### Three of those deserve a second look
 
@@ -643,7 +657,7 @@ and get a byte-identical binary to compare against, so the attestation, when it
 exists, will be a statement by the build system about what it did rather than
 something you can independently recompute.
 
-## Three things that are not obvious from the outside
+## Four things that are not obvious from the outside
 
 ### The collector runs under `READ UNCOMMITTED`
 
@@ -670,6 +684,28 @@ rather than business tables, that trade is worth making:
 There is no case in this corpus where a dirty read produces a wrong answer that
 a clean read would have got right. The worst outcome is a value fractionally
 staler than the instant it was requested.
+
+### A narrowed run may still collect the distribution database
+
+`DB_INCLUDE` names the databases you want. There is one case where the
+collector adds one you did not name: if a database you did include is a
+replication publisher, and the distributor is this same instance, the
+distribution database is collected too.
+
+It is not a loophole in the filter. The publication metadata on a publisher
+says what is published; everything about whether replication is *working* —
+agent history, delivery latency, undistributed commands, replication errors —
+lives in the distribution database, and a run that collected the first and not
+the second would report on a topology it never measured.
+
+Only the three collectors written for it are offered that database — the
+publication, distribution and subscription catalogs. The thirty-odd ordinary
+database collectors are not: no object inventory, no index usage, no Query
+Store. And `DB_EXCLUDE` still wins — naming the distribution database
+there keeps it out, at the cost of the agent and latency data.
+
+`check` prints the reason beside the folder before you authorise anything, and
+`MANIFEST.txt` repeats it under `kept because:` on the database itself.
 
 ### Timeouts: 15 s to connect, and why raising the query timeout may not help
 
