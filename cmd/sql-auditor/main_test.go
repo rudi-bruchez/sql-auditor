@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rudi-bruchez/sql-auditor/collect"
 )
@@ -481,5 +484,57 @@ func TestAnAbsentDefaultEnvFileIsNotAnError(t *testing.T) {
 	}
 	if o.Config.Server != "invalid.invalid" {
 		t.Errorf("Server = %q, want the environment to have been read", o.Config.Server)
+	}
+}
+
+// The README promises that ctrl-c during a collection still writes the manifest
+// and the archive. Until the harm review of 4 September 2026 that was true only
+// in the wizard: the subcommand ran on context.Background() with no handler, so
+// SIGINT took the default disposition and left a half-written run folder, no
+// manifest and no archive — on exactly the path a scheduled task, a remote
+// shell and a runbook use.
+//
+// collect.Run decides cancellation from the context, so the whole fix is that
+// something now cancels it.
+func TestInterruptCancelsTheRunAndHandsTheSignalBack(t *testing.T) {
+	sig := make(chan os.Signal, 1)
+	handedBack := make(chan struct{}, 1)
+	var out bytes.Buffer
+
+	ctx, stop := interruptibleOn(context.Background(), sig,
+		func() {
+			select {
+			case handedBack <- struct{}{}:
+			default:
+			}
+		}, &out)
+	defer stop()
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("the context is cancelled before any signal arrived")
+	default:
+	}
+
+	sig <- os.Interrupt
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("a signal did not cancel the run")
+	}
+
+	// The second ctrl-c must reach the runtime, or an operator whose run will
+	// not wind down has no way out. That is what handing the signal back is.
+	select {
+	case <-handedBack:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the signal was never handed back, so a second ctrl-c would be swallowed too")
+	}
+
+	// And the operator is told which of the two happened, on stderr, or a run
+	// that appears to ignore ctrl-c gets killed by someone who had no reason to
+	// wait.
+	if s := out.String(); !strings.Contains(s, "manifest") || !strings.Contains(s, "again") {
+		t.Errorf("the stop said nothing useful: %q", s)
 	}
 }

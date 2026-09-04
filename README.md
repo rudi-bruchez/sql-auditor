@@ -272,6 +272,10 @@ from before the wizard.
   into a ticket and a sequence of keystrokes cannot.
 - `check` in particular is meant to be run without a human present, since its
   whole output is a verdict something else can read.
+- `ctrl-c` and `SIGTERM` behave the same here as in the wizard: the collection
+  finishes what is in flight and still writes its manifest and its archive,
+  marked as cancelled. A second `ctrl-c` abandons the run instead, so a
+  collection that will not wind down can still be stopped.
 
 An argument therefore wins over everything else: `sql-auditor collect` does the
 same work whatever terminal it finds itself attached to, and no invocation that

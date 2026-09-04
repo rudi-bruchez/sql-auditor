@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -770,7 +772,8 @@ func run() int {
 		return 2
 	}
 
-	ctx := context.Background()
+	ctx, stopSignals := interruptible(context.Background())
+	defer stopSignals()
 	dbg.printf("dispatching to %s", cmd)
 	switch cmd {
 	case "collect":
@@ -1003,4 +1006,57 @@ Environment (read from the process environment, never from .env):
 
 Exit codes: 0 success, 2 partial failure or bad configuration, 1 fatal.
 `)
+}
+
+// interruptible turns ctrl-c into the stop request collect.Run already knows
+// how to honour, on the path where nobody was listening for it.
+//
+// The wizard has watched for signals since it was written, and README's
+// promise — "cancelling a collection with ctrl-c still writes its manifest and
+// its archive" — was true only there. The subcommand ran on
+// context.Background() with no handler, so SIGINT took the default disposition:
+// exit 130, no manifest, no archive, no cancelled record, a half-written run
+// folder on disk, and the previous run left parked under its .superseded name.
+// That is the path "a scheduled task, a remote shell, a CI job and a runbook
+// use", which is where an interruption is most likely and least watched.
+//
+// Everything needed was already there: Run decides cancellation from the
+// CONTEXT rather than from the errors in flight, records cancelled: true, and
+// finishes writing. All that was missing was something to cancel it.
+//
+// THE SECOND SIGNAL KILLS. signal.Stop hands SIGINT back to the runtime once
+// the stop has been asked for, so an operator whose run will not wind down —
+// a collector inside a 1800-second timeout, an instance that stopped answering
+// — can still take the process out with a second ctrl-c. A handler that
+// swallowed every signal would turn a graceful stop into a hang with no way
+// out, which is worse than the behaviour it replaced.
+func interruptible(parent context.Context) (context.Context, func()) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	return interruptibleOn(parent, sig, func() { signal.Stop(sig) }, os.Stderr)
+}
+
+// interruptibleOn is the half that can be tested. Sending a real signal to the
+// test process is not portable — Windows has no kill(2) and Go refuses
+// Process.Signal(os.Interrupt) there — so the channel and the hand-back are
+// parameters, and the only thing interruptible itself adds is signal.Notify.
+func interruptibleOn(parent context.Context, sig <-chan os.Signal, handBack func(), out io.Writer) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		if _, ok := <-sig; !ok {
+			return
+		}
+		fmt.Fprintln(out,
+			"\nstopping: finishing what is in flight, then writing the manifest and the archive")
+		fmt.Fprintln(out,
+			"press ctrl-c again to abandon the run instead")
+		// Before the cancel, so the window in which a second signal is still
+		// swallowed is as short as it can be.
+		handBack()
+		cancel()
+	}()
+	return ctx, func() {
+		handBack()
+		cancel()
+	}
 }
