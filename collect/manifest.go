@@ -181,12 +181,20 @@ type Manifest struct {
 	// Disclosed is the sorted set of @discloses tokens carried by the
 	// collectors this run planned to execute. It drives the "names things"
 	// list, so a corpus that captures no text produces no line about text.
-	Disclosed []string        `json:"disclosed"`
-	Targets   TargetBlock     `json:"targets"`
-	Results   []ResultEntry   `json:"results"`
-	Skipped   []SkippedScript `json:"skipped_scripts"`
-	Warnings  []string        `json:"warnings"`
-	Errors    []ErrorEntry    `json:"errors"`
+	Disclosed []string `json:"disclosed"`
+	// PartialUnits counts the collectors that wrote their document but told
+	// their root object they could not read part of it — the guard pattern's
+	// answer to a lock timeout. It is not an error: the file is there and the
+	// rest of it is good. It is counted rather than derived so the run summary
+	// can say so without reparsing what it has just written, and so that a
+	// degraded collection is visible from the command line and not only from
+	// inside a JSON file nobody opens until the analysis stage.
+	PartialUnits int             `json:"partial_units"`
+	Targets      TargetBlock     `json:"targets"`
+	Results      []ResultEntry   `json:"results"`
+	Skipped      []SkippedScript `json:"skipped_scripts"`
+	Warnings     []string        `json:"warnings"`
+	Errors       []ErrorEntry    `json:"errors"`
 }
 
 // NewManifest starts a manifest with the tool identity and a start timestamp

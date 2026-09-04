@@ -104,8 +104,13 @@ func TestEmbeddedCorpusHasNoTopLevelKeyCollision(t *testing.T) {
 	}
 	alias := regexp.MustCompile(`(?i)\bAS\s+\[([^\]]+)\]`)
 	// A SELECT that assigns into a variable returns no rows, so it consumes a
-	// hint without consuming a result set.
+	// hint without consuming a result set. So does an INSERT that buffers a
+	// read into a table variable, which is the guard pattern the four
+	// blockable collectors use: they read into @tables inside TRY/CATCH and
+	// emit from them at the bottom, so the emitting statements are the ones
+	// selecting FROM a table variable and the buffering ones return nothing.
 	assignment := regexp.MustCompile(`(?is)\bSELECT\s+@\w+\s*=`)
+	buffering := regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+@\w+`)
 
 	for _, s := range scripts {
 		rootAt := -1
@@ -117,14 +122,19 @@ func TestEmbeddedCorpusHasNoTopLevelKeyCollision(t *testing.T) {
 		if rootAt < 0 {
 			continue // no root set, so nothing merges into the top level
 		}
-		chunks := strings.Split(collect.BlankSQLStrings(s.SQL), "OPTION (RECOMPILE, MAXDOP 1)")
+		// Comments are stripped as well as literals blanked. The statement that
+		// owns a hint is found by looking back to the last ";", and an alias is
+		// found by looking for AS [x]; a banner comment between SELECT and its
+		// first assignment hid an assignment from the filter below, and a ";" or
+		// an [alias] inside prose would mislead both.
+		chunks := strings.Split(collect.BlankSQLStrings(collect.StripSQLComments(s.SQL)), "OPTION (RECOMPILE, MAXDOP 1)")
 		chunks = chunks[:len(chunks)-1] // the tail after the last hint emits nothing
 		var parts []string
 		for _, c := range chunks {
 			// The statement that owns this hint is the one after the last ";".
 			// Testing the whole chunk would drop a producing SELECT that merely
 			// happens to sit behind an earlier assignment.
-			if assignment.MatchString(c[strings.LastIndex(c, ";")+1:]) {
+			if stmt := c[strings.LastIndex(c, ";")+1:]; assignment.MatchString(stmt) || buffering.MatchString(stmt) {
 				continue
 			}
 			parts = append(parts, c)

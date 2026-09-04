@@ -1607,8 +1607,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// under the old test its gauge would have taken the archive path away from
 	// every script that reads it.
 	if !o.OwnsScreen {
-		fmt.Printf("%d result(s), %d skipped, %d error(s)\n%s\n",
-			len(m.Results), len(m.Skipped), len(m.Errors), zipPath)
+		// "N partial" only when there are some. The line is parsed by scripts
+		// and read at a glance by operators; a permanent ", 0 partial" would
+		// cost both and tell neither anything.
+		partial := ""
+		if m.PartialUnits > 0 {
+			partial = fmt.Sprintf(", %d partial", m.PartialUnits)
+		}
+		fmt.Printf("%d result(s), %d skipped, %d error(s)%s\n%s\n",
+			len(m.Results), len(m.Skipped), len(m.Errors), partial, zipPath)
 	}
 	return code, nil
 }
@@ -1696,6 +1703,16 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	sets, err := ReadResultSets(rows, s.Results)
 	if err != nil {
 		return outOfTime(ctx, qctx, timeout, knob, err)
+	}
+
+	// Read before the document is written, and recorded whether or not the
+	// write then succeeds: a collector that guarded its own reads reports the
+	// blocked areas in its root object, and nothing else in this pipeline can
+	// see them. Without this the run prints "0 error(s)" over a database whose
+	// schema it half collected.
+	if areas, total := reportedErrors(sets); len(areas) > 0 {
+		m.Warnings = append(m.Warnings, partialWarning(s.Path, u.Name, areas, total))
+		m.PartialUnits++
 	}
 
 	var res WriteResult

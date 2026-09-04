@@ -709,16 +709,44 @@ So every collector also carries:
 SET LOCK_TIMEOUT 10000;
 ```
 
-Ten seconds, then the collector gives up with error 1222 and the run records
-which one it was and why. Driven against a blocked database, three collectors
-stopped at their ten seconds — `20.databases/020.properties.sql`,
-`70.schema/010.objects.sql` and `70.schema/020.index-usage.sql` — and the run
-finished with the other fifty-one. Without the setting each of them would have
-waited for its own `@timeout` instead, which for the first is five minutes.
+Ten seconds, then the read gives up with error 1222 instead of waiting for its
+own `@timeout`, which for the widest collector is five minutes. Driven against
+a database with one `ALTER TABLE` open in another session, four collectors met
+it: `20.databases/020.properties.sql`, `70.schema/010.objects.sql`,
+`70.schema/020.index-usage.sql` and `70.schema/030.index-operational.sql`.
 
-A collector that gives up this way loses its whole document, not just the read
-that was blocked, so an archive collected against a database undergoing a long
-schema change will be short of those files. `MANIFEST.txt` names them.
+#### A blocked read costs its area, not the document
+
+Those four used to lose **everything** when one of their reads timed out — a
+statement that fails part-way through a batch takes the rest of the batch's
+output with it, so an `ALTER` on one table cost the whole database's
+properties, files and backup dates, none of which had anything to do with that
+table. Measured: the run reported four errors and wrote no file for any of
+them.
+
+They now read each area inside its own `TRY`/`CATCH`, buffer it, and emit every
+result set whatever happened. The root object of each says which areas came
+back and which did not:
+
+```json
+"collected": { "counts": 1, "usage": 0, "missing": 1 },
+"errors":    { "counts": 0, "usage": 1222, "missing": 0 }
+```
+
+An empty array beside `"errors": { … : 0 }` means there was nothing to report.
+An empty array beside `1222` means the read did not come back. Those are
+different facts and the archive keeps them apart.
+
+The same run that used to end `50 result(s), 8 skipped, 4 error(s)` with four
+files missing now ends:
+
+```
+54 result(s), 8 skipped, 0 error(s), 4 partial
+```
+
+and `MANIFEST.txt` carries a line per degraded collector naming the areas and
+the error number. A degraded collection is visible from the command line; it
+does not have to be found by opening the JSON.
 
 **The cost** is that a read can see uncommitted changes, or miss rows that move
 during a scan. For what this tool reads, catalog metadata and DMV counters
