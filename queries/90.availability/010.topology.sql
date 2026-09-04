@@ -65,6 +65,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_at],
        /* The instance-level switch. 0 means the feature is not enabled in

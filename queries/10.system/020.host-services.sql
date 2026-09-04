@@ -40,6 +40,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 -- SERVERPROPERTY returns sql_variant, always. Projected raw, the encoder has
 -- no type to render it by: it falls back to fmt.Sprint and warns. The value

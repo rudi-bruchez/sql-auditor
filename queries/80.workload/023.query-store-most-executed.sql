@@ -52,6 +52,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 /* ───────── by_query ─────────
    TOP (50) by call count, not by cost: this is the RBAR-hunting ranking, and

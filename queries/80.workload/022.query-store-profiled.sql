@@ -81,6 +81,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 /* ───────── root ─────────
    requested_queries counts QUERIES, not plans: the list holds query ids, one

@@ -41,6 +41,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 /* columns_total counts every column of every user table, not only the ones
    listed below. It is the pair (total, listed) that tells a reader how much

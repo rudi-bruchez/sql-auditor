@@ -48,6 +48,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT CAST(c.is_enabled AS int)                                  AS [is_enabled],
        c.classifier_function_id                                   AS [classifier_function_id],

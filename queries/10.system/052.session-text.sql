@@ -26,6 +26,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 /* Same TOP (5) and same ORDER BY as 050.tempdb.sql, so the rows correspond
    one for one when both files are present. */

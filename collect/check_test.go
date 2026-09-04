@@ -30,11 +30,11 @@ import (
 var checkCorpus = fstest.MapFS{
 	"queries/10.system/010.properties.sql": {Data: []byte(
 		"-- @scope: instance\n-- @resultsets: a:object\n-- @timeout: 60\n" +
-			"SET NOCOUNT ON;\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\n" +
+			"SET NOCOUNT ON;\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\nSET LOCK_TIMEOUT 10000;\n" +
 			"SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);")},
 	"queries/20.databases/020.files.sql": {Data: []byte(
 		"-- @scope: database\n-- @resultsets: a:object\n-- @timeout: 60\n" +
-			"SET NOCOUNT ON;\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\n" +
+			"SET NOCOUNT ON;\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\nSET LOCK_TIMEOUT 10000;\n" +
 			"SELECT 1 AS x OPTION (RECOMPILE, MAXDOP 1);")},
 	"queries/20.databases/030.broken.sql": {Data: []byte(
 		"-- @scope: database\nSELECT 1;")},

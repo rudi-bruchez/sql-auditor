@@ -35,6 +35,7 @@ USE tempdb;
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 /* Trace flags cannot be produced by a SELECT — capture them into a table
    variable first. INSERT ... EXEC swallows the DBCC rowset, so this emits

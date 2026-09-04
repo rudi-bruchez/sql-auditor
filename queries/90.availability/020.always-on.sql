@@ -49,6 +49,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_at],
        CONVERT(int, SERVERPROPERTY('IsHadrEnabled'))              AS [is_enabled],

@@ -37,6 +37,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT si.sqlserver_start_time                                  AS [instance_start],
        DATEDIFF(second, si.sqlserver_start_time, GETDATE())     AS [seconds_since_instance_start],

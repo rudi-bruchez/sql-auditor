@@ -70,6 +70,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 /* ───────── root ─────────
    A LEFT JOIN from sys.databases, not a bare SELECT from

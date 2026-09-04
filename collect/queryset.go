@@ -17,6 +17,12 @@ const (
 	ScopeDatabase
 )
 
+// maxLockTimeoutMS is the longest a collector may wait for a lock. Ten seconds
+// is short enough that a blocked collector gives up while the operator is
+// still watching the run, and far under the shortest @timeout in the corpus,
+// so the two limits never race. See contractLint for what it repairs.
+const maxLockTimeoutMS = 10000
+
 type Script struct {
 	Path, Dir, Base string
 	SQL             string
@@ -164,6 +170,7 @@ var (
 	// author laid the statement out.
 	nocountPattern    = regexp.MustCompile(`(?i)\bSET\s+NOCOUNT\s+ON\b`)
 	isolationPattern  = regexp.MustCompile(`(?i)\bSET\s+TRANSACTION\s+ISOLATION\s+LEVEL\s+READ\s+UNCOMMITTED\b`)
+	lockTimeoutPatt   = regexp.MustCompile(`(?i)\bSET\s+LOCK_TIMEOUT\s+(\d+)\b`)
 	queryHintPattern  = regexp.MustCompile(`(?i)\bOPTION\s*\(\s*RECOMPILE\s*,\s*MAXDOP\s+1\s*\)`)
 	optionWordPattern = regexp.MustCompile(`(?i)\bOPTION\s*\(`)
 )
@@ -722,7 +729,35 @@ func contractLint(sql string, results []ResultSpec) string {
 		return "missing SET NOCOUNT ON: rowcount messages travel in the result stream and the collector must not emit them"
 	}
 	if !isolationPattern.MatchString(sql) {
-		return "missing SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED: a collector must never block or be blocked by the workload it audits"
+		return "missing SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED: a collector must not take shared locks on the data of the workload it audits"
+	}
+	// READ UNCOMMITTED is only half of "never blocked". It gives up locks on
+	// DATA; it gives up nothing on METADATA. Measured on SQL Server 2022, with
+	// an ALTER TABLE holding Sch-M inside an open transaction:
+	//
+	//   sys.dm_db_index_physical_stats, LIMITED   9 955 ms   (42 ms baseline)
+	//   sys.columns filtered by OBJECT_ID         9 809 ms
+	//   sys.tables, unfiltered                        0 ms
+	//
+	// So any collector that resolves a named object waits behind a schema
+	// modification, and the two that call the index DMF wait behind one for as
+	// long as it runs. A five-minute @timeout then means five minutes of a
+	// production instance holding a connection open for an audit.
+	//
+	// LOCK_TIMEOUT is the answer and it was verified rather than assumed: many
+	// internal waits ignore it. With SET LOCK_TIMEOUT 3000 the same blocked
+	// call came back in 3 024 ms with error 1222, catchable in TRY/CATCH, and
+	// the batch went on to emit its remaining result sets.
+	//
+	// A file may be stricter than the contract and never laxer, so the number
+	// is a ceiling rather than a constant: it must be under the shortest
+	// @timeout in the corpus, and small enough that a blocked collector gives
+	// up while the DBA is still watching.
+	if m := lockTimeoutPatt.FindStringSubmatch(sql); m == nil {
+		return "missing SET LOCK_TIMEOUT 10000: READ UNCOMMITTED gives up data locks and not metadata locks, so a collector reading a named object waits behind any ALTER on it until its own timeout"
+	} else if ms, err := strconv.Atoi(m[1]); err != nil || ms > maxLockTimeoutMS || ms <= 0 {
+		return fmt.Sprintf("SET LOCK_TIMEOUT %s: the contract allows at most %d milliseconds, and never 0 or -1 — a collector that waits indefinitely on a lock is the defect this setting exists to prevent",
+			m[1], maxLockTimeoutMS)
 	}
 	hints := len(queryHintPattern.FindAllString(sql, -1))
 	if hints >= len(results) {

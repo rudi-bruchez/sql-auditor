@@ -51,6 +51,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 /* No cap on this one, deliberately, and the two counts below prove it rather
    than asking to be believed: indexes_total and indexes_listed are read from

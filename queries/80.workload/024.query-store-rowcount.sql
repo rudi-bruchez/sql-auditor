@@ -75,6 +75,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 /* ───────── root ─────────
    The denominator every share below is computed against, stated once rather

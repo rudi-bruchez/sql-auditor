@@ -27,6 +27,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 DECLARE @c TABLE (
     [object_name] nvarchar(128), [counter_name] nvarchar(128),

@@ -689,10 +689,38 @@ Every query in the corpus begins with:
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 ```
 
-The collector will not block your production workload, and will not be blocked
-by it. That is the point: a diagnostic tool that takes shared locks on catalog
-views can end up queued behind a long transaction, or contribute to the
-contention it was brought in to measure.
+This means the collector takes no shared locks on your data: it will not queue
+behind a long transaction that is holding rows, and it cannot contribute to
+that kind of contention.
+
+**It does not mean the collector can never wait.** `READ UNCOMMITTED` gives up
+locks on data and gives up nothing on metadata. Any read that resolves a named
+object still takes a schema-stability lock on it, and a schema-stability lock
+waits behind the schema-modification lock of an `ALTER` in an open transaction.
+Measured on SQL Server 2022, with one session holding `Sch-M` on a table:
+
+| Read, all under `READ UNCOMMITTED` | Waited |
+| --- | --- |
+| `sys.dm_db_index_physical_stats`, LIMITED | 9 955 ms (42 ms unblocked) |
+| `sys.columns` filtered by `OBJECT_ID` | 9 809 ms |
+| `sys.tables`, unfiltered | 0 ms |
+
+So every collector also carries:
+
+```sql
+SET LOCK_TIMEOUT 10000;
+```
+
+Ten seconds, then the collector gives up with error 1222 and the run records
+which one it was and why. Driven against a blocked database, three collectors
+stopped at their ten seconds — `20.databases/020.properties.sql`,
+`70.schema/010.objects.sql` and `70.schema/020.index-usage.sql` — and the run
+finished with the other fifty-one. Without the setting each of them would have
+waited for its own `@timeout` instead, which for the first is five minutes.
+
+A collector that gives up this way loses its whole document, not just the read
+that was blocked, so an archive collected against a database undergoing a long
+schema change will be short of those files. `MANIFEST.txt` names them.
 
 **The cost** is that a read can see uncommitted changes, or miss rows that move
 during a scan. For what this tool reads, catalog metadata and DMV counters

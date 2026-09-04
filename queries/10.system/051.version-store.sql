@@ -26,6 +26,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT
     CONVERT(int, SERVERPROPERTY('IsTempDbMetadataMemoryOptimized'))  AS [tempdb.metadata_memory_optimized],

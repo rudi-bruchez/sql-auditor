@@ -31,6 +31,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 DECLARE @applies bit = 0, @err_subs int = 0, @err_agents int = 0,
         @msg nvarchar(2048) = N'';

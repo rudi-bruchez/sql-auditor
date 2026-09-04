@@ -25,6 +25,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT
     si.sql_memory_model                                             AS [memory.sql_memory_model],

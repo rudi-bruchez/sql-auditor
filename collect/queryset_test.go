@@ -10,7 +10,7 @@ import (
 // every collector. Fixtures that assert a clean lint have to carry them, and
 // an OPTION (RECOMPILE, MAXDOP 1) per declared result set, or they fail the
 // contract check rather than the thing they are testing.
-const contractPreamble = "SET NOCOUNT ON;\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\n"
+const contractPreamble = "SET NOCOUNT ON;\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\nSET LOCK_TIMEOUT 10000;\n"
 
 const goodSQL = `-- @scope:       instance
 -- @resultsets:  instance:object, waits:array
@@ -354,6 +354,19 @@ func TestLintEnforcesTheAuditorContract(t *testing.T) {
 			header + "SET NOCOUNT ON;\n" +
 				"SELECT 1 OPTION (RECOMPILE, MAXDOP 1);\nSELECT 2 OPTION (RECOMPILE, MAXDOP 1);",
 			"READ UNCOMMITTED"},
+		// READ UNCOMMITTED gives up data locks, not metadata locks. Measured
+		// on a 2022 container: with an ALTER TABLE holding Sch-M in an open
+		// transaction, sys.dm_db_index_physical_stats under READ UNCOMMITTED
+		// took 9 955 ms against a 42 ms baseline, and a catalog read resolving
+		// the same object (sys.columns filtered by OBJECT_ID) took 9 809 ms.
+		// Listing sys.tables was not blocked. So the promise the isolation
+		// level was thought to carry needs a second setting to be true, and it
+		// belongs beside the first rather than in the two files that happened
+		// to be caught.
+		{"missing lock timeout",
+			header + "SET NOCOUNT ON;\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\n" +
+				"SELECT 1 OPTION (RECOMPILE, MAXDOP 1);\nSELECT 2 OPTION (RECOMPILE, MAXDOP 1);",
+			"LOCK_TIMEOUT"},
 		{"one result set short of a hint",
 			header + contractPreamble + "SELECT 1 OPTION (RECOMPILE, MAXDOP 1);\nSELECT 2;",
 			"OPTION (RECOMPILE, MAXDOP 1)"},

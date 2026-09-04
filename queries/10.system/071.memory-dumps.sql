@@ -33,6 +33,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT (SELECT COUNT(*) FROM sys.dm_server_memory_dumps)          AS [count],
        CONVERT(varchar(23), (SELECT MIN(creation_time) FROM sys.dm_server_memory_dumps), 126)

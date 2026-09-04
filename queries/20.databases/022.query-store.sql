@@ -25,6 +25,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 /* A LEFT JOIN from sys.databases, not a bare SELECT from
    sys.database_query_store_options, so root is a single row even on a

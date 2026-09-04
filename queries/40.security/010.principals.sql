@@ -42,6 +42,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT SYSDATETIME()                                              AS [collected_at],
        (SELECT COUNT(*) FROM sys.server_principals AS p

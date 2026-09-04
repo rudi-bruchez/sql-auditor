@@ -38,6 +38,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT DB_NAME()                                                  AS [database],
        CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_at],

@@ -50,6 +50,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 /* modules_total counts every module of the database, before either cap. Beside
    modules_listed it is what says how much code this archive does not carry. */

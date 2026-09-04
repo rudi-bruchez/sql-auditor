@@ -40,6 +40,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT (SELECT COUNT(*) FROM msdb.dbo.suspect_pages)              AS [count],
        /* Not a threshold: the engine's own hard limit. At 1000 the table has

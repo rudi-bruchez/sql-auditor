@@ -47,6 +47,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 SELECT
     (SELECT COUNT(*) FROM msdb.dbo.sysjobsteps)                 AS [counts.steps],

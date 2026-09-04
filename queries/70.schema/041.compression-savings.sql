@@ -69,6 +69,7 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 10000;
 
 DECLARE @top int = 20, @min_mb int = 100, @kind nvarchar(60) = N'PAGE';
 DECLARE @failures int = 0, @attempted int = 0;
