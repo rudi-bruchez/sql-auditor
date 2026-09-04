@@ -308,9 +308,23 @@ func TestAllTurnsOnEveryOptIn(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("buildOptions: code %d, err %v", code, err)
 	}
-	if len(o.Flags) != 9 {
-		t.Fatalf("Options carries %d flags, want 9; --all was written against a "+
-			"different set and one of them is now decided somewhere else", len(o.Flags))
+	// The expected set is collect.KnownFlags, never a number written down here.
+	// The two are independent — KnownFlags is what @requires_flag may say, this
+	// map is what the command line decides — so comparing them is a real test,
+	// where a hardcoded count was only ever a chore that made every new opt-in
+	// cost a round trip. It also names the flag that drifted, which a count
+	// cannot.
+	for name := range collect.KnownFlags {
+		if _, ok := o.Flags[name]; !ok {
+			t.Errorf("%s is a known flag and no option decides it: a collector gated on "+
+				"it can never run", name)
+		}
+	}
+	for name := range o.Flags {
+		if _, ok := collect.KnownFlags[name]; !ok {
+			t.Errorf("--all decides %s, which is not in collect.KnownFlags: no collector "+
+				"can ever be gated on it", name)
+		}
 	}
 	for name, on := range o.Flags {
 		if !on {

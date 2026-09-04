@@ -15,9 +15,7 @@ func TestEmbeddedCorpusIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	if len(scripts) != 75 {
-		t.Fatalf("got %d scripts, want 75", len(scripts))
-	}
+	checkCorpusInventory(t, scripts)
 	for _, s := range scripts {
 		if s.LintError != "" {
 			t.Errorf("%s: %s", s.Path, s.LintError)

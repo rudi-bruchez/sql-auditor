@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -111,8 +112,17 @@ func TestVerificationListsTheNineCapabilitiesInProbeOrder(t *testing.T) {
 			t.Fatalf("capability %d is %q, want %q", i, got[i][1], c.Name)
 		}
 	}
-	// The total is derived from Capabilities(), never written down.
-	contains(t, Render(s, testWidth, 0), "7 / 9")
+	// The total is derived from Capabilities(), never written down — which the
+	// literal "7 / 9" that stood here contradicted in the same breath. Both
+	// halves come from the fixture now: probedVerify denies exactly the two
+	// named above, so adding a capability changes nothing in this file.
+	granted := 0
+	for _, c := range s.Verify.Checks {
+		if c.Status == "ok" {
+			granted++
+		}
+	}
+	contains(t, Render(s, testWidth, 0), fmt.Sprintf("%d / %d", granted, len(caps)))
 }
 
 func TestVerificationKeepsTheWholeImpactAtSixtyColumns(t *testing.T) {
