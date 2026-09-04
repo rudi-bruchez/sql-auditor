@@ -91,10 +91,28 @@ type SkipReason struct {
 type Selection struct {
 	Included []string
 	Skipped  []SkipReason
-	// Widened maps a database name to the reason the second pass kept it
-	// despite DB_INCLUDE. Empty for every ordinary run: with no DB_INCLUDE
-	// every user database is already included and the pass changes nothing.
-	Widened map[string]string
+	// Widened maps a database name to why the second pass kept it despite
+	// DB_INCLUDE. Empty for every ordinary run: with no DB_INCLUDE every user
+	// database is already included and the pass changes nothing.
+	Widened map[string]WidenedFor
+}
+
+// WidenedFor is why a database the operator did not name is in the run. The
+// two halves are separate on purpose and must stay that way.
+//
+// Purpose is a machine token from the same closed vocabulary as the @widened
+// directive, and planUnits matches it against a script's own value. Reason is
+// a sentence for whoever reads MANIFEST.txt.
+//
+// They were one field for about an hour. Because planUnits compares the field
+// to "replication" and the field held "local distributor for 1 published
+// database(s) in this selection", every comparison failed and the widened
+// database was offered to no collector at all — including the ones it had been
+// kept for. Nothing caught it: each unit test built its own fixture with its
+// own idea of what the field contained.
+type WidenedFor struct {
+	Purpose string
+	Reason  string
 }
 
 // parseServer normalises the ways a SQL Server address is written into the two
@@ -365,10 +383,14 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error)
 		}
 		sel.Included = append(sel.Included, d.Name)
 		if sel.Widened == nil {
-			sel.Widened = map[string]string{}
+			sel.Widened = map[string]WidenedFor{}
 		}
-		sel.Widened[d.Name] = fmt.Sprintf(
-			"local distributor for %d published database(s) in this selection", published)
+		sel.Widened[d.Name] = WidenedFor{
+			Purpose: "replication",
+			Reason: fmt.Sprintf(
+				"local distributor for %d published database(s) in this selection",
+				published),
+		}
 	}
 	return sel, nil
 }

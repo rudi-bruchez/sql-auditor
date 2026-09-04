@@ -220,7 +220,7 @@ func TestSelectTargetsWidensToDistributor(t *testing.T) {
 	if !containsName(sel.Included, "DISTDB") {
 		t.Errorf("DISTDB should be retained; Included = %v", sel.Included)
 	}
-	if sel.Widened["DISTDB"] == "" {
+	if sel.Widened["DISTDB"].Reason == "" {
 		t.Errorf("DISTDB should carry a retention reason; Widened = %v", sel.Widened)
 	}
 	// The superseded skip must be gone, or the manifest lists the database
@@ -298,4 +298,31 @@ func containsName(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// The purpose and the reason are two different strings and must not share a
+// field. planUnits matches the purpose against a script's @widened value; the
+// manifest prints the reason to a human. Conflating them makes every match
+// fail, silently, and no isolated test catches it because each one builds its
+// own fixture.
+func TestSelectTargetsSeparatesPurposeFromReason(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
+	}
+	sel, err := SelectTargets(cands, "SALESDB", "")
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	w, ok := sel.Widened["DISTDB"]
+	if !ok {
+		t.Fatalf("DISTDB should be widened in; Widened = %v", sel.Widened)
+	}
+	if w.Purpose != "replication" {
+		t.Errorf("Purpose = %q, want %q — this is what planUnits matches on",
+			w.Purpose, "replication")
+	}
+	if !strings.Contains(w.Reason, "local distributor") {
+		t.Errorf("Reason = %q, want it to explain itself to a human", w.Reason)
+	}
 }
