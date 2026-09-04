@@ -1205,7 +1205,8 @@ unchanged: each item cost this audit a sentence it could not write.
 
 **Three of the five below were closed the same day, in the same working tree**,
 and are kept here for the same reason section 9 is kept: so that what they cost
-stays on record and nobody rebuilds them. Sections 16 and 17 are still open.
+stays on record and nobody rebuilds them. Section 17 was closed a day later,
+on the second reading below. Section 16 is the one still open.
 
 ### 13. The subscriber-side replication collector reported nothing on a subscriber — closed
 
@@ -1301,7 +1302,7 @@ instances, one of them rated high (`least-privilege-database-roles`), and
 server-level `sysadmin` membership. On an estate where nine principals are
 `sysadmin` on each instance, that is the shallow half of the question.
 
-### 17. Column density is not projected, so index key order cannot be decided
+### 17. Column density is not projected, so index key order cannot be decided — closed
 
 `70.schema/090.statistics.json` projects statistic freshness: `last_updated`,
 `rows_sampled`, `modifications_since`. It projects nothing about distribution.
@@ -1326,3 +1327,37 @@ Either is enough, and either beats the alternative: a `COUNT(DISTINCT)` per
 indexed column is not an option on tables of two hundred million rows, which is
 precisely why the statistic the engine has already computed is the right
 source.
+
+**Closed by `70.schema/091.statistics-density.sql`**, and closed with an
+estimate rather than with the number the section asked for. That distinction is
+the whole content of the fix.
+
+`DBCC SHOW_STATISTICS ... WITH DENSITY_VECTOR` is unreachable from this corpus
+and will stay unreachable. It names a table and a statistic, so it is one call
+per statistic assembled from variables, and `collect/statementlint.go` refuses
+dynamic SQL built out of variables — a statement the lint cannot read is one it
+cannot vouch for, which is what lets the manifest promise the collector only
+reads. Reaching a density vector is not worth weakening that.
+
+So the file estimates the leading column's density from the histogram, through
+`sys.dm_db_stats_histogram`, which is a function and can be applied without any
+dynamic SQL at all: `SUM(distinct_range_rows) + COUNT(*)` distinct values over
+`SUM(range_rows) + SUM(equal_rows)` rows. The columns are named
+`all_density_estimate` and `distinct_pct_estimate`, because a number carrying
+four caveats must not be read as a measurement.
+
+The caveats, which the file's own header states at length: the histogram
+describes the FIRST column of a statistic and no other; it is built on a sample,
+so where `090` shows a low `sampled_pct` this is an estimate of an estimate; it
+caps at 200 steps, so a high-cardinality column has its distinct count estimated
+rather than counted; and a filtered statistic describes a subset, which is why
+`has_filter` travels beside the density.
+
+**It is a second file rather than four columns in `090.statistics.sql`, and the
+floor is why.** `sys.dm_db_stats_histogram` arrived in SQL Server 2016 SP1 CU2,
+build 13.0.4422, and `090` is gated at 11.0.3000. Raising `090` to reach the
+histogram would take statistic freshness away from every 2012 and 2014 instance
+in order to add distribution to none of them. The build is worth noting for a
+second reason: the two instances that raised this section run 13.0.4451 and
+13.0.4457, so unlike section 15 this gate does not exclude them — the collector
+would have answered the question that was asked.
