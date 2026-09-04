@@ -48,8 +48,10 @@ as its measurement record. Read both before Task 6.
 | --- | --- | --- |
 | `queryset.go` | modify | `@widened` directive, `KnownWidened`, `Script.Widened` |
 | `runner.go` | modify | three flags on `DatabaseInfo`, `Selection.Widened`, the second pass in `SelectTargets`, the `CandidateDatabases` projection |
-| `output.go` | modify | `DatabaseFolder.WidenedFor` and `MarkWidened` |
+| `output.go` | modify | `DatabaseFolder.WidenedFor` and `RetentionReason`, and `MarkWidened` |
 | `observer.go` | modify | `planUnits` pairs a widened folder only with a matching script |
+| `collect.go` | modify | the `folders` call site, and `check` prints the retention reason |
+| `verify.go` | modify | the second `folders` call site, so `check` and `collect` agree |
 | `manifest.go` | modify | `writeTargets` renders the retention reason |
 
 **SQL, in `queries/90.availability/`:**
@@ -61,6 +63,12 @@ as its measurement record. Read both before Task 6.
 | `042.replication-distribution.sql` | create | distribution database: topology, agents, latency, errors |
 | `043.replication-subscriber.sql` | create | subscription-side catalog |
 | `044.replication-counters.sql` | create | replication performance counters, `VIEW SERVER STATE` |
+
+**Documentation:**
+
+| File | Change | Responsibility |
+| --- | --- | --- |
+| `docs/dba-guide.md` | modify | the widening, and what replication collection costs in rights (Task 14) |
 
 Tasks 1–8 are the socle and are shippable on their own: they change no
 collector output and are covered by unit tests plus one live check. Task 8 is the natural review gate before any SQL is written.
@@ -245,9 +253,25 @@ git commit -m "Porter les trois drapeaux de réplication sur DatabaseInfo"
 
 **Interfaces:**
 - Consumes: `DatabaseInfo`'s three flags from Task 2.
-- Produces: `Selection.Widened map[string]string` — database name to the reason
-  it was kept. Task 4 turns it into `DatabaseFolder.WidenedFor`; Task 6 renders
-  it.
+- Produces: `Selection.Widened map[string]WidenedFor` — database name to why the
+  second pass kept it. `WidenedFor` has two fields and they must stay two:
+
+```go
+// WidenedFor is why a database the operator did not name is in the run.
+type WidenedFor struct {
+	// Purpose is a machine token from the same closed vocabulary as the
+	// @widened directive. planUnits matches it against a script's own value.
+	Purpose string
+	// Reason is the sentence MANIFEST.txt shows a human. Nothing matches on it.
+	Reason string
+}
+```
+
+  A single field carrying both is the defect a review caught before any of this
+  ran: `planUnits` compares to `"replication"`, the prose reason never equals
+  it, and the widened database is then offered to no collector at all — the
+  whole slice a silent no-op. Task 4 carries both onto `DatabaseFolder`; Task 5
+  matches on `Purpose`; Task 6 renders `Reason`.
 
 **The rule, restated from the spec so the implementer does not have to
 reconstruct it:** a database carrying `IsDistributor` is retained even when
@@ -271,7 +295,10 @@ func TestSelectTargetsWidensToDistributor(t *testing.T) {
 	if !contains(sel.Included, "DISTDB") {
 		t.Errorf("DISTDB should be retained; Included = %v", sel.Included)
 	}
-	if sel.Widened["DISTDB"] == "" {
+	if sel.Widened["DISTDB"].Purpose != "replication" {
+		t.Errorf("DISTDB should carry the replication purpose; Widened = %v", sel.Widened)
+	}
+	if sel.Widened["DISTDB"].Reason == "" {
 		t.Errorf("DISTDB should carry a retention reason; Widened = %v", sel.Widened)
 	}
 	// The superseded skip must be gone, or the manifest lists the database
@@ -461,25 +488,36 @@ git commit -m "Réintégrer la base de distribution quand un publisher survit au
 
 **Interfaces:**
 - Consumes: `Selection.Widened` from Task 3.
-- Produces: `DatabaseFolder.WidenedFor string` and
-  `MarkWidened(folders []DatabaseFolder, widened map[string]string) []DatabaseFolder`.
-  Task 5 reads the field; Task 6 renders it.
+- Produces: `DatabaseFolder.WidenedFor string` (the purpose, matched by Task 5),
+  `DatabaseFolder.RetentionReason string` (the prose, rendered by Task 6), and
+  `MarkWidened(folders []DatabaseFolder, widened map[string]WidenedFor) []DatabaseFolder`.
+
+**Two fields, not one.** The purpose is compared; the reason is read. Carrying
+them in one field makes the comparison in Task 5 always false and the widened
+database reaches no collector — with every task's own test still green, because
+each fixture invents its own idea of what the field holds. The test below
+therefore asserts both fields at once, which is what makes it able to fail.
 
 - [ ] **Step 1: Write the failing test**
 
 ```go
 func TestMarkWidenedTagsOnlyTheWidenedFolders(t *testing.T) {
 	folders := ResolveDatabaseFolders([]string{"SALESDB", "DISTDB"})
-	got := MarkWidened(folders, map[string]string{"DISTDB": "local distributor"})
+	got := MarkWidened(folders, map[string]WidenedFor{
+		"DISTDB": {Purpose: "replication", Reason: "local distributor for 1 published database(s) in this selection"},
+	})
 	for _, f := range got {
 		switch f.Name {
 		case "DISTDB":
-			if f.WidenedFor != "local distributor" {
-				t.Errorf("DISTDB WidenedFor = %q, want the reason", f.WidenedFor)
+			if f.WidenedFor != "replication" {
+				t.Errorf("DISTDB WidenedFor = %q, want the purpose planUnits matches on", f.WidenedFor)
+			}
+			if !strings.Contains(f.RetentionReason, "local distributor") {
+				t.Errorf("DISTDB RetentionReason = %q, want the human sentence", f.RetentionReason)
 			}
 		case "SALESDB":
-			if f.WidenedFor != "" {
-				t.Errorf("SALESDB must not be marked, got %q", f.WidenedFor)
+			if f.WidenedFor != "" || f.RetentionReason != "" {
+				t.Errorf("SALESDB must not be marked, got %q / %q", f.WidenedFor, f.RetentionReason)
 			}
 		}
 	}
@@ -500,26 +538,34 @@ type DatabaseFolder struct {
 	// WidenedFor is empty for an ordinarily selected database. When the
 	// selection's second pass brought a database back, it carries the purpose
 	// — "replication" — and planUnits offers the folder only to collectors
-	// declaring the same @widened value.
+	// declaring the same @widened value. It is a token, never a sentence:
+	// putting the human explanation here instead makes that comparison false
+	// for every collector and the database is then read by none of them.
 	WidenedFor string `json:"widened_for,omitempty"`
+	// RetentionReason is that explanation, for MANIFEST.txt and for check.
+	// Nothing matches on it.
+	RetentionReason string `json:"retention_reason,omitempty"`
 }
 
-// MarkWidened stamps the retention purpose onto the folders the second pass
-// kept. It is separate from ResolveDatabaseFolders because folder naming is
-// about collisions on disk and this is about who may read the database; a
-// single function doing both would have two reasons to change.
-func MarkWidened(folders []DatabaseFolder, widened map[string]string) []DatabaseFolder {
+// MarkWidened stamps the retention purpose and reason onto the folders the
+// second pass kept. It is separate from ResolveDatabaseFolders because folder
+// naming is about collisions on disk and this is about who may read the
+// database; a single function doing both would have two reasons to change.
+func MarkWidened(folders []DatabaseFolder, widened map[string]WidenedFor) []DatabaseFolder {
 	if len(widened) == 0 {
 		return folders
 	}
 	for i := range folders {
-		if r, ok := widened[folders[i].Name]; ok {
-			folders[i].WidenedFor = r
+		if w, ok := widened[folders[i].Name]; ok {
+			folders[i].WidenedFor = w.Purpose
+			folders[i].RetentionReason = w.Reason
 		}
 	}
 	return folders
 }
 ```
+
+`output_test.go` does not import `"strings"` today; the assertion above needs it.
 
 - [ ] **Step 4: Run it and watch it pass**
 
@@ -593,6 +639,39 @@ func TestPlanUnitsKeepsAWidenedFolderForItsOwnCollectors(t *testing.T) {
 }
 ```
 
+And a second test that builds the folders the way the program does, rather than
+by hand. The test above passes even when `MarkWidened` writes the wrong value
+into `WidenedFor`, because its fixture writes the right one; only running the
+three functions in sequence can show that they agree:
+
+```go
+func TestWidenedDatabaseSurvivesSelectionIntoUnits(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
+	}
+	sel, err := SelectTargets(cands, "SALESDB", "")
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	folders := MarkWidened(ResolveDatabaseFolders(sel.Included), sel.Widened)
+
+	repl := Script{Path: "90.availability/042.a.sql", Scope: ScopeDatabase,
+		Widened: "replication", Results: []ResultSpec{{"root", ShapeObject}}}
+	units, _, errs := planUnits([]plannedScript{{Script: repl}}, folders, &Config{})
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	var got []string
+	for _, u := range units {
+		got = append(got, u.Target.Name)
+	}
+	if len(got) != 2 {
+		t.Fatalf("the collector the widening was for must see both databases, got %v", got)
+	}
+}
+```
+
 - [ ] **Step 2: Run it and watch it fail**
 
 Run: `go test ./collect/ -run TestPlanUnitsKeepsAWidenedFolder -v`
@@ -642,7 +721,22 @@ saying the operator did not ask for it:
 		v.Folders = MarkWidened(ResolveDatabaseFolders(sel.Included), sel.Widened)
 ```
 
-The test file needs `"strings"` in its imports for the skip assertion below;
+Marking the folder is not enough on its own: the code that renders `check`,
+`collect/collect.go:667-669`, prints only the name and the folder, so the DBA
+would see the distribution database appear with nothing saying why. Give it the
+reason:
+
+```go
+		for _, f := range v.Folders {
+			if f.RetentionReason != "" {
+				fmt.Printf("  - %s -> %s/ (%s)\n", f.Name, f.Folder, f.RetentionReason)
+				continue
+			}
+			fmt.Printf("  - %s -> %s/\n", f.Name, f.Folder)
+		}
+```
+
+The test file needs `"strings"` in its imports for the skip assertion above;
 `observer_test.go` does not import it today.
 
 - [ ] **Step 4: Run it and watch it pass**
@@ -666,7 +760,8 @@ git commit -m "N'offrir une base réintégrée qu'aux collecteurs pour qui elle 
 - Test: `collect/manifest_test.go`
 
 **Interfaces:**
-- Consumes: `DatabaseFolder.WidenedFor`.
+- Consumes: `DatabaseFolder.RetentionReason` — the prose field, not the purpose
+  token beside it.
 - Produces: nothing.
 
 - [ ] **Step 1: Write the failing test**
@@ -677,8 +772,8 @@ func TestManifestExplainsAWidenedDatabase(t *testing.T) {
 	// Name, version and commit are constructor arguments, not fields.
 	m.Targets.Databases = []DatabaseFolder{
 		{Name: "SALESDB", Folder: "SALESDB"},
-		{Name: "DISTDB", Folder: "DISTDB",
-			WidenedFor: "local distributor for 1 published database(s) in this selection"},
+		{Name: "DISTDB", Folder: "DISTDB", WidenedFor: "replication",
+			RetentionReason: "local distributor for 1 published database(s) in this selection"},
 	}
 	h := flatten(m.Human())
 	if !strings.Contains(h, "local distributor for 1 published database(s)") {
@@ -698,8 +793,8 @@ In `writeTargets`, in the loop over `m.Targets.Databases`, append the reason
 when it is set:
 
 ```go
-			if d.WidenedFor != "" {
-				fmt.Fprintf(b, "      kept because: %s\n", d.WidenedFor)
+			if d.RetentionReason != "" {
+				fmt.Fprintf(b, "      kept because: %s\n", d.RetentionReason)
 			}
 ```
 
@@ -869,6 +964,22 @@ EXEC sp_executesql N'SELECT 1 OPTION (RECOMPILE, MAXDOP 1)';`
 		t.Errorf("literal contents must be blanked; got:\n%s", got)
 	}
 }
+
+// The one that matters. Half the corpus is commented in English and in French,
+// and an apostrophe in a comment is not the start of a string literal. A
+// version that does not know this flips into "inside a literal" on the first
+// "qu'est-ce" or "client's" and blanks the real code that follows — measured
+// on the corpus as 30 files losing hints they carry.
+func TestBlankSQLStringsIgnoresApostrophesInComments(t *testing.T) {
+	in := `-- On regarde ce qu'est un plan ici.
+SELECT 1 OPTION (RECOMPILE, MAXDOP 1);
+/* And the client's own rules apply. */
+SELECT 2 OPTION (RECOMPILE, MAXDOP 1);`
+	got := BlankSQLStrings(in)
+	if n := strings.Count(got, "OPTION (RECOMPILE, MAXDOP 1)"); n != 2 {
+		t.Errorf("both hints are in code and must survive, got %d:\n%s", n, got)
+	}
+}
 ```
 
 - [ ] **Step 2: Run it and watch it fail**
@@ -891,18 +1002,72 @@ In `collect/queryset.go`, beside `StripSQLComments`:
 // It is deliberately not StripSQLComments' job. That function keeps literals
 // because contractLint must see a hint wherever it is written, including
 // inside dynamic SQL. The two callers want opposite things from the same text.
+//
+// It runs the same four-state machine as StripSQLComments, and it has to: an
+// apostrophe in a comment does not open a string literal. Half this corpus is
+// commented in French, so a quote-counting version reads "qu'est-ce" as the
+// start of a literal and blanks the code after it. Comments themselves are
+// left alone, which keeps the counting test's behaviour on them exactly as it
+// was before this function existed.
 func BlankSQLStrings(sql string) string {
 	b := []byte(sql)
-	inString := false
-	for i := 0; i < len(b); i++ {
-		if b[i] == '\'' {
-			// '' inside a string is an escaped quote, not a close: the state
-			// flips twice and lands where it started, which is correct.
-			inString = !inString
-			continue
-		}
-		if inString && b[i] != '\n' && b[i] != '\r' {
+	blank := func(i int) {
+		if b[i] != '\n' && b[i] != '\r' {
 			b[i] = ' '
+		}
+	}
+	const (
+		code = iota
+		lineComment
+		blockComment
+		literal
+	)
+	state := code
+	blockDepth := 0
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		switch state {
+		case code:
+			switch {
+			case c == '-' && i+1 < len(b) && b[i+1] == '-':
+				state = lineComment
+				i++
+			case c == '/' && i+1 < len(b) && b[i+1] == '*':
+				state = blockComment
+				blockDepth = 1
+				i++
+			case c == '\'':
+				state = literal
+			}
+		case lineComment:
+			if c == '\n' {
+				state = code
+			}
+		case blockComment:
+			switch {
+			case c == '/' && i+1 < len(b) && b[i+1] == '*':
+				blockDepth++
+				i++
+			case c == '*' && i+1 < len(b) && b[i+1] == '/':
+				blockDepth--
+				i++
+				if blockDepth == 0 {
+					state = code
+				}
+			}
+		case literal:
+			if c == '\'' {
+				// '' is an escaped quote and still contents, not the close.
+				if i+1 < len(b) && b[i+1] == '\'' {
+					blank(i)
+					blank(i + 1)
+					i++
+					continue
+				}
+				state = code
+				continue
+			}
+			blank(i)
 		}
 	}
 	return string(b)
@@ -930,6 +1095,32 @@ positional match honest:
 Run: `go test . -run TestEmbeddedCorpusHasNoTopLevelKeyCollision -v`
 Expected: PASS on the current 58-file corpus — no file loses coverage, because
 no shipped collector uses dynamic SQL with a hint inside it yet.
+
+Then measure it directly, because a PASS above only says the counts still
+match, and this function's failure mode is silent erasure. Add this to
+`queries_test.go` and keep it — it is what stops the next reader from
+simplifying the state machine back into a quote counter:
+
+```go
+func TestBlankSQLStringsErasesNoHintInTheCurrentCorpus(t *testing.T) {
+	const hint = "OPTION (RECOMPILE, MAXDOP 1)"
+	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	for _, s := range scripts {
+		before := strings.Count(s.SQL, hint)
+		after := strings.Count(collect.BlankSQLStrings(s.SQL), hint)
+		if before != after {
+			t.Errorf("%s: %d hints before blanking, %d after", s.Path, before, after)
+		}
+	}
+}
+```
+
+Expected: PASS, all 58 files. A quote-counting version fails it on 30 of them —
+`013.memory-model.sql` 1→0, `050.tempdb.sql` 11→5, `040.error-log.sql` 6→3, and
+so on down the corpus.
 
 Then confirm the test still catches what it was written for, by temporarily
 adding a root column `[waits.n]` to a file declaring a `waits` array, running
@@ -1399,7 +1590,29 @@ The file's root object carries
 `'50.agent/010.jobs.sql' AS [not_collected.see]`. Both were true when nothing
 read the distribution database. After Task 13 they are a machine-readable claim
 contradicting the header above them, and the analysis layer was told to match
-on the first. Delete both columns.
+on the first.
+
+Delete lines 62 to 69 as one block: the two columns and the comment paragraph
+above them, which exists only to justify columns that are going. Then
+`[counts.distributor]` on line 53 becomes the last projected column and **its
+trailing comma must go with them**, or the statement ends in
+`… AS [counts.distributor], OPTION (RECOMPILE, MAXDOP 1);` and every run of the
+file returns `Msg 156, Incorrect syntax near the keyword 'OPTION'`. Measured on
+the container; the grammar checker catches it too, but only after the commit.
+The result:
+
+```sql
+       (SELECT COUNT(*) FROM sys.databases AS d WHERE d.is_distributor = 1)     AS [counts.distributor]
+       /* No SERVERPROPERTY here, and that is a correction rather than an
+          … (paragraph unchanged) … */
+OPTION (RECOMPILE, MAXDOP 1);
+```
+
+The `SERVERPROPERTY` paragraph on lines 54–61 stays where it is. It records a
+correction — that `IsPublisher` and `IsSubscriber` are not real property names,
+and returned NULL on a live run rather than raising — which is still true and
+still worth not repeating. A comment between the last column and `OPTION` is
+legal; the grammar check in Step 4 confirms it.
 
 - [ ] **Step 3: Add the remote-distributor result set**
 
@@ -1771,6 +1984,13 @@ END
 ```sql
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)     AS [collected_at],
        CONVERT(int, @applies)                       AS [applies],
+       /* collected, on the same terms as 041, 043 and 044: every guarded read
+          returned. Six guards here rather than one, so it is their conjunction.
+          A reader comparing files should not have to learn a second convention
+          because this one happens to have more error codes. */
+       CASE WHEN @err_cfg = 0 AND @err_topo = 0 AND @err_agents = 0
+             AND @err_hist = 0 AND @err_errs = 0 AND @err_size = 0
+            THEN 1 ELSE 0 END                       AS [collected],
        @window_days                                 AS [window_days],
        @err_cfg    AS [errors.configuration], @err_topo  AS [errors.topology],
        @err_agents AS [errors.agents],        @err_hist  AS [errors.history],
@@ -1780,7 +2000,14 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)     AS [collected_at],
        (SELECT COUNT(*) FROM @arts)                 AS [counts.articles],
        (SELECT COUNT(*) FROM @agents)               AS [counts.agents],
        (SELECT [row_count] FROM @size WHERE [table_name] = N'MSrepl_commands')
-                                                    AS [counts.repl_commands_rows]
+                                                    AS [counts.repl_commands_rows],
+       /* Staged by the same read as the line above, so projecting it costs
+          nothing and dropping it would leave the query paying for a row it
+          throws away. The pair is also the useful reading: commands per
+          transaction says whether the backlog is many small units or few
+          large ones. */
+       (SELECT [row_count] FROM @size WHERE [table_name] = N'MSrepl_transactions')
+                                                    AS [counts.repl_transactions_rows]
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT c.[name], c.[min_distretention], c.[max_distretention], c.[history_retention]
@@ -1833,15 +2060,110 @@ sqlcmd -S "[::1],11433" -U sa -P 'Str0ng!Passw0rd' -C -d master \
   -i queries/90.availability/042.replication-distribution.sql
 ```
 
-Expected: `resultsets 7/7 ok`; seven result sets on a bare instance, `applies`
-0, `collected` 1, every array empty. **No `Msg 208`** — if one appears, a read
-escaped `sp_executesql`.
+Expected: `resultsets 7/7 ok`; seven result sets on a bare instance. In the
+root object, `applies` 0 and `collected` 1 — nothing applied and nothing
+failed, which are different questions — every `errors.*` code 0,
+`errors.last_message` NULL, every array empty, and both `counts.repl_*_rows`
+NULL rather than 0, because on a bare instance the tables do not exist to have
+a row count. **No `Msg 208`** — if one appears, a read escaped `sp_executesql`.
 
 - [ ] **Step 9: Commit**
 
 ```bash
 git add queries/90.availability/042.replication-distribution.sql
 git commit -m "Collecter la base de distribution : topologie, agents, latence, erreurs"
+```
+
+---
+
+### Task 14: The guide tells the DBA what changed for them
+
+**Files:**
+- Modify: `docs/dba-guide.md`
+
+**Interfaces:**
+- Consumes: the behaviour of Tasks 3–6 and the four collectors.
+- Produces: nothing.
+
+**Why it is a task and not a line in a commit message.** Two things changed
+that a DBA reading the guide would otherwise meet for the first time in the
+`check` output: a run narrowed with `DB_INCLUDE` can now collect a database the
+operator did not name, and four collectors read replication metadata with
+whatever rights the login happens to have. Both are exactly the kind of
+surprise this guide exists to prevent, and neither is visible from the corpus.
+
+- [ ] **Step 1: Add the widening to "Three things that are not obvious"**
+
+That section is the right home: it is where the guide already explains
+behaviour a reader would not predict from the flags. Rename its heading to
+"Four things that are not obvious from the outside" and add, after the
+`READ UNCOMMITTED` subsection:
+
+```markdown
+### A narrowed run may still collect the distribution database
+
+`DB_INCLUDE` names the databases you want. There is one case where the
+collector adds one you did not name: if a database you did include is a
+replication publisher, and the distributor is this same instance, the
+distribution database is collected too.
+
+It is not a loophole in the filter. The publication metadata on a publisher
+says what is published; everything about whether replication is *working* —
+agent history, delivery latency, undistributed commands, replication errors —
+lives in the distribution database, and a run that collected the first and not
+the second would report a healthy topology it never measured.
+
+Only the four replication collectors are offered that database. The thirty-odd
+ordinary database collectors are not: no object inventory, no index usage, no
+Query Store. And `DB_EXCLUDE` still wins — naming the distribution database
+there keeps it out, at the cost of the agent and latency data.
+
+`MANIFEST.txt` says so on the database itself, under `kept because:`, and
+`check` prints the same sentence beside the folder before you authorise
+anything.
+```
+
+- [ ] **Step 2: Say what replication collection costs in rights**
+
+In "The six rights, and what each one costs when missing", after the existing
+entries, add:
+
+```markdown
+**Replication metadata** asks for no right you are not already granting. The
+four replication collectors read the publication, distribution and subscription
+catalogs with whatever the audit login has, and each one records in its own
+result set which reads returned and which were refused — `applies`, `collected`
+and an error code per area. A login without `replmonitor` or membership in the
+publication access list gets the instance-level answer (which databases carry
+which role, where a remote distributor is) and an error code in place of the
+topology. Nothing fails, and nothing is silently missing: the archive says
+which of the two you are looking at.
+
+There is deliberately no new grant to ask for here. If your organisation would
+have to raise the audit login's rights to collect this, the right answer is to
+run without it and read the error codes.
+```
+
+- [ ] **Step 3: Check the count in the contents block**
+
+`docs/dba-guide.md:17` has a `### Contents` list. If it names the "Three
+things" section by that number, the rename in Step 1 makes it wrong.
+
+- [ ] **Step 4: Verify**
+
+```bash
+git grep -n "Three things that are not obvious"
+```
+
+Expected: no hits. Then reread the two additions against `MANIFEST.txt` and the
+`check` output from Task 5 — the guide quotes both, and a quotation that drifts
+from what the program prints is worse than no quotation.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/dba-guide.md
+git commit -m "Dire au DBA qu'une sélection restreinte peut ramener la base de distribution"
 ```
 
 ---
@@ -1856,7 +2178,6 @@ resolves `MSpublications.publisher_id` at the 2012 floor, where
 Each is recorded in `docs/replication-spec.md` and each is settled by the first
 real audit, not by this slice.
 
-The `docs/dba-guide.md` paragraph — no new grant is asked for, what is thinner
-without one, and that a narrowed run may collect a distribution database the
-operator did not name — belongs with the collectors and should be written when
-Task 12 lands.
+The `docs/dba-guide.md` paragraphs are Task 14, which is inside this slice: a
+behaviour change the operator meets first in `check` output is not
+documentation that can wait for the next one.
