@@ -77,6 +77,18 @@ jobs:
       SQL_SERVER: localhost,1433
       SQL_USER: sa
       SQL_PASSWORD: "Str0ng!Passw0rd"
+      # SQL_TRUST_SERVER_CERTIFICATE defaults to false, which is the right
+      # default for an operator: encrypting to a certificate nobody validated
+      # is indistinguishable from encrypting to a machine-in-the-middle. The
+      # mssql image generates its own self-signed certificate at first start,
+      # so every run of this job would meet exactly that x509 failure and stop
+      # at `check`. What the setting protects — a login travelling a network
+      # someone else can reach — does not exist here: the instance is a
+      # container on the runner's own loopback, its password is three lines
+      # above in a public file, and both are destroyed with the job. Saying so
+      # here keeps the product default honest instead of loosening it for
+      # everyone to spare the CI.
+      SQL_TRUST_SERVER_CERTIFICATE: "true"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
