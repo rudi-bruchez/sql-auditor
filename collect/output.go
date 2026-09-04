@@ -10,15 +10,17 @@ import (
 type DatabaseFolder struct {
 	Name   string `json:"name"`
 	Folder string `json:"folder"`
-	// WidenedFor is empty for an ordinarily selected database. When the
+	// WidenedPurpose is empty for an ordinarily selected database. When the
 	// selection's second pass brought a database back that the operator did
 	// not name, it carries the purpose — "replication" — and planUnits offers
 	// the folder only to collectors declaring the same @widened value.
 	//
-	// It is a token, never a sentence. The explanation goes in the field
-	// below: written here instead, it would never equal any script's @widened
-	// value, and the database nobody asked for would be read by nobody.
-	WidenedFor string `json:"widened_for,omitempty"`
+	// It is a token, never a sentence, and it is named for what it holds
+	// rather than after the WidenedFor struct it comes from — the two were
+	// one field once, and the prose written here instead of below never
+	// equalled any script's @widened value, so the database nobody asked
+	// for was read by nobody.
+	WidenedPurpose string `json:"widened_for,omitempty"`
 	// RetentionReason is that explanation, for MANIFEST.txt and for check.
 	// Nothing matches on it.
 	RetentionReason string `json:"retention_reason,omitempty"`
@@ -34,7 +36,7 @@ func MarkWidened(folders []DatabaseFolder, widened map[string]WidenedFor) []Data
 	}
 	for i := range folders {
 		if w, ok := widened[folders[i].Name]; ok {
-			folders[i].WidenedFor = w.Purpose
+			folders[i].WidenedPurpose = w.Purpose
 			folders[i].RetentionReason = w.Reason
 		}
 	}

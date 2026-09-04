@@ -633,7 +633,7 @@ func TestManifestExplainsAWidenedDatabase(t *testing.T) {
 	m := NewManifest("SQL01", "11.0.7001.0", "")
 	m.Targets.Databases = []DatabaseFolder{
 		{Name: "SALESDB", Folder: "SALESDB"},
-		{Name: "DISTDB", Folder: "DISTDB", WidenedFor: "replication",
+		{Name: "DISTDB", Folder: "DISTDB", WidenedPurpose: "replication",
 			RetentionReason: "local distributor for 1 published database(s) in this selection"},
 	}
 	h := flatten(m.Human())

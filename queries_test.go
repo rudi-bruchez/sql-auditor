@@ -232,21 +232,34 @@ func TestNoIntPageCountIsMultipliedBeforeItIsWidened(t *testing.T) {
 // Blanking must erase nothing that is really in code. The failure mode is
 // silent: a version of BlankSQLStrings that does not know what a comment is
 // flips into "inside a literal" on the first apostrophe in French prose and
-// wipes the hints after it. Measured on the corpus, that version loses hints
+// wipes the hints after it. Measured on this corpus, that version loses hints
 // in thirty of these files — 013.memory-model.sql 1 to 0, 050.tempdb.sql 11 to
 // 5 — while the collision test above still passes, because it counts what is
 // left rather than what was lost.
-func TestBlankSQLStringsErasesNoHintInTheCurrentCorpus(t *testing.T) {
+//
+// The invariant is that blanking and stripping COMMUTE, not that blanking
+// erases nothing. Blanking erases the hint inside an sp_executesql literal on
+// purpose — that is the entire reason the function exists — so "no hint is
+// ever lost" would be a true statement about today's corpus and a false one
+// about the first collector using the guard pattern, failing in the hands of
+// whoever adds it with a message about a file they did not touch.
+//
+// Stripping first removes the comments; blanking first must behave as if they
+// were not there. A scanner that mistakes prose for a literal makes the two
+// orders disagree, and nothing else in this corpus does.
+func TestBlankSQLStringsAndCommentStrippingCommute(t *testing.T) {
 	const hint = "OPTION (RECOMPILE, MAXDOP 1)"
 	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
 	for _, s := range scripts {
-		before := strings.Count(s.SQL, hint)
-		after := strings.Count(collect.BlankSQLStrings(s.SQL), hint)
-		if before != after {
-			t.Errorf("%s: %d hints before blanking, %d after", s.Path, before, after)
+		stripThenBlank := strings.Count(collect.BlankSQLStrings(collect.StripSQLComments(s.SQL)), hint)
+		blankThenStrip := strings.Count(collect.StripSQLComments(collect.BlankSQLStrings(s.SQL)), hint)
+		if stripThenBlank != blankThenStrip {
+			t.Errorf("%s: %d hints in code when comments are stripped first, %d when blanked first; "+
+				"blanking is reading something that is not a string literal",
+				s.Path, stripThenBlank, blankThenStrip)
 		}
 	}
 }

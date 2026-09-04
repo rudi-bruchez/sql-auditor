@@ -242,7 +242,7 @@ func TestPlanUnitsKeepsAWidenedFolderForItsOwnCollectors(t *testing.T) {
 		Results: []ResultSpec{{"root", ShapeObject}}}
 	folders := []DatabaseFolder{
 		{Name: "SALESDB", Folder: "SALESDB"},
-		{Name: "DISTDB", Folder: "DISTDB", WidenedFor: "replication"},
+		{Name: "DISTDB", Folder: "DISTDB", WidenedPurpose: "replication"},
 	}
 	plan := []plannedScript{{Script: repl}, {Script: ordinary}}
 
@@ -301,5 +301,33 @@ func TestWidenedDatabaseSurvivesSelectionIntoUnits(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("the collector the widening was for must see both databases, got %v", got)
+	}
+}
+
+// The widened filter has to run BEFORE queryStoreUnits, not after. Run after,
+// the folder is removed from the targets but the skip line queryStoreUnits
+// already wrote for it survives into the manifest — so a database the operator
+// never named is reported as deliberately omitted, under a setting they never
+// configured. The fixture below passes a real QUERY_STORE_DB_INCLUDE for that
+// reason: with an empty Config, queryStoreUnits returns early and this test
+// would pass against the wrong ordering.
+func TestPlanUnitsDoesNotSkipAWidenedFolderItNeverOffered(t *testing.T) {
+	qs := Script{Path: "80.queries/030.qs-detail.sql", Scope: ScopeDatabase,
+		Writer: "query_store", Results: []ResultSpec{{"root", ShapeObject}}}
+	folders := []DatabaseFolder{
+		{Name: "SALESDB", Folder: "SALESDB"},
+		{Name: "DISTDB", Folder: "DISTDB", WidenedPurpose: "replication"},
+	}
+	cfg := &Config{QueryStoreDBInclude: "SALESDB"}
+
+	_, skipped, errs := planUnits([]plannedScript{{Script: qs}}, folders, cfg)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	for _, s := range skipped {
+		if s.Target == "DISTDB" {
+			t.Errorf("DISTDB was never offered to this collector, so it cannot be "+
+				"skipped by it: %+v", s)
+		}
 	}
 }

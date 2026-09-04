@@ -82,8 +82,6 @@ func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]u
 		targets := []DatabaseFolder{{}}
 		if s.Scope == ScopeDatabase {
 			var narrowed []SkippedScript
-			targets, narrowed = queryStoreUnits(cfg, s, folders)
-			skipped = append(skipped, narrowed...)
 			// A folder the selection widened back in is offered only to the
 			// collectors the widening was for. It is not a skip: recording one
 			// per ordinary collector would write thirty "Queries not run"
@@ -91,17 +89,23 @@ func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]u
 			// for. The manifest's retention reason on the database is where a
 			// reader learns what happened.
 			//
-			// A new slice, never targets[:0]. queryStoreUnits returns the
-			// caller's slice unchanged for every script without a @writer, so
-			// targets aliases folders, and filtering in place would rewrite
-			// the shared list for every later script.
-			kept := make([]DatabaseFolder, 0, len(targets))
-			for _, t := range targets {
-				if t.WidenedFor == "" || t.WidenedFor == s.Widened {
-					kept = append(kept, t)
+			// This runs BEFORE queryStoreUnits and the order is the whole
+			// point. Run after, queryStoreUnits has already written a skip
+			// line naming the widened database against QUERY_STORE_DB_INCLUDE
+			// — a database the operator never named, reported as deliberately
+			// omitted under a setting they never configured — and removing it
+			// from targets afterwards does not take that line back.
+			//
+			// A new slice, never folders[:0]: folders is the caller's and is
+			// reused by every later script in the plan.
+			eligible := make([]DatabaseFolder, 0, len(folders))
+			for _, f := range folders {
+				if f.WidenedPurpose == "" || f.WidenedPurpose == s.Widened {
+					eligible = append(eligible, f)
 				}
 			}
-			targets = kept
+			targets, narrowed = queryStoreUnits(cfg, s, eligible)
+			skipped = append(skipped, narrowed...)
 		}
 		for _, t := range targets {
 			units = append(units, unit{Script: s, Target: t})

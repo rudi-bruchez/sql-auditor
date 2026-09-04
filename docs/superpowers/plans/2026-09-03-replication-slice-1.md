@@ -70,8 +70,22 @@ as its measurement record. Read both before Task 6.
 | --- | --- | --- |
 | `docs/dba-guide.md` | modify | the widening, and what replication collection costs in rights (Task 14) |
 
-Tasks 1–8 are the socle and are shippable on their own: they change no
-collector output and are covered by unit tests plus one live check. Task 8 is the natural review gate before any SQL is written.
+Tasks 1–8 are the socle, and Task 8 is the natural review gate before any SQL
+is written.
+
+**They are not shippable on their own, and an earlier draft of this line said
+they were.** No file in `queries/` declares `@widened`, so with Tasks 9–13
+absent a narrowed run against a publisher adds the distribution database to the
+selection, resolves a folder for it, prints it in `check` under a heading
+asking the DBA to authorise it, and lists it in `MANIFEST.txt` as covered —
+while `planUnits` hands it to zero collectors. The manifest would claim
+coverage of a database nothing read. "They change no collector output" was true
+and beside the point: the selection, the manifest and the `check` listing all
+change.
+
+The consequence is a merge rule, not a code change. This branch lands as one
+slice, Tasks 1–14 together. If Tasks 9–13 have to slip, the socle waits with
+them.
 
 ---
 
@@ -1081,10 +1095,12 @@ Expected: PASS.
 
 - [ ] **Step 5: Use it in the collision test**
 
-In `queries_test.go`, change the split to work on the blanked text while the
-alias scan keeps working on the real one — the aliases live in code, so
-blanking changes nothing for them, and using one string for both keeps the
-positional match honest:
+In `queries_test.go`, change the split to work on the blanked text. The alias
+scan then runs over the blanked chunks too, which is correct and deliberate:
+aliases live in code, blanking leaves code alone, and deriving `parts` and the
+scan from one string is what keeps the positional match honest. (An earlier
+draft of this step claimed the scan kept working on the raw text. It does not,
+and it should not.)
 
 ```go
 		chunks := strings.Split(collect.BlankSQLStrings(s.SQL), "OPTION (RECOMPILE, MAXDOP 1)")

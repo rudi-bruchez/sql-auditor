@@ -140,15 +140,15 @@ func TestMarkWidenedTagsOnlyTheWidenedFolders(t *testing.T) {
 			// The purpose is what planUnits compares. Putting the sentence
 			// here instead makes that comparison false for every collector,
 			// and the database is then read by none of them.
-			if f.WidenedFor != "replication" {
-				t.Errorf("DISTDB WidenedFor = %q, want the purpose planUnits matches on", f.WidenedFor)
+			if f.WidenedPurpose != "replication" {
+				t.Errorf("DISTDB WidenedPurpose = %q, want the purpose planUnits matches on", f.WidenedPurpose)
 			}
 			if !strings.Contains(f.RetentionReason, "local distributor") {
 				t.Errorf("DISTDB RetentionReason = %q, want the human sentence", f.RetentionReason)
 			}
 		case "SALESDB":
-			if f.WidenedFor != "" || f.RetentionReason != "" {
-				t.Errorf("SALESDB must not be marked, got %q / %q", f.WidenedFor, f.RetentionReason)
+			if f.WidenedPurpose != "" || f.RetentionReason != "" {
+				t.Errorf("SALESDB must not be marked, got %q / %q", f.WidenedPurpose, f.RetentionReason)
 			}
 		}
 	}

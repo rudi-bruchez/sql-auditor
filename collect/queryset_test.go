@@ -91,6 +91,17 @@ func TestDiscoverLintErrors(t *testing.T) {
 		{"unknown widened value", "queries/10.system/010.a.sql",
 			"-- @resultsets: a:object\n-- @widened: everything\nSELECT 1;",
 			"everything"},
+		// @widened is consulted only inside planUnits' database-scope branch,
+		// so on an instance-scoped file it parses clean and does nothing. That
+		// is the same silent no-op the closed vocabulary above exists to
+		// prevent, reached by putting the directive in the wrong file rather
+		// than by misspelling its value.
+		{"widened on an instance-scoped script", "queries/10.system/010.a.sql",
+			"-- @scope: instance\n-- @resultsets: a:object\n-- @timeout: 60\n" +
+				"-- @widened: replication\n" +
+				"SET NOCOUNT ON;\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\n" +
+				"SELECT 1 OPTION (RECOMPILE, MAXDOP 1);",
+			"@scope: database"},
 		// The unknown-directive message hand-lists the vocabulary. A new
 		// directive that is not in that list tells the first person to
 		// misspell it to use a set that does not contain the word they
@@ -555,5 +566,20 @@ SELECT 2 OPTION (RECOMPILE, MAXDOP 1);`
 	got := BlankSQLStrings(in)
 	if n := strings.Count(got, "OPTION (RECOMPILE, MAXDOP 1)"); n != 2 {
 		t.Errorf("both hints are in code and must survive, got %d:\n%s", n, got)
+	}
+}
+
+// A quoted identifier is code, and an apostrophe inside one does not open a
+// literal. "AS [nombre d'objets]" is not exotic in a corpus commented in
+// French, and a scanner that misreads it blanks every byte to the end of the
+// file — the collision test then reports the file as unreliable and silently
+// stops checking it, which is the failure this function exists to prevent.
+func TestBlankSQLStringsKnowsQuotedIdentifiers(t *testing.T) {
+	in := `SELECT 1 AS [nombre d'objets] OPTION (RECOMPILE, MAXDOP 1);
+SELECT 2 AS "l'autre" OPTION (RECOMPILE, MAXDOP 1);
+SELECT 3 AS [a]]b'c] OPTION (RECOMPILE, MAXDOP 1);`
+	got := BlankSQLStrings(in)
+	if n := strings.Count(got, "OPTION (RECOMPILE, MAXDOP 1)"); n != 3 {
+		t.Errorf("all three hints are in code and must survive, got %d:\n%s", n, got)
 	}
 }

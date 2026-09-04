@@ -338,6 +338,16 @@ func parseScript(rel, sql string) Script {
 		setLint(fmt.Sprintf("@writer: %q needs @scope: %s; %s", s.Writer,
 			scopeWord(spec.Scope), spec.ScopeReason))
 	}
+	// @widened is consulted only where planUnits pairs a script with database
+	// folders, so on an instance-scoped file it parses clean and means nothing.
+	// That is the same silent no-op the closed vocabulary guards against,
+	// reached by putting the directive in the wrong file rather than by
+	// misspelling its value, and the file would be just as quietly wrong.
+	if s.Widened != "" && s.Scope != ScopeDatabase {
+		setLint(fmt.Sprintf("@widened: %q needs @scope: database; an instance-scoped "+
+			"collector runs once and is never paired with a database, so the "+
+			"directive would do nothing", s.Widened))
+	}
 	// An absent @timeout is linted for the same reason a misspelt one is, and
 	// the reason is that the fallback is silent. A collector with no @timeout
 	// gets SQL_QUERY_TIMEOUT_SEC, which is 60 seconds and is sized for a
@@ -625,6 +635,8 @@ func BlankSQLStrings(sql string) string {
 		lineComment
 		blockComment
 		literal
+		bracketID
+		quotedID
 	)
 	state := code
 	blockDepth := 0
@@ -642,6 +654,34 @@ func BlankSQLStrings(sql string) string {
 				i++
 			case c == '\'':
 				state = literal
+			// A quoted identifier is code, and an apostrophe inside one opens
+			// nothing: AS [nombre d'objets] is ordinary in this corpus. Read as
+			// a literal it would blank every byte to the end of the file, and
+			// the collision test would then report the file as unreliable
+			// rather than check it — a coverage hole that announces itself
+			// nowhere. StripSQLComments shares this blind spot, where it
+			// merely fails to strip a comment; here it would delete code.
+			case c == '[':
+				state = bracketID
+			case c == '"':
+				state = quotedID
+			}
+		case bracketID:
+			// ]] is an escaped bracket inside the identifier, not its close.
+			if c == ']' {
+				if i+1 < len(b) && b[i+1] == ']' {
+					i++
+					continue
+				}
+				state = code
+			}
+		case quotedID:
+			if c == '"' {
+				if i+1 < len(b) && b[i+1] == '"' {
+					i++
+					continue
+				}
+				state = code
 			}
 		case lineComment:
 			if c == '\n' {

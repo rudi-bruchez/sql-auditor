@@ -326,3 +326,27 @@ func TestSelectTargetsSeparatesPurposeFromReason(t *testing.T) {
 		t.Errorf("Reason = %q, want it to explain itself to a human", w.Reason)
 	}
 }
+
+// An instance can host more than one distribution database: sp_adddistributiondb
+// may be called repeatedly. Each one is kept, because choosing between them
+// would mean guessing which publisher uses which, and the archive would then be
+// missing the agent history for whichever guess was wrong.
+func TestSelectTargetsWidensToEveryDistributor(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
+		{Name: "DISTDB2", State: "ONLINE", HasAccess: true, IsDistributor: true},
+	}
+	sel, err := SelectTargets(cands, "SALESDB", "")
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	for _, name := range []string{"DISTDB", "DISTDB2"} {
+		if !containsString(sel.Included, name) {
+			t.Errorf("%s should be retained; Included = %v", name, sel.Included)
+		}
+		if sel.Widened[name].Purpose != "replication" {
+			t.Errorf("%s should carry the replication purpose; Widened = %v", name, sel.Widened)
+		}
+	}
+}

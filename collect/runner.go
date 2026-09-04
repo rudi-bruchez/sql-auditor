@@ -83,6 +83,14 @@ type DatabaseInfo struct {
 // being offered.
 const SkipNoAccess = "no access for this login"
 
+// skipNotIncluded is the reason DB_INCLUDE did not name a database. It is a
+// constant for the same reason as the one above, and here the two places are
+// the first pass that records the skip and the second pass that supersedes it
+// when a distributor is kept. A literal in both would drift, the supersession
+// would quietly stop matching, and the manifest would then name one database
+// twice with two contradictory reasons.
+const skipNotIncluded = "not matched by DB_INCLUDE"
+
 type SkipReason struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
@@ -337,7 +345,7 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error)
 		case !d.HasAccess:
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, SkipNoAccess})
 		case len(inc) > 0 && !matchAny(inc, d.Name):
-			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, "not matched by DB_INCLUDE"})
+			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, skipNotIncluded})
 		case matchAny(exc, d.Name):
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, "matched by DB_EXCLUDE"})
 		default:
@@ -380,7 +388,7 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error)
 		// database twice with two contradictory reasons. Only that one reason
 		// can be superseded: the others are still true.
 		for i, s := range sel.Skipped {
-			if s.Name == d.Name && s.Reason == "not matched by DB_INCLUDE" {
+			if s.Name == d.Name && s.Reason == skipNotIncluded {
 				sel.Skipped = append(sel.Skipped[:i], sel.Skipped[i+1:]...)
 				break
 			}
