@@ -17,6 +17,16 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Fixed
+
+- **Links in the packaged `README.md`** are rewritten to absolute URLs at build
+  time, pinned to the tag being released. `docs/` and `.env.example` are not in
+  the archive, so from an unpacked copy those links led nowhere — and the reader
+  they failed was the DBA sent to the guide before authorising a run. The
+  release now stops if any relative link survives packaging.
+
 ## [0.21.0] - 2026-09-04
 
 The first release with binaries. Everything below already worked from a
