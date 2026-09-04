@@ -524,3 +524,36 @@ func TestDiscoverParsesWidened(t *testing.T) {
 		t.Errorf("Widened = %q, want %q", got[0].Widened, "replication")
 	}
 }
+
+func TestBlankSQLStringsKeepsCodeAndLength(t *testing.T) {
+	in := `SELECT 'a''b' AS x, 1 OPTION (RECOMPILE, MAXDOP 1);
+EXEC sp_executesql N'SELECT 1 OPTION (RECOMPILE, MAXDOP 1)';`
+	got := BlankSQLStrings(in)
+	if len(got) != len(in) {
+		t.Fatalf("length changed: %d -> %d", len(in), len(got))
+	}
+	if strings.Count(got, "OPTION (RECOMPILE, MAXDOP 1)") != 1 {
+		t.Errorf("the hint inside the literal should be blanked; got:\n%s", got)
+	}
+	if !strings.Contains(got, "EXEC sp_executesql") {
+		t.Errorf("code outside literals must survive; got:\n%s", got)
+	}
+	if strings.Contains(got, "a''b") {
+		t.Errorf("literal contents must be blanked; got:\n%s", got)
+	}
+}
+
+// The one that matters. Half this corpus is commented in French and the rest
+// in English, and an apostrophe in a comment does not open a string literal. A
+// version that merely counts quotes flips state on the first "qu'est-ce" or
+// "client's" and blanks the real code that follows.
+func TestBlankSQLStringsIgnoresApostrophesInComments(t *testing.T) {
+	in := `-- On regarde ce qu'est un plan ici.
+SELECT 1 OPTION (RECOMPILE, MAXDOP 1);
+/* And the client's own rules apply. */
+SELECT 2 OPTION (RECOMPILE, MAXDOP 1);`
+	got := BlankSQLStrings(in)
+	if n := strings.Count(got, "OPTION (RECOMPILE, MAXDOP 1)"); n != 2 {
+		t.Errorf("both hints are in code and must survive, got %d:\n%s", n, got)
+	}
+}

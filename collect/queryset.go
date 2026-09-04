@@ -592,3 +592,87 @@ func contractLint(sql string, results []ResultSpec) string {
 	return fmt.Sprintf("every result set needs OPTION (RECOMPILE, MAXDOP 1); found %d for the %d declared in @resultsets",
 		hints, len(results))
 }
+
+// BlankSQLStrings replaces the contents of single-quoted literals with spaces,
+// keeping every other byte and the total length. It exists so a test can count
+// statements in code without seeing the SQL a collector hands to
+// sp_executesql: the guard pattern repeats the query hint inside that string,
+// and a naive split on the hint text counts the dynamic statement as a second
+// emitting one.
+//
+// It is deliberately not StripSQLComments' job. That function keeps literals,
+// because contractLint must see a hint wherever it is written, dynamic SQL
+// included. The two callers want opposite things from the same text.
+//
+// It runs the same four-state machine as StripSQLComments, and it has to: an
+// apostrophe in a comment does not open a string literal. Half this corpus is
+// commented in French, so a version that merely counts quotes reads "qu'est-ce"
+// as the start of a literal and blanks the code after it — measured across the
+// corpus as thirty files losing hints they carry. Comments themselves are left
+// alone, which keeps the counting test's behaviour on them exactly as it was
+// before this function existed.
+func BlankSQLStrings(sql string) string {
+	b := []byte(sql)
+	// Newlines survive so the blanked text keeps its line structure, and a
+	// caller reporting a position still reports a true one.
+	blank := func(i int) {
+		if b[i] != '\n' && b[i] != '\r' {
+			b[i] = ' '
+		}
+	}
+	const (
+		code = iota
+		lineComment
+		blockComment
+		literal
+	)
+	state := code
+	blockDepth := 0
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		switch state {
+		case code:
+			switch {
+			case c == '-' && i+1 < len(b) && b[i+1] == '-':
+				state = lineComment
+				i++
+			case c == '/' && i+1 < len(b) && b[i+1] == '*':
+				state = blockComment
+				blockDepth = 1
+				i++
+			case c == '\'':
+				state = literal
+			}
+		case lineComment:
+			if c == '\n' {
+				state = code
+			}
+		case blockComment:
+			switch {
+			case c == '/' && i+1 < len(b) && b[i+1] == '*':
+				blockDepth++
+				i++
+			case c == '*' && i+1 < len(b) && b[i+1] == '/':
+				blockDepth--
+				i++
+				if blockDepth == 0 {
+					state = code
+				}
+			}
+		case literal:
+			if c == '\'' {
+				// '' is an escaped quote and still contents, not the close.
+				if i+1 < len(b) && b[i+1] == '\'' {
+					blank(i)
+					blank(i + 1)
+					i++
+					continue
+				}
+				state = code
+				continue
+			}
+			blank(i)
+		}
+	}
+	return string(b)
+}

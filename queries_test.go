@@ -117,7 +117,7 @@ func TestEmbeddedCorpusHasNoTopLevelKeyCollision(t *testing.T) {
 		if rootAt < 0 {
 			continue // no root set, so nothing merges into the top level
 		}
-		chunks := strings.Split(s.SQL, "OPTION (RECOMPILE, MAXDOP 1)")
+		chunks := strings.Split(collect.BlankSQLStrings(s.SQL), "OPTION (RECOMPILE, MAXDOP 1)")
 		chunks = chunks[:len(chunks)-1] // the tail after the last hint emits nothing
 		var parts []string
 		for _, c := range chunks {
@@ -225,6 +225,28 @@ func TestNoIntPageCountIsMultipliedBeforeItIsWidened(t *testing.T) {
 			t.Errorf("%s:%d multiplies an int page count by 8 before widening it, "+
 				"which kills the whole statement past 2 TiB. Wrap the operand in "+
 				"CAST(... AS BIGINT):\n  %s", s.Path, i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
+// Blanking must erase nothing that is really in code. The failure mode is
+// silent: a version of BlankSQLStrings that does not know what a comment is
+// flips into "inside a literal" on the first apostrophe in French prose and
+// wipes the hints after it. Measured on the corpus, that version loses hints
+// in thirty of these files — 013.memory-model.sql 1 to 0, 050.tempdb.sql 11 to
+// 5 — while the collision test above still passes, because it counts what is
+// left rather than what was lost.
+func TestBlankSQLStringsErasesNoHintInTheCurrentCorpus(t *testing.T) {
+	const hint = "OPTION (RECOMPILE, MAXDOP 1)"
+	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	for _, s := range scripts {
+		before := strings.Count(s.SQL, hint)
+		after := strings.Count(collect.BlankSQLStrings(s.SQL), hint)
+		if before != after {
+			t.Errorf("%s: %d hints before blanking, %d after", s.Path, before, after)
 		}
 	}
 }
