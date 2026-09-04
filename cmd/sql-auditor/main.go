@@ -141,7 +141,7 @@ func defineFlags(cmd string) *cliFlags {
 			"for disclosure and the one off for cost")
 	fs.StringVar(&c.to, "to", "",
 		"destination: a directory for 'queries export', a file for 'env init' (default .env)")
-	fs.BoolVar(&c.force, "force", false, "'env init' only: replace an existing file")
+	fs.BoolVar(&c.force, "force", false, "replace existing files: the destination of 'env init', the corpus of 'queries export'")
 	// Writes a file, never a permission. The collector connects with the
 	// login being measured, which by construction cannot grant anything —
 	// so the output is a script for a DBA to read and run, and the tool
@@ -665,7 +665,7 @@ func run() int {
 			fmt.Fprintln(os.Stderr, "queries export requires --to DIR")
 			return 2
 		}
-		if err := collect.ExportQueries(sqlauditor.Queries, "queries", c.to); err != nil {
+		if err := collect.ExportQueries(sqlauditor.Queries, "queries", c.to, c.force); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
@@ -860,7 +860,10 @@ func writeUsageBody(w io.Writer) {
                                        a machine that has only the executable.
                                        --to FILE to write elsewhere (default
                                        .env), --force to replace an existing one
-  sql-auditor queries export --to DIR  write the embedded queries to disk
+  sql-auditor queries export --to DIR  write the embedded queries to disk. It
+                                       refuses to replace a file already there,
+                                       so an edited corpus survives a second
+                                       export; --force replaces them.
   sql-auditor version                  print the version and the build it came
                                        from. --version, -version and -V do the
                                        same thing.

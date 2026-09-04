@@ -22,7 +22,7 @@ func TestExportQueriesWritesTree(t *testing.T) {
 		"queries/10.system/010.properties.sql": {Data: []byte("SELECT 1;")},
 	}
 	dest := t.TempDir()
-	if err := ExportQueries(corpus, "queries", dest); err != nil {
+	if err := ExportQueries(corpus, "queries", dest, false); err != nil {
 		t.Fatalf("ExportQueries: %v", err)
 	}
 	b, err := os.ReadFile(filepath.Join(dest, "10.system", "010.properties.sql"))
@@ -1132,5 +1132,43 @@ func TestPrepareRunFolderSaysWhereThePreviousRunWent(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), aside[0]) {
 		t.Errorf("the notice does not say where the previous run was kept: %q", out.String())
+	}
+}
+
+// "queries export --to DIR" is the command that exists so people edit the
+// corpus, so the natural cycle is export, edit, run, export again. Until
+// 4 September 2026 the second export overwrote the edits without a word — while
+// "env init" a few lines away refused an existing file and argued in its own
+// comment that the file mattered too much to replace silently. Both are true of
+// a corpus somebody has spent an afternoon on.
+func TestExportQueriesRefusesToOverwriteWithoutForce(t *testing.T) {
+	corpus := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte("SELECT 1")}}
+	dest := t.TempDir()
+	if err := ExportQueries(corpus, "queries", dest, false); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	edited := filepath.Join(dest, "10.system", "010.a.sql")
+	if err := os.WriteFile(edited, []byte("SELECT 2 -- my edit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ExportQueries(corpus, "queries", dest, false)
+	if err == nil {
+		t.Fatal("the second export overwrote an edited corpus without being asked")
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Errorf("error = %v, want one naming the way through", err)
+	}
+	b, _ := os.ReadFile(edited)
+	if !strings.Contains(string(b), "my edit") {
+		t.Error("the edit was lost even though the export refused")
+	}
+
+	if err := ExportQueries(corpus, "queries", dest, true); err != nil {
+		t.Fatalf("forced export: %v", err)
+	}
+	b, _ = os.ReadFile(edited)
+	if string(b) != "SELECT 1" {
+		t.Errorf("--force did not replace the file: %q", b)
 	}
 }

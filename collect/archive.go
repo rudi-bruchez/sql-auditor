@@ -93,17 +93,32 @@ func Zip(runFolder, destZip string) (err error) {
 		if err != nil {
 			return err
 		}
-		f, err := os.Open(p)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		_, err = io.Copy(w, f)
-		return err
+		return copyInto(w, p)
 	})
 	if walkErr != nil {
 		zw.Close()
 		return walkErr
 	}
 	return zw.Close()
+}
+
+// copyInto exists so that each archived file is closed when its own copy ends
+// rather than when the whole walk does.
+//
+// A `defer f.Close()` inside the WalkDir callback defers to the callback's
+// return, which reads correctly and is correct — but the callback is one
+// closure invoked once per file, so a run over a few thousand files holds a few
+// thousand descriptors at once. A collection with --include-object-definitions
+// against databases carrying a few thousand modules writes one file per module
+// and passes the 1024-descriptor limit of an ordinary Unix account. Zip then
+// fails, and the error path of the caller deletes the half-written archive:
+// a run that did all its work on the instance ends with nothing to show for it.
+func copyInto(w io.Writer, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(w, f)
+	return err
 }

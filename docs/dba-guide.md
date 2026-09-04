@@ -58,7 +58,7 @@ before you run anything:
 sql-auditor queries export --to ./queries-to-review
 ```
 
-The corpus is 55 files. The archive records the SHA-256 of the exact corpus that
+The corpus is 62 files. The archive records the SHA-256 of the exact corpus that
 was used, so a run can be tied to the questions it asked.
 
 ### Seven files are opt-in
@@ -307,7 +307,6 @@ On an instance where everything is available:
 ```
 sql-auditor 0.11.0 (a1b2c3d4)
 
-note: the connection is encrypted but the server certificate is NOT validated (SQL_TRUST_SERVER_CERTIFICATE=true)
 Queries (38):
   10.system/010.properties.sql
   10.system/013.memory-model.sql             SQL Server 13.0.4001+
@@ -387,7 +386,6 @@ On a login without `VIEW ANY DEFINITION` and `VIEW SERVER STATE`:
 ```
 sql-auditor 0.11.0 (a1b2c3d4)
 
-note: the connection is encrypted but the server certificate is NOT validated (SQL_TRUST_SERVER_CERTIFICATE=true)
 Queries (38):
   ... (unchanged - the query list does not depend on permissions)
 
@@ -860,6 +858,41 @@ sql-auditor collect --queries-dir ./my-queries
 `MANIFEST.txt` records that the corpus came from a directory rather than from
 the binary, along with its SHA-256, and withdraws its claim that the queries are
 the published ones. A modified run cannot be mistaken for a standard one.
+
+A second `queries export` into the same directory now refuses rather than
+replacing what you edited. Pass `--force` when replacing is what you want.
+
+#### What a corpus from a directory is allowed to contain
+
+Every file, wherever it came from, is checked before anything runs — and the
+check is about what the statements *do*, not only how they are written. A
+collector may issue reads. It may write to a table variable or a `#temp` table,
+because several DMFs and procedures return rows that have to be captured before
+they can be joined. Everything else is refused, and a refused file does not run:
+
+`ALTER`, `CREATE` or `DROP` of anything permanent, `INSERT`, `UPDATE`, `DELETE`
+or `TRUNCATE` against a real table, `SELECT ... INTO` a permanent table,
+`GRANT`, `REVOKE`, `DENY`, `KILL`, `BACKUP`, `RESTORE`, `RECONFIGURE`,
+`SHUTDOWN`, `EXECUTE AS`, any `xp_` procedure, the `sp_` procedures that
+configure the instance, and any `DBCC` command that is not one of the read-only
+ones. Dynamic SQL is read too — the check looks inside the string a collector
+hands to `EXEC` or `sp_executesql` — and a statement assembled from variables is
+refused outright, because a statement the check cannot read is one it cannot
+vouch for.
+
+This is a guard against the accident, not a sandbox. Whoever can pass
+`--queries-dir` can also open `sqlcmd` and type the same statement. What it
+buys is that the sentence `MANIFEST.txt` prints — *nothing on this server is
+created, altered or deleted* — is now something the program checked before the
+run rather than something it asserted afterwards.
+
+The refusal looks like this, and the run exits `2`:
+
+```
+!! 10.system/010.mine.sql   DROP: a collector may only write to a table variable
+                            or a #temp table, which die with the connection —
+                            anything else belongs to the server it is auditing
+```
 
 Both timeout settings must be positive whole numbers of seconds. A value the
 tool cannot parse is an error rather than a silent fallback to the default.
@@ -1558,20 +1591,36 @@ thing these two options are not.
 
 ### TLS
 
-The connection is encrypted by default (`SQL_ENCRYPT=true`), but the server
-certificate is not validated (`SQL_TRUST_SERVER_CERTIFICATE=true`), which is the
-only default that works against the self-signed certificate most instances ship
-with.
+The connection is encrypted by default (`SQL_ENCRYPT=true`), and the server
+certificate **is** validated (`SQL_TRUST_SERVER_CERTIFICATE=false`).
 
-The tool prints a notice on every run to make sure this is not a silent
-assumption:
+That is a change from earlier versions, and on an instance with its own
+self-signed certificate — which is most of them — the first run now fails:
 
 ```
-note: the connection is encrypted but the server certificate is NOT validated (SQL_TRUST_SERVER_CERTIFICATE=true)
+cannot reach the instance
+
+the connection was encrypted but this machine does not trust the certificate
+SQL01 presented.
+...
 ```
 
-If your instance has a certificate your machine trusts, set
-`SQL_TRUST_SERVER_CERTIFICATE=false` and the notice goes away.
+The message that follows names the setting and what accepting it costs. The
+short version: `SQL_TRUST_SERVER_CERTIFICATE=true` encrypts the connection and
+then accepts *any* certificate, which is precisely what something sitting on the
+network path between you and the instance needs in order to read `SQL_USER` and
+`SQL_PASSWORD` off the wire. A self-signed certificate and an interception look
+identical from the client.
+
+The default used to be `true`, on the reasoning that it is the only value that
+works out of the box. It is — and it made everyone who never looked at the
+setting vulnerable in order to spare the few who would have. So the failure is
+now loud, once, and the decision is recorded in your `.env`:
+
+- if the instance has a certificate this machine trusts, nothing to do;
+- if you can install that certificate in the machine's trust store, do that;
+- otherwise set `SQL_TRUST_SERVER_CERTIFICATE=true` deliberately, knowing you
+  are trusting the network path. The tool then prints a notice on every run.
 
 ## Reproducing a run locally
 

@@ -147,7 +147,7 @@ sql-auditor check                    verify connectivity, permissions and config
                                      and list what a collection would run
 sql-auditor collect                  collect, then archive
 sql-auditor env init                 write the annotated .env template
-sql-auditor queries export --to DIR  write the embedded queries to disk
+sql-auditor queries export --to DIR  write the embedded queries to disk; refuses to replace files already there, --force to replace
 sql-auditor version                  print the version and the build it came from
 ```
 
@@ -288,7 +288,7 @@ Exactly three cases.
 | `--env PATH` | `.env` file to read (default `.env`) |
 | `--password-file FILE` | read `SQL_PASSWORD` from this file rather than from `.env`. One trailing line ending is ignored; an empty file is refused |
 | `--password-stdin` | read `SQL_PASSWORD` from standard input, same rules |
-| `--queries-dir DIR` | run a corpus from disk instead of the embedded one |
+| `--queries-dir DIR` | run a corpus from disk instead of the embedded one. Every file is checked first for what its statements DO, and one that changes the server is refused rather than run ([what is allowed](docs/dba-guide.md#what-a-corpus-from-a-directory-is-allowed-to-contain)) |
 | `--output-dir DIR` | where to write results |
 | `--keep` | keep an existing same-day run folder, suffixing this run |
 | `--grant-script FILE` | `check` only. Write the T-SQL that grants the permissions found missing, for the login the server reports, with the reason for each. Never executed. |
@@ -478,7 +478,7 @@ reverse of the usual twelve-factor ordering and is
 | `SQL_PASSWORD` | *(empty)* | password for `SQL_USER` |
 | `SQL_INTEGRATED_SECURITY` | `false` | force Windows authentication even when `SQL_USER` is set |
 | `SQL_ENCRYPT` | `true` | encrypt the connection |
-| `SQL_TRUST_SERVER_CERTIFICATE` | `true` | skip server certificate validation |
+| `SQL_TRUST_SERVER_CERTIFICATE` | `false` | `true` accepts ANY certificate, which is what a machine-in-the-middle needs to read the login and its password. On an instance with a self-signed certificate the first run fails and explains the choice ([why](docs/dba-guide.md#tls)) |
 
 ### Timeouts and identification
 
@@ -492,7 +492,7 @@ reverse of the usual twelve-factor ordering and is
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `QUERIES_DIR` | *(empty)* | run a corpus from disk instead of the embedded one |
+| `QUERIES_DIR` | *(empty)* | run a corpus from disk instead of the embedded one, under the same statement check as `--queries-dir` |
 | `OUTPUT_DIR` | `output` | where run folders and archives are written |
 | `DB_INCLUDE` | *(empty)* | comma-separated `*`/`?` patterns; empty means all user databases |
 | `DB_EXCLUDE` | *(empty)* | comma-separated `*`/`?` patterns |

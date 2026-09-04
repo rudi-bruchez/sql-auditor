@@ -392,7 +392,18 @@ func deadline(ctx context.Context, cfg *Config) (context.Context, context.Cancel
 	return context.WithTimeout(ctx, cfg.QueryTimeout)
 }
 
-func ExportQueries(corpus fs.FS, root, dest string) error {
+// ExportQueries writes the corpus out so it can be read and edited.
+//
+// force replaces files that are already there. Without it an existing file
+// stops the export, for the reason WriteEnvTemplate refuses an existing .env:
+// the whole point of this command is that somebody edits what it produced, and
+// the second export is then over their afternoon's work. O_EXCL rather than a
+// prior existence test, so the refusal does not depend on winning a race.
+func ExportQueries(corpus fs.FS, root, dest string, force bool) error {
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if force {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
 	return fs.WalkDir(corpus, root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -412,7 +423,17 @@ func ExportQueries(corpus fs.FS, root, dest string) error {
 		if err := os.MkdirAll(filepath.Dir(target), dirPerm); err != nil {
 			return err
 		}
-		return os.WriteFile(target, b, filePerm)
+		f, err := os.OpenFile(target, flags, filePerm)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("%s already exists: this export would replace a corpus "+
+					"you may have edited. Export somewhere else, or pass --force to replace it", target)
+			}
+			return err
+		}
+		defer f.Close()
+		_, err = f.Write(b)
+		return err
 	})
 }
 
@@ -696,6 +717,9 @@ func Check(ctx context.Context, o Options) (int, error) {
 	}
 	if v.ConnErr != nil {
 		fmt.Fprintln(o.progress(), "cannot reach the instance")
+		if advice := certificateAdvice(o.Config, v.ConnErr); advice != "" {
+			fmt.Fprintln(o.progress(), "\n"+advice)
+		}
 		return 1, err
 	}
 
@@ -711,6 +735,9 @@ func Check(ctx context.Context, o Options) (int, error) {
 	if v.Probed {
 		fmt.Printf("\nServer   : %s  %s  %s\n", v.Server.Name, v.Server.Version, v.Server.Edition)
 		fmt.Printf("Login    : %s\n", v.Server.Login)
+		if excess := v.Server.ExcessPrivilege(); excess != "" {
+			fmt.Printf("  !! %s\n", excess)
+		}
 	}
 
 	// Advice, not a finding, and it is here rather than in the archive on
@@ -1289,7 +1316,11 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// not a diagnosis anybody would arrive at from the message.
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		err = fmt.Errorf("cannot reach the instance: %w", err)
+		if advice := certificateAdvice(o.Config, err); advice != "" {
+			err = fmt.Errorf("cannot reach the instance: %w\n\n%s", err, advice)
+		} else {
+			err = fmt.Errorf("cannot reach the instance: %w", err)
+		}
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 1, err)
 	}
@@ -1316,6 +1347,14 @@ func Run(ctx context.Context, o Options) (int, error) {
 	}
 	m.Server = ServerBlock{Name: si.Name, Version: si.Version, Edition: si.Edition,
 		UTCOffsetMinutes: si.UTCOffsetMinutes, Auth: AuthLabel(o.Config)}
+	// A warning rather than a refusal: the run is legitimate and its output is
+	// no different. What is different is what a mistake could have cost, and
+	// that belongs in the archive as much as on the operator's screen — the
+	// person reviewing the manifest is the one who cares which login ran it.
+	if excess := si.ExcessPrivilege(); excess != "" {
+		m.Warnings = append(m.Warnings, excess)
+		fmt.Fprintf(o.progress(), "note: %s\n", excess)
+	}
 
 	// The window is resolved here and nowhere earlier: this is the first moment
 	// the server's UTC offset is known, and the operator types what the client

@@ -474,3 +474,36 @@ func TestRunPreflightNeedsRowsErrorMidResultSetWins(t *testing.T) {
 		t.Errorf("got %q, want denied", s)
 	}
 }
+
+// The whole of grants.go exists to build a login at least privilege, and until
+// 4 September 2026 a run connected as sysadmin was never once mentioned. That
+// silence is what makes the statement-class lint's remaining exposure matter:
+// the difference between a foreign corpus reading catalogs and a foreign corpus
+// destroying the estate is entirely the login it runs as.
+func TestOverPrivilegeIsNamedWhenThereIsSome(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		si   ServerInfo
+		want string
+	}{
+		{"least privilege", ServerInfo{Login: "AUDIT_RO"}, ""},
+		{"sysadmin", ServerInfo{Login: "sa", Sysadmin: true}, "sysadmin"},
+		{"control server", ServerInfo{Login: "AUDIT_RO", ControlServer: true}, "CONTROL SERVER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.si.ExcessPrivilege()
+			if tc.want == "" {
+				if got != "" {
+					t.Errorf("a least-privilege login was warned about: %s", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("ExcessPrivilege() = %q, want it to name %q", got, tc.want)
+			}
+			if !strings.Contains(got, tc.si.Login) {
+				t.Errorf("ExcessPrivilege() = %q, want it to name the login", got)
+			}
+		})
+	}
+}

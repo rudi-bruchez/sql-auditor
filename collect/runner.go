@@ -61,6 +61,40 @@ type ServerInfo struct {
 	// Zero when the server did not answer with one, which callers treat as
 	// "fall back to the local instant" rather than as the year 1.
 	NowUTC time.Time
+
+	// Sysadmin and ControlServer record that the login can do far more than
+	// this tool asks of it. They are not capabilities — nothing here needs
+	// them, and grants.go exists to build a login that has neither — they are
+	// the blast radius of a mistake. See ExcessPrivilege.
+	Sysadmin      bool
+	ControlServer bool
+}
+
+// ExcessPrivilege names the privilege this run holds and does not need, or ""
+// when it holds none.
+//
+// It is worth saying out loud because every other safety property of this
+// program is bounded by it. The statement-class lint refuses a corpus that
+// writes, and says plainly that it is not a sandbox; what stands behind that
+// admission is the login. Connected as a purpose-built reader, the worst a
+// mistake does is read something it should not. Connected as sysadmin, the
+// worst a mistake does is unbounded — and a DBA testing the tool for the first
+// time connects as themselves, which on most instances means sysadmin.
+//
+// The remedy is already in the box: "sql-auditor check --grant-script" writes
+// the script that creates the reader.
+func (si ServerInfo) ExcessPrivilege() string {
+	switch {
+	case si.Sysadmin:
+		return fmt.Sprintf("%s is a member of the sysadmin server role. This collection needs none "+
+			"of that: it reads catalogs and DMVs. Run it as a purpose-built reader instead — "+
+			"'sql-auditor check --grant-script grant.sql' writes the script that creates one.", si.Login)
+	case si.ControlServer:
+		return fmt.Sprintf("%s holds CONTROL SERVER, which is sysadmin by another name. This "+
+			"collection needs only CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE and a little "+
+			"of msdb — 'sql-auditor check --grant-script grant.sql' writes the script.", si.Login)
+	}
+	return ""
 }
 
 type DatabaseInfo struct {
@@ -277,18 +311,27 @@ func Probe(ctx context.Context, c *sql.Conn) (ServerInfo, error) {
 	var name, version, edition, login sql.NullString
 	var offset sql.NullInt64
 	var nowUTC sql.NullTime
+	// The last two columns are not capabilities but blast radius: what this
+	// login could do if a query did something it should not. Both are nullable
+	// on purpose — IS_SRVROLEMEMBER answers NULL for a role it cannot resolve,
+	// and a NULL there must cost its own field rather than the whole probe.
+	var sysadmin, controlServer sql.NullInt64
 	err := c.QueryRowContext(ctx, `
         SELECT CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
                CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')),
                CONVERT(nvarchar(128), SERVERPROPERTY('Edition')),
                DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()),
                SUSER_SNAME(),
-               GETUTCDATE()`).
-		Scan(&name, &version, &edition, &offset, &login, &nowUTC)
+               GETUTCDATE(),
+               IS_SRVROLEMEMBER('sysadmin'),
+               HAS_PERMS_BY_NAME(NULL, NULL, 'CONTROL SERVER')`).
+		Scan(&name, &version, &edition, &offset, &login, &nowUTC, &sysadmin, &controlServer)
 	if err != nil {
 		return si, err
 	}
 	si.Name, si.Version, si.Edition, si.Login = name.String, version.String, edition.String, login.String
+	si.Sysadmin = sysadmin.Int64 == 1
+	si.ControlServer = controlServer.Int64 == 1
 	si.UTCOffsetMinutes = int(offset.Int64)
 	if nowUTC.Valid {
 		si.NowUTC = nowUTC.Time.UTC()

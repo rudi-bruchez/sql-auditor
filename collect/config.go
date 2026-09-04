@@ -313,7 +313,7 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 		AppNameSet:     set("SQL_APPLICATION_NAME"),
 		Integrated:     boolOf("SQL_INTEGRATED_SECURITY", false),
 		Encrypt:        boolOf("SQL_ENCRYPT", true),
-		TrustCert:      boolOf("SQL_TRUST_SERVER_CERTIFICATE", true),
+		TrustCert:      boolOf("SQL_TRUST_SERVER_CERTIFICATE", false),
 		ConnectTimeout: secOf("SQL_CONNECT_TIMEOUT_SEC", 15),
 		QueryTimeout:   secOf("SQL_QUERY_TIMEOUT_SEC", 60),
 		QueriesDir:     get("QUERIES_DIR", ""),
