@@ -287,7 +287,10 @@ func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error
 	rows, err := c.QueryContext(ctx, `
         SELECT d.name, d.state_desc,
                CASE WHEN d.source_database_id IS NULL THEN 0 ELSE 1 END,
-               CASE WHEN HAS_DBACCESS(d.name) = 1 THEN 1 ELSE 0 END
+               CASE WHEN HAS_DBACCESS(d.name) = 1 THEN 1 ELSE 0 END,
+               CONVERT(int, d.is_published),
+               CONVERT(int, d.is_subscribed),
+               CONVERT(int, d.is_distributor)
         FROM sys.databases AS d
         WHERE d.database_id > 4
         ORDER BY d.name`)
@@ -298,11 +301,12 @@ func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error
 	var out []DatabaseInfo
 	for rows.Next() {
 		var d DatabaseInfo
-		var snap, acc int
-		if err := rows.Scan(&d.Name, &d.State, &snap, &acc); err != nil {
+		var snap, acc, pub, sub, dist int
+		if err := rows.Scan(&d.Name, &d.State, &snap, &acc, &pub, &sub, &dist); err != nil {
 			return nil, err
 		}
 		d.IsSnapshot, d.HasAccess = snap == 1, acc == 1
+		d.IsPublished, d.IsSubscribed, d.IsDistributor = pub == 1, sub == 1, dist == 1
 		out = append(out, d)
 	}
 	return out, rows.Err()
