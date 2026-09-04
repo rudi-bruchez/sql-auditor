@@ -18,8 +18,10 @@
 -- it so the analysis can decide; a rate computed from one sample is not a
 -- rate.
 --
--- The object names carry trailing spaces in this DMV, which is why the
--- comparison is on a trimmed value.
+-- The names carry trailing spaces in this DMV, which is why they are trimmed
+-- on the way out. Not in the WHERE clause: a trailing % already absorbs the
+-- padding, and trimming there would run the function over every row of the
+-- DMV to reach the same set.
 --
 -- SQL Server 2012 is the floor.
 
@@ -38,7 +40,7 @@ BEGIN TRY
         SELECT RTRIM(p.object_name), RTRIM(p.counter_name), RTRIM(p.instance_name),
                p.cntr_value, p.cntr_type
         FROM sys.dm_os_performance_counters AS p
-        WHERE RTRIM(p.object_name) LIKE ''%Replication%''
+        WHERE p.object_name LIKE ''%Replication%''
         OPTION (RECOMPILE, MAXDOP 1)';
 END TRY
 BEGIN CATCH

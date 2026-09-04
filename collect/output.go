@@ -31,9 +31,6 @@ type DatabaseFolder struct {
 // because folder naming is about collisions on disk and this is about who may
 // read the database; one function doing both would have two reasons to change.
 func MarkWidened(folders []DatabaseFolder, widened map[string]WidenedFor) []DatabaseFolder {
-	if len(widened) == 0 {
-		return folders
-	}
 	for i := range folders {
 		if w, ok := widened[folders[i].Name]; ok {
 			folders[i].WidenedPurpose = w.Purpose
@@ -127,4 +124,14 @@ func ResultRelativePath(dir, base, dbFolder string) string {
 		return path.Join(dir, base+".json")
 	}
 	return path.Join(dir, dbFolder, base+".json")
+}
+
+// SelectedFolders is the one way a Selection becomes folders: named, then
+// stamped. The two steps stay separate functions for the reason MarkWidened
+// gives, but the pair is written once — open-coded at each call site, it is a
+// caller resolving folders and forgetting to mark them, which yields folders
+// that look right and are offered to none of the collectors the widening kept
+// their database for. Nothing would say so.
+func SelectedFolders(sel Selection) []DatabaseFolder {
+	return MarkWidened(ResolveDatabaseFolders(sel.Included), sel.Widened)
 }

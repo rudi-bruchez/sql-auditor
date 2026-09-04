@@ -622,8 +622,11 @@ func (m *Manifest) writeTargets(b *strings.Builder) {
 			// so a reader looking for its object inventory would find nothing
 			// and no account of why. The line says what was collected, not
 			// only why the database is here.
-			if d.RetentionReason != "" {
-				fmt.Fprintf(b, "      replication metadata only, not a full collection\n")
+			// The notice comes from KnownWidened, keyed by the purpose. Written
+			// here as a literal it would have said "replication" over the
+			// second purpose ever added, and no test would have noticed.
+			if notice, ok := KnownWidened[d.WidenedPurpose]; ok {
+				fmt.Fprintf(b, "      %s\n", notice)
 				fmt.Fprintf(b, "      kept because: %s\n", d.RetentionReason)
 			}
 		}

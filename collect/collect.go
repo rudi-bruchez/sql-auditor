@@ -1282,7 +1282,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)
 	}
-	folders := MarkWidened(ResolveDatabaseFolders(sel.Included), sel.Widened)
+	folders := SelectedFolders(sel)
 	m.Targets = TargetBlock{Databases: folders, Skipped: sel.Skipped}
 
 	plan := planScripts(scripts, denied, ParseVersion(si.Version), o.Flags)

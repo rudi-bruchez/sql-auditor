@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -381,7 +382,7 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error)
 	// dropped a merge topology's distributor with nothing recorded.
 	published := 0
 	for _, d := range c {
-		if (d.IsPublished || d.IsMergePublished) && containsString(sel.Included, d.Name) {
+		if (d.IsPublished || d.IsMergePublished) && slices.Contains(sel.Included, d.Name) {
 			published++
 		}
 	}
@@ -389,7 +390,7 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error)
 		return sel, nil
 	}
 	for _, d := range c {
-		if !d.IsDistributor || containsString(sel.Included, d.Name) {
+		if !d.IsDistributor || slices.Contains(sel.Included, d.Name) {
 			continue
 		}
 		// Everything except DB_INCLUDE still disqualifies it. DB_EXCLUDE in
@@ -418,15 +419,6 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error)
 		}
 	}
 	return sel, nil
-}
-
-func containsString(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }
 
 // checkPatterns validates each pattern once, up front, so a syntax error is

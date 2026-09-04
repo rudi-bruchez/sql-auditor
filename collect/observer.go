@@ -95,16 +95,7 @@ func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]u
 			// — a database the operator never named, reported as deliberately
 			// omitted under a setting they never configured — and removing it
 			// from targets afterwards does not take that line back.
-			//
-			// A new slice, never folders[:0]: folders is the caller's and is
-			// reused by every later script in the plan.
-			eligible := make([]DatabaseFolder, 0, len(folders))
-			for _, f := range folders {
-				if f.WidenedPurpose == "" || f.WidenedPurpose == s.Widened {
-					eligible = append(eligible, f)
-				}
-			}
-			targets, narrowed = queryStoreUnits(cfg, s, eligible)
+			targets, narrowed = queryStoreUnits(cfg, s, eligibleFolders(folders, s.Widened))
 			skipped = append(skipped, narrowed...)
 		}
 		for _, t := range targets {
@@ -161,4 +152,32 @@ func (w observer) Finished(cancelled bool) {
 	if w.o != nil {
 		w.o.Finished(cancelled)
 	}
+}
+
+// eligibleFolders drops the databases the selection widened back in for a
+// purpose this script does not declare, and returns the caller's own slice
+// when nothing was widened — which is every run without DB_INCLUDE, and there
+// is no reason to copy the whole list once per database-scoped collector to
+// arrive at the same list.
+//
+// It never returns folders[:0] in the filtering case either: the slice belongs
+// to the caller and every later script in the plan reads it again.
+func eligibleFolders(folders []DatabaseFolder, widened string) []DatabaseFolder {
+	widenedAny := false
+	for _, f := range folders {
+		if f.WidenedPurpose != "" {
+			widenedAny = true
+			break
+		}
+	}
+	if !widenedAny {
+		return folders
+	}
+	eligible := make([]DatabaseFolder, 0, len(folders))
+	for _, f := range folders {
+		if f.WidenedPurpose == "" || f.WidenedPurpose == widened {
+			eligible = append(eligible, f)
+		}
+	}
+	return eligible
 }

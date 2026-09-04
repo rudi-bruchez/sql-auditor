@@ -2,6 +2,7 @@ package collect
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -196,14 +197,6 @@ func TestBadServerAddressIsMarkedAsConfiguration(t *testing.T) {
 	}
 }
 
-func TestDatabaseInfoCarriesReplicationFlags(t *testing.T) {
-	d := DatabaseInfo{Name: "SALESDB", State: "ONLINE", HasAccess: true,
-		IsPublished: true, IsDistributor: false, IsSubscribed: false}
-	if !d.IsPublished || d.IsDistributor || d.IsSubscribed {
-		t.Errorf("flags did not round-trip: %+v", d)
-	}
-}
-
 // The second pass keeps a distribution database a narrowed run would lose.
 // "Retained after filtering" is the exact trigger, and these five cases pin
 // each half of it.
@@ -217,7 +210,7 @@ func TestSelectTargetsWidensToDistributor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
-	if !containsName(sel.Included, "DISTDB") {
+	if !slices.Contains(sel.Included, "DISTDB") {
 		t.Errorf("DISTDB should be retained; Included = %v", sel.Included)
 	}
 	if sel.Widened["DISTDB"].Reason == "" {
@@ -241,7 +234,7 @@ func TestSelectTargetsDoesNotWidenWithoutARetainedPublisher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
-	if containsName(sel.Included, "DISTDB") {
+	if slices.Contains(sel.Included, "DISTDB") {
 		t.Errorf("no retained publisher, so DISTDB must not be widened in")
 	}
 }
@@ -255,7 +248,7 @@ func TestSelectTargetsExcludeBeatsWidening(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
-	if containsName(sel.Included, "DISTDB") {
+	if slices.Contains(sel.Included, "DISTDB") {
 		t.Errorf("DB_EXCLUDE must win over widening")
 	}
 }
@@ -269,7 +262,7 @@ func TestSelectTargetsDoesNotWidenAnInaccessibleDistributor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
-	if containsName(sel.Included, "DISTDB") {
+	if slices.Contains(sel.Included, "DISTDB") {
 		t.Errorf("an inaccessible distributor must stay skipped")
 	}
 }
@@ -286,18 +279,9 @@ func TestSelectTargetsWidensOnAStaleFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
-	if !containsName(sel.Included, "DISTDB") {
+	if !slices.Contains(sel.Included, "DISTDB") {
 		t.Errorf("a stale flag widens; the spec accepts this")
 	}
-}
-
-func containsName(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }
 
 // The purpose and the reason are two different strings and must not share a
@@ -342,7 +326,7 @@ func TestSelectTargetsWidensToEveryDistributor(t *testing.T) {
 		t.Fatalf("SelectTargets: %v", err)
 	}
 	for _, name := range []string{"DISTDB", "DISTDB2"} {
-		if !containsString(sel.Included, name) {
+		if !slices.Contains(sel.Included, name) {
 			t.Errorf("%s should be retained; Included = %v", name, sel.Included)
 		}
 		if sel.Widened[name].Purpose != "replication" {
@@ -364,7 +348,7 @@ func TestSelectTargetsWidensForAMergePublisher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
-	if !containsString(sel.Included, "DISTDB") {
+	if !slices.Contains(sel.Included, "DISTDB") {
 		t.Errorf("a merge publisher keeps its distributor too; Included = %v", sel.Included)
 	}
 }

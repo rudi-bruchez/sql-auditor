@@ -59,7 +59,14 @@ type Script struct {
 // misspelt value means "ordinary collector", so the file is never offered the
 // database it exists to read, and the archive is short of a document with
 // nothing anywhere explaining why.
-var KnownWidened = map[string]bool{"replication": true}
+// The value is what MANIFEST.txt says about a database kept for that purpose.
+// It lives here, beside the token, because the alternative was a sentence about
+// replication inlined in the manifest writer under a purpose-agnostic test —
+// which would have printed it over the second purpose ever added, silently and
+// wrongly.
+var KnownWidened = map[string]string{
+	"replication": "replication metadata only, not a full collection",
+}
 
 // KnownFlags is the closed set of names @requires_flag accepts. A typo would
 // otherwise gate a script on a flag no command line can ever set, silently
@@ -195,6 +202,16 @@ func filepathRel(root, p string) (string, error) {
 	return strings.TrimPrefix(p, root+"/"), nil
 }
 
+// knownDirectives is the vocabulary the header switch below accepts, in the
+// order the message lists them. It is here so the unknown-directive lint can
+// name the set rather than repeat it as prose: the one message guaranteed to
+// be wrong when a tenth directive is added is the one whose job is to say
+// what the nine are.
+var knownDirectives = []string{
+	"scope", "timeout", "permissions", "resultsets", "min_version",
+	"requires_flag", "writer", "widened", "correlated",
+}
+
 func parseScript(rel, sql string) Script {
 	s := Script{
 		Path: rel,
@@ -295,11 +312,13 @@ func parseScript(rel, sql string) Script {
 			// directive exists to prevent — the file would then never be
 			// offered the database it was written for, and nothing would say
 			// so.
-			if !KnownWidened[val] {
-				setLint(fmt.Sprintf("@widened: unknown value %q; expected one of replication", val))
+			name := strings.ToLower(strings.TrimSpace(val))
+			if _, ok := KnownWidened[name]; !ok {
+				setLint(fmt.Sprintf("@widened: unknown value %q; expected one of %s",
+					val, strings.Join(knownWidenedNames(), ", ")))
 				break
 			}
-			s.Widened = val
+			s.Widened = name
 		case "correlated":
 			setLint("correlated result sets are not supported: a result set must not " +
 				"reference a column of another; split it into its own query")
@@ -314,10 +333,9 @@ func parseScript(rel, sql string) Script {
 			// This also means a header line may not OPEN with an @ word,
 			// because the parser cannot tell prose from a directive. Write
 			// "the @timeout directive is 60 here", not "@timeout is 60 here".
-			setLint(fmt.Sprintf("unknown directive @%s; expected one of "+
-				"scope, timeout, permissions, resultsets, min_version, "+
-				"requires_flag, writer, widened, correlated — and note that a "+
-				"header line must not begin with an @ word, even in prose", key))
+			setLint(fmt.Sprintf("unknown directive @%s; expected one of %s — and "+
+				"note that a header line must not begin with an @ word, even in "+
+				"prose", key, strings.Join(knownDirectives, ", ")))
 		}
 	}
 	// The scope a writer needs is the writer's own property, declared beside it
@@ -390,6 +408,15 @@ func knownWriterNames() []string {
 	return names
 }
 
+func knownWidenedNames() []string {
+	names := make([]string, 0, len(KnownWidened))
+	for n := range KnownWidened {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // ParseVersion splits a dotted version into components. It returns nil for
 // anything that is not a dotted run of integers, so a malformed directive is
 // distinguishable from an absent one.
@@ -447,15 +474,33 @@ func NormalisePermission(s string) (string, bool) {
 	return k, ok
 }
 
-// StripSQLComments removes -- line comments and /* */ blocks — including
-// nested block comments, which SQL Server allows — while leaving string
-// literals untouched, so the GO and FOR JSON lints cannot fire on prose that
-// merely mentions them. Doubled quotes inside a literal are handled. An
-// unterminated block comment or string literal is not an error here; the
-// text before it is kept and stripping simply stops.
-func StripSQLComments(sql string) string {
-	var b strings.Builder
-	b.Grow(len(sql))
+// The three classes classifySQL assigns to every byte of a script. clsCode is
+// the zero value and covers ordinary code, quoted identifiers, and the quotes
+// that delimit a literal — bytes both rewriters below keep as they are.
+const (
+	clsCode = iota
+	clsComment
+	clsLiteral
+)
+
+// classifySQL runs the T-SQL scanner both rewriters need and returns one class
+// per byte. It is one function rather than two because the scanning is the
+// whole difficulty and the rewriting is trivial: the states are code, line
+// comment, block comment (nested, which SQL Server allows), string literal,
+// bracketed identifier and quoted identifier, where a doubled ] " or quote is
+// an escape rather than a close.
+//
+// The two identifier states are load-bearing. A quoted identifier is code, and
+// an apostrophe inside one opens no literal: AS [nombre d'objets] is ordinary
+// in this corpus, and read as a literal it would swallow every byte to the end
+// of the file — silently, in both directions. Stripping would stop seeing the
+// comments and every lint below would go blind; blanking would erase the code
+// the counting test walks.
+//
+// An unterminated block comment or literal is not an error: the text before it
+// keeps its class and the rest takes the open state's.
+func classifySQL(sql string) []byte {
+	cls := make([]byte, len(sql))
 	const (
 		code = iota
 		lineComment
@@ -472,61 +517,55 @@ func StripSQLComments(sql string) string {
 		case code:
 			switch {
 			case c == '-' && i+1 < len(sql) && sql[i+1] == '-':
+				cls[i], cls[i+1] = clsComment, clsComment
 				state = lineComment
 				i++
 			case c == '/' && i+1 < len(sql) && sql[i+1] == '*':
+				cls[i], cls[i+1] = clsComment, clsComment
 				state = blockComment
 				blockDepth = 1
 				i++
 			case c == '\'':
+				// The delimiter itself stays code: both rewriters keep it.
 				state = literal
-				b.WriteByte(c)
-			// A quoted identifier is code, and an apostrophe inside one opens
-			// no literal: AS [nombre d'objets] is ordinary here. Without these
-			// two states everything after it reads as string contents, so the
-			// comments that follow are never stripped and every lint below
-			// stops seeing the rest of the file.
 			case c == '[':
 				state = bracketID
-				b.WriteByte(c)
 			case c == '"':
 				state = quotedID
-				b.WriteByte(c)
-			default:
-				b.WriteByte(c)
 			}
 		case bracketID:
-			b.WriteByte(c)
 			if c == ']' {
-				// ]] is an escaped bracket, not the close.
 				if i+1 < len(sql) && sql[i+1] == ']' {
-					b.WriteByte(']')
 					i++
 					continue
 				}
 				state = code
 			}
 		case quotedID:
-			b.WriteByte(c)
 			if c == '"' {
 				if i+1 < len(sql) && sql[i+1] == '"' {
-					b.WriteByte('"')
 					i++
 					continue
 				}
 				state = code
 			}
 		case lineComment:
+			// The newline that ends the comment is code, so stripping keeps
+			// the line structure of the file.
 			if c == '\n' {
 				state = code
-				b.WriteByte(c)
+			} else {
+				cls[i] = clsComment
 			}
 		case blockComment:
+			cls[i] = clsComment
 			switch {
 			case c == '/' && i+1 < len(sql) && sql[i+1] == '*':
+				cls[i+1] = clsComment
 				blockDepth++
 				i++
 			case c == '*' && i+1 < len(sql) && sql[i+1] == '/':
+				cls[i+1] = clsComment
 				blockDepth--
 				i++
 				if blockDepth == 0 {
@@ -534,18 +573,57 @@ func StripSQLComments(sql string) string {
 				}
 			}
 		case literal:
-			b.WriteByte(c)
 			if c == '\'' {
+				// '' is an escaped quote and still contents, not the close.
 				if i+1 < len(sql) && sql[i+1] == '\'' {
-					b.WriteByte('\'')
+					cls[i], cls[i+1] = clsLiteral, clsLiteral
 					i++
 					continue
 				}
 				state = code
+				continue
 			}
+			cls[i] = clsLiteral
+		}
+	}
+	return cls
+}
+
+// rewriteSQL is the one rewriter behind StripSQLComments and BlankSQLStrings,
+// which want opposite things from the same scan: comments gone and literals
+// intact, or literals blanked and comments intact. lint wants both at once and
+// asks for them in a single pass.
+func rewriteSQL(sql string, dropComments, blankLiterals bool) string {
+	cls := classifySQL(sql)
+	var b strings.Builder
+	b.Grow(len(sql))
+	for i := 0; i < len(sql); i++ {
+		switch {
+		case cls[i] == clsComment && dropComments:
+			// Nothing: the byte goes.
+		case cls[i] == clsLiteral && blankLiterals:
+			// Newlines survive, so the blanked text keeps its line structure
+			// and a caller reporting a position still reports a true one.
+			if sql[i] == '\n' || sql[i] == '\r' {
+				b.WriteByte(sql[i])
+			} else {
+				b.WriteByte(' ')
+			}
+		default:
+			b.WriteByte(sql[i])
 		}
 	}
 	return b.String()
+}
+
+// StripSQLComments removes -- line comments and /* */ blocks — including
+// nested block comments, which SQL Server allows — while leaving string
+// literals untouched, so the GO and FOR JSON lints cannot fire on prose that
+// merely mentions them. Doubled quotes inside a literal are handled. An
+// unterminated block comment or string literal is not an error here; the
+// text before it is kept and stripping simply stops.
+func StripSQLComments(sql string) string {
+	return rewriteSQL(sql, true, false)
 }
 
 func parseResultSets(val string) ([]ResultSpec, error) {
@@ -652,108 +730,15 @@ func contractLint(sql string, results []ResultSpec) string {
 //
 // It is deliberately not StripSQLComments' job. That function keeps literals,
 // because contractLint must see a hint wherever it is written, dynamic SQL
-// included. The two callers want opposite things from the same text.
+// included. The two callers want opposite things from the same text, which is
+// why both are a call into rewriteSQL rather than two scanners.
 //
-// It runs the same four-state machine as StripSQLComments, and it has to: an
-// apostrophe in a comment does not open a string literal. Half this corpus is
-// commented in French, so a version that merely counts quotes reads "qu'est-ce"
-// as the start of a literal and blanks the code after it — measured across the
-// corpus as thirty files losing hints they carry. Comments themselves are left
-// alone, which keeps the counting test's behaviour on them exactly as it was
-// before this function existed.
+// Comments are left alone, which keeps the counting test's behaviour on them
+// exactly as it was before this function existed. They still have to be
+// scanned: an apostrophe in a comment does not open a string literal, and half
+// this corpus is commented in French, so a version that merely counts quotes
+// reads "qu'est-ce" as the start of a literal and blanks the code after it —
+// measured across the corpus as thirty files losing hints they carry.
 func BlankSQLStrings(sql string) string {
-	b := []byte(sql)
-	// Newlines survive so the blanked text keeps its line structure, and a
-	// caller reporting a position still reports a true one.
-	blank := func(i int) {
-		if b[i] != '\n' && b[i] != '\r' {
-			b[i] = ' '
-		}
-	}
-	const (
-		code = iota
-		lineComment
-		blockComment
-		literal
-		bracketID
-		quotedID
-	)
-	state := code
-	blockDepth := 0
-	for i := 0; i < len(b); i++ {
-		c := b[i]
-		switch state {
-		case code:
-			switch {
-			case c == '-' && i+1 < len(b) && b[i+1] == '-':
-				state = lineComment
-				i++
-			case c == '/' && i+1 < len(b) && b[i+1] == '*':
-				state = blockComment
-				blockDepth = 1
-				i++
-			case c == '\'':
-				state = literal
-			// A quoted identifier is code, and an apostrophe inside one opens
-			// nothing: AS [nombre d'objets] is ordinary in this corpus. Read as
-			// a literal it would blank every byte to the end of the file, and
-			// the collision test would then report the file as unreliable
-			// rather than check it — a coverage hole that announces itself
-			// nowhere. StripSQLComments carries the same two states for the
-			// same reason — there the cost is every contract lint losing
-			// sight of the rest of the file.
-			case c == '[':
-				state = bracketID
-			case c == '"':
-				state = quotedID
-			}
-		case bracketID:
-			// ]] is an escaped bracket inside the identifier, not its close.
-			if c == ']' {
-				if i+1 < len(b) && b[i+1] == ']' {
-					i++
-					continue
-				}
-				state = code
-			}
-		case quotedID:
-			if c == '"' {
-				if i+1 < len(b) && b[i+1] == '"' {
-					i++
-					continue
-				}
-				state = code
-			}
-		case lineComment:
-			if c == '\n' {
-				state = code
-			}
-		case blockComment:
-			switch {
-			case c == '/' && i+1 < len(b) && b[i+1] == '*':
-				blockDepth++
-				i++
-			case c == '*' && i+1 < len(b) && b[i+1] == '/':
-				blockDepth--
-				i++
-				if blockDepth == 0 {
-					state = code
-				}
-			}
-		case literal:
-			if c == '\'' {
-				// '' is an escaped quote and still contents, not the close.
-				if i+1 < len(b) && b[i+1] == '\'' {
-					blank(i)
-					blank(i + 1)
-					i++
-					continue
-				}
-				state = code
-				continue
-			}
-			blank(i)
-		}
-	}
-	return string(b)
+	return rewriteSQL(sql, false, true)
 }
