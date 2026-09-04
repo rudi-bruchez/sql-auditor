@@ -61,6 +61,48 @@ name. A failing test caught it a minute later, which is luck rather than method.
 `go test ./...` must pass before a commit. Test fixtures are part of the public
 surface of this repository, so the rule above applies to them in full.
 
+### Adding or removing a collector
+
+The corpus inventory lives in `testdata/corpus.txt`. Regenerate it rather than
+editing it, and run the rest of the checks in the same breath:
+
+```
+pwsh -File tools/refresh-corpus.ps1
+```
+
+The regeneration alone is `go test . -run TestEmbeddedCorpusIsValid -update`.
+
+**Never run either in CI**, and `ci.yml` does not. The file is a guard: a
+collector must not enter or leave the corpus without someone saying so, and a
+pipeline that regenerated it before checking it would assert nothing. What a
+reviewer reads is the diff on `testdata/corpus.txt`.
+
+The test reports with `Errorf`, so an inventory mismatch no longer aborts the
+run and the directive and contract lint report in the same pass. A new collector
+fails once, with everything wrong with it listed together.
+
+### Do not write down the size of a growing collection
+
+The target is narrow: a test that hardcodes how many things there are, where the
+things go on being added. It is not about a fixture asserting its own values — a
+plan id of 104 or a ring count of 412 is the fixture, and belongs where it is.
+
+This section exists because three tests hardcoded a size, and each cost a round
+trip every time the collection grew — 62 to 75 collectors paid that toll eight
+times. Such a count is also the weakest available assertion: it says "got 74,
+want 75", names nothing, and is blind to a rename.
+
+There is always a better form, and which one depends on what is being counted:
+
+- **Derive it from an independent source of truth.** `TestAllTurnsOnEveryOptIn`
+  compares `Options.Flags` against `collect.KnownFlags` — two sets decided in
+  different places, so comparing them is a real test and costs no maintenance.
+  The verification screen's total comes from its own fixture the same way.
+- **Make it a golden file** when there is no second source, as the corpus
+  inventory does. Regenerated with `-update`, reviewed as a diff.
+
+A hardcoded number is a golden test written in the worst available format.
+
 ## Commit messages are written in English
 
 Whatever language the conversation is in, the message that lands in the log is

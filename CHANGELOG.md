@@ -103,7 +103,20 @@ unasked by default.
 
 ### Changed
 
-
+- **The corpus inventory is `testdata/corpus.txt`, not a number in a test.**
+  `TestEmbeddedCorpusIsValid` hardcoded how many collectors there are and
+  aborted on a mismatch, so adding one failed twice: once on the count, and
+  again on the lint the count had prevented from running. The inventory is now
+  a golden file regenerated with `go test . -run TestEmbeddedCorpusIsValid
+  -update`, or with `tools/refresh-corpus.ps1` alongside the other checks, and
+  the mismatch reports with `Errorf` so the lint runs in the same pass. A list
+  names the file that arrived or vanished and catches a rename, neither of which
+  a total can do. CI never regenerates it: the diff is the guard.
+- **Two other hardcoded sizes are derived instead.** `--all` is checked against
+  `collect.KnownFlags` rather than a count, which is the stronger test — the two
+  sets are decided in different places — and names the flag that drifted. The
+  verification screen's granted-over-total is taken from its own fixture, where
+  the comment above it already claimed the total was never written down.
 - **`20.databases/023.log-vlf.sql` no longer carries a version floor.** The
   condition was never which build this is but whether `sys.dm_db_log_info`
   exists, so the file asks that directly and falls back to `DBCC LOGINFO`,
