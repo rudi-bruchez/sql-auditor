@@ -653,3 +653,23 @@ func TestManifestExplainsAWidenedDatabase(t *testing.T) {
 		t.Errorf("MANIFEST.txt must say DISTDB was not fully collected:\n%s", m.Human())
 	}
 }
+
+// The distribution database is not narrowed by DB_INCLUDE the way the rest of
+// the run is: its catalogs describe every publication on the instance, so a
+// run cadenced on one database archives the publisher_db and the article names
+// of databases the operator never named. That is a disclosure beyond the
+// stated scope, into a file that gets mailed onward, and the manifest is where
+// whoever opens the archive learns it.
+func TestManifestSaysAWidenedDatabaseReachesBeyondTheSelection(t *testing.T) {
+	m := NewManifest("SQL01", "11.0.7001.0", "")
+	m.Targets.Databases = []DatabaseFolder{
+		{Name: "SALESDB", Folder: "SALESDB"},
+		{Name: "DISTDB", Folder: "DISTDB", WidenedPurpose: "replication",
+			RetentionReason: "local distributor for 1 published database(s) in this selection"},
+	}
+	h := flatten(m.Human())
+	if !strings.Contains(h, "outside this selection") {
+		t.Errorf("MANIFEST.txt does not warn that the widened database describes "+
+			"databases outside the selection:\n%s", m.Human())
+	}
+}

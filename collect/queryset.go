@@ -64,8 +64,26 @@ type Script struct {
 // replication inlined in the manifest writer under a purpose-agnostic test —
 // which would have printed it over the second purpose ever added, silently and
 // wrongly.
-var KnownWidened = map[string]string{
-	"replication": "replication metadata only, not a full collection",
+type WidenedNotice struct {
+	// Collected says what was taken, so a reader does not go looking for an
+	// object inventory that was never made.
+	Collected string
+	// Reaches says what that collection sees beyond the operator's selection.
+	// It exists because DB_INCLUDE narrows which databases are opened and not
+	// what the catalogs inside them describe: the distribution database's
+	// catalogs cover the whole instance, so a run cadenced on one database
+	// archives the publisher_db and the article names — application table
+	// names — of databases nobody named. That is irreversible once the archive
+	// is handed over, and it is the manifest's job to say so.
+	Reaches string
+}
+
+var KnownWidened = map[string]WidenedNotice{
+	"replication": {
+		Collected: "replication metadata only, not a full collection",
+		Reaches: "it describes every publication on this instance, including " +
+			"databases outside this selection",
+	},
 }
 
 // KnownFlags is the closed set of names @requires_flag accepts. A typo would

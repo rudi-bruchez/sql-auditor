@@ -722,6 +722,13 @@ func Check(ctx context.Context, o Options) (int, error) {
 			// than in the manifest afterwards.
 			if f.RetentionReason != "" {
 				fmt.Printf("  - %s -> %s/ (%s)\n", f.Name, f.Folder, f.RetentionReason)
+				// What it reaches, not only why it is here. This is the moment
+				// the operator authorises the run, so it is the moment to say
+				// that this one database is not narrowed by their DB_INCLUDE
+				// the way the rest of the list is.
+				if notice, ok := KnownWidened[f.WidenedPurpose]; ok {
+					fmt.Printf("      %s\n", notice.Reaches)
+				}
 				continue
 			}
 			fmt.Printf("  - %s -> %s/\n", f.Name, f.Folder)

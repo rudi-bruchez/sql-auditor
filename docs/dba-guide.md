@@ -712,6 +712,26 @@ database collectors are not: no object inventory, no index usage, no Query
 Store. And `DB_EXCLUDE` still wins — naming the distribution database
 there keeps it out, at the cost of the agent and latency data.
 
+**Know what that database describes before you send the archive on.**
+`DB_INCLUDE` narrows which databases are opened. It cannot narrow what the
+catalogs inside them describe, and the distribution database's catalogs cover
+the instance, not your selection: every publication it distributes, the name of
+every published database, and the `article` rows — which are **table names** —
+of all of them. On an instance that distributes for one application, that is
+the topology you asked for. On a shared or hosted distributor it means an
+archive cadenced on one database names the databases and the tables of the
+others.
+
+Filtering it is not on offer, because it would be half a filter: the
+publication and agent catalogs carry the publisher database and could be
+narrowed, but `MSrepl_errors` and the agent history do not carry it, and an
+archive filtered in one half and not the other would describe a topology that
+does not exist. So the whole picture is collected and the fact is stated —
+here, in `check` before you authorise the run, and in `MANIFEST.txt` under the
+database itself. If that is not acceptable for the instance in front of you,
+`DB_EXCLUDE` on the distribution database is the answer, and you lose the
+agent and latency data with it.
+
 `check` prints the reason beside the folder before you authorise anything, and
 `MANIFEST.txt` repeats it under `kept because:` on the database itself.
 

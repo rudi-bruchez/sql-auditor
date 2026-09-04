@@ -626,7 +626,8 @@ func (m *Manifest) writeTargets(b *strings.Builder) {
 			// here as a literal it would have said "replication" over the
 			// second purpose ever added, and no test would have noticed.
 			if notice, ok := KnownWidened[d.WidenedPurpose]; ok {
-				fmt.Fprintf(b, "      %s\n", notice)
+				fmt.Fprintf(b, "      %s\n", notice.Collected)
+				fmt.Fprintf(b, "      %s\n", notice.Reaches)
 				fmt.Fprintf(b, "      kept because: %s\n", d.RetentionReason)
 			}
 		}
