@@ -112,6 +112,15 @@ unasked by default.
   goes through `MSreplication_subscriptions`, then through those procedures, and
   `applies_source` names the test that answered.
 
+- **The certificate advice wrapped badly**, and it is the most important message
+  this tool prints. The phrase naming what `SQL_TRUST_SERVER_CERTIFICATE=true`
+  gives up was substituted mid-sentence and pre-wrapped with a newline of its
+  own; no single wrapping suits both the Windows and the SQL-login variant, so
+  the paragraph ended in three ragged lines of 38, 26 and 33 columns against the
+  74 the rest of it keeps. Someone meeting that decision for the first time was
+  reading something that looked broken. The closing paragraph is now written out
+  per case.
+
 - **Links in the packaged `README.md`** are rewritten to absolute URLs at build
   time, pinned to the tag being released. `docs/` and `.env.example` are not in
   the archive, so from an unpacked copy those links led nowhere — and the reader
