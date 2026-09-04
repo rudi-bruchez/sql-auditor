@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestZipRoundTrip(t *testing.T) {
@@ -205,5 +206,81 @@ func TestZipRemovesPartialArchiveOnError(t *testing.T) {
 	}
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
 		t.Errorf("failed Zip left %s behind (stat err = %v)", dest, err)
+	}
+}
+
+// Two collections of the same instance on the same day used to run straight
+// into each other: both rename the predecessor aside, both write into the same
+// folder, and both exit 0 printing the same archive path. The operator is
+// handed one archive that is two runs interleaved, described by whichever
+// manifest was written last, with no error anywhere.
+func TestASecondRunCannotClaimAFolderARunIsUsing(t *testing.T) {
+	dir := t.TempDir()
+	run := filepath.Join(dir, "SQL01-2026-09-04")
+	now := time.Date(2026, 9, 4, 14, 2, 0, 0, time.UTC)
+
+	release, err := lockRun(run, now)
+	if err != nil {
+		t.Fatalf("the first run could not claim the folder: %v", err)
+	}
+
+	if _, err := lockRun(run, now); err == nil {
+		t.Fatal("a second run claimed a folder the first one is writing")
+	} else {
+		// The message has to be actionable: which folder, which file to look
+		// at, and what to do when nothing is in fact running.
+		for _, want := range []string{run, ".lock", "interrupted"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the refusal does not mention %q: %v", want, err)
+			}
+		}
+		// And it names the run to go and look at, which is the only useful
+		// thing to tell somebody who hits this.
+		if !strings.Contains(err.Error(), "pid ") {
+			t.Errorf("the refusal does not say which process holds it: %v", err)
+		}
+	}
+
+	// Released, the name is free again — a run that finished must not block the
+	// next one.
+	release()
+	release2, err := lockRun(run, now)
+	if err != nil {
+		t.Fatalf("the folder stayed locked after the run finished: %v", err)
+	}
+	release2()
+
+	// A stale lock is deliberately NOT cleaned up: a process killed mid-run
+	// leaves a half-written folder, and guessing the lock is stale would delete
+	// the evidence of the run that died.
+	if _, err := lockRun(run, now); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if _, err := os.Stat(run + ".lock"); err != nil {
+		t.Errorf("the lock file is not where the message says it is: %v", err)
+	}
+}
+
+// The lock sits beside the run folder, like the .zip, so it is never collected
+// into the archive it is protecting.
+func TestTheLockIsNotInsideTheArchive(t *testing.T) {
+	dir := t.TempDir()
+	run := filepath.Join(dir, "SQL01-2026-09-04")
+	if err := os.MkdirAll(run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	release, err := lockRun(run, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	entries, err := os.ReadDir(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".lock") {
+			t.Errorf("the lock is inside the run folder and would be archived: %s", e.Name())
+		}
 	}
 }

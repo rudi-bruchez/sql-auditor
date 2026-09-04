@@ -127,6 +127,25 @@ unasked by default.
 
 ### Fixed
 
+- **Two collections of the same instance on the same day ran into each other.**
+  Nothing prevented it: both renamed the same predecessor aside, both wrote into
+  the same folder, and both exited 0 printing the same archive path, so the
+  operator was handed one archive that was two runs interleaved with a manifest
+  describing whichever finished last. A run now claims its name with an `O_EXCL`
+  lock file beside the folder, the way the grant script and `env init` already
+  claim theirs. A stale lock is deliberately not cleaned up — a process killed
+  mid-run leaves evidence worth looking at, and guessing by age or by PID would
+  delete it — so the refusal names the file and says what to do.
+- **`ctrl-c` on the command line wrote no manifest and no archive.** The README
+  promise held only in the wizard; the subcommand ran on `context.Background()`
+  with no handler, on exactly the path a scheduled task, a remote shell and a
+  runbook use. A second `ctrl-c` still abandons the run, so a collection that
+  will not wind down can be stopped.
+- **Control characters from the server reached the terminal.** A database name,
+  a server name and a login are chosen on the far side of the connection, and
+  an ESC in one of them can repaint the screen — including the archive path the
+  wizard asks the operator to copy. `SafeForTerminal` is the display
+  counterpart of the `SafeFolderName` that already existed for the filesystem.
 - **The `--queries-dir` statement lint could be walked past two ways.**
   *Concatenation:* only the literal that opens a dynamic-SQL argument is
   recognised as executed, so in `EXEC('DR' + 'OP DATABASE x')` the first

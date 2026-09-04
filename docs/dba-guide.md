@@ -527,6 +527,51 @@ Two things worth knowing:
 
 ## What is in the archive
 
+### What the default run costs a large instance
+
+Read-only is not free, and this section exists because the rest of this guide
+documents cost most carefully where cost is lowest. Three things in a default
+run scale with the size of the instance rather than with the number of objects:
+
+| What | Where | What it actually does |
+| --- | --- | --- |
+| Sampled page reads on heaps | `70.schema/050.heaps.sql` | `sys.dm_db_index_physical_stats(..., 'SAMPLED')` reads about 1% of the pages of the 50 largest heaps **in every collected database**. On a 500 GB heap that is 5 GB of reads. |
+| The whole current error log | `10.system/040.error-log.sql` | copied into a `#temp` table before it is summarised. An instance that never cycles its log can carry hundreds of megabytes. |
+| A string search over cached plans | `80.workload/030.implicit-conversions.sql` | `CAST(query_plan AS nvarchar(max)) LIKE '%CONVERT_IMPLICIT%'` over the 200 heaviest plans — CPU, on a busy cache. |
+
+The heap scan is the one to know about. **Neither guard in this corpus bounds
+it:** `SET LOCK_TIMEOUT 10000` bounds waiting for a lock and this takes none
+worth waiting on, and `@timeout: 300` bounds how long it runs while the cost is
+buffer-pool eviction — five minutes of scanning is more than enough, and
+cancelling the query does not put the evicted pages back. The instance is left
+colder than the collector found it.
+
+It is capped on purpose — the 50 *largest* heaps, sampled rather than detailed,
+chosen from metadata first so the scan only touches objects big enough to
+matter — and on an estate of ordinary tables it is close to free. On a
+warehouse it is not.
+
+There is no flag for it. If that cost is unacceptable on a particular instance,
+run with `--queries-dir` on an exported corpus with that one file removed:
+
+```
+sql-auditor queries export --to ./corpus
+rm ./corpus/70.schema/050.heaps.sql
+sql-auditor collect --queries-dir ./corpus
+```
+
+The archive then carries 74 collectors instead of 75, and `MANIFEST.txt`
+records that the corpus did not come from the published one — which is the
+honest record of the trade.
+
+`--estimate-compression` is in a different class again and is opt-in for
+exactly this reason: `sp_estimate_data_compression_savings` copies sampled real
+rows into tempdb and compresses them, against the 20 largest uncompressed
+objects over 100 MB **per database**, with a 1800-second timeout per database.
+On a large
+estate that is the difference between an audit that takes a minute and an
+afternoon of tempdb pressure.
+
 ### Where you leave it matters as much as where you send it
 
 The run folder and the `.zip` are created for you alone: mode `0700` on the

@@ -13,9 +13,14 @@ What it does to your instance:
 
 - it issues read-only `SELECT` statements against system catalog views and
   dynamic management views;
-- it does **not** read user or application tables;
+- it does **not** read the contents of user or application tables;
 - it does **not** write to your databases;
-- it does **not** change any configuration.
+- it does **not** change any configuration;
+- read-only is not the same as free. One collector samples pages of the largest
+  heaps in each database to count forwarded records, which is real I/O on a
+  large instance — [what it costs the
+  instance](docs/dba-guide.md#what-the-default-run-costs-a-large-instance) says
+  what that means and how to avoid it.
 
 ## In a hurry
 

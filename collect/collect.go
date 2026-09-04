@@ -1530,6 +1530,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// other configuration refusals rather than 1, which claims the instance was
 	// unreachable when it has in fact just been read successfully.
 	runFolder := RunFolderFor(o.Config.OutputDir, si.Name, o.Now, o.Keep)
+	// Before prepareRunFolder, because prepareRunFolder is where the previous
+	// run gets renamed aside: two runs reaching that together is exactly the
+	// collision the lock exists to stop.
+	releaseLock, err := lockRun(runFolder, o.Now)
+	if err != nil {
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", 2, err)
+	}
+	defer releaseLock()
 	superseded, err := prepareRunFolder(runFolder, o.Keep, o.Now, o.progress())
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -1940,4 +1949,48 @@ func sqlErrorNumber(err error) int {
 		return int(e.Number)
 	}
 	return 0
+}
+
+// lockRun claims the run name for this process, and refuses to start when
+// another collection already holds it.
+//
+// Nothing stopped two runs from colliding before. Both call prepareRunFolder,
+// both rename the same predecessor aside, both write into the same folder, and
+// both exit 0 printing the same archive path — so the operator is handed one
+// archive that is the interleaving of two collections, with a manifest that
+// describes whichever finished last. There is no error anywhere, which is what
+// makes it worth a lock rather than a warning.
+//
+// It is not the same question as RunNameTaken, which asks whether an EARLIER
+// run left something behind and is answered by replacing it or by --keep. This
+// asks whether a run is happening RIGHT NOW.
+//
+// O_EXCL is the whole mechanism, as it is for the grant script and for env
+// init: the check and the claim are one operation, so two processes racing
+// cannot both win. The PID and the start time go inside, because the only
+// useful thing to tell someone who hits this is which run to go and look at.
+//
+// A STALE LOCK IS NOT CLEANED UP AUTOMATICALLY, and that is deliberate. A
+// process killed mid-run leaves a lock and a half-written folder, and guessing
+// that the lock is stale — by age, or by asking whether the PID still exists,
+// which on a reused PID is a coin toss — would delete the evidence of the run
+// that died. The message names the file so the operator can look, and remove
+// it themselves.
+func lockRun(runFolder string, now time.Time) (release func(), err error) {
+	path := runFolder + ".lock"
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm)
+	if err != nil {
+		if os.IsExist(err) {
+			body, _ := os.ReadFile(path)
+			return nil, fmt.Errorf("another collection is already writing %s\n"+
+				"  %s says: %s"+
+				"  if no collection is running, that run was interrupted: look at what it left,\n"+
+				"  then delete the lock file to start again",
+				runFolder, path, string(body))
+		}
+		return nil, fmt.Errorf("claiming %s: %w", path, err)
+	}
+	fmt.Fprintf(f, "pid %d, started %s\n", os.Getpid(), now.Format(time.RFC3339))
+	f.Close()
+	return func() { os.Remove(path) }, nil
 }
