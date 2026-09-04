@@ -195,3 +195,11 @@ func TestBadServerAddressIsMarkedAsConfiguration(t *testing.T) {
 		t.Error("a nil error must not be reported as a bad address")
 	}
 }
+
+func TestDatabaseInfoCarriesReplicationFlags(t *testing.T) {
+	d := DatabaseInfo{Name: "SALESDB", State: "ONLINE", HasAccess: true,
+		IsPublished: true, IsDistributor: false, IsSubscribed: false}
+	if !d.IsPublished || d.IsDistributor || d.IsSubscribed {
+		t.Errorf("flags did not round-trip: %+v", d)
+	}
+}

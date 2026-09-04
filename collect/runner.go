@@ -66,6 +66,14 @@ type DatabaseInfo struct {
 	Name, State string
 	IsSnapshot  bool
 	HasAccess   bool
+	// The three replication roles, read from sys.databases in the same pass
+	// that lists the candidates. They are flags and not proof of activity: a
+	// database restored from a publisher keeps them set, which is why the
+	// collectors that use them record what they found rather than trusting the
+	// flag.
+	IsPublished   bool
+	IsSubscribed  bool
+	IsDistributor bool
 }
 
 // SkipNoAccess is the reason a database is left out because the login
