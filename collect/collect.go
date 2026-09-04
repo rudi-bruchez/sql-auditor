@@ -665,6 +665,13 @@ func Check(ctx context.Context, o Options) (int, error) {
 			fmt.Println("  (none)")
 		}
 		for _, f := range v.Folders {
+			// A database the operator did not name says why it is here, at
+			// the moment the DBA decides whether to authorise the run rather
+			// than in the manifest afterwards.
+			if f.RetentionReason != "" {
+				fmt.Printf("  - %s -> %s/ (%s)\n", f.Name, f.Folder, f.RetentionReason)
+				continue
+			}
 			fmt.Printf("  - %s -> %s/\n", f.Name, f.Folder)
 		}
 		if len(v.Selection.Skipped) > 0 {
@@ -1275,7 +1282,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)
 	}
-	folders := ResolveDatabaseFolders(sel.Included)
+	folders := MarkWidened(ResolveDatabaseFolders(sel.Included), sel.Widened)
 	m.Targets = TargetBlock{Databases: folders, Skipped: sel.Skipped}
 
 	plan := planScripts(scripts, denied, ParseVersion(si.Version), o.Flags)

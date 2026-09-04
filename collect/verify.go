@@ -152,7 +152,7 @@ func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 			break
 		}
 		v.Selection = sel
-		v.Folders = ResolveDatabaseFolders(sel.Included)
+		v.Folders = MarkWidened(ResolveDatabaseFolders(sel.Included), sel.Widened)
 		for _, s := range sel.Skipped {
 			if s.Reason == SkipNoAccess {
 				v.NoAccess = append(v.NoAccess, s.Name)

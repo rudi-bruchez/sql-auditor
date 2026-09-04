@@ -234,3 +234,72 @@ func TestPlanUnitsReturnsLintErrorsInPlanOrder(t *testing.T) {
 // planUnits, the single source of both numbers, is covered by the four tests
 // above. Reaching Run's loop needs a connection, which no test in this package
 // opens.
+
+func TestPlanUnitsKeepsAWidenedFolderForItsOwnCollectors(t *testing.T) {
+	repl := Script{Path: "90.availability/042.a.sql", Scope: ScopeDatabase,
+		Widened: "replication", Results: []ResultSpec{{"root", ShapeObject}}}
+	ordinary := Script{Path: "70.schema/010.objects.sql", Scope: ScopeDatabase,
+		Results: []ResultSpec{{"root", ShapeObject}}}
+	folders := []DatabaseFolder{
+		{Name: "SALESDB", Folder: "SALESDB"},
+		{Name: "DISTDB", Folder: "DISTDB", WidenedFor: "replication"},
+	}
+	plan := []plannedScript{{Script: repl}, {Script: ordinary}}
+
+	units, skipped, errs := planUnits(plan, folders, &Config{})
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	var replTargets, ordinaryTargets []string
+	for _, u := range units {
+		if u.Script.Path == repl.Path {
+			replTargets = append(replTargets, u.Target.Name)
+		} else {
+			ordinaryTargets = append(ordinaryTargets, u.Target.Name)
+		}
+	}
+	if len(replTargets) != 2 {
+		t.Errorf("the replication collector wants both databases, got %v", replTargets)
+	}
+	if len(ordinaryTargets) != 1 || ordinaryTargets[0] != "SALESDB" {
+		t.Errorf("the ordinary collector must not see DISTDB, got %v", ordinaryTargets)
+	}
+	// Not a skip: recording one per ordinary collector would put thirty
+	// "Queries not run" lines into every widened run, describing a pairing
+	// nobody asked for.
+	for _, s := range skipped {
+		if s.Target == "DISTDB" {
+			t.Errorf("a widened folder must not produce a skip entry: %+v", s)
+		}
+	}
+}
+
+// The test above passes even when MarkWidened writes the wrong value into
+// WidenedFor, because its fixture writes the right one by hand. Only running
+// the three functions in sequence shows whether they agree about what the
+// field holds — which is exactly the defect a review found in the plan.
+func TestWidenedDatabaseSurvivesSelectionIntoUnits(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
+	}
+	sel, err := SelectTargets(cands, "SALESDB", "")
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	folders := MarkWidened(ResolveDatabaseFolders(sel.Included), sel.Widened)
+
+	repl := Script{Path: "90.availability/042.a.sql", Scope: ScopeDatabase,
+		Widened: "replication", Results: []ResultSpec{{"root", ShapeObject}}}
+	units, _, errs := planUnits([]plannedScript{{Script: repl}}, folders, &Config{})
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	var got []string
+	for _, u := range units {
+		got = append(got, u.Target.Name)
+	}
+	if len(got) != 2 {
+		t.Fatalf("the collector the widening was for must see both databases, got %v", got)
+	}
+}

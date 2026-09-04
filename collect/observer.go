@@ -84,6 +84,24 @@ func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]u
 			var narrowed []SkippedScript
 			targets, narrowed = queryStoreUnits(cfg, s, folders)
 			skipped = append(skipped, narrowed...)
+			// A folder the selection widened back in is offered only to the
+			// collectors the widening was for. It is not a skip: recording one
+			// per ordinary collector would write thirty "Queries not run"
+			// lines into every widened run, describing a pairing nobody asked
+			// for. The manifest's retention reason on the database is where a
+			// reader learns what happened.
+			//
+			// A new slice, never targets[:0]. queryStoreUnits returns the
+			// caller's slice unchanged for every script without a @writer, so
+			// targets aliases folders, and filtering in place would rewrite
+			// the shared list for every later script.
+			kept := make([]DatabaseFolder, 0, len(targets))
+			for _, t := range targets {
+				if t.WidenedFor == "" || t.WidenedFor == s.Widened {
+					kept = append(kept, t)
+				}
+			}
+			targets = kept
 		}
 		for _, t := range targets {
 			units = append(units, unit{Script: s, Target: t})
