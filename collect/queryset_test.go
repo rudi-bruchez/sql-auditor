@@ -88,6 +88,15 @@ func TestDiscoverLintErrors(t *testing.T) {
 		// is visible.
 		{"misspelt directive name", "queries/10.system/010.a.sql",
 			"-- @resultsets: a:object\n-- @minversion: 13\nSELECT 1;", "minversion"},
+		{"unknown widened value", "queries/10.system/010.a.sql",
+			"-- @resultsets: a:object\n-- @widened: everything\nSELECT 1;",
+			"everything"},
+		// The unknown-directive message hand-lists the vocabulary. A new
+		// directive that is not in that list tells the first person to
+		// misspell it to use a set that does not contain the word they
+		// wanted.
+		{"the unknown-directive message lists widened", "queries/10.system/010.a.sql",
+			"-- @resultsets: a:object\n-- @widning: replication\nSELECT 1;", "widened"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -498,5 +507,20 @@ func TestKnownFlagsCarriesTheQueryStoreFlags(t *testing.T) {
 		if KnownFlags[k] != v {
 			t.Errorf("KnownFlags[%s] = %q, want %q", k, KnownFlags[k], v)
 		}
+	}
+}
+
+func TestDiscoverParsesWidened(t *testing.T) {
+	fsys := fstest.MapFS{"queries/90.availability/041.a.sql": {Data: []byte(
+		"-- @scope: database\n-- @resultsets: root:object\n-- @widened: replication\nSELECT 1;")}}
+	got, err := Discover(fsys, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 script, got %d", len(got))
+	}
+	if got[0].Widened != "replication" {
+		t.Errorf("Widened = %q, want %q", got[0].Widened, "replication")
 	}
 }

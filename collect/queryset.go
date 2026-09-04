@@ -34,6 +34,12 @@ type Script struct {
 	// has to be "not collected" and the gate has to be visible in the file
 	// itself rather than in a list held somewhere else.
 	RequiresFlag string
+	// Widened names the widening purpose this script serves. Empty means the
+	// script is never offered a database that only the selection's second pass
+	// retained — see SelectTargets. A collector declaring one is saying "the
+	// database that was brought back for this purpose is mine to read", and
+	// planUnits pairs the two on that word alone.
+	Widened string
 	// Writer names the Go writer that turns this script's result sets into
 	// files, instead of the one JSON document every other collector produces.
 	// Empty means the ordinary encoder. The vocabulary is closed for the same
@@ -43,6 +49,17 @@ type Script struct {
 	Writer    string
 	LintError string
 }
+
+// KnownWidened is the closed set of values @widened accepts. A collector
+// declares one when it is allowed to run against a database the selection
+// widened back in for a specific purpose — see SelectTargets' second pass,
+// which keeps a distribution database a narrowed run would otherwise lose.
+//
+// Closed for the same reason KnownFlags is, and with a nastier failure mode: a
+// misspelt value means "ordinary collector", so the file is never offered the
+// database it exists to read, and the archive is short of a document with
+// nothing anywhere explaining why.
+var KnownWidened = map[string]bool{"replication": true}
 
 // KnownFlags is the closed set of names @requires_flag accepts. A typo would
 // otherwise gate a script on a flag no command line can ever set, silently
@@ -272,6 +289,17 @@ func parseScript(rel, sql string) Script {
 				continue
 			}
 			s.Writer = name
+		case "widened":
+			// Closed for the same reason KnownFlags is: a misspelt value would
+			// silently mean "ordinary collector", which is the failure this
+			// directive exists to prevent — the file would then never be
+			// offered the database it was written for, and nothing would say
+			// so.
+			if !KnownWidened[val] {
+				setLint(fmt.Sprintf("@widened: unknown value %q; expected one of replication", val))
+				break
+			}
+			s.Widened = val
 		case "correlated":
 			setLint("correlated result sets are not supported: a result set must not " +
 				"reference a column of another; split it into its own query")
@@ -288,8 +316,8 @@ func parseScript(rel, sql string) Script {
 			// "the @timeout directive is 60 here", not "@timeout is 60 here".
 			setLint(fmt.Sprintf("unknown directive @%s; expected one of "+
 				"scope, timeout, permissions, resultsets, min_version, "+
-				"requires_flag, writer, correlated — and note that a header "+
-				"line must not begin with an @ word, even in prose", key))
+				"requires_flag, writer, widened, correlated — and note that a "+
+				"header line must not begin with an @ word, even in prose", key))
 		}
 	}
 	// The scope a writer needs is the writer's own property, declared beside it
