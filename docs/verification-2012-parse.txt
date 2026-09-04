@@ -1,11 +1,11 @@
 sql-auditor corpus grammar check
 ================================
-Produced    : 2026-09-04T12:02:43Z
-Corpus tree : 0ad283e3aac6512a8a65dbd46295c2804c606a11
+Produced    : 2026-09-04T12:56:14Z
+Corpus tree : d3a0368f3459fae790b71df308a021ca281deb1c
               (git rev-parse HEAD:queries - this artifact describes that corpus
                and no other; if the two differ, re-run this script)
 ScriptDom   : C:\Program Files\Microsoft SQL Server Management Studio 22\Release\Common7\IDE\Extensions\Application\Microsoft.SqlServer.TransactSql.ScriptDom.dll
-Files       : 71
+Files       : 75
 
 queries/10.system/010.properties.sql           TSql110 (SQL Server 2012)    resultsets 6/6  ok
 queries/10.system/013.memory-model.sql         TSql130 (SQL Server 2016)    resultsets 1/1  ok
@@ -19,6 +19,7 @@ queries/10.system/041.connectivity.sql         TSql110 (SQL Server 2012)    resu
 queries/10.system/042.connection-security.sql  TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/10.system/043.cpu-neighbours.sql       TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/10.system/044.default-trace.sql        TSql110 (SQL Server 2012)    resultsets 2/2  ok
+queries/10.system/045.default-trace-detail.sql TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/10.system/046.local-sessions.sql       TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/10.system/047.resource-pressure.sql    TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/10.system/048.security-errors.sql      TSql110 (SQL Server 2012)    resultsets 2/2  ok
@@ -44,8 +45,10 @@ queries/20.databases/023.log-vlf.sql           TSql110 (SQL Server 2012)    resu
 queries/20.databases/024.log-stats.sql         TSql130 (SQL Server 2016)    resultsets 1/1  ok
 queries/20.databases/026.persisted-sku-features.sql TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/40.security/010.principals.sql         TSql110 (SQL Server 2012)    resultsets 5/5  ok
+queries/40.security/020.database-principals.sql TSql110 (SQL Server 2012)    resultsets 5/5  ok
 queries/50.agent/010.jobs.sql                  TSql110 (SQL Server 2012)    resultsets 3/3  ok
 queries/50.agent/020.job-steps.sql             TSql110 (SQL Server 2012)    resultsets 2/2  ok
+queries/50.agent/030.alerts.sql                TSql110 (SQL Server 2012)    resultsets 4/4  ok
 queries/60.backup/010.history.sql              TSql110 (SQL Server 2012)    resultsets 4/4  ok
 queries/60.backup/020.restore-history.sql      TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/70.schema/010.objects.sql              TSql110 (SQL Server 2012)    resultsets 5/5  ok
@@ -67,6 +70,7 @@ queries/80.workload/023.query-store-most-executed.sql TSql130 (SQL Server 2016) 
 queries/80.workload/024.query-store-rowcount.sql TSql140 (SQL Server 2017)    resultsets 2/2  ok
 queries/80.workload/030.implicit-conversions.sql TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/80.workload/040.plan-cache.sql         TSql110 (SQL Server 2012)    resultsets 2/2  ok
+queries/80.workload/041.plan-cache-plans.sql   TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/80.workload/050.procedure-stats.sql    TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/80.workload/051.function-stats.sql     TSql130 (SQL Server 2016)    resultsets 2/2  ok
 queries/90.availability/010.topology.sql       TSql110 (SQL Server 2012)    resultsets 3/3  ok
@@ -79,5 +83,5 @@ queries/90.availability/042.replication-distribution.sql TSql110 (SQL Server 201
 queries/90.availability/043.replication-subscriber.sql TSql110 (SQL Server 2012)    resultsets 3/3  ok
 queries/90.availability/044.replication-counters.sql TSql110 (SQL Server 2012)    resultsets 2/2  ok
 
-All 71 files parse under their declared grammar, and every
+All 75 files parse under their declared grammar, and every
 @resultsets count matches the parse tree.
