@@ -203,3 +203,99 @@ func TestDatabaseInfoCarriesReplicationFlags(t *testing.T) {
 		t.Errorf("flags did not round-trip: %+v", d)
 	}
 }
+
+// The second pass keeps a distribution database a narrowed run would lose.
+// "Retained after filtering" is the exact trigger, and these five cases pin
+// each half of it.
+
+func TestSelectTargetsWidensToDistributor(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
+	}
+	sel, err := SelectTargets(cands, "SALESDB", "")
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	if !containsName(sel.Included, "DISTDB") {
+		t.Errorf("DISTDB should be retained; Included = %v", sel.Included)
+	}
+	if sel.Widened["DISTDB"] == "" {
+		t.Errorf("DISTDB should carry a retention reason; Widened = %v", sel.Widened)
+	}
+	// The superseded skip must be gone, or the manifest lists the database
+	// twice with contradictory reasons.
+	for _, s := range sel.Skipped {
+		if s.Name == "DISTDB" {
+			t.Errorf("DISTDB is both included and skipped: %q", s.Reason)
+		}
+	}
+}
+
+func TestSelectTargetsDoesNotWidenWithoutARetainedPublisher(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
+	}
+	sel, err := SelectTargets(cands, "OTHERDB", "SALESDB")
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	if containsName(sel.Included, "DISTDB") {
+		t.Errorf("no retained publisher, so DISTDB must not be widened in")
+	}
+}
+
+func TestSelectTargetsExcludeBeatsWidening(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
+	}
+	sel, err := SelectTargets(cands, "SALESDB", "DISTDB")
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	if containsName(sel.Included, "DISTDB") {
+		t.Errorf("DB_EXCLUDE must win over widening")
+	}
+}
+
+func TestSelectTargetsDoesNotWidenAnInaccessibleDistributor(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: false, IsDistributor: true},
+	}
+	sel, err := SelectTargets(cands, "SALESDB", "")
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	if containsName(sel.Included, "DISTDB") {
+		t.Errorf("an inaccessible distributor must stay skipped")
+	}
+}
+
+// A stale is_published flag on a restored database widens the run. The spec
+// accepts this and says so; the test exists so the behaviour is deliberate
+// rather than discovered by the first operator it surprises.
+func TestSelectTargetsWidensOnAStaleFlag(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "RESTOREDDB", State: "ONLINE", HasAccess: true, IsPublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
+	}
+	sel, err := SelectTargets(cands, "RESTOREDDB", "")
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	if !containsName(sel.Included, "DISTDB") {
+		t.Errorf("a stale flag widens; the spec accepts this")
+	}
+}
+
+func containsName(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

@@ -91,6 +91,10 @@ type SkipReason struct {
 type Selection struct {
 	Included []string
 	Skipped  []SkipReason
+	// Widened maps a database name to the reason the second pass kept it
+	// despite DB_INCLUDE. Empty for every ordinary run: with no DB_INCLUDE
+	// every user database is already included and the pass changes nothing.
+	Widened map[string]string
 }
 
 // parseServer normalises the ways a SQL Server address is written into the two
@@ -318,7 +322,64 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error)
 			sel.Included = append(sel.Included, d.Name)
 		}
 	}
+
+	// Second pass: keep the distribution database when a publisher survived
+	// the first one.
+	//
+	// It fires only where it is needed. With no DB_INCLUDE every user database
+	// is already included and this changes nothing. It exists for the narrowed
+	// run whose narrowed set still contains a publisher, where losing the
+	// distributor that goes with it would be absurd — the log that will not
+	// truncate is on the publisher and the reason is in the distributor.
+	//
+	// "Retained after filtering" is the exact trigger, and sel.Included is
+	// what encodes it: a publisher the operator excluded, or one the login
+	// cannot reach, is not in there and does not count. Re-testing DB_INCLUDE
+	// here would be a tautology.
+	published := 0
+	for _, d := range c {
+		if d.IsPublished && containsString(sel.Included, d.Name) {
+			published++
+		}
+	}
+	if published == 0 {
+		return sel, nil
+	}
+	for _, d := range c {
+		if !d.IsDistributor || containsString(sel.Included, d.Name) {
+			continue
+		}
+		// Everything except DB_INCLUDE still disqualifies it. DB_EXCLUDE in
+		// particular stays the operator's explicit way of saying no.
+		if d.State != "ONLINE" || d.IsSnapshot || !d.HasAccess || matchAny(exc, d.Name) {
+			continue
+		}
+		// The skip this supersedes has to go, or the manifest names the same
+		// database twice with two contradictory reasons. Only that one reason
+		// can be superseded: the others are still true.
+		for i, s := range sel.Skipped {
+			if s.Name == d.Name && s.Reason == "not matched by DB_INCLUDE" {
+				sel.Skipped = append(sel.Skipped[:i], sel.Skipped[i+1:]...)
+				break
+			}
+		}
+		sel.Included = append(sel.Included, d.Name)
+		if sel.Widened == nil {
+			sel.Widened = map[string]string{}
+		}
+		sel.Widened[d.Name] = fmt.Sprintf(
+			"local distributor for %d published database(s) in this selection", published)
+	}
 	return sel, nil
+}
+
+func containsString(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // checkPatterns validates each pattern once, up front, so a syntax error is
