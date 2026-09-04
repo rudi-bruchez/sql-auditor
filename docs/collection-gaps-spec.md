@@ -1205,8 +1205,8 @@ unchanged: each item cost this audit a sentence it could not write.
 
 **Three of the five below were closed the same day, in the same working tree**,
 and are kept here for the same reason section 9 is kept: so that what they cost
-stays on record and nobody rebuilds them. Section 17 was closed a day later,
-on the second reading below. Section 16 is the one still open.
+stays on record and nobody rebuilds them. Sections 16 and 17 were both closed a
+day later, on the second reading below.
 
 ### 13. The subscriber-side replication collector reported nothing on a subscriber — closed
 
@@ -1289,7 +1289,7 @@ The shape to reuse for them is the one that worked here: ask whether the object
 exists, degrade to what the old build can give, and name the path in the row
 rather than leaving the absence to be inferred.
 
-### 16. Database-level principals, second pass, unchanged
+### 16. Database-level principals, second pass, unchanged — closed
 
 Recorded on 3 September and unchanged, so it is repeated here rather than
 assumed dealt with. Database users, database role membership and grants to
@@ -1301,6 +1301,39 @@ instances, one of them rated high (`least-privilege-database-roles`), and
 **What it cost.** The security section of both reports could only speak about
 server-level `sysadmin` membership. On an estate where nine principals are
 `sysadmin` on each instance, that is the shallow half of the question.
+
+**Closed by two collectors and one new capability**, because the section names
+two unrelated absences and they do not have the same permission.
+
+`40.security/020.database-principals.sql` is database-scoped and reads the
+users, the role memberships and the grants under `CONNECT` and
+`VIEW ANY DEFINITION` — nothing new to ask a client for.
+`40.security/010.principals.sql` had said in its own header that this collector
+did not exist yet, and that sentence now points at it. Object-level grants are
+aggregated per principal rather than listed: a legacy application carries
+thousands of per-object and per-column grants that would swamp the archive,
+while database-scoped grants are listed in full because each is its own
+decision. Orphaned users are derived rather than left implicit, and contained
+users are excluded from that test — counting them as orphans would report a
+defect against the feature working correctly.
+
+`50.agent/030.alerts.sql` could not be written under any permission the corpus
+already declared, and that is the whole reason it took a new one. `MSDB READ`
+is `SELECT` on `backupset` and nothing else, and `010.jobs.sql` had already
+measured that a login in `SQLAgentReaderRole` is refused `sysalerts`. Declaring
+either would have produced exactly the failure section 6 warns about: the skip
+gate never fires, and the file lands in `Errors` on every locked-down client.
+So `agent_alerts` is a ninth probed capability, with its own preflight probe,
+its own grant section and its own row in `docs/dba-guide.md` — and unlike the
+`dbcc_loginfo` capability section 1 refused, this one can actually be granted,
+which is what `TestEveryProbedCapabilityCanBeGranted` requires.
+
+The three tables are one permission because they are one finding: an alert
+nobody is notified of is the same as no alert. The probe deliberately does not
+require rows, because an instance with no alerts is the finding rather than a
+denial, and no operator address is projected — only whether one is configured,
+which is what the finding rests on and keeps personal contact details out of an
+archive that gets mailed around.
 
 ### 17. Column density is not projected, so index key order cannot be decided — closed
 
@@ -1361,3 +1394,37 @@ in order to add distribution to none of them. The build is worth noting for a
 second reason: the two instances that raised this section run 13.0.4451 and
 13.0.4457, so unlike section 15 this gate does not exclude them — the collector
 would have answered the question that was asked.
+
+### 18. A spill is invisible to the archive, and the floor for seeing one is 13.0.5026
+
+An audit that names a slow procedure is expected to say where its time went. On
+one instance the answer turned out to be a hash aggregate spilling to `tempdb`,
+twice, for about ten seconds each — more than the rest of the plan put together.
+Nothing in the archive could have said so.
+
+The reason is the version, not the corpus. Query Store below 2019 stores
+estimated plans only, so `80.workload/021.query-store-detail` cannot carry a
+runtime counter of any kind, and `022.query-store-profiled.sql` is gated at 15.0
+for exactly that reason. `query_store_runtime_stats` gained no spill column
+until 2017. The diagnosis needed an actual post-execution plan, which only the
+client can produce, and the report had to ask for it and wait for a second
+exchange.
+
+**What is collectable, and where.** `sys.dm_exec_query_stats` gained
+`total_spills` and `last_spills` in SQL Server 2016 SP2, build 13.0.5026, and in
+2017 CU3. On an instance at or above that build the archive could name a
+spilling statement, with its plan handle and its grant, without any plan file at
+all — `total_grant_kb`, `total_used_grant_kb` and `total_ideal_grant_kb` sit in
+the same view and give the ratio that says whether the grant or the estimate was
+wrong.
+
+That is worth projecting, in `80.workload`, gated at 13.0.5026. It closes
+nothing for an instance below the floor, and the instance that raised this
+section is one of those: below SP2 there is no path to a spill except an actual
+plan, and that is a fact about the build rather than a gap in the corpus. The
+report should say so in the same breath as it asks for the plan, which is a
+`redaction-audit` matter and is recorded there.
+
+Note the floor is the same 13.0.5026 that section 15 was written against. The
+conclusion is the opposite one: there the gate was ours to remove because the
+data had another source, here it is Microsoft's and there is no second source.

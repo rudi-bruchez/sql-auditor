@@ -119,6 +119,21 @@ func Capabilities() []Capability {
 				"UNION ALL SELECT TOP 0 1 FROM msdb.dbo.log_shipping_monitor_secondary " +
 				"UNION ALL SELECT TOP 0 1 FROM msdb.dbo.log_shipping_monitor_error_detail",
 			Impact: "log shipping configuration and lag not collected — the report must not read this as 'no log shipping'"},
+		// A fourth slice of msdb, and the probe comment above already named
+		// sysalerts among what SQLAgentReaderRole denies. The three tables go
+		// in one batch for the reason log_shipping's six do: 030.alerts.sql
+		// fails as a whole the moment one of them is refused, so probing only
+		// sysalerts would report ok and let the collector fail anyway.
+		//
+		// Deliberately not NeedsRows, and this is the capability where that
+		// matters most: an instance with NO alerts returns no rows, and "no
+		// alerts are configured" is precisely the finding the collector exists
+		// to make. A probe requiring rows would report the finding as a denial.
+		{Name: "agent_alerts", Label: "Read the Agent alerts and operators (msdb.dbo.sysalerts)",
+			SQL: "SELECT TOP 0 1 FROM msdb.dbo.sysalerts " +
+				"UNION ALL SELECT TOP 0 1 FROM msdb.dbo.sysoperators " +
+				"UNION ALL SELECT TOP 0 1 FROM msdb.dbo.sysnotifications",
+			Impact: "alerts and operators not collected — the report must not read this as 'no alerts are configured', which is the opposite finding"},
 		// Asked as a permission question rather than by running the procedure:
 		// sp_readerrorlog reads the whole current log, which is minutes of work
 		// on a long-uptime instance and far too expensive for a probe.

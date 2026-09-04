@@ -95,7 +95,7 @@ type GrantScriptInput struct {
 // needs a user there belongs in this list: the script creates that user once,
 // and a capability missing from here produces GRANTs against a principal that
 // was never created.
-var msdbCapabilities = []string{"msdb_read", "agent_jobs", "agent_job_steps", "log_shipping"}
+var msdbCapabilities = []string{"msdb_read", "agent_jobs", "agent_job_steps", "log_shipping", "agent_alerts"}
 
 func majorVersion(v string) int {
 	head, _, _ := strings.Cut(v, ".")
@@ -317,6 +317,30 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.log_shipping_monitor_primary TO %s;", login),
 				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.log_shipping_monitor_secondary TO %s;", login),
 				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.log_shipping_monitor_error_detail TO %s;", login),
+			},
+		})
+	}
+
+	if denied["agent_alerts"] {
+		sections = append(sections, grantSection{
+			title:  "Read whether anyone is told when this instance breaks",
+			marker: sectionInMsdb,
+			why: append([]string{
+				"SELECT on three tables. Neither MSDB READ nor SQLAgentReaderRole",
+				"reaches them, and an alert nobody is notified of is the same as no",
+				"alert at all — so the operators and the notifications that bind the",
+				"two are granted together with the alerts themselves.",
+				"",
+				"Without it the archive cannot tell an instance that raises no alert on",
+				"a severity 19 to 25 error from one whose alerts this login may not",
+				"look at, and those are opposite findings.",
+				"",
+				"Collectors that need it:",
+			}, indentList(collectorsFor(in.Scripts, "agent_alerts"))...),
+			statement: []string{
+				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.sysalerts TO %s;", login),
+				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.sysoperators TO %s;", login),
+				fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.sysnotifications TO %s;", login),
 			},
 		})
 	}

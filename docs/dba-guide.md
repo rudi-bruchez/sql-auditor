@@ -136,6 +136,7 @@ archive.
 | Read the Agent job inventory | `SQLAgentReaderRole` in msdb | Agent jobs not collected — the report must not read this as 'no jobs' or 'no failing jobs' |
 | Read the Agent job steps | `SELECT` on `msdb.dbo.sysjobsteps` | job steps not collected — the report can say a job exists but not what it runs |
 | Read the log shipping tables | `SELECT` on the six `msdb.dbo.log_shipping_*` tables | log shipping configuration and lag not collected — the report must not read this as 'no log shipping' |
+| Read the Agent alerts and operators | `SELECT` on `msdb.dbo.sysalerts`, `sysoperators` and `sysnotifications` | alerts and operators not collected — the report must not read this as 'no alerts are configured', which is the opposite finding |
 | Read the SQL Server error log | covered by `VIEW SERVER STATE` before 2022; `VIEW ANY ERROR LOG` from 2022 | the error log is not collected — the report must not read this as 'no errors were logged' |
 
 **Replication metadata asks for no right you are not already granting.** The

@@ -98,7 +98,7 @@ func TestRenderSurvivesAZeroSizedTerminal(t *testing.T) {
 	}
 }
 
-func TestVerificationListsTheEightCapabilitiesInProbeOrder(t *testing.T) {
+func TestVerificationListsTheNineCapabilitiesInProbeOrder(t *testing.T) {
 	s := State{Step: StepVerification, Verify: probedVerify()}
 	got := statusLines(Render(s, testWidth, 0))
 
@@ -112,7 +112,7 @@ func TestVerificationListsTheEightCapabilitiesInProbeOrder(t *testing.T) {
 		}
 	}
 	// The total is derived from Capabilities(), never written down.
-	contains(t, Render(s, testWidth, 0), "6 / 8")
+	contains(t, Render(s, testWidth, 0), "7 / 9")
 }
 
 func TestVerificationKeepsTheWholeImpactAtSixtyColumns(t *testing.T) {

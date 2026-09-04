@@ -33,8 +33,10 @@
 -- client's own rules.
 --
 -- Database-level principals and role memberships are NOT here: they are
--- per-database and need their own database-scoped collector, which does not
--- exist yet. A reader must not take this file as covering database users.
+-- per-database and have their own database-scoped collector,
+-- 020.database-principals.sql. A reader must not take this file as covering
+-- database users; sysadmin membership is the shallow half of the question and
+-- 020 is the other one.
 --
 -- SQL Server 2012 is the floor. Not collected for that reason:
 --   sys.server_principals.is_fixed_role   (2012 has it; kept)
