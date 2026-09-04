@@ -1,11 +1,11 @@
 sql-auditor corpus grammar check
 ================================
-Produced    : 2026-09-04T11:55:26Z
-Corpus tree : 879991a04eb817ef38bdf2e5dbe9669a2a69ad28
+Produced    : 2026-09-04T12:02:43Z
+Corpus tree : 0ad283e3aac6512a8a65dbd46295c2804c606a11
               (git rev-parse HEAD:queries - this artifact describes that corpus
                and no other; if the two differ, re-run this script)
 ScriptDom   : C:\Program Files\Microsoft SQL Server Management Studio 22\Release\Common7\IDE\Extensions\Application\Microsoft.SqlServer.TransactSql.ScriptDom.dll
-Files       : 70
+Files       : 71
 
 queries/10.system/010.properties.sql           TSql110 (SQL Server 2012)    resultsets 6/6  ok
 queries/10.system/013.memory-model.sql         TSql130 (SQL Server 2016)    resultsets 1/1  ok
@@ -58,6 +58,7 @@ queries/70.schema/060.columns.sql              TSql110 (SQL Server 2012)    resu
 queries/70.schema/070.index-columns.sql        TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/70.schema/080.modules.sql              TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/70.schema/090.statistics.sql           TSql110 (SQL Server 2012)    resultsets 2/2  ok
+queries/70.schema/091.statistics-density.sql   TSql130 (SQL Server 2016)    resultsets 2/2  ok
 queries/80.workload/010.wait-stats.sql         TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/80.workload/020.query-store.sql        TSql130 (SQL Server 2016)    resultsets 3/3  ok
 queries/80.workload/021.query-store-detail.sql TSql130 (SQL Server 2016)    resultsets 3/3  ok
@@ -78,5 +79,5 @@ queries/90.availability/042.replication-distribution.sql TSql110 (SQL Server 201
 queries/90.availability/043.replication-subscriber.sql TSql110 (SQL Server 2012)    resultsets 3/3  ok
 queries/90.availability/044.replication-counters.sql TSql110 (SQL Server 2012)    resultsets 2/2  ok
 
-All 70 files parse under their declared grammar, and every
+All 71 files parse under their declared grammar, and every
 @resultsets count matches the parse tree.
