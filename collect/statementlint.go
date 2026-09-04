@@ -90,9 +90,28 @@ var (
 	// Dynamic SQL has to be a literal this lint can read. A statement
 	// assembled from variables is unreviewable by construction, and every rule
 	// above would then be one string concatenation away from nothing.
-	execOfVariable = regexp.MustCompile(`(?i)\bEXEC(UTE)?\s*\([^)]*@`)
+	execOfVariable = regexp.MustCompile(`(?i)\bEXEC(UTE)?\s*\([^)]*[@+]`)
 	execsqlOfLit   = regexp.MustCompile(`(?i)\bsp_executesql\s+N?\s*'`)
 	execsqlKeyword = regexp.MustCompile(`(?i)\bsp_executesql\b`)
+
+	// CONCATENATION IS THE SAME HOLE AS A VARIABLE, and it was open until the
+	// harm review of 4 September 2026. Only the literal that opens the
+	// argument is recognised as executed — isExecuted reads the code
+	// immediately before the quote — so in
+	//
+	//	EXEC('DR' + 'OP DATABASE victim')
+	//
+	// the first fragment was linted, found harmless, and the second was not
+	// linted at all, because what precedes it is "+" and not "EXEC(". The
+	// server concatenates and runs it. Measured: it defeated every rule in
+	// this file, the xp_ blocklist included.
+	//
+	// So a "+" anywhere in the executed expression is refused, exactly as "@"
+	// is, and for the identical reason: a statement this lint reads in pieces
+	// is a statement it has not read. The EXEC form is covered by the [@+] in
+	// execOfVariable above; sp_executesql needs its own, because its argument
+	// is not parenthesised.
+	execsqlConcat = regexp.MustCompile(`(?i)\bsp_executesql\s+N?\s*'[^']*'\s*\+`)
 )
 
 // maxDynamicDepth bounds the recursion into nested dynamic SQL. Three levels is
@@ -169,7 +188,10 @@ func scanStatements(code string) string {
 		}
 	}
 	if execOfVariable.MatchString(code) {
-		return "dynamic SQL assembled from variables: a statement this lint cannot read is one it cannot vouch for, so EXEC takes a literal here"
+		return "dynamic SQL assembled from variables or concatenated: a statement this lint cannot read whole is one it cannot vouch for, so EXEC takes a single literal here"
+	}
+	if execsqlConcat.MatchString(code) {
+		return "sp_executesql given a statement built by concatenation: this lint reads the first literal and would never see the rest, so its first argument must be one literal"
 	}
 	if countAll(execsqlKeyword, code) > countAll(execsqlOfLit, code) {
 		return "sp_executesql given a statement assembled from variables: its first argument must be a literal this lint can read"

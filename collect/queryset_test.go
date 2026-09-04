@@ -128,8 +128,11 @@ func TestDiscoverLintErrors(t *testing.T) {
 
 func TestStripSQLComments(t *testing.T) {
 	tests := []struct{ name, in, want string }{
-		{"line comment", "SELECT 1; -- FOR JSON was removed\n", "SELECT 1; \n"},
-		{"block comment", "SELECT /* FOR JSON */ 1;", "SELECT  1;"},
+		// Blanked to spaces rather than removed, so a comment cannot weld two
+		// keywords together — see TestStripSQLCommentsLeavesASeparatorBehind.
+		{"line comment", "SELECT 1; -- FOR JSON was removed\n",
+			"SELECT 1; " + strings.Repeat(" ", 23) + "\n"},
+		{"block comment", "SELECT /* FOR JSON */ 1;", "SELECT " + strings.Repeat(" ", 14) + " 1;"},
 		{"string literal survives", "SELECT '-- not a comment';", "SELECT '-- not a comment';"},
 		{"string literal with block marker", "SELECT '/* keep */';", "SELECT '/* keep */';"},
 		{"escaped quote inside literal", "SELECT 'it''s -- fine';", "SELECT 'it''s -- fine';"},
@@ -216,20 +219,73 @@ func TestDiscoverRejectsFileAtQueryRoot(t *testing.T) {
 	}
 }
 
-func TestStripSQLCommentsNestedBlocks(t *testing.T) {
+// A comment becomes SPACES, one per byte, and never nothing. T-SQL treats a
+// comment as a token separator, so deleting it merged EXECUTE/**/AS into
+// EXECUTEAS and the impersonation rule stopped matching — measured in the harm
+// review of 4 September 2026. One space per byte rather than one per comment,
+// so that every offset after it still points where it did in the original.
+func TestStripSQLCommentsLeavesASeparatorBehind(t *testing.T) {
 	tests := []struct{ name, in, want string }{
-		{"nested block comment", "SELECT /* outer /* inner */ still commented? */ 1;", "SELECT  1;"},
+		{"nested block comment",
+			"SELECT /* outer /* inner */ still commented? */ 1;",
+			"SELECT " + strings.Repeat(" ", 40) + " 1;"},
 		{"unterminated block comment does not panic",
-			"SELECT 1; /* never closed", "SELECT 1; "},
+			"SELECT 1; /* never closed", "SELECT 1; " + strings.Repeat(" ", 15)},
 		{"unterminated string literal does not panic",
 			"SELECT 'never closed", "SELECT 'never closed"},
+		{"a line comment keeps its newline, or two statements become one",
+			"SELECT 1; -- why\nSELECT 2;", "SELECT 1; " + strings.Repeat(" ", 6) + "\nSELECT 2;"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := StripSQLComments(tc.in); got != tc.want {
-				t.Errorf("got %q, want %q", got, tc.want)
+			got := StripSQLComments(tc.in)
+			if got != tc.want {
+				t.Errorf("got %q (%d), want %q (%d)", got, len(got), tc.want, len(tc.want))
+			}
+			// The length is the property that makes an offset survive.
+			if len(got) != len(tc.in) {
+				t.Errorf("length changed: %d in, %d out — offsets after the comment now lie",
+					len(tc.in), len(got))
 			}
 		})
+	}
+}
+
+// The lint reads text that StripSQLComments has been over, so a comment placed
+// between two keywords must not hide the pair from it. Each of these was a
+// live bypass before the separator was restored.
+func TestStatementLintIsNotDefeatedByACommentBetweenKeywords(t *testing.T) {
+	for _, sql := range []string{
+		"EXECUTE/**/AS LOGIN = 'sa';",
+		"EXECUTE--x\nAS LOGIN = 'sa';",
+		"DROP/**/DATABASE victim;",
+		"BULK/**/INSERT t FROM 'f';",
+		"CREATE/**/TABLE dbo.t (a int);",
+	} {
+		if msg := statementLint(StripSQLComments(sql)); msg == "" {
+			t.Errorf("a comment between the keywords got %q past the lint", sql)
+		}
+	}
+}
+
+// Concatenation is the same hole as a variable: only the literal that opens the
+// argument is recognised as executed, so every fragment after a "+" went
+// unread. It defeated every rule in the file, the xp_ blocklist included.
+func TestStatementLintRefusesDynamicSQLBuiltByConcatenation(t *testing.T) {
+	for _, sql := range []string{
+		"EXEC('DR' + 'OP DATABASE victim');",
+		"EXEC('xp_' + 'cmdshell ''dir''');",
+		"EXEC sp_executesql N'DR' + N'OP DATABASE victim';",
+	} {
+		if msg := statementLint(StripSQLComments(sql)); msg == "" {
+			t.Errorf("concatenated dynamic SQL passed the lint: %q", sql)
+		}
+	}
+	// And the guard pattern the corpus actually uses still passes, or the fix
+	// would have cost the collectors it exists to protect.
+	ok := "DECLARE @t TABLE (a int);\nINSERT INTO @t EXEC sp_executesql N'SELECT 1';"
+	if msg := statementLint(StripSQLComments(ok)); msg != "" {
+		t.Errorf("the corpus guard pattern is now refused: %s", msg)
 	}
 }
 

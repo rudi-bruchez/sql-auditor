@@ -700,7 +700,23 @@ func rewriteSQL(sql string, dropComments, blankLiterals bool) string {
 	for i := 0; i < len(sql); i++ {
 		switch {
 		case cls[i] == clsComment && dropComments:
-			// Nothing: the byte goes.
+			// A SPACE, NOT NOTHING, and the difference is a bypass. T-SQL
+			// treats a comment as a token separator: EXECUTE/**/AS runs as
+			// EXECUTE AS. Deleting the bytes merged the two tokens into
+			// EXECUTEAS, which the impersonation rule — the one the lint
+			// calls the thing that would make every other rule negotiable —
+			// then did not match. Found in the harm review of 4 September
+			// 2026 and measured: with the bytes deleted the statement passed
+			// the lint, with a space it is refused.
+			//
+			// A space per byte rather than one space per comment, so that
+			// every offset after it is still the offset in the original text,
+			// which deleting had already broken.
+			if sql[i] == '\n' || sql[i] == '\r' {
+				b.WriteByte(sql[i])
+			} else {
+				b.WriteByte(' ')
+			}
 		case cls[i] == clsLiteral && blankLiterals:
 			// Newlines survive, so the blanked text keeps its line structure
 			// and a caller reporting a position still reports a true one.

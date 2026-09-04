@@ -933,9 +933,13 @@ or `TRUNCATE` against a real table, `SELECT ... INTO` a permanent table,
 `SHUTDOWN`, `EXECUTE AS`, any `xp_` procedure, the `sp_` procedures that
 configure the instance, and any `DBCC` command that is not one of the read-only
 ones. Dynamic SQL is read too — the check looks inside the string a collector
-hands to `EXEC` or `sp_executesql` — and a statement assembled from variables is
-refused outright, because a statement the check cannot read is one it cannot
-vouch for.
+hands to `EXEC` or `sp_executesql` — and a statement assembled from variables
+**or built by concatenation** is refused outright, because a statement the check
+cannot read whole is one it cannot vouch for. Concatenation is named separately
+because it was the way through: only the literal that opens the argument is
+recognised as executed, so in `EXEC('DR' + 'OP DATABASE x')` the first fragment
+was checked, found harmless, and the rest was never read at all. It defeated
+every rule in the list above, `xp_` included, until 4 September 2026.
 
 This is a guard against the accident, not a sandbox. Whoever can pass
 `--queries-dir` can also open `sqlcmd` and type the same statement. What it

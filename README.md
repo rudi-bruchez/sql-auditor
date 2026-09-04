@@ -310,7 +310,7 @@ Exactly three cases.
 | `--env PATH` | `.env` file to read (default `.env`) |
 | `--password-file FILE` | read `SQL_PASSWORD` from this file rather than from `.env`. One trailing line ending is ignored; an empty file is refused |
 | `--password-stdin` | read `SQL_PASSWORD` from standard input, same rules |
-| `--queries-dir DIR` | run a corpus from disk instead of the embedded one. Every file is checked first for what its statements DO, and one that changes the server is refused rather than run ([what is allowed](docs/dba-guide.md#what-a-corpus-from-a-directory-is-allowed-to-contain)) |
+| `--queries-dir DIR` | run a corpus from disk instead of the embedded one. Every file is checked first for what its statements DO, and one that changes the server is refused rather than run. That check is a syntactic guard against the accident and **not a sandbox**: it bounds what a mistake can do, it does not vouch for an author this project has never seen ([what is allowed](docs/dba-guide.md#what-a-corpus-from-a-directory-is-allowed-to-contain)) |
 | `--output-dir DIR` | where to write results |
 | `--keep` | keep an existing same-day run folder, suffixing this run |
 | `--grant-script FILE` | `check` only. Write the T-SQL that grants the permissions found missing, for the login the server reports, with the reason for each. Never executed. |

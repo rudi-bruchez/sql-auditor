@@ -127,6 +127,28 @@ unasked by default.
 
 ### Fixed
 
+- **The `--queries-dir` statement lint could be walked past two ways.**
+  *Concatenation:* only the literal that opens a dynamic-SQL argument is
+  recognised as executed, so in `EXEC('DR' + 'OP DATABASE x')` the first
+  fragment was linted, found harmless, and the rest was never read. It defeated
+  every rule in the file, the `xp_` blocklist included, and `sp_executesql` took
+  it too. A `+` in the executed expression is now refused exactly as `@` is.
+  *Comment splicing:* `StripSQLComments` deleted comment bytes, and T-SQL treats
+  a comment as a token separator — so `EXECUTE/**/AS` reached the lint as
+  `EXECUTEAS` and the impersonation rule, the one the file calls the thing that
+  would make every other rule negotiable, stopped matching. Deleting made the
+  lint weaker than not stripping at all: `CREATE/**/TABLE` became `CREATETABLE`,
+  which no rule matches either. Comments now blank to one space per byte, which
+  restores the separator and also keeps every later offset true. Both closures
+  are covered by tests proven by mutation. The blocklist of writing procedures
+  remains enumerable by nature — `sp_rename` and `sp_msforeachdb` still pass —
+  which is why the surrounding claims were corrected rather than strengthened:
+  `README.md` now carries the "guard against the accident, not a sandbox"
+  reserve that `MANIFEST.txt` and the DBA guide already had. Found by an
+  external reviewer during an adversarial harm review; two of its three claimed
+  bypasses were confirmed and the third, that comment splicing defeats every
+  multi-token rule, was not — `DROP`, `BULK INSERT`, `CREATE TABLE`, `ALTER` and
+  `DBCC` were all still refused.
 - **A database name could plant executable T-SQL in the grant script.**
   `--grant-script` interpolated server-reported names raw into `-- ` comment
   lines, and a SQL Server identifier may contain a newline — so a database
