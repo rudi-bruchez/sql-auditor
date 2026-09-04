@@ -63,6 +63,8 @@ twice. Nothing specified here creates a `#temp` table.
 
 ## 1. VLF count below SQL Server 2016 SP2
 
+slug: vlf-count
+
 ### The gap
 
 `20.databases/023.log-vlf.sql` reads `sys.dm_db_log_info`, which arrived in
@@ -273,6 +275,8 @@ because nothing ran". `@source`, `@err` and `@msg` say all three.
 
 ## 2. The operating system and the host
 
+slug: os-and-host
+
 ### The gap
 
 The archive says nothing about the operating system.
@@ -333,6 +337,8 @@ supportability still needs the build number from somewhere else.
 ---
 
 ## 3. Transport, authentication scheme and encryption in transit
+
+slug: transport-and-encryption
 
 ### The gap
 
@@ -413,6 +419,8 @@ client.
 ---
 
 ## 4. Execution plans when the Query Store is off
+
+slug: plans-without-query-store
 
 ### What already exists
 
@@ -509,6 +517,8 @@ cap is what makes the collector usable.
 ---
 
 ## 5. Is SQL Server alone on this machine?
+
+slug: co-located-processes
 
 ### The gap, and what already answers half of it
 
@@ -653,6 +663,8 @@ any of the above.
 
 ## 6. The default trace — who changed what, and when
 
+slug: default-trace
+
 ### The gap
 
 The default trace runs on every instance audited so far. It is on by default,
@@ -776,6 +788,8 @@ Three cautions belong in the files:
 ---
 
 ## 7. Enterprise features persisted in a database
+
+slug: persisted-sku-features
 
 ### The gap, corrected
 
@@ -983,6 +997,8 @@ step, not here.
 
 ## 10. The other ring buffers
 
+slug: other-ring-buffers
+
 `10.system/041.connectivity.sql` already emits one row per
 `ring_buffer_type` — count, oldest, newest, span. So the archive already says
 which buffers exist and how fast each one turns over. The only question left is
@@ -1092,6 +1108,8 @@ when someone reads a quiet afternoon as a quiet server.
 
 ## 10 bis. One gap the review named that this document does not close
 
+slug: review-unclosed-gap
+
 **The missing-index DMVs.** `sys.dm_db_missing_index_group_stats` and its
 siblings are absent from the corpus and from this specification, and a reviewer
 was right to notice: aggregating them is a fixture of every performance audit,
@@ -1144,3 +1162,35 @@ command-only diagnostics captured into scratch storage in tempdb, and **no
 permanent object created, altered or deleted**. That is true of the corpus,
 true of everything specified here, and it keeps the line that makes `observe` a
 separate command — `CREATE EVENT SESSION` creates a permanent object.
+
+---
+
+## 12. The foreign key graph
+
+slug: foreign-key-graph
+
+**Status: not collected.** `70.schema/010.objects.sql` reads `sys.foreign_keys`,
+but only to count the constraints the optimizer no longer trusts — those with
+`is_not_trusted = 1` or `is_disabled = 1`. The graph itself, which table
+references which and through which columns, is nowhere in an archive.
+
+Two analyses need it and neither can be done today.
+
+A missing foreign key is a data-model finding in its own right, and the first
+one an auditor reaches for on a schema built by an application that enforces
+its own integrity. Without the graph, the finding cannot be made from an
+archive at all; it has to be asked for by hand, every time.
+
+And a purge routine that rediscovers the reference graph on every pass is a
+recurring, expensive pattern. Reading one from `INFORMATION_SCHEMA` per table
+per call costs more than the deletions it exists to order. Recognising that
+shape from an archive needs the graph the routine is rebuilding.
+
+What a collector would project: the constraint, its parent and referenced
+table, the ordered column pairs, whether it is trusted, whether it cascades,
+and whether an index covers the referencing columns — that last one is what
+turns the graph into an indexing finding as well.
+
+Scope is `database`, and the cost is a catalog read: `sys.foreign_keys` joined
+to `sys.foreign_key_columns`, bounded by the same 200-table cap the rest of
+`70.schema` uses so one archive does not carry ten thousand rows nobody reads.
