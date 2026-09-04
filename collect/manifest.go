@@ -44,6 +44,26 @@ type ServerBlock struct {
 // SourceInfo records where a corpus came from and what it hashed to, so an
 // audit can state which questions were asked and prove they were the published
 // ones.
+// TransportBlock records how the connection to the instance was secured. It is
+// a block of its own rather than two more entries in Config because it is not a
+// preference: it is a fact about THIS collection, and the question it answers —
+// "was this archive gathered over a channel whose far end was verified?" — is
+// asked months later by someone who has the archive and not the .env.
+//
+// Both halves are recorded, because neither answers the question alone.
+// Encryption without validation stops an eavesdropper and does not stop a
+// machine-in-the-middle, which terminates the TLS itself and presents whatever
+// certificate it likes; a run that trusted any certificate is a run whose
+// channel was confidential towards an interlocutor nobody checked. Recording
+// only "encrypted: true" would be the reassuring half of a two-part answer.
+type TransportBlock struct {
+	Encrypted bool `json:"encrypted"`
+	// CertificateValidated is false when SQL_TRUST_SERVER_CERTIFICATE was on.
+	// It is meaningless when Encrypted is false, and it is still written: an
+	// absent key and a false one would be told apart by nothing.
+	CertificateValidated bool `json:"certificate_validated"`
+}
+
 type SourceInfo struct {
 	From   string `json:"from"`
 	Path   string `json:"path"`
@@ -183,6 +203,7 @@ type Manifest struct {
 	Server    ServerBlock           `json:"server"`
 	Config    map[string]string     `json:"config"`
 	Sources   map[string]SourceInfo `json:"sources"`
+	Transport TransportBlock        `json:"transport"`
 	Preflight []CapabilityCheck     `json:"preflight"`
 	Coverage  CoverageBlock         `json:"coverage"`
 	Collected CollectedKinds        `json:"collected"`
@@ -372,6 +393,38 @@ func (m *Manifest) refreshCoverage() {
 // transfer approved. It has to answer, without the author present, which
 // server this is, when it was read, what was read, and whether any business
 // data is in the archive.
+// transportLines says what the two transport flags mean together: the first
+// line goes beside the label, and any further ones are continuations indented
+// under it.
+//
+// It returns a slice rather than a sentence because the interesting case needs
+// more than a header line can hold. The label field of this block is fifteen
+// columns and its values are short; a 155-character explanation on one of them
+// would wrap wherever the reader's terminal happened to end, in the block whose
+// whole purpose is to be skimmed.
+//
+// The unencrypted case names its exception rather than hiding it: SQL Server
+// encrypts the login packet whatever this setting says, so a flat "not
+// encrypted" would be wrong about the credentials and right about everything
+// else.
+func transportLines(t TransportBlock) []string {
+	switch {
+	case t.Encrypted && t.CertificateValidated:
+		return []string{"encrypted, and the server certificate was validated"}
+	case t.Encrypted:
+		return []string{
+			"encrypted, but the server certificate was NOT validated",
+			"SQL_TRUST_SERVER_CERTIFICATE was on, so any certificate",
+			"answering for that address was accepted",
+		}
+	default:
+		return []string{
+			"not encrypted, except the login packet, which the",
+			"protocol encrypts whatever this setting says",
+		}
+	}
+}
+
 func (m *Manifest) Human() string {
 	m.refreshCoverage()
 	var b strings.Builder
@@ -393,6 +446,17 @@ func (m *Manifest) Human() string {
 	}
 	if m.Server.Auth != "" {
 		fmt.Fprintf(&b, "Authenticated: %s\n", m.Server.Auth)
+	}
+	// Printed next to the authentication, because the two together are what a
+	// security officer is actually asking about, and printed unconditionally:
+	// a line that appeared only on the bad case would let its absence pass for
+	// "the question was not relevant here".
+	for i, line := range transportLines(m.Transport) {
+		label := "Connection   : "
+		if i > 0 {
+			label = strings.Repeat(" ", len(label))
+		}
+		fmt.Fprintf(&b, "%s%s\n", label, line)
 	}
 	tool := strings.TrimSpace(m.Tool.Name + " " + m.Tool.Version)
 	if m.Tool.Commit != "" {

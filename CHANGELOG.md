@@ -91,6 +91,16 @@ unasked by default.
   under the same wording the error log collector uses, because that is what the
   rows carry.
 
+- **`MANIFEST.txt` now records how the connection was secured**, as a
+  `Connection` line beside the authentication and a `transport` block in the
+  JSON. Both halves are kept, because neither answers the question alone:
+  encryption without validation stops an eavesdropper and does not stop a
+  machine-in-the-middle, which terminates the TLS itself and presents whatever
+  certificate it likes. The terminal note that said so scrolled away; the
+  question "was this archive gathered over a channel whose far end was
+  verified?" is asked months later by someone holding the archive and not the
+  `.env` it was run from.
+
 ### Changed
 
 

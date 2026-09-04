@@ -13,6 +13,98 @@ import (
 // rather than about where a line happens to break.
 func flatten(s string) string { return strings.Join(strings.Fields(s), " ") }
 
+// A collection is evidence, and the question "was it gathered over a channel
+// whose far end was verified?" is asked months later by someone holding the
+// archive and not the .env it was run from. The terminal note that says so
+// scrolls away; this is the copy that survives.
+//
+// All three states are asserted, and the encrypted-but-unvalidated one is the
+// reason the block exists. Encryption without validation stops an eavesdropper
+// and does not stop a machine-in-the-middle, which terminates the TLS itself
+// and presents whatever certificate it likes — so recording "encrypted: true"
+// alone would be the reassuring half of a two-part answer.
+func TestManifestRecordsHowTheConnectionWasSecured(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		transport TransportBlock
+		want      []string
+		absent    []string
+	}{
+		{
+			name:      "encrypted and validated",
+			transport: TransportBlock{Encrypted: true, CertificateValidated: true},
+			want:      []string{"Connection : encrypted, and the server certificate was validated"},
+			absent:    []string{"NOT validated"},
+		},
+		{
+			name:      "encrypted, any certificate accepted",
+			transport: TransportBlock{Encrypted: true},
+			want: []string{
+				"encrypted, but the server certificate was NOT validated",
+				// The setting is named, so the reader can tell which decision
+				// produced this and reverse it.
+				"SQL_TRUST_SERVER_CERTIFICATE was on",
+				"any certificate answering for that address was accepted",
+			},
+		},
+		{
+			name:      "not encrypted",
+			transport: TransportBlock{},
+			want: []string{
+				"not encrypted",
+				// Named rather than glossed over: SQL Server encrypts the login
+				// packet whatever the setting says, so a flat "not encrypted"
+				// would be wrong about the credentials while right about
+				// everything else.
+				"except the login packet",
+			},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := &Manifest{}
+			m.Server.Name = "SRV01"
+			m.Transport = c.transport
+			h := flatten(m.Human())
+			for _, want := range c.want {
+				if !strings.Contains(h, want) {
+					t.Errorf("MANIFEST.txt does not say %q; it says: %s", want, m.Human())
+				}
+			}
+			for _, no := range c.absent {
+				if strings.Contains(h, no) {
+					t.Errorf("MANIFEST.txt says %q and should not", no)
+				}
+			}
+		})
+	}
+}
+
+// The machine-readable half has to agree with the sentence, or an analysis
+// reading the JSON and a person reading the text would answer the question
+// differently.
+func TestManifestTransportSurvivesTheJSON(t *testing.T) {
+	m := &Manifest{}
+	m.Transport = TransportBlock{Encrypted: true}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var back Manifest
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !back.Transport.Encrypted || back.Transport.CertificateValidated {
+		t.Errorf("the transport block did not survive the round trip: %+v", back.Transport)
+	}
+	// Both keys are written even though one is false. An absent key and a false
+	// one would be told apart by nothing.
+	for _, key := range []string{`"encrypted":true`, `"certificate_validated":false`} {
+		if !strings.Contains(string(b), key) {
+			t.Errorf("the JSON manifest is missing %s: %s", key, b)
+		}
+	}
+}
+
 func TestManifestHumanStatesDataNature(t *testing.T) {
 	m := &Manifest{}
 	m.Server.Name, m.Server.Version = "SRV01", "11.0.7001.0"

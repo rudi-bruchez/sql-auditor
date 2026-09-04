@@ -1244,16 +1244,25 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// A nil Observer — every command-line run — makes all of them no-ops.
 	obs := observer{o: o.Observer}
 	m := NewManifest("sql-auditor", o.Version, o.Commit)
+	// Recorded from the resolved configuration rather than from the connection
+	// string, so that what the archive claims and what the driver was told come
+	// from one value. See TransportBlock for why both halves are kept.
+	m.Transport = TransportBlock{
+		Encrypted:            o.Config.Encrypt,
+		CertificateValidated: o.Config.Encrypt && !o.Config.TrustCert,
+	}
 	m.Config = map[string]string{
-		"queries_dir":          o.Config.QueriesDir,
-		"output_dir":           o.Config.OutputDir,
-		"db_include":           o.Config.DBInclude,
-		"db_exclude":           o.Config.DBExclude,
-		"include_session_text": fmt.Sprint(o.Flags[FlagIncludeSessionText]),
-		"object_definitions":   fmt.Sprint(o.Flags[FlagObjectDefinitions]),
-		"deadlock_graphs":      fmt.Sprint(o.Flags[FlagDeadlockGraphs]),
-		"default_trace":        fmt.Sprint(o.Flags[FlagDefaultTrace]),
-		"plan_cache_plans":     fmt.Sprint(o.Flags[FlagPlanCachePlans]),
+		"queries_dir":              o.Config.QueriesDir,
+		"encrypt":                  fmt.Sprint(o.Config.Encrypt),
+		"trust_server_certificate": fmt.Sprint(o.Config.TrustCert),
+		"output_dir":               o.Config.OutputDir,
+		"db_include":               o.Config.DBInclude,
+		"db_exclude":               o.Config.DBExclude,
+		"include_session_text":     fmt.Sprint(o.Flags[FlagIncludeSessionText]),
+		"object_definitions":       fmt.Sprint(o.Flags[FlagObjectDefinitions]),
+		"deadlock_graphs":          fmt.Sprint(o.Flags[FlagDeadlockGraphs]),
+		"default_trace":            fmt.Sprint(o.Flags[FlagDefaultTrace]),
+		"plan_cache_plans":         fmt.Sprint(o.Flags[FlagPlanCachePlans]),
 
 		"query_store_detail":     fmt.Sprint(o.Flags[FlagQueryStoreDetail]),
 		"query_store_plan_stats": fmt.Sprint(o.Flags[FlagQueryStorePlanStats]),
