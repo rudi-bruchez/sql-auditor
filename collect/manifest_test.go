@@ -628,3 +628,21 @@ func TestManifestTextClassifiesQueryStoreDetailAsPersonalData(t *testing.T) {
 		t.Errorf("MANIFEST.txt should classify QueryStoreDetail archives as potentially containing personal data:\n%s", m.Human())
 	}
 }
+
+func TestManifestExplainsAWidenedDatabase(t *testing.T) {
+	m := NewManifest("SQL01", "11.0.7001.0", "")
+	m.Targets.Databases = []DatabaseFolder{
+		{Name: "SALESDB", Folder: "SALESDB"},
+		{Name: "DISTDB", Folder: "DISTDB", WidenedFor: "replication",
+			RetentionReason: "local distributor for 1 published database(s) in this selection"},
+	}
+	h := flatten(m.Human())
+	if !strings.Contains(h, "local distributor for 1 published database(s)") {
+		t.Errorf("MANIFEST.txt must say why DISTDB is here:\n%s", m.Human())
+	}
+	// The purpose token is machinery. Printing it would put "replication" in
+	// front of a reader with nothing to attach it to.
+	if strings.Contains(h, "- DISTDB replication") {
+		t.Errorf("the manifest shows the reason, not the purpose token:\n%s", m.Human())
+	}
+}

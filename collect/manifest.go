@@ -613,6 +613,13 @@ func (m *Manifest) writeTargets(b *strings.Builder) {
 		fmt.Fprintf(b, "\nDatabases covered (%d):\n", len(m.Targets.Databases))
 		for _, d := range m.Targets.Databases {
 			fmt.Fprintf(b, "  - %s\n", d.Name)
+			// A database the operator's selection did not name is here for a
+			// reason, and that reason belongs beside it. A reader comparing
+			// this list to the DB_INCLUDE they wrote would otherwise find one
+			// name too many and no account of it.
+			if d.RetentionReason != "" {
+				fmt.Fprintf(b, "      kept because: %s\n", d.RetentionReason)
+			}
 		}
 	case m.Coverage.DatabaseListMayBeIncomplete:
 		b.WriteString("\nDatabases covered (0):\n")
