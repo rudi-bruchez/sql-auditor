@@ -77,10 +77,17 @@ const (
 	fieldCount
 )
 
-// flagOrder is the seven opt-ins in the order screen 3 lists them, which is
-// the order the spec's mock-up fixes: the six that widen what the archive
+// flagOrder is the nine opt-ins in the order screen 3 lists them, which is
+// the order the spec's mock-up fixes: the eight that widen what the archive
 // discloses first, with plan stats indented under its prerequisite, and the
 // one that only costs time last.
+//
+// It was seven until the harm review of 4 September 2026. default_trace and
+// plan_cache_plans had been added to the command line and to --all without
+// reaching this list, so the wizard could not offer them and its screen said
+// six-plus-one while --all turned on nine. The two absent ones were the two
+// heaviest: plan cache text can carry the literal parameter values a statement
+// was written with, where Query Store text is parameterised.
 //
 // It is built from the constants rather than from collect.KnownFlags, and not
 // only because a map has no order: KnownFlags is a flag-to-CLI-spelling map
@@ -91,8 +98,10 @@ var flagOrder = []string{
 	collect.FlagObjectDefinitions,
 	collect.FlagDeadlockGraphs,
 	collect.FlagBlockedProcessReports,
+	collect.FlagDefaultTrace,
 	collect.FlagQueryStoreDetail,
 	collect.FlagQueryStorePlanStats,
+	collect.FlagPlanCachePlans,
 	collect.FlagEstimateCompression,
 }
 

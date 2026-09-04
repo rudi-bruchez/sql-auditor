@@ -464,3 +464,41 @@ func TestEnterOnlyAnswersACollisionThatIsOnScreen(t *testing.T) {
 		t.Error("[enter] cleared Keep with no collision on screen: it answered a question nobody asked")
 	}
 }
+
+// The wizard must offer every opt-in the command line has, and this test is the
+// reason the previous divergence cannot come back.
+//
+// When default_trace and plan_cache_plans were added, they reached
+// collect.KnownFlags, the --all map, the manifest and the tests, and did not
+// reach flagOrder. The wizard silently could not turn them on, while --all
+// turned on nine and three documents promised seven. Nothing failed, because
+// nothing compared the two lists — the same shape of defect as a hardcoded
+// count, and the same remedy: derive the expectation from the other side.
+func TestTheWizardOffersEveryOptInTheCommandLineHas(t *testing.T) {
+	inOrder := map[string]bool{}
+	for _, f := range flagOrder {
+		inOrder[f] = true
+	}
+	for name := range collect.KnownFlags {
+		if !inOrder[name] {
+			t.Errorf("%s is an opt-in the command line accepts and screen 3 never offers; "+
+				"a wizard user cannot turn it on, and --all turns it on anyway", name)
+		}
+	}
+	for _, f := range flagOrder {
+		if _, ok := collect.KnownFlags[f]; !ok {
+			t.Errorf("screen 3 offers %s, which is not a known flag: toggling it collects nothing", f)
+		}
+	}
+	// And every offered flag needs a row on the screen, or it is listed with an
+	// empty description.
+	described := map[string]bool{}
+	for _, o := range options(State{Verify: probedVerify()}) {
+		described[o.flag] = true
+	}
+	for _, f := range flagOrder {
+		if !described[f] {
+			t.Errorf("%s is in flagOrder and has no row on screen 3", f)
+		}
+	}
+}

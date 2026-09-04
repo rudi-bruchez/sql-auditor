@@ -445,10 +445,10 @@ func blockingBlock(s State, width int) []string {
 // and whether it is the indented dependent one.
 //
 // Every option carries its consequence beside its box rather than in a README
-// nobody opens before running the tool. Six of the seven widen what the archive
-// DISCLOSES — that is a decision somebody may have to justify to a security
-// officer — and the seventh only costs time. Presenting them as one category
-// would misprice the first six.
+// nobody opens before running the tool. Eight of the nine widen what the
+// archive DISCLOSES — that is a decision somebody may have to justify to a
+// security officer — and the ninth only costs time. Presenting them as one
+// category would misprice the first eight.
 type option struct {
 	flag, label, desc string
 	dependent         bool
@@ -471,10 +471,14 @@ func options(s State) []option {
 		{collect.FlagDeadlockGraphs, "deadlock graphs",
 			".xdl reports, verbatim SQL of both victims", false},
 		{collect.FlagBlockedProcessReports, "blocked processes", blocked, false},
+		{collect.FlagDefaultTrace, "default trace detail",
+			"per-event rows from the default trace, with the TextData of configuration changes", false},
 		{collect.FlagQueryStoreDetail, "query store detail",
 			"untruncated query text and .sqlplan execution plans, per database", false},
 		{collect.FlagQueryStorePlanStats, "plan stats",
 			"also reads the whole instance plan cache to find the last profiled plan", true},
+		{collect.FlagPlanCachePlans, "plan cache plans",
+			".sqlplan from the cache when the Query Store is off; cached text can carry literal parameter values", false},
 		{collect.FlagEstimateCompression, "compression estimate",
 			"samples real data into tempdb; slow on large tables", false},
 	}
@@ -491,7 +495,7 @@ func renderOptions(s State, width int) []string {
 		"the resolved plan. No statement text, no source code, no execution plans. Query Store configuration, "+
 		"top queries and forced plans are included.", s.Verify.Collectors), width, pad)...)
 	out = append(out, "")
-	out = append(out, screen.Wrap("Additional. The first six widen what the archive discloses; "+
+	out = append(out, screen.Wrap("Additional. The first eight widen what the archive discloses; "+
 		"the last one only costs time.", width, pad)...)
 	out = append(out, "")
 
@@ -546,7 +550,7 @@ func nothingReason(s State) string {
 }
 
 // optionLines draws one checkbox with its consequence folded under it. The
-// description column is fixed so that the seven consequences line up, and the
+// description column is fixed so that the nine consequences line up, and the
 // dependent option is indented under the one it needs — it does nothing on its
 // own, and a checkbox that looked independent would promise a collection that
 // will not happen.

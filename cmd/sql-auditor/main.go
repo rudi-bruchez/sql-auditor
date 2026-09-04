@@ -129,12 +129,12 @@ func defineFlags(cmd string) *cliFlags {
 	_ = fs.Bool("debug", false,
 		"print a timeline of what the program is doing on stderr, stamped with the "+
 			"time since process start")
-	// A union of the seven opt-ins below, and deliberately not a mode: it
-	// turns them on and changes nothing else. Six of them are disclosure
+	// A union of the nine opt-ins below, and deliberately not a mode: it
+	// turns them on and changes nothing else. Eight of them are disclosure
 	// decisions and one is a cost decision, so what this asks for is the
 	// widest archive the tool can produce — which is the right thing on an
 	// instance you have a mandate for, and the wrong thing everywhere else.
-	// MANIFEST.txt is unchanged by it: the archive keeps recording the seven
+	// MANIFEST.txt is unchanged by it: the archive keeps recording the nine
 	// individually, because what was collected is the fact worth keeping and
 	// how few words it took to ask is not.
 	fs.BoolVar(&c.all, "all", false,
@@ -916,11 +916,11 @@ Options (check, collect):
   --queries-dir DIR           run a corpus from disk instead of the embedded one
   --output-dir DIR            where to write results
   --keep                      keep an existing same-day run folder
-  --all                       turn on all seven options below at once: the six
+  --all                       turn on all nine options below at once: the eight
                               that are off for disclosure and the one that is
                               off for cost. The widest archive this tool can
                               produce. It changes nothing else, and MANIFEST.txt
-                              still records the seven individually.
+                              still records the nine individually.
   --grant-script FILE         check only. After probing permissions, write the
                               T-SQL that grants exactly the ones found missing,
                               for the login the server reports, with the reason

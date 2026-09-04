@@ -61,12 +61,13 @@ sql-auditor queries export --to ./queries-to-review
 The corpus is 62 files. The archive records the SHA-256 of the exact corpus that
 was used, so a run can be tied to the questions it asked.
 
-### Seven files are opt-in
+### Nine files are opt-in
 
 They produce nothing unless you ask for them:
 
 | File | Option |
 | --- | --- |
+| `10.system/045.default-trace-detail.sql` | `--include-default-trace` |
 | `10.system/052.session-text.sql` | `--include-session-text` |
 | `10.system/061.deadlock-graphs.sql` | `--include-deadlock-graphs` |
 | `10.system/063.blocked-process-reports.sql` | `--include-blocked-process-reports` |
@@ -74,10 +75,18 @@ They produce nothing unless you ask for them:
 | `70.schema/080.modules.sql` | `--include-object-definitions` |
 | `80.workload/021.query-store-detail.sql` | `--query-store-detail` |
 | `80.workload/022.query-store-profiled.sql` | `--query-store-plan-stats` |
+| `80.workload/041.plan-cache-plans.sql` | `--plan-cache-plans` |
 
-Six of the seven change what kind of data ends up in the archive and have
+Eight of the nine change what kind of data ends up in the archive and have
 sections of their own below. `--estimate-compression` is opt-in for cost rather
 than for disclosure.
+
+`--plan-cache-plans` deserves reading twice before it is used on an instance you
+do not own. It keeps execution plans from the cache when the Query Store is off,
+and the statement text it resolves comes from the cache, where it can carry the
+literal parameter values a statement was written with — Query Store text is
+parameterised and this is not. It has its own paragraph in `MANIFEST.txt` for
+that reason.
 
 ### It collects; it does not judge
 

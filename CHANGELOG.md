@@ -127,6 +127,30 @@ unasked by default.
 
 ### Fixed
 
+- **A database name could plant executable T-SQL in the grant script.**
+  `--grant-script` interpolated server-reported names raw into `-- ` comment
+  lines, and a SQL Server identifier may contain a newline — so a database
+  called `y⏎GRANT CONTROL SERVER TO [x];⏎-- ` left live T-SQL in a file whose
+  own header tells the reader to run it as sysadmin. The principals differ:
+  creating that name needs `dbcreator`, running the script needs sysadmin, and
+  the payload rode on the tool's own least-privilege recommendation. The login
+  was printed raw inside the `/* */` header the same way, where `*/` closes the
+  block. Every string reaching a comment now goes through `commentSafe`, which
+  is the comment-side counterpart of `quoteIdent`. The statements themselves
+  were never affected: `quoteIdent` keeps a name with newlines inside one
+  bracketed identifier. Found by an external reviewer during an adversarial harm
+  review, verified end-to-end, and covered by a test proven by mutation.
+- **`--all` turned on nine opt-ins while the documentation promised seven.**
+  `README.md`, `--help` and the wizard all said seven after `--include-default-trace`
+  and `--plan-cache-plans` were added. The two missing were the two heaviest:
+  cached statement text can carry the literal parameter values a statement was
+  written with, where Query Store text is parameterised. Screen 3 of the wizard
+  now offers all nine — it could not turn those two on at all — the counts are
+  corrected everywhere, and `docs/dba-guide.md` gains the two rows plus a
+  paragraph on what the plan cache discloses. A new test compares `flagOrder`
+  against `collect.KnownFlags`, so the wizard can no longer fall behind the
+  command line in silence.
+
 - **`90.availability/043.replication-subscriber.sql` reported nothing on a
   subscriber.** It gated on `sys.databases.is_subscribed`, which reads 0 on a
   push subscriber whose database carries the apply procedures the snapshot

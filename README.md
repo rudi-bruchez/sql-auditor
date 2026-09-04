@@ -319,7 +319,7 @@ Exactly three cases.
 
 | Flag | Meaning |
 | --- | --- |
-| `--all` | turn on all seven options below at once: the six off for disclosure and the one off for cost. See the note under these tables |
+| `--all` | turn on all nine options below at once: the eight off for disclosure and the one off for cost. See the note under these tables |
 | `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
 | `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
 | `--include-deadlock-graphs` | also collect the deadlock reports `system_health` still holds, one `.xdl` file each |
@@ -341,13 +341,13 @@ Exactly three cases.
 ### `--all` asks for the widest archive this tool can produce
 
 It is the one option that is a convenience rather than a decision, and it should
-be read as what it is: six of the seven collectors it turns on are off by
+be read as what it is: eight of the nine collectors it turns on are off by
 default because of what they put in the archive, not because of what they cost.
 
 That is the right thing on an instance you have a written mandate for and the
 wrong thing everywhere else, and the tool will not ask you which it is.
 
-It changes nothing else: no confirmation, no extra collectors beyond the seven,
+It changes nothing else: no confirmation, no extra collectors beyond the nine,
 and `MANIFEST.txt` still discloses them one by one, because what the archive
 contains is the fact that matters and how briefly it was requested is not.
 
