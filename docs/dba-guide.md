@@ -572,6 +572,48 @@ On a large
 estate that is the difference between an audit that takes a minute and an
 afternoon of tempdb pressure.
 
+### Three limits that are known and not fixed
+
+Named here because a limit an operator can plan around is worth more than a
+limit nobody wrote down. Each was raised in the adversarial harm review of
+4 September 2026 and each was left alone on purpose.
+
+**A collector that fails keeps its temporary tables for the rest of the run.**
+The run holds one connection. `ResetSession` rolls back a leaked transaction
+and returns to the default database between units, and the connection is only
+replaced when it is *dead* — so a collector that fails on its own merits, a
+timeout or a missing permission, leaves its `#temp` tables in tempdb until the
+run ends. `10.system/040.error-log.sql` is the one that matters: it copies the
+whole current error log into `#log` before summarising it, so a timeout there
+can park hundreds of megabytes of tempdb for the rest of the collection.
+Recycling the connection after every failed unit would fix it and would also
+make every ordinary permission refusal cost a reconnect, which is the trade
+that has not been made. If it bites, the run is bounded: tempdb is released
+when the tool exits.
+
+**Result sets are materialised in memory before the size budget is consulted.**
+The 256 MB run budget protects the disk and never the RAM of the machine the
+tool runs on. Within the shipped corpus the `TOP` caps make this theoretical;
+it becomes reachable through `QUERY_STORE_TOP`, which is deliberately uncapped,
+and through a `--queries-dir` corpus with no caps of its own.
+
+**The run folder is named from the server's own answer.** A same-day rerun
+replaces the previous run of the same name, and that name is what
+`SERVERPROPERTY` reported — not something this tool can authenticate. Two
+cloned instances that kept one name will therefore replace each other's
+archives with no attacker involved, and under
+`SQL_TRUST_SERVER_CERTIFICATE=true` anything answering on the address can claim
+the name. Validating the certificate is what closes the second case, which is
+why the default was changed and why `MANIFEST.txt` now records whether it
+happened. Use `--keep`, or a different `OUTPUT_DIR`, when two instances
+legitimately share a name.
+
+One deliberate inconsistency belongs beside them: `--grant-script` overwrites
+its destination, where `env init` and `queries export` refuse and want
+`--force`. The grant script is this tool's deterministic output on a path the
+operator has just named, and `check --grant-script` is meant to be re-run until
+every line comes back `ok`; `env init` writes a file that will hold a password.
+
 ### Where you leave it matters as much as where you send it
 
 The run folder and the `.zip` are created for you alone: mode `0700` on the
