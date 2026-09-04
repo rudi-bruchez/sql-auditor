@@ -19,10 +19,14 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
-The corpus goes from 62 collectors to 71. Every one of them closes a gap in
-[docs/collection-gaps-spec.md](docs/collection-gaps-spec.md), and the bar for
-entry there is that an audit needed the answer, could not find it in an
-archive, and had to go back to the client for it.
+The corpus goes from 62 collectors to 75, and every gap
+[docs/collection-gaps-spec.md](docs/collection-gaps-spec.md) records is closed
+except three it deliberately leaves open. The bar for entry there is that an
+audit needed the answer, could not find it in an archive, and had to go back to
+the client for it.
+
+Two new opt-ins and one new permission come with that, and all three are off or
+unasked by default.
 
 ### Added
 
@@ -65,7 +69,30 @@ archive, and had to go back to the client for it.
   by hand — and with nonclustered index copying off, a reinitialisation drops
   every index on the subscriber. That answer had to be got by mail.
 
+- **Database principals, and who is told when the instance breaks**
+  (`40.security/020.database-principals.sql` and `50.agent/030.alerts.sql`).
+  The security section of a report could only speak about server-level sysadmin
+  membership, and nothing said whether an instance raises an alert on a
+  severity 19 to 25 error or an I/O error — which is not the same finding as
+  raising one nobody is notified of. The alerts collector needs a permission
+  neither `MSDB READ` nor `SQLAgentReaderRole` grants, so **`AGENT ALERTS` is a
+  new capability**: it is probed, it appears in `check`, the grant script writes
+  it, and `docs/dba-guide.md` lists it. No operator address is collected, only
+  whether one is configured.
+- **Execution plans when the Query Store is off** (`--plan-cache-plans`). Until
+  now an instance without the Query Store contributed no plan at all, and the
+  analysis had aggregate counters with no way to see a plan shape. This keeps up
+  to a hundred plans from the cache as `.sqlplan` files with an index, chosen by
+  four definitions of mattering. Off by default: a plan carries compiled
+  parameter values and literal predicates, and it discloses that under its own
+  entry in `MANIFEST.txt` rather than borrowing the Query Store's.
+- **The retained rows of the default trace** (`--include-default-trace`),
+  alongside the aggregate that now always runs. Off by default, and disclosed
+  under the same wording the error log collector uses, because that is what the
+  rows carry.
+
 ### Changed
+
 
 - **`20.databases/023.log-vlf.sql` no longer carries a version floor.** The
   condition was never which build this is but whether `sys.dm_db_log_info`

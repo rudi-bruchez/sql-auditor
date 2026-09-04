@@ -112,6 +112,13 @@ type WriteResult struct {
 	// would otherwise have MANIFEST.txt disclose deadlock reports the archive
 	// does not hold, under a flag the operator never passed.
 	ReportFiles int
+	// CachedPlanFiles counts plans written out of the plan cache. A sixth
+	// counter, and not a reuse of PlanFiles: PlanFiles latches
+	// Collected.QueryStoreDetail, so a run that found the Query Store off and
+	// fell back to the cache would otherwise have MANIFEST.txt announce Query
+	// Store text and per-interval statistics the archive does not hold — under a
+	// flag the operator never passed.
+	CachedPlanFiles int
 }
 
 // ScriptWriter turns materialised result sets into files.
@@ -136,6 +143,8 @@ func writerFor(name string) ScriptWriter {
 		return writeDeadlockGraphs
 	case "blocked-process-reports":
 		return writeBlockedProcessReports
+	case "plan-cache-plans":
+		return writePlanCachePlans
 	}
 	return nil
 }

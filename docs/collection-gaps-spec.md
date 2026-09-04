@@ -1,7 +1,10 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** specification, except section 8, which is implemented.
+**Status:** implemented, except sections 10 bis, 12 and 18, which are open.
+Sections 1 to 8, 10 and 13 to 17 are built and in the corpus; each closed
+section keeps its argument, because what a gap cost is the only thing that
+stops it being rebuilt or its guard being chosen wrongly a second time.
 **Revised:** 3 September 2026, after a five-reader external review. Every claim
 below that says "measured" was measured on SQL Server 2022 (16.0.4265.3,
 Developer, on Linux) unless another version is named. Four of the five
@@ -61,7 +64,7 @@ twice. Nothing specified here creates a `#temp` table.
 
 ---
 
-## 1. VLF count below SQL Server 2016 SP2
+## 1. VLF count below SQL Server 2016 SP2 — closed
 
 slug: vlf-count
 
@@ -273,7 +276,7 @@ because nothing ran". `@source`, `@err` and `@msg` say all three.
 
 ---
 
-## 2. The operating system and the host
+## 2. The operating system and the host — closed
 
 slug: os-and-host
 
@@ -336,7 +339,7 @@ supportability still needs the build number from somewhere else.
 
 ---
 
-## 3. Transport, authentication scheme and encryption in transit
+## 3. Transport, authentication scheme and encryption in transit — closed
 
 slug: transport-and-encryption
 
@@ -418,7 +421,7 @@ client.
 
 ---
 
-## 4. Execution plans when the Query Store is off
+## 4. Execution plans when the Query Store is off — closed
 
 slug: plans-without-query-store
 
@@ -516,7 +519,34 @@ cap is what makes the collector usable.
 
 ---
 
-## 5. Is SQL Server alone on this machine?
+**Closed by `80.workload/041.plan-cache-plans.sql` and the
+`plan-cache-plans` writer.** The three costs this section priced are all paid:
+`plan_cache_plans` is in `KnownFlags` with a `--plan-cache-plans` BoolVar,
+`plan-cache-plans` is in `KnownWriters` at instance scope with the reason
+recorded beside it, and the writer emits one `.sqlplan` per plan plus an
+`_index.json`.
+
+The deduplication is on `plan_handle`, as this section corrected, and the
+statistics are therefore SUMMED across the statements sharing it — with the
+statement count projected, so a reader knows how many rows went into them. The
+open question this section left — whether statement-level plans through
+`sys.dm_exec_text_query_plan` are worth the shape change — is answered no for
+now, and the reason is in the file: what a reader needs is the plan shape, and
+the heaviest statement's text is enough to attribute the summed numbers to
+something readable.
+
+The disclosure debt is paid in full rather than worked around. `PlanCachePlans`
+is its own field in `CollectedKinds` and its own paragraph in `MANIFEST.txt`,
+and `WriteResult` gained a sixth counter rather than reusing `PlanFiles` —
+which latches `QueryStoreDetail`, so a run that fell back to the cache would
+otherwise have announced Query Store text and per-interval statistics the
+archive does not hold. The `readsSessionText` defect is fixed by a map,
+`textDisclosedByOwnFlag`, that both the run and the corpus test read: a
+collector whose own flag authorises the read and carries its own disclosure is
+exempt from the session-text warning, and nothing else is. Making the test read
+the same map is what stops the corpus gating one way and disclosing another.
+
+## 5. Is SQL Server alone on this machine? — closed
 
 slug: co-located-processes
 
@@ -661,7 +691,7 @@ any of the above.
 
 ---
 
-## 6. The default trace — who changed what, and when
+## 6. The default trace — who changed what, and when — closed
 
 slug: default-trace
 
@@ -787,7 +817,23 @@ Three cautions belong in the files:
 
 ---
 
-## 7. Enterprise features persisted in a database
+**Closed by two files, as this section said it had to be.**
+`10.system/044.default-trace.sql` is the aggregate and is ungated;
+`10.system/045.default-trace-detail.sql` carries `@requires_flag: default_trace`
+and the retained rows. The cost this section omitted and section 4 stated is
+paid: `default_trace` is in `KnownFlags`, `--include-default-trace` is a
+BoolVar with help text, and `--all` now carries eight opt-ins.
+
+Two things were settled while building it. The detail file declares
+`@discloses: error_log` rather than a new disclosure value — what a security
+officer reads should not depend on which collector found the message, and the
+existing wording already covers logins, databases, file paths and client
+addresses. And `TextData` is projected for class 22 alone, with the narrowing
+done INSIDE the deferred batch: filtering on the way out would have staged the
+other classes' text first, which is a disclosure made and then discarded rather
+than never made.
+
+## 7. Enterprise features persisted in a database — closed
 
 slug: persisted-sku-features
 
@@ -995,7 +1041,7 @@ step, not here.
 
 ---
 
-## 10. The other ring buffers
+## 10. The other ring buffers — closed
 
 slug: other-ring-buffers
 

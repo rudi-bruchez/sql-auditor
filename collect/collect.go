@@ -109,6 +109,22 @@ const FlagBlockedProcessReports = "blocked_process_reports"
 // disclosure flag was passed would be an aggregate nobody ever gets.
 const FlagDefaultTrace = "default_trace"
 
+// FlagPlanCachePlans gates the export of execution plans out of the plan cache.
+//
+// A sixth decision, and it is neither of the two plan decisions that already
+// exist. --query-store-detail exports what the Query Store recorded, which is a
+// feature somebody turned on; this reads the cache every instance has, and it
+// is the only way an instance WITHOUT the Query Store ever gets a plan into an
+// archive at all.
+//
+// What it discloses is a third thing again. Query Store text is parameterised;
+// text resolved from the cache can carry the literal values a statement was
+// written with, and a plan carries the compiled parameter values, the literal
+// predicates and the name of every object it touches. So it has its own kind in
+// CollectedKinds and its own paragraph in MANIFEST.txt rather than borrowing
+// either of the others.
+const FlagPlanCachePlans = "plan_cache_plans"
+
 // FlagQueryStorePlanStats gates the search for the last profiled plan of each
 // extracted query.
 //
@@ -598,11 +614,36 @@ func collectsSessionText(plan []plannedScript) []string {
 		if p.Skip != "" || p.Script.LintError != "" {
 			continue
 		}
+		// A collector whose own flag authorises reading the text discloses
+		// through its own kind and its own paragraph, so it must not be
+		// reported here. 041.plan-cache-plans.sql reads sys.dm_exec_sql_text to
+		// attribute a plan's summed statistics to a statement a reader can
+		// read, and without this it would do two wrong things at once: latch
+		// Collected.SessionText, which claims the text came from live sessions
+		// rather than from the cache, and warn on every run that the file
+		// "should have declared --include-session-text" — a flag that is not
+		// the one gating it.
+		if textDisclosedByOwnFlag[p.Script.RequiresFlag] {
+			continue
+		}
 		if p.Script.RequiresFlag == FlagIncludeSessionText || readsSessionText(p.Script) {
 			by = append(by, p.Script.Path)
 		}
 	}
 	return by
+}
+
+// textDisclosedByOwnFlag names the @requires_flag values that both authorise a
+// collector to read sys.dm_exec_sql_text AND carry their own disclosure for what
+// it finds. It is a map rather than a comparison so that the next such collector
+// is one line here instead of a second special case in the loop above.
+//
+// It is deliberately NOT "any flag at all". A --queries-dir corpus whose file
+// reads the DMF under some unrelated flag still has to be reported: the point of
+// the check is that the archive's disclosure must not depend on a directive
+// nobody verified.
+var textDisclosedByOwnFlag = map[string]bool{
+	FlagPlanCachePlans: true,
 }
 
 // readsSessionText looks for the DMF that turns a plan handle into the
@@ -1164,6 +1205,13 @@ func discloseWrites(m *Manifest, rw *runWriter, s Script, res WriteResult) {
 	if res.PlanFiles > 0 || res.TextFiles > 0 {
 		m.Collected.QueryStoreDetail = true
 	}
+	// Same rule again, and its own counter: from the plans written, never from
+	// the flag passed. A run with the option on against an instance whose cache
+	// was emptied by a restart minutes earlier discloses nothing, because it
+	// collected nothing.
+	if res.CachedPlanFiles > 0 {
+		m.Collected.PlanCachePlans = true
+	}
 	// From the plan written, never from the flag passed: a run with the option
 	// on and nothing in the cache to match discloses nothing, because it
 	// collected nothing.
@@ -1205,6 +1253,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		"object_definitions":   fmt.Sprint(o.Flags[FlagObjectDefinitions]),
 		"deadlock_graphs":      fmt.Sprint(o.Flags[FlagDeadlockGraphs]),
 		"default_trace":        fmt.Sprint(o.Flags[FlagDefaultTrace]),
+		"plan_cache_plans":     fmt.Sprint(o.Flags[FlagPlanCachePlans]),
 
 		"query_store_detail":     fmt.Sprint(o.Flags[FlagQueryStoreDetail]),
 		"query_store_plan_stats": fmt.Sprint(o.Flags[FlagQueryStorePlanStats]),

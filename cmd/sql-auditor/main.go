@@ -94,7 +94,7 @@ type cliFlags struct {
 
 	sessionText, objectDefinitions              bool
 	deadlockGraphs, blockedProcessReports       bool
-	defaultTrace                                bool
+	defaultTrace, planCachePlans                bool
 	estimateCompression                         bool
 	queryStoreDetail, queryStorePlanStats       bool
 	queryStoreDays, queryStoreTop               int
@@ -179,6 +179,10 @@ func defineFlags(cmd string) *cliFlags {
 	fs.BoolVar(&c.blockedProcessReports, "include-blocked-process-reports", false,
 		"also collect the blocked process reports captured by an Extended Events "+
 			"session, one .xml file each — these name both sessions and carry their SQL")
+	fs.BoolVar(&c.planCachePlans, "plan-cache-plans", false,
+		"also collect execution plans from the plan cache, one .sqlplan file each — "+
+			"the only way an instance without the Query Store contributes a plan, and "+
+			"a plan carries compiled parameter values and literal predicates")
 	fs.BoolVar(&c.defaultTrace, "include-default-trace", false,
 		"also collect the retained rows of the default trace, not only the aggregate — "+
 			"these name the login, host and database of each event and carry the text "+
@@ -436,6 +440,7 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 			collect.FlagDeadlockGraphs:        c.all || c.deadlockGraphs,
 			collect.FlagBlockedProcessReports: c.all || c.blockedProcessReports,
 			collect.FlagDefaultTrace:          c.all || c.defaultTrace,
+			collect.FlagPlanCachePlans:        c.all || c.planCachePlans,
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -942,6 +947,14 @@ Options (check, collect):
                               Off by default: a report carries the SQL of the
                               blocked session and of the one blocking it, and
                               reading it touches the server's file system.
+  --plan-cache-plans          also collect execution plans from the plan cache,
+                              one .sqlplan file each. This is the only way an
+                              instance without the Query Store gets a plan into
+                              the archive. Off by default: a plan carries
+                              compiled parameter values and literal predicates,
+                              and the statement text beside it comes from the
+                              cache rather than from a parameterised record.
+                              MANIFEST.txt discloses it when it is on.
   --include-default-trace     also collect the retained rows of the default
                               trace, not only the aggregate 044 always makes.
                               Off by default: the rows name the login, host and

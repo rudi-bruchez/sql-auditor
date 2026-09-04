@@ -466,8 +466,17 @@ func TestEmbeddedCorpusGatesSessionTextBehindTheFlag(t *testing.T) {
 		// dm_exec_sql_text is the source of verbatim user SQL. Anything
 		// reading it without the gate would make the default MANIFEST.txt
 		// untrue, which is the defect this whole split exists to prevent.
-		if readsSessionText(s) && s.RequiresFlag != FlagIncludeSessionText {
-			t.Errorf("%s reads dm_exec_sql_text without @requires_flag: %s", s.Path, FlagIncludeSessionText)
+		// A collector carrying its own text-disclosing flag is exempt, and only
+		// those named in textDisclosedByOwnFlag are: 041.plan-cache-plans.sql
+		// resolves a statement out of the cache so its summed statistics can be
+		// attributed to something readable, and it discloses that through its
+		// own kind and its own manifest paragraph. Reading the exemption from
+		// the same map the run uses is what stops the two from drifting into a
+		// corpus that gates one way and discloses another.
+		if readsSessionText(s) && s.RequiresFlag != FlagIncludeSessionText &&
+			!textDisclosedByOwnFlag[s.RequiresFlag] {
+			t.Errorf("%s reads dm_exec_sql_text without @requires_flag: %s or a flag that discloses it itself",
+				s.Path, FlagIncludeSessionText)
 		}
 		// And the converse: the gated file must actually be the one reading
 		// it, or the gate guards nothing.

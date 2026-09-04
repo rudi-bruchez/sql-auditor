@@ -161,6 +161,14 @@ type CollectedKinds struct {
 	// system_health ring buffer rather than a live session.
 	DeadlockGraphs bool `json:"deadlock_graphs"`
 
+	// PlanCachePlans marks that execution plans taken from the plan cache are
+	// in the archive, with the statement text resolved from it. It is a third
+	// plan disclosure and not a widening of either of the others: the Query
+	// Store's text is parameterised, while text resolved from the cache can
+	// carry the literal values a statement was written with — and this is the
+	// only plan an instance without the Query Store ever contributes.
+	PlanCachePlans bool `json:"plan_cache_plans"`
+
 	// BlockedProcessReports marks that blocked process reports are in the
 	// archive. Like a deadlock graph it carries the SQL of the sessions
 	// involved — including the blocker's, which is a session doing nothing
@@ -481,6 +489,18 @@ What is in here that names things:
 		fmt.Fprintln(b, "    verbatim — which can hold literals copied out of application")
 		fmt.Fprintln(b, "    tables. Nothing on the instance was modified or cleared to read")
 		fmt.Fprintln(b, "    them. Collected because --include-deadlock-graphs was passed.")
+	}
+	if m.Collected.PlanCachePlans {
+		fmt.Fprintln(b, "  - Execution plans taken from this instance's plan cache, one")
+		fmt.Fprintln(b, "    .sqlplan file each, with the text of the heaviest statement behind")
+		fmt.Fprintln(b, "    each one. A plan carries the compiled parameter values, the")
+		fmt.Fprintln(b, "    literal predicates and the name of every object it touches, and")
+		fmt.Fprintln(b, "    text resolved from the cache can hold the literal values a")
+		fmt.Fprintln(b, "    statement was written with, where Query Store text is")
+		fmt.Fprintln(b, "    parameterised. The cache belongs to the whole instance, not only")
+		fmt.Fprintln(b, "    the databases listed above. Nothing was compiled or executed to")
+		fmt.Fprintln(b, "    obtain them: only plans already in the cache were read.")
+		fmt.Fprintln(b, "    Collected because --plan-cache-plans was passed.")
 	}
 	if m.Collected.BlockedProcessReports {
 		fmt.Fprintln(b, "  - The blocked process reports captured by an Extended Events session")

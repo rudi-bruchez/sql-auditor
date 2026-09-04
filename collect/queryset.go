@@ -118,6 +118,7 @@ var KnownFlags = map[string]string{
 	"deadlock_graphs":         "--include-deadlock-graphs",
 	"blocked_process_reports": "--include-blocked-process-reports",
 	"default_trace":           "--include-default-trace",
+	"plan_cache_plans":        "--plan-cache-plans",
 }
 
 // KnownWriters is the closed set of names @writer accepts, mapped to the
@@ -155,6 +156,11 @@ var KnownWriters = map[string]WriterSpec{
 		Description: "one .xdl file per deadlock system_health still holds",
 		Scope:       ScopeInstance,
 		ScopeReason: "the system_health ring buffer belongs to the instance, so a per-database run would collect the same graphs once per database",
+	},
+	"plan-cache-plans": {
+		Description: "one .sqlplan file per plan kept from the plan cache, for instances with no Query Store",
+		Scope:       ScopeInstance,
+		ScopeReason: "the plan cache is an instance-wide structure with no database_id, so a per-database run would sort the whole cache once per database and write largely the same plans into each",
 	},
 	"blocked-process-reports": {
 		Description: "one .xml file per blocked process report, read from the capturing session's .xel files",
