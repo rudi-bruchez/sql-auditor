@@ -88,9 +88,17 @@
 -- the application is repeating what somebody said.
 --
 -- The record shape is undocumented — Microsoft publishes the schema of no ring
--- buffer — so it is asserted from observation, and every element is read with
--- value() and an explicit type so that a renamed element yields a NULL in one
--- column instead of shifting every field silently.
+-- buffer — so it is asserted from observation, and every element is read by an
+-- explicit XPath so that a renamed element yields a NULL in one column instead
+-- of shifting every field silently.
+--
+-- THE TWO PERCENTAGES COME OUT AS TEXT AND ARE CONVERTED AFTERWARDS.
+-- 048.security-errors.sql asked value() for an int on a field whose name
+-- promised a number, and the first client instance it met answered with a
+-- symbolic value, which raised and took the whole batch. Asking value() for a
+-- numeric type turns a surprise into an ERROR; TRY_CONVERT turns it into a
+-- NULL, which then flows through the residue arithmetic below and leaves one
+-- sample empty instead of leaving the archive with nothing at all.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -169,8 +177,10 @@ FROM (
                END)                                                 AS [max_other_processes_pct]
     FROM (
         SELECT DATEADD(second, -((@ticks - rb.timestamp) / 1000), GETDATE())            AS when_local,
-               x.value('(//SystemHealth/ProcessUtilization)[1]', 'int')                 AS process_utilization,
-               x.value('(//SystemHealth/SystemIdle)[1]', 'int')                         AS system_idle
+               TRY_CONVERT(int, x.value('(//SystemHealth/ProcessUtilization)[1]', 'varchar(64)'))
+                                                                                        AS process_utilization,
+               TRY_CONVERT(int, x.value('(//SystemHealth/SystemIdle)[1]', 'varchar(64)'))
+                                                                                        AS system_idle
         FROM sys.dm_os_ring_buffers AS rb
         CROSS APPLY (SELECT CAST(rb.record AS xml)) AS q(x)
         WHERE rb.ring_buffer_type = 'RING_BUFFER_SCHEDULER_MONITOR'
@@ -199,8 +209,10 @@ SELECT r.when_local                                                 AS [sampled_
        END                                                          AS [other_processes_pct]
 FROM (
     SELECT DATEADD(second, -((@ticks - rb.timestamp) / 1000), GETDATE())                AS when_local,
-           x.value('(//SystemHealth/ProcessUtilization)[1]', 'int')                     AS process_utilization,
-           x.value('(//SystemHealth/SystemIdle)[1]', 'int')                             AS system_idle
+           TRY_CONVERT(int, x.value('(//SystemHealth/ProcessUtilization)[1]', 'varchar(64)'))
+                                                                                        AS process_utilization,
+           TRY_CONVERT(int, x.value('(//SystemHealth/SystemIdle)[1]', 'varchar(64)'))
+                                                                                        AS system_idle
     FROM sys.dm_os_ring_buffers AS rb
     CROSS APPLY (SELECT CAST(rb.record AS xml)) AS q(x)
     WHERE rb.ring_buffer_type = 'RING_BUFFER_SCHEDULER_MONITOR'

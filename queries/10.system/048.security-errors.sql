@@ -17,21 +17,37 @@
 -- 042.connection-security.sql it closes the loop: NTLM where Kerberos was
 -- expected is the symptom, these error codes are the cause.
 --
--- ERRORCODE IS A HEXADECIMAL STRING AND NOT A NUMBER. A live record carries
--- 0x139F, and CAST('0x139F' AS int) fails with Msg 245 — measured. It is
--- projected as text, verbatim: a reader who wants the decimal can convert
--- through varbinary, and the archive keeps the form the engine wrote, which is
--- also the form every search engine will match.
+-- NOT ONE OF THESE FIELDS IS A NUMBER, AND THE FIRST VERSION ONLY KNEW IT
+-- ABOUT ONE OF THEM. ErrorCode is a hexadecimal string: a live record carries
+-- 0x139F, and CAST('0x139F' AS int) fails with Msg 245 — measured. That much
+-- was right from the start.
+--
+-- SQLErrorCode and SQLErrorState were typed as int beside it, by assuming from
+-- their names, and on the first client instance this file ever ran against one
+-- of them carried the symbolic value 'x_cse_Success'. value() with an explicit
+-- int raised on it, which is a batch-level failure: the whole collector
+-- returned nothing, on an instance where it had something to say.
+--
+-- So all three are projected as text, verbatim. A reader who wants a decimal
+-- can convert through varbinary; the archive keeps the form the engine wrote,
+-- which is also the form every search engine will match. The lesson is wider
+-- than these two columns and is written into the paragraph below: the shape of
+-- an undocumented buffer is not knowable from a field's name, so nothing here
+-- asks the parser to assert a type the record never promised.
 --
 -- AGGREGATE, NOT A DUMP. The records carry a session id and no user name, so a
 -- per-SPID listing would add a number nobody can resolve to a person while the
 -- aggregate already answers the question.
 --
 -- WHAT IS DECODED HERE IS UNSUPPORTED, the same caveat 047.resource-pressure
--- carries: Microsoft publishes the record schema of no ring buffer, so the
--- shape is asserted from observation and every element is read with value()
--- and an explicit type, so that a renamed element yields a NULL in one column
--- rather than shifting every field silently.
+-- carries: Microsoft publishes the record schema of no ring buffer. So the
+-- shape is asserted from observation, and the contract is that a renamed OR
+-- RETYPED element yields a NULL in one column rather than taking the batch
+-- down. An explicit numeric type in value() breaks that contract, because it
+-- converts a surprise into an error instead of into a NULL — which is what
+-- 'x_cse_Success' proved. Text out of the buffer, and TRY_CONVERT afterwards
+-- wherever a number is genuinely needed, is the shape that keeps the
+-- promise.
 --
 -- Two constraints are inherited from 041.connectivity.sql: the ms_ticks
 -- arithmetic is done in SECONDS, because DATEADD's increment argument is an
@@ -70,8 +86,8 @@ FROM (
            x.value('(//Error/APIName)[1]', 'varchar(60)')                       AS api_name,
            x.value('(//Error/CallingAPIName)[1]', 'varchar(60)')                AS calling_api_name,
            x.value('(//Error/ErrorCode)[1]', 'varchar(32)')                     AS error_code,
-           x.value('(//Error/SQLErrorCode)[1]', 'int')                          AS sql_error_code,
-           x.value('(//Error/SQLErrorState)[1]', 'int')                         AS sql_error_state
+           x.value('(//Error/SQLErrorCode)[1]', 'varchar(64)')                  AS sql_error_code,
+           x.value('(//Error/SQLErrorState)[1]', 'varchar(64)')                 AS sql_error_state
     FROM sys.dm_os_ring_buffers AS rb
     CROSS APPLY (SELECT CAST(rb.record AS xml)) AS q(x)
     WHERE rb.ring_buffer_type = 'RING_BUFFER_SECURITY_ERROR'

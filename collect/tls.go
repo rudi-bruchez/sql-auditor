@@ -39,11 +39,24 @@ func certificateAdvice(cfg *Config, err error) string {
 		!strings.Contains(msg, "tls handshake") {
 		return ""
 	}
-	// Wrapped to the width of the paragraph below, because it is substituted
-	// mid-line and a longer phrase would push that line past the rest.
-	who := "the SQL login and its\npassword"
+	// The closing paragraph is written out per case rather than substituted
+	// into, and that is a fix rather than a preference. The first version
+	// inserted the phrase mid-sentence and pre-wrapped it with a newline of its
+	// own, aiming at the width of the paragraph above. No single wrapping suits
+	// both phrases, so the most important message this tool prints ended in
+	// three ragged lines — measured at 38, 26 and 33 columns against the 74 the
+	// rest of it keeps. Someone meeting a security decision for the first time
+	// should not be reading something that looks broken.
+	exposed := `in your .env — which encrypts the connection and then accepts any
+certificate at all, leaving the SQL login and its password readable by
+anything that can answer for that address.`
+	// No password crosses the wire under Windows authentication, so naming one
+	// would overstate the cost and invite the reader to discount the whole
+	// warning. What is exposed there is everything the collection carries back.
 	if cfg.Integrated || cfg.User == "" {
-		who = "everything this session\nsends"
+		exposed = `in your .env — which encrypts the connection and then accepts any
+certificate at all, leaving everything this session sends readable by
+anything that can answer for that address.`
 	}
 	return fmt.Sprintf(`the connection was encrypted but this machine does not trust the certificate %s presented.
 
@@ -57,7 +70,5 @@ if you know the network path between here and that instance, set
 
     SQL_TRUST_SERVER_CERTIFICATE=true
 
-in your .env — which encrypts the connection and then accepts any certificate
-at all, leaving %s readable by anything
-that can answer for that address.`, cfg.Server, who)
+%s`, cfg.Server, exposed)
 }

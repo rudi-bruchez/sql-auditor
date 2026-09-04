@@ -117,9 +117,13 @@ SELECT e.error_number                                             AS [error_numb
        MAX(e.when_local)                                          AS [last_seen]
 FROM (
     SELECT DATEADD(second, -((@ticks - rb.timestamp) / 1000), GETDATE())      AS when_local,
-           x.value('(//Exception/Error)[1]',    'int')                        AS error_number,
-           x.value('(//Exception/Severity)[1]', 'int')                        AS severity,
-           x.value('(//Exception/State)[1]',    'int')                        AS state
+           /* Text out, TRY_CONVERT after: an explicit numeric type in value()
+              turns an unexpected symbolic value into a batch-level error rather
+              than into the NULL this decode promises. Measured the hard way in
+              048.security-errors.sql. */
+           TRY_CONVERT(int, x.value('(//Exception/Error)[1]',    'varchar(64)')) AS error_number,
+           TRY_CONVERT(int, x.value('(//Exception/Severity)[1]', 'varchar(64)')) AS severity,
+           TRY_CONVERT(int, x.value('(//Exception/State)[1]',    'varchar(64)')) AS state
     FROM sys.dm_os_ring_buffers AS rb
     CROSS APPLY (SELECT CAST(rb.record AS xml)) AS r(x)
     WHERE rb.ring_buffer_type = 'RING_BUFFER_EXCEPTION'

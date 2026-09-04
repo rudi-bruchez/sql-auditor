@@ -21,8 +21,17 @@
 --
 -- THE NODE ELEMENT IS NodeId AND NOT Node, and that is not a detail. An XPath
 -- on the wrong name returns NULL rather than failing, so the mistake ships and
--- produces a column of nulls nobody questions. Every element below is read
--- with value() and an explicit type for the same reason.
+-- produces a column of nulls nobody questions.
+--
+-- THE VALUES COME OUT AS TEXT AND ARE CONVERTED AFTERWARDS, and that is a
+-- correction paid for elsewhere. 048.security-errors.sql asked value() for an
+-- int on a field whose name promised a number, and the first client instance it
+-- ran against answered 'x_cse_Success' — a symbolic value, in an undocumented
+-- record, which raised and took the whole collector's batch with it. An
+-- explicit numeric type converts a surprise into an ERROR; TRY_CONVERT converts
+-- it into a NULL, which is the contract this file claims two paragraphs below.
+-- These four are numbers on every record seen so far, and that is exactly the
+-- evidence the other file had too.
 --
 -- WHAT IS DECODED HERE IS UNSUPPORTED. Microsoft documents
 -- sys.dm_os_ring_buffers as "identified for informational purposes only, not
@@ -75,10 +84,14 @@ SELECT n.notification                                               AS [notifica
 FROM (
     SELECT DATEADD(second, -((@ticks - rb.timestamp) / 1000), GETDATE())        AS when_local,
            x.value('(//ResourceMonitor/Notification)[1]', 'varchar(60)')        AS notification,
-           x.value('(//ResourceMonitor/NodeId)[1]', 'int')                      AS node_id,
-           x.value('(//ResourceMonitor/IndicatorsProcess)[1]', 'int')           AS indicators_process,
-           x.value('(//ResourceMonitor/IndicatorsSystem)[1]', 'int')            AS indicators_system,
-           x.value('(//ResourceMonitor/IndicatorsPool)[1]', 'int')              AS indicators_pool
+           TRY_CONVERT(int, x.value('(//ResourceMonitor/NodeId)[1]', 'varchar(64)'))
+                                                                                AS node_id,
+           TRY_CONVERT(int, x.value('(//ResourceMonitor/IndicatorsProcess)[1]', 'varchar(64)'))
+                                                                                AS indicators_process,
+           TRY_CONVERT(int, x.value('(//ResourceMonitor/IndicatorsSystem)[1]', 'varchar(64)'))
+                                                                                AS indicators_system,
+           TRY_CONVERT(int, x.value('(//ResourceMonitor/IndicatorsPool)[1]', 'varchar(64)'))
+                                                                                AS indicators_pool
     FROM sys.dm_os_ring_buffers AS rb
     CROSS APPLY (SELECT CAST(rb.record AS xml)) AS q(x)
     WHERE rb.ring_buffer_type = 'RING_BUFFER_RESOURCE_MONITOR'
