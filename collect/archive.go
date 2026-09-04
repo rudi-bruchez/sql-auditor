@@ -34,7 +34,10 @@ func Zip(runFolder, destZip string) (err error) {
 	} else if !fi.IsDir() {
 		return fmt.Errorf("%s is not a directory", runFolder)
 	}
-	out, err := os.Create(destZip)
+	// OpenFile rather than Create: Create is 0666 before umask and takes no
+	// argument to say otherwise, and this file is the whole run in the form
+	// that gets mailed onward.
+	out, err := os.OpenFile(destZip, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, filePerm)
 	if err != nil {
 		return err
 	}

@@ -135,3 +135,24 @@ func ResultRelativePath(dir, base, dbFolder string) string {
 func SelectedFolders(sel Selection) []DatabaseFolder {
 	return MarkWidened(ResolveDatabaseFolders(sel.Included), sel.Widened)
 }
+
+// The modes everything this package creates is made with. Named rather than
+// written out at each call site so the reason travels with them, and so
+// TestNothingThisPackageCreatesIsWorldReadable can accept exactly two values.
+//
+// 0700 and 0600, not 0755 and 0644: a run folder holds the estate's inventory
+// and the .zip beside it is the same content in the form that gets mailed
+// onward. It is the argument WriteEnvTemplate already makes for .env, applied
+// to the larger prize.
+//
+// One rule, no exemption list — the exported corpus is public SQL and would
+// survive being world-readable, but a rule with one exception is a rule
+// somebody has to remember.
+//
+// On Windows these bits are largely ignored: files there inherit the parent
+// directory's ACL, so what protects a run folder is where OUTPUT_DIR points
+// and who can read it. The guide says so.
+const (
+	dirPerm  = 0o700
+	filePerm = 0o600
+)

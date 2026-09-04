@@ -208,12 +208,12 @@ func (m *Manifest) WriteJSON(runFolder string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(runFolder, manifestJSONName), b, 0o644)
+	return os.WriteFile(filepath.Join(runFolder, manifestJSONName), b, filePerm)
 }
 
 // WriteHuman writes MANIFEST.txt into runFolder.
 func (m *Manifest) WriteHuman(runFolder string) error {
-	return os.WriteFile(filepath.Join(runFolder, manifestHumanName), []byte(m.Human()), 0o644)
+	return os.WriteFile(filepath.Join(runFolder, manifestHumanName), []byte(m.Human()), filePerm)
 }
 
 // marshalJSON renders the manifest with the configuration redacted. The
@@ -282,7 +282,7 @@ func WriteManifestWithFallback(m *Manifest, runFolder string, progress io.Writer
 		return "", lastResort(b, err, progress)
 	}
 	path := filepath.Join(dir, manifestJSONName)
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	if err := os.WriteFile(path, b, filePerm); err != nil {
 		return "", lastResort(b, err, progress)
 	}
 	if herr := m.WriteHuman(dir); herr != nil {

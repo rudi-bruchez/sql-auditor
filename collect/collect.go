@@ -211,7 +211,7 @@ func prepareRunFolder(path string, keep bool, now time.Time, progress io.Writer)
 			return nil, fmt.Errorf("--keep: %s already exists; this run would be written into "+
 				"the same place as an earlier one and the two would be indistinguishable", what)
 		}
-		return nil, os.MkdirAll(path, 0o755)
+		return nil, os.MkdirAll(path, dirPerm)
 	}
 	if warning := replacingRunWarning(path); warning != "" {
 		fmt.Fprintln(progress, warning)
@@ -254,7 +254,7 @@ func prepareRunFolder(path string, keep bool, now time.Time, progress io.Writer)
 	for _, p := range aside {
 		fmt.Fprintf(progress, "  kept at %s until this run has written its archive\n", p)
 	}
-	return aside, os.MkdirAll(path, 0o755)
+	return aside, os.MkdirAll(path, dirPerm)
 }
 
 func supersededNameTaken(dest string) bool {
@@ -366,7 +366,7 @@ func outputWritable(dir string) bool {
 // on a normal machine, and passes every assertion about the return value while
 // testing nothing about the output directory at all.
 func writeProbe(dir string) (string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return "", err
 	}
 	f, err := os.CreateTemp(dir, ".sql-auditor-write-probe-*")
@@ -401,16 +401,16 @@ func ExportQueries(corpus fs.FS, root, dest string) error {
 		}
 		target := filepath.Join(dest, filepath.FromSlash(rel))
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
+			return os.MkdirAll(target, dirPerm)
 		}
 		b, err := fs.ReadFile(corpus, p)
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), dirPerm); err != nil {
 			return err
 		}
-		return os.WriteFile(target, b, 0o644)
+		return os.WriteFile(target, b, filePerm)
 	})
 }
 
@@ -1183,7 +1183,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 				stamp = started
 			}
 			dest = filepath.Join(o.Config.OutputDir, FailedRunFolderName(stamp))
-			_ = os.MkdirAll(dest, 0o755)
+			_ = os.MkdirAll(dest, dirPerm)
 		}
 		if _, err := WriteManifestWithFallback(m, dest, o.progress()); err != nil {
 			return code, err

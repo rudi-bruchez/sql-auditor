@@ -115,10 +115,10 @@ func (w *runWriter) write(rel string, payload []byte) (int, error) {
 // have to be added twice.
 func (w *runWriter) put(rel string, payload []byte) (int, error) {
 	full := filepath.Join(w.root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(full), dirPerm); err != nil {
 		return 0, fmt.Errorf("runWriter: creating directory for %s: %w", rel, err)
 	}
-	if err := os.WriteFile(full, payload, 0o644); err != nil {
+	if err := os.WriteFile(full, payload, filePerm); err != nil {
 		return 0, fmt.Errorf("runWriter: writing %s: %w", rel, err)
 	}
 

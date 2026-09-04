@@ -519,6 +519,20 @@ Two things worth knowing:
 
 ## What is in the archive
 
+### Where you leave it matters as much as where you send it
+
+The run folder and the `.zip` are created for you alone: mode `0700` on the
+folder, `0600` on everything in it and on the archive. That is deliberate —
+what is inside is the estate's inventory, and `job_steps` says outright that a
+T-SQL job step whose first 200 characters contain a password would carry it
+here.
+
+**On Windows those bits do almost nothing.** Files inherit the ACL of the
+directory that holds them, so what actually protects a run is where
+`OUTPUT_DIR` points. Do not aim it at a shared drive, `C:\Temp`, or a folder
+under a profile several administrators use. On a Linux jump host the modes do
+apply, and are enough.
+
 `MANIFEST.txt` sits at the top of the archive and is written for whoever has to
 approve the transfer. It states:
 
