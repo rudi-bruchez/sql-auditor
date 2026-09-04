@@ -261,6 +261,12 @@ SELECT a.[kind], a.[id], a.[name], a.[publisher_db], a.[publication],
 FROM @agents AS a ORDER BY a.[kind], a.[name]
 OPTION (RECOMPILE, MAXDOP 1);
 
+/* runstatus is projected raw beside its description, and the raw one is the
+   authority. The documented set is 1 to 6, and a freshly configured
+   distributor was measured returning 0 on the rows sp_addsubscription seeds
+   when it registers an agent. An undocumented code therefore leaves
+   runstatus_desc NULL rather than inventing a word for it, and the number is
+   still in the archive for whoever meets it next. */
 SELECT h.[leg], h.[agent_id], h.[runstatus],
        CASE h.[runstatus] WHEN 1 THEN 'start' WHEN 2 THEN 'succeed'
                           WHEN 3 THEN 'in progress' WHEN 4 THEN 'idle'
