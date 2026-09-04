@@ -10,6 +10,35 @@ import (
 type DatabaseFolder struct {
 	Name   string `json:"name"`
 	Folder string `json:"folder"`
+	// WidenedFor is empty for an ordinarily selected database. When the
+	// selection's second pass brought a database back that the operator did
+	// not name, it carries the purpose — "replication" — and planUnits offers
+	// the folder only to collectors declaring the same @widened value.
+	//
+	// It is a token, never a sentence. The explanation goes in the field
+	// below: written here instead, it would never equal any script's @widened
+	// value, and the database nobody asked for would be read by nobody.
+	WidenedFor string `json:"widened_for,omitempty"`
+	// RetentionReason is that explanation, for MANIFEST.txt and for check.
+	// Nothing matches on it.
+	RetentionReason string `json:"retention_reason,omitempty"`
+}
+
+// MarkWidened stamps the retention purpose and reason onto the folders the
+// selection's second pass kept. It is separate from ResolveDatabaseFolders
+// because folder naming is about collisions on disk and this is about who may
+// read the database; one function doing both would have two reasons to change.
+func MarkWidened(folders []DatabaseFolder, widened map[string]WidenedFor) []DatabaseFolder {
+	if len(widened) == 0 {
+		return folders
+	}
+	for i := range folders {
+		if w, ok := widened[folders[i].Name]; ok {
+			folders[i].WidenedFor = w.Purpose
+			folders[i].RetentionReason = w.Reason
+		}
+	}
+	return folders
 }
 
 // reservedNames are Windows device names. They are reserved as the stem too,
