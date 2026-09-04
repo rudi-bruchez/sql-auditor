@@ -734,6 +734,15 @@ func run() int {
 	// The timeline follows the run into collect, where the waits actually
 	// happen. Nil when the mode is off, which that package reads as silence.
 	opts.Debug = dbg.Writer()
+	// Which instance, and — the part that is not obvious — where that answer
+	// came from. A .env in the working directory beats an exported SQL_SERVER,
+	// which is the reverse of the usual precedence and invisible at run time:
+	// during a review of this program a binary launched from the repository
+	// resolved a client instance while the exported environment named a test
+	// container. One line before the connection is where that costs nothing.
+	if cmd == "check" || cmd == "collect" {
+		fmt.Fprintf(os.Stderr, "instance : %s (from %s)\n", opts.Config.Server, opts.Config.ServerFrom)
+	}
 	if opts.Config.TrustCert && opts.Config.Encrypt {
 		fmt.Fprintln(os.Stderr, "note: the connection is encrypted but the server certificate is NOT validated "+
 			"(SQL_TRUST_SERVER_CERTIFICATE=true)")

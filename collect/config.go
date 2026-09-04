@@ -58,6 +58,17 @@ func WriteEnvTemplate(content, dest string, force bool) error {
 
 type Config struct {
 	Server, Database, User, Password, AppName string
+	// ServerFrom names where Server's value came from: "--server", ".env" or
+	// "the environment". It exists because the precedence here is the reverse
+	// of the usual one — a .env in the working directory beats an exported
+	// SQL_SERVER — and an inversion that nothing prints is a trap however well
+	// it is documented. It caught the author of this program during a review:
+	// a binary run from the repository resolved a client instance while the
+	// exported environment named a test container.
+	//
+	// Printed on the line before the connection, where it is still worth
+	// something.
+	ServerFrom string
 	// AppNameSet distinguishes an AppName the operator supplied from the one
 	// this package defaulted to. The two cannot be told apart from the value:
 	// SQL_APPLICATION_NAME=sql-auditor is a legitimate thing to write — it is
@@ -157,24 +168,51 @@ func ParseDotEnv(r io.Reader) (map[string]string, error) {
 	return out, sc.Err()
 }
 
+// flagNameFor turns a setting key into the command-line flag that carries it,
+// for the provenance line. Only the keys the CLI actually exposes as flags need
+// an entry; anything else falls back to the key itself, which is still a true
+// answer about where the value came from.
+func flagNameFor(key string) string {
+	switch key {
+	case "SQL_SERVER":
+		return "server"
+	case "SQL_USER":
+		return "user"
+	case "QUERIES_DIR":
+		return "queries-dir"
+	case "OUTPUT_DIR":
+		return "output-dir"
+	}
+	return key
+}
+
 // Resolve applies precedence: flag, then .env, then process environment, then
 // default. The .env-over-environment ordering is deliberate and documented;
 // it matches the PowerShell extractor that existing configurations were
-// written for.
+// written for. It is also the reverse of what most tools do, which is why the
+// resolved server carries its provenance in ServerFrom.
 func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Config, error) {
 	if err := checkKeys(dotenv); err != nil {
 		return nil, err
 	}
+	// from records where each resolved value came from. Only SQL_SERVER's is
+	// used today; it is filled for every key because the cost is a map write
+	// and the alternative is a second copy of this precedence chain.
+	from := map[string]string{}
 	get := func(key, def string) string {
 		if v, ok := flags[key]; ok && v != "" {
+			from[key] = "--" + flagNameFor(key)
 			return v
 		}
 		if v, ok := dotenv[key]; ok && v != "" {
+			from[key] = ".env"
 			return v
 		}
 		if v := environ(key); v != "" {
+			from[key] = "the environment"
 			return v
 		}
+		from[key] = "the default"
 		return def
 	}
 	// set reports that the operator supplied the key, wherever from. It is not
@@ -306,6 +344,7 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 
 	cfg := &Config{
 		Server:         get("SQL_SERVER", ""),
+		ServerFrom:     from["SQL_SERVER"],
 		Database:       get("SQL_DATABASE", "master"),
 		User:           get("SQL_USER", ""),
 		Password:       get("SQL_PASSWORD", ""),

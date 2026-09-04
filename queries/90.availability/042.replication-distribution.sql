@@ -167,6 +167,27 @@ BEGIN
     BEGIN CATCH
         SELECT @err_agents = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
     END CATCH
+    /* KNOWN COST, LEFT AS IT IS ON PURPOSE. Each branch of the UNION ALL below
+       computes two window functions over the same partition with different
+       orderings — PERCENTILE_CONT by delivery_latency, ROW_NUMBER by [time] —
+       so the plan carries two sort operators per branch, four in all, over
+       seven days of MSdistribution_history and MSlogreader_history. LEFT(x
+       .comments, 512) is projected inside the CTE, so up to a kilobyte a row
+       travels through both sorts although one row per agent is emitted.
+
+       Every rewrite considered costs more than it saves or cannot be judged
+       without measuring. Lifting comments out through an OUTER APPLY replaces
+       the width with a per-agent lookup whose cost depends on an index this
+       file must not assume. Splitting the CTE so each sort sees only its own
+       columns makes the base tables read three times, because SQL Server does
+       not materialise a CTE referenced more than once.
+
+       What bounds it meanwhile: @timeout 120 on the client side, READ
+       UNCOMMITTED and SET LOCK_TIMEOUT so it can neither block nor be blocked
+       for long. The worst case is a slow collector, not a stalled distributor.
+
+       Anyone changing this needs a distributor with real history and an actual
+       plan, not this comment. */
     BEGIN TRY
         INSERT INTO @hist
         EXEC sys.sp_executesql N'

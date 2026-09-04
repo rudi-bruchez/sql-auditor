@@ -368,3 +368,47 @@ func TestWriteEnvTemplateTightensTheModeWhenItReplaces(t *testing.T) {
 		t.Errorf("mode = %04o, want 0600", got)
 	}
 }
+
+// .env beats an exported environment variable, which is the reverse of what
+// almost every other tool does. It is documented, in bold, in two places — and
+// it still caught the author of this program during a review session: a binary
+// launched from the repository resolved a client instance while the exported
+// environment named the test container. Documentation does not fix an inversion
+// that is invisible at run time; saying the answer out loud does.
+func TestServerProvenanceNamesWhereTheValueCameFrom(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		flags, dotenv  map[string]string
+		env            map[string]string
+		wantServer     string
+		wantProvenance string
+	}{
+		{"a flag wins over both",
+			map[string]string{"SQL_SERVER": "SQL01"},
+			map[string]string{"SQL_SERVER": "SQL02"},
+			map[string]string{"SQL_SERVER": "SQL03"},
+			"SQL01", "--server"},
+		{"a .env beats an exported variable",
+			nil,
+			map[string]string{"SQL_SERVER": "SQL02"},
+			map[string]string{"SQL_SERVER": "SQL03"},
+			"SQL02", ".env"},
+		{"the environment is used when no .env names it",
+			nil, nil,
+			map[string]string{"SQL_SERVER": "SQL03"},
+			"SQL03", "the environment"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Resolve(tc.flags, tc.dotenv, func(k string) string { return tc.env[k] })
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if cfg.Server != tc.wantServer {
+				t.Errorf("Server = %q, want %q", cfg.Server, tc.wantServer)
+			}
+			if !strings.Contains(cfg.ServerFrom, tc.wantProvenance) {
+				t.Errorf("ServerFrom = %q, want it to name %q", cfg.ServerFrom, tc.wantProvenance)
+			}
+		})
+	}
+}
