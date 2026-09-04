@@ -60,3 +60,15 @@ name. A failing test caught it a minute later, which is luck rather than method.
 
 `go test ./...` must pass before a commit. Test fixtures are part of the public
 surface of this repository, so the rule above applies to them in full.
+
+## Commit messages are written in English
+
+Whatever language the conversation is in, the message that lands in the log is
+English. This repository is public: its history is read by people who have no
+reason to speak French, and a message they cannot read is a message that does
+not explain the change.
+
+That is a rule about the log, not about the work. Discussion, review and
+planning happen in whatever language suits; only the commit message is fixed.
+The same goes for everything else already in the public surface — source
+comments, `docs/`, `README.md` — which is English throughout.

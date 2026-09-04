@@ -652,30 +652,49 @@ Whatever that binary collects, it collects with those files, and they are plain
 SQL. `MANIFEST.txt` also records the SHA-256 of the corpus each run used, so an
 archive can be tied to the questions behind it.
 
-Note what this does *not* establish. It tells you what the collector asks. It
-does not prove that a binary somebody handed you contains nothing else.
+**Check a release archive against what was published.** Every release carries a
+checksum file covering each archive:
 
-### What does not exist yet
+```
+sha256sum -c --ignore-missing sql-auditor_<version>_checksums.txt
+```
 
-No release has been published, so there is:
+That proves the bytes did not change between the releases page and your disk.
+It proves nothing about who put them on the releases page, which is what the
+next one is for.
 
-- no releases page;
-- no published SHA-256 to check a download against;
-- no build provenance attestation.
+**Check the archive against the build that produced it.** Each archive carries
+a build provenance attestation, signed through Sigstore at build time and stored
+with the repository:
 
-When the first version is released it will carry a digest for every asset and an
-attestation tying each binary to the commit and workflow that produced it.
+```
+gh attestation verify sql-auditor_<version>_linux_amd64.tar.gz \
+   --repo rudi-bruchez/sql-auditor
+```
 
-Until then, a binary you were handed cannot be checked against anything except
-its own query corpus. If that is not enough assurance for your situation, build
-it yourself from the source above.
+A pass says this archive came out of a named workflow run, in this repository,
+from a named commit — which you can then go and read. It is the only mechanism
+here that connects a file on your disk to source code.
+
+### What it does not establish
+
+**That the archive you have is a release at all.** The two checks above apply
+to a file downloaded from the releases page. A binary that arrived by email, by
+file share or on a USB key has no checksum line and no attestation to verify,
+and the fact that one exists for a release of the same version does not transfer
+to it. Download the release yourself and compare, or build from source.
+
+**That a binary contains nothing beyond the corpus.** `queries export` tells you
+what the collector asks. It cannot tell you what else a binary somebody handed
+you might do.
 
 ### What none of it will ever give you
 
 A reproducible build. The source being public does not mean you can compile it
-and get a byte-identical binary to compare against, so the attestation, when it
-exists, will be a statement by the build system about what it did rather than
-something you can independently recompute.
+and get a byte-identical binary to compare against, so the attestation is a
+statement by the build system about what it did rather than something you can
+independently recompute. It is trustworthy to the extent that GitHub's build
+infrastructure is, and no further.
 
 ## Four things that are not obvious from the outside
 

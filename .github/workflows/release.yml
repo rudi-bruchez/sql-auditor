@@ -3,9 +3,17 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Rebuilding a tag that already exists. Publish below is idempotent, so this
+  # is how a release whose upload died halfway is recovered — without moving the
+  # tag, which would invalidate every checksum anyone has already written down.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
 
 permissions:
-  contents: write # create the release and upload the binaries
+  contents: write # create the release and upload the archives
   id-token: write # mint the OIDC token Sigstore signs with
   attestations: write # persist the provenance attestation
   artifact-metadata: write # create the artifact storage record
@@ -14,53 +22,158 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Bound through env rather than interpolated into a script: ${{ }} is expanded
+  # by the runner before bash parses the line, so a workflow_dispatch input
+  # holding shell metacharacters would become script rather than a value.
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      # Two things have to agree with the tag before anything is built.
+      #
+      # The source, because main.go carries the number a build stamps into every
+      # archive it produces. That number is provenance — it names the build
+      # behind a collection — so a tag saying v0.22.0 over a source saying
+      # 0.21.0 would ship archives attributed to a version nobody can find. The
+      # ldflags below overwrite it, which is exactly why the disagreement would
+      # otherwise be invisible: it survives only in the binaries people download.
+      #
+      # The changelog, because "what changed" is the one part of a release no
+      # workflow can generate. --generate-notes lists commits; it cannot say
+      # which of them an operator has to act on.
+      - name: Check the tag against the source and the changelog
+        run: |
+          set -eu
+          tag="$RELEASE_TAG"
+          file=$(sed -n 's|^var version = "\(.*\)"$|\1|p' cmd/sql-auditor/main.go)
+          if [ -z "$file" ]; then
+            echo "no 'var version = \"...\"' line in cmd/sql-auditor/main.go" >&2
+            exit 1
+          fi
+          if [ "$tag" != "v$file" ]; then
+            echo "tag $tag does not match cmd/sql-auditor/main.go (v$file)" >&2
+            exit 1
+          fi
+          if ! grep -qE "^## \[$file\]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [$file]' section" >&2
+            exit 1
+          fi
+          echo "version=$file" >> "$GITHUB_ENV"
+          # From the checkout, not from GITHUB_SHA. On a workflow_dispatch the
+          # latter names the commit of the ref the run was started from, which
+          # is not the tag checked out above — a binary stamped with it would
+          # name a commit it was not built from.
+          echo "commit=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_ENV"
+
       # A tag can be pushed without the branch ever having gone through ci.
       - run: go vet ./...
       - run: go test ./... -count=1
-      - name: build
+
+      - name: Build
         run: |
-          mkdir -p dist
-          for target in windows/amd64 linux/amd64; do
-            os=${target%/*}
-            arch=${target#*/}
+          set -eu
+          mkdir -p dist staging
+          for target in linux/amd64 windows/amd64; do
+            os="${target%/*}"; arch="${target#*/}"
             ext=""
             case "$os" in windows) ext=".exe" ;; esac
-            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build \
+            name="sql-auditor_${version}_${os}_${arch}"
+            stage="staging/$name"
+            echo "building $name"
+
+            mkdir -p "$stage"
+            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build \
               -trimpath \
-              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA::8}" \
-              -o "dist/sql-auditor-$os-$arch$ext" ./cmd/sql-auditor
+              -ldflags "-s -w -X main.version=${version} -X main.commit=${commit}" \
+              -o "$stage/sql-auditor$ext" ./cmd/sql-auditor
+
+            # The licence travels with the binary. A collector handed round on a
+            # USB key inside a client's network is exactly the copy that arrives
+            # without the repository it came from.
+            cp LICENSE README.md "$stage/"
+
+            if [ "$os" = "windows" ]; then
+              (cd staging && zip -qr "../dist/${name}.zip" "$name")
+            else
+              tar czf "dist/${name}.tar.gz" -C staging "$name"
+            fi
           done
-          # Glob the binaries by name, not "*": SHA256SUMS must not check itself.
-          (cd dist && sha256sum sql-auditor-* > SHA256SUMS)
-          cat dist/SHA256SUMS
-      # A binary that reports the wrong version is worse than no binary: the
-      # support conversation starts from a lie. The runner is linux/amd64, so
-      # that artefact can be executed here and made to prove its own stamping.
-      - name: verify the version stamp
+          # Glob the archives by name, not "*": the checksum file must not be
+          # asked to check itself.
+          (cd dist && sha256sum sql-auditor_*.tar.gz sql-auditor_*.zip \
+             > "sql-auditor_${version}_checksums.txt")
+          ls -lh dist
+          cat "dist/sql-auditor_${version}_checksums.txt"
+
+      # Smoke-test the artefact people download, not the tree it was built from.
+      # The runner is linux/amd64, so that one archive can be unpacked and made
+      # to answer for itself; the Windows build is covered only by compiling.
+      #
+      # Two properties, and both have been wrong before in this class of
+      # workflow. That the binary reports the version it was stamped with: one
+      # that lies about its version starts every support conversation from a
+      # falsehood. And that the corpus survived being embedded: `queries export`
+      # is how a DBA reads what the collector will ask before authorising a run,
+      # so an archive whose corpus did not make it is worse than no archive.
+      # Compared against the tree it was embedded from rather than a count — a
+      # literal goes stale the first time a collector is added, and it goes
+      # stale by passing.
+      - name: Verify the linux archive
         run: |
-          stamped=$(./dist/sql-auditor-linux-amd64 version)
+          set -eu
+          tmp=$(mktemp -d)
+          tar xzf "dist/sql-auditor_${version}_linux_amd64.tar.gz" -C "$tmp"
+          app="$tmp/sql-auditor_${version}_linux_amd64/sql-auditor"
+
+          stamped=$("$app" version)
           echo "$stamped"
-          expected="sql-auditor ${GITHUB_REF_NAME} (${GITHUB_SHA::8})"
-          test "$stamped" = "$expected" || {
+          expected="sql-auditor ${version} (${commit})"
+          if [ "$stamped" != "$expected" ]; then
             echo "expected: $expected" >&2
             exit 1
-          }
-      - uses: actions/attest-build-provenance@v4
+          fi
+
+          "$app" queries export --to "$tmp/corpus"
+          (cd queries && find . -name '*.sql' | sort) > "$tmp/embedded.txt"
+          (cd "$tmp/corpus" && find . -name '*.sql' | sort) > "$tmp/exported.txt"
+          diff -u "$tmp/embedded.txt" "$tmp/exported.txt"
+          test -s "$tmp/embedded.txt"
+          echo "archive verified"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/sql-auditor-*
-      # A semver pre-release carries a hyphen: v1.0.0-rc.1. Without this, such a
-      # tag would be published as an ordinary release and become the "Latest"
-      # that /releases/latest/download serves — the link handed to clients.
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: dist/*
-          generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="$RELEASE_TAG"
+          # A semver pre-release carries a hyphen: v1.0.0-rc.1. Without this such
+          # a tag would be published as an ordinary release and become the
+          # "Latest" that /releases/latest/download serves — the link handed to
+          # clients.
+          prerelease=""
+          case "$tag" in *-*) prerelease="--prerelease" ;; esac
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            # Unquoted on purpose: empty must expand to no argument at all.
+            # shellcheck disable=SC2086
+            gh release create "$tag" dist/* \
+              --title "$tag" \
+              --generate-notes $prerelease
+          fi

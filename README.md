@@ -38,6 +38,28 @@ Before you point it at production, read [docs/dba-guide.md](docs/dba-guide.md).
 
 ## Install
 
+### Download a release
+
+[Releases](https://github.com/rudi-bruchez/sql-auditor/releases) carry an
+archive per platform — `sql-auditor_<version>_linux_amd64.tar.gz` and
+`sql-auditor_<version>_windows_amd64.zip` — each holding the binary, the licence
+and this file. Alongside them sits `sql-auditor_<version>_checksums.txt`.
+
+Check what you downloaded before you run it against an instance:
+
+```
+sha256sum -c --ignore-missing sql-auditor_<version>_checksums.txt
+```
+
+Every archive also carries a build provenance attestation, which says more than
+a digest does: a checksum proves the file did not change in transit, the
+attestation names the commit and the workflow run that built it.
+
+```
+gh attestation verify sql-auditor_<version>_linux_amd64.tar.gz \
+   --repo rudi-bruchez/sql-auditor
+```
+
 ### Build it yourself
 
 The source is published, so the route that gives you the most assurance is to
@@ -55,26 +77,26 @@ go build ./cmd/sql-auditor
 go install github.com/rudi-bruchez/sql-auditor/cmd/sql-auditor@latest
 ```
 
-With no version tagged yet, `@latest` resolves to the tip of the default branch,
-so it gives you whatever has been merged and not necessarily what this file
-describes.
-
-Until the first release, `git clone` and `go build` are the way to get a binary
-you can tie to a commit you have read.
+`@latest` resolves to the highest published tag. Name one — `@v0.21.0` — to get
+the version this file describes rather than whatever has been tagged since. A
+build made this way carries no attestation: the module proxy hands you source,
+and the binary is compiled on your machine.
 
 ### About a binary somebody handed you
 
-Everything about a *downloaded* binary is not there yet. Releases are meant to
-carry:
+A release archive can be checked two ways, both above: its digest against the
+published checksum file, and its attestation against this repository. A binary
+that arrived some other way — an email, a share, a USB key — can be checked
+against neither. What it can still be made to do is say what it will ask:
 
-- a SHA-256 for every asset;
-- a build provenance attestation tying each binary to the commit and workflow
-  that produced it.
+```
+sql-auditor queries export --to ./from-binary
+```
 
-Until a release exists, a binary somebody handed you cannot be checked against
-anything except its own query corpus, and no amount of tooling will ever give
-you a byte-identical rebuild to compare against. What can and cannot be verified
-is set out in full in
+Those files are the whole of what it collects, and they are plain SQL.
+
+What no amount of tooling will give you is a byte-identical rebuild to compare
+against. What can and cannot be verified is set out in full in
 [docs/dba-guide.md](docs/dba-guide.md#can-i-verify-the-binary).
 
 ## Running it
