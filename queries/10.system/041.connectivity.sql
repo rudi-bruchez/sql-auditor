@@ -1,5 +1,5 @@
 -- @scope:       instance
--- @resultsets:  root:object, ring_buffers:array, connectivity:array
+-- @resultsets:  root:object, ring_buffers:array, connectivity:array, exceptions:array
 -- @permissions: CONNECT, VIEW SERVER STATE
 -- @timeout:     120
 --
@@ -28,6 +28,15 @@
 -- The XML is read with the value() method, which requires QUOTED_IDENTIFIER
 -- ON. The TDS default is ON and the collector relies on it; a client tool that
 -- turns it off will see error 1934 here rather than wrong data.
+--
+-- RING_BUFFER_EXCEPTION IS AGGREGATED HERE RATHER THAN GIVEN ITS OWN FILE.
+-- It holds 459 records on an instance doing nothing, it survives a cycle of
+-- the error log, and an aggregate by error number and severity is cheap: it
+-- would say "this instance throws three thousand 8134s an hour", which the
+-- error log's filtered read can miss entirely. A dump would be noise, so the
+-- Stack element is never projected — and note that these records carry NO
+-- SPID, whatever a reading that confuses them with RING_BUFFER_SECURITY_ERROR
+-- may suggest.
 --
 -- SQL Server 2012 is the floor. sys.dm_os_ring_buffers predates it. The record
 -- layout is undocumented and has been stable for many versions, but it is not
@@ -94,5 +103,27 @@ FROM (
     WHERE rb.ring_buffer_type = 'RING_BUFFER_CONNECTIVITY'
 ) AS c
 GROUP BY c.rec_type, c.rec_source, c.remote_host, c.sni_error, c.socket_error, c.state
+ORDER BY COUNT(*) DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* The exception buffer, aggregated. Same undocumented-shape caveat as every
+   other decode of this view: explicit XPaths with explicit types, so a renamed
+   element gives one NULL column rather than a silently shifted row. */
+SELECT e.error_number                                             AS [error_number],
+       e.severity                                                 AS [severity],
+       e.state                                                    AS [state],
+       COUNT(*)                                                   AS [occurrences],
+       MIN(e.when_local)                                          AS [first_seen],
+       MAX(e.when_local)                                          AS [last_seen]
+FROM (
+    SELECT DATEADD(second, -((@ticks - rb.timestamp) / 1000), GETDATE())      AS when_local,
+           x.value('(//Exception/Error)[1]',    'int')                        AS error_number,
+           x.value('(//Exception/Severity)[1]', 'int')                        AS severity,
+           x.value('(//Exception/State)[1]',    'int')                        AS state
+    FROM sys.dm_os_ring_buffers AS rb
+    CROSS APPLY (SELECT CAST(rb.record AS xml)) AS r(x)
+    WHERE rb.ring_buffer_type = 'RING_BUFFER_EXCEPTION'
+) AS e
+GROUP BY e.error_number, e.severity, e.state
 ORDER BY COUNT(*) DESC
 OPTION (RECOMPILE, MAXDOP 1);

@@ -30,6 +30,21 @@
 -- This file's projections are written for the publication database; a column
 -- list that happens to compile in the other one is a silent wrong answer.
 --
+-- SCHEMA_OPTION IS WHAT SAYS WHERE THE SUBSCRIBER'S INDEXES CAME FROM. It is
+-- the bitmask the Snapshot Agent obeys when it recreates an article, and the
+-- archive had no column for it until an audit in September 2026 had to ask the
+-- client by email. The answer inverted the recommendation: with the
+-- nonclustered bit off, every index on the subscriber is hand-made, nothing
+-- keeps it aligned with the publisher, and a reinitialisation drops all of
+-- them. That is a paragraph of the report, and it should come from the
+-- archive rather than from correspondence.
+--
+-- The raw value is projected beside the decoded bits, in the 0x form the
+-- documentation of sp_addarticle uses, because the bits decoded here are six
+-- of more than thirty and the next question is always about a seventh. The
+-- conversion to bigint is not decoration either: the mask reaches 0x800000000,
+-- which is past what an int holds.
+--
 -- NO PASSWORD COLUMN IS PROJECTED. syspublications carries ftp_password.
 -- Projections stay explicit for that reason and must never drift to SELECT *.
 --
@@ -53,7 +68,8 @@ DECLARE @pub TABLE (
     [allow_queued_tran] bit, [pubid] int);
 
 DECLARE @art TABLE (
-    [artid] int, [name] sysname, [dest_table] sysname, [objid] int, [pubid] int);
+    [artid] int, [name] sysname, [dest_table] sysname, [objid] int, [pubid] int,
+    [schema_option] varbinary(8) NULL);
 
 DECLARE @sub TABLE (
     [artid] int, [srvid] smallint, [srvname] sysname NULL, [dest_db] sysname,
@@ -73,7 +89,8 @@ BEGIN
 
         INSERT INTO @art
         EXEC sys.sp_executesql N'
-            SELECT a.artid, a.name, a.dest_table, a.objid, a.pubid
+            SELECT a.artid, a.name, a.dest_table, a.objid, a.pubid,
+                   a.schema_option
             FROM dbo.sysarticles AS a
             OPTION (RECOMPILE, MAXDOP 1)';
 
@@ -110,7 +127,29 @@ SELECT p.[name], p.[pubid], p.[status], p.[repl_freq], p.[sync_method],
 FROM @pub AS p ORDER BY p.[name]
 OPTION (RECOMPILE, MAXDOP 1);
 
-SELECT a.[artid], a.[name], a.[dest_table], a.[objid], a.[pubid]
+SELECT a.[artid], a.[name], a.[dest_table], a.[objid], a.[pubid],
+       CONVERT(varchar(18), a.[schema_option], 1)                  AS [schema_option],
+       /* Decoded because a bitmask nobody decodes is a number nobody reads.
+          The six bits are the ones that decide what the subscriber's schema
+          owes to replication and what it owes to somebody's hand. */
+       CASE WHEN a.[schema_option] IS NULL THEN NULL
+            WHEN (CONVERT(bigint, a.[schema_option]) & 0x10) > 0 THEN 1
+            ELSE 0 END                                      AS [copies_clustered_index],
+       CASE WHEN a.[schema_option] IS NULL THEN NULL
+            WHEN (CONVERT(bigint, a.[schema_option]) & 0x40) > 0 THEN 1
+            ELSE 0 END                                      AS [copies_nonclustered_indexes],
+       CASE WHEN a.[schema_option] IS NULL THEN NULL
+            WHEN (CONVERT(bigint, a.[schema_option]) & 0x80) > 0 THEN 1
+            ELSE 0 END                                      AS [copies_primary_key],
+       CASE WHEN a.[schema_option] IS NULL THEN NULL
+            WHEN (CONVERT(bigint, a.[schema_option]) & 0x200) > 0 THEN 1
+            ELSE 0 END                                      AS [copies_foreign_keys],
+       CASE WHEN a.[schema_option] IS NULL THEN NULL
+            WHEN (CONVERT(bigint, a.[schema_option]) & 0x1000) > 0 THEN 1
+            ELSE 0 END                                      AS [copies_collation],
+       CASE WHEN a.[schema_option] IS NULL THEN NULL
+            WHEN (CONVERT(bigint, a.[schema_option]) & 0x2000) > 0 THEN 1
+            ELSE 0 END                                      AS [copies_extended_properties]
 FROM @art AS a ORDER BY a.[pubid], a.[name]
 OPTION (RECOMPILE, MAXDOP 1);
 
