@@ -94,6 +94,7 @@ type cliFlags struct {
 
 	sessionText, objectDefinitions              bool
 	deadlockGraphs, blockedProcessReports       bool
+	defaultTrace                                bool
 	estimateCompression                         bool
 	queryStoreDetail, queryStorePlanStats       bool
 	queryStoreDays, queryStoreTop               int
@@ -178,6 +179,10 @@ func defineFlags(cmd string) *cliFlags {
 	fs.BoolVar(&c.blockedProcessReports, "include-blocked-process-reports", false,
 		"also collect the blocked process reports captured by an Extended Events "+
 			"session, one .xml file each — these name both sessions and carry their SQL")
+	fs.BoolVar(&c.defaultTrace, "include-default-trace", false,
+		"also collect the retained rows of the default trace, not only the aggregate — "+
+			"these name the login, host and database of each event and carry the text "+
+			"of the error log messages among them")
 	// Off by default for cost, not for privacy. The estimate samples real
 	// data into tempdb, and the objects worth asking about are the large
 	// ones — which is precisely when it hurts.
@@ -430,6 +435,7 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 			collect.FlagObjectDefinitions:     c.all || c.objectDefinitions,
 			collect.FlagDeadlockGraphs:        c.all || c.deadlockGraphs,
 			collect.FlagBlockedProcessReports: c.all || c.blockedProcessReports,
+			collect.FlagDefaultTrace:          c.all || c.defaultTrace,
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -936,6 +942,12 @@ Options (check, collect):
                               Off by default: a report carries the SQL of the
                               blocked session and of the one blocking it, and
                               reading it touches the server's file system.
+  --include-default-trace     also collect the retained rows of the default
+                              trace, not only the aggregate 044 always makes.
+                              Off by default: the rows name the login, host and
+                              database of each event, and carry the text of the
+                              error log messages among them. MANIFEST.txt
+                              discloses it when it is on.
   --estimate-compression      also estimate page-compression savings on the largest
                               uncompressed objects. Off by default for cost: it
                               samples data into tempdb and is slow on big tables.

@@ -117,6 +117,7 @@ var KnownFlags = map[string]string{
 	"object_definitions":      "--include-object-definitions",
 	"deadlock_graphs":         "--include-deadlock-graphs",
 	"blocked_process_reports": "--include-blocked-process-reports",
+	"default_trace":           "--include-default-trace",
 }
 
 // KnownWriters is the closed set of names @writer accepts, mapped to the

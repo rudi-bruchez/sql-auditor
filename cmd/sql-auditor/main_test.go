@@ -308,8 +308,8 @@ func TestAllTurnsOnEveryOptIn(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("buildOptions: code %d, err %v", code, err)
 	}
-	if len(o.Flags) != 7 {
-		t.Fatalf("Options carries %d flags, want 7; --all was written against a "+
+	if len(o.Flags) != 8 {
+		t.Fatalf("Options carries %d flags, want 8; --all was written against a "+
 			"different set and one of them is now decided somewhere else", len(o.Flags))
 	}
 	for name, on := range o.Flags {

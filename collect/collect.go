@@ -90,6 +90,25 @@ const FlagDeadlockGraphs = "deadlock_graphs"
 // the decision is its own.
 const FlagBlockedProcessReports = "blocked_process_reports"
 
+// FlagDefaultTrace gates the retained ROWS of the default trace.
+//
+// 044.default-trace.sql aggregates that trace and runs on every collection: a
+// count per event class with a window costs nothing and discloses nothing. This
+// is the other half — the rows themselves, with the login, host, application
+// and database each event names, and the text of the class 22 messages where a
+// configuration change is recorded.
+//
+// It is gated because that text is error log content reached from a different
+// door. The disclosure it carries is exactly the one 040.error-log.sql declares,
+// which is why this file declares the same @discloses value rather than a new
+// one: the wording a security officer reads should not depend on which
+// collector happened to find the message.
+//
+// A directive gates a WHOLE FILE, which is why the aggregate is a separate
+// collector rather than a result set here. An aggregate that only ran when a
+// disclosure flag was passed would be an aggregate nobody ever gets.
+const FlagDefaultTrace = "default_trace"
+
 // FlagQueryStorePlanStats gates the search for the last profiled plan of each
 // extracted query.
 //
@@ -1185,6 +1204,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		"include_session_text": fmt.Sprint(o.Flags[FlagIncludeSessionText]),
 		"object_definitions":   fmt.Sprint(o.Flags[FlagObjectDefinitions]),
 		"deadlock_graphs":      fmt.Sprint(o.Flags[FlagDeadlockGraphs]),
+		"default_trace":        fmt.Sprint(o.Flags[FlagDefaultTrace]),
 
 		"query_store_detail":     fmt.Sprint(o.Flags[FlagQueryStoreDetail]),
 		"query_store_plan_stats": fmt.Sprint(o.Flags[FlagQueryStorePlanStats]),
