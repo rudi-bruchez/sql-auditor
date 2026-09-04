@@ -583,3 +583,19 @@ SELECT 3 AS [a]]b'c] OPTION (RECOMPILE, MAXDOP 1);`
 		t.Errorf("all three hints are in code and must survive, got %d:\n%s", n, got)
 	}
 }
+
+// StripSQLComments feeds every contract lint, so an apostrophe it misreads as
+// opening a literal takes the rest of the file out of their view: a GO, a FOR
+// JSON or a missing SET NOCOUNT ON after it would stop being seen. It shared
+// this blind spot with BlankSQLStrings, where the consequence was worse and
+// the fix was made first.
+func TestStripSQLCommentsKnowsQuotedIdentifiers(t *testing.T) {
+	in := "SELECT 1 AS [nombre d'objets] /* gone */ , 2 AS \"l'autre\" /* also gone */\n"
+	got := StripSQLComments(in)
+	if strings.Contains(got, "gone") {
+		t.Errorf("comments after a quoted identifier must still be stripped; got:\n%s", got)
+	}
+	if !strings.Contains(got, "[nombre d'objets]") || !strings.Contains(got, "\"l'autre\"") {
+		t.Errorf("the identifiers themselves must survive; got:\n%s", got)
+	}
+}

@@ -461,6 +461,8 @@ func StripSQLComments(sql string) string {
 		lineComment
 		blockComment
 		literal
+		bracketID
+		quotedID
 	)
 	state := code
 	blockDepth := 0
@@ -479,8 +481,40 @@ func StripSQLComments(sql string) string {
 			case c == '\'':
 				state = literal
 				b.WriteByte(c)
+			// A quoted identifier is code, and an apostrophe inside one opens
+			// no literal: AS [nombre d'objets] is ordinary here. Without these
+			// two states everything after it reads as string contents, so the
+			// comments that follow are never stripped and every lint below
+			// stops seeing the rest of the file.
+			case c == '[':
+				state = bracketID
+				b.WriteByte(c)
+			case c == '"':
+				state = quotedID
+				b.WriteByte(c)
 			default:
 				b.WriteByte(c)
+			}
+		case bracketID:
+			b.WriteByte(c)
+			if c == ']' {
+				// ]] is an escaped bracket, not the close.
+				if i+1 < len(sql) && sql[i+1] == ']' {
+					b.WriteByte(']')
+					i++
+					continue
+				}
+				state = code
+			}
+		case quotedID:
+			b.WriteByte(c)
+			if c == '"' {
+				if i+1 < len(sql) && sql[i+1] == '"' {
+					b.WriteByte('"')
+					i++
+					continue
+				}
+				state = code
 			}
 		case lineComment:
 			if c == '\n' {
@@ -555,7 +589,13 @@ func lint(sql string, results []ResultSpec) string {
 	if len(results) == 0 {
 		return "missing the @resultsets directive; declare each result set as name:object or name:array"
 	}
-	return contractLint(stripped, results)
+	// Blanked, because contractLint counts hints against the number of declared
+	// result sets and a hint inside dynamic SQL emits nothing. The guard pattern
+	// repeats the hint in every sp_executesql string, so 042 offers seventeen
+	// hints for seven result sets — measured — and the count passes with enough
+	// slack to hide three missing ones on the statements that really do emit.
+	// Blanking leaves eight, which is a check that can still fail.
+	return contractLint(BlankSQLStrings(stripped), results)
 }
 
 // contractLint enforces the auditor contract: every collector runs with
@@ -659,8 +699,9 @@ func BlankSQLStrings(sql string) string {
 			// a literal it would blank every byte to the end of the file, and
 			// the collision test would then report the file as unreliable
 			// rather than check it — a coverage hole that announces itself
-			// nowhere. StripSQLComments shares this blind spot, where it
-			// merely fails to strip a comment; here it would delete code.
+			// nowhere. StripSQLComments carries the same two states for the
+			// same reason — there the cost is every contract lint losing
+			// sight of the rest of the file.
 			case c == '[':
 				state = bracketID
 			case c == '"':

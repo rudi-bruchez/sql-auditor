@@ -640,9 +640,16 @@ func TestManifestExplainsAWidenedDatabase(t *testing.T) {
 	if !strings.Contains(h, "local distributor for 1 published database(s)") {
 		t.Errorf("MANIFEST.txt must say why DISTDB is here:\n%s", m.Human())
 	}
-	// The purpose token is machinery. Printing it would put "replication" in
-	// front of a reader with nothing to attach it to.
-	if strings.Contains(h, "- DISTDB replication") {
+	// The purpose token is machinery. Rendered into the reason slot it would
+	// put the bare word "replication" in front of a reader with nothing to
+	// attach it to — which is what happens if the two fields are ever merged
+	// back into one.
+	if strings.Contains(h, "kept because: replication") {
 		t.Errorf("the manifest shows the reason, not the purpose token:\n%s", m.Human())
+	}
+	// And the reader is told this is not a full collection, or they go looking
+	// for an object inventory that was never taken.
+	if !strings.Contains(h, "replication metadata only") {
+		t.Errorf("MANIFEST.txt must say DISTDB was not fully collected:\n%s", m.Human())
 	}
 }

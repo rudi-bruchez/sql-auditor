@@ -22,14 +22,18 @@
 -- MSreplication_subscriptions and a reviewer placed it on
 -- MSsubscription_properties. This file reads the documented one; if the column
 -- is not there the guard records the error rather than failing the unit, and
--- the verification run against a real subscriber settles it.
+-- the verification run against a real subscriber settles it. That unsettled
+-- column is also why the two reads below have a handler each rather than one
+-- between them: an unproven column must not be able to take the agent
+-- inventory down with it.
 --
 -- SQL Server 2012 is the floor.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-DECLARE @applies bit = 0, @collected bit = 1, @err int = 0, @msg nvarchar(2048) = N'';
+DECLARE @applies bit = 0, @err_subs int = 0, @err_agents int = 0,
+        @msg nvarchar(2048) = N'';
 
 SELECT @applies = CONVERT(bit, d.is_subscribed)
 FROM sys.databases AS d
@@ -48,6 +52,12 @@ DECLARE @agents TABLE (
 
 IF @applies = 1
 BEGIN
+    /* One handler per family, as in 042, and here the reason is written into
+       the header above: this file reads distribution_agent from the table
+       Microsoft documents it on, and a reviewer put it somewhere else. If that
+       column is not there the read raises Msg 207 — and under a single shared
+       handler that unsettled column would take the agent inventory down with
+       it, which is the whole failure the split exists to prevent. */
     BEGIN TRY
         INSERT INTO @subs
         EXEC sys.sp_executesql N'
@@ -56,7 +66,12 @@ BEGIN
                    s.distribution_agent, s.[Time], s.immediate_sync
             FROM dbo.MSreplication_subscriptions AS s
             OPTION (RECOMPILE, MAXDOP 1)';
+    END TRY
+    BEGIN CATCH
+        SELECT @err_subs = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+    END CATCH
 
+    BEGIN TRY
         INSERT INTO @agents
         EXEC sys.sp_executesql N'
             SELECT a.id, a.publisher, a.publisher_db, a.publication,
@@ -65,15 +80,19 @@ BEGIN
             OPTION (RECOMPILE, MAXDOP 1)';
     END TRY
     BEGIN CATCH
-        SELECT @collected = 0, @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+        SELECT @err_agents = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
     END CATCH
 END
 
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)     AS [collected_at],
        CONVERT(int, @applies)                       AS [applies],
-       CONVERT(int, @collected)                     AS [collected],
-       @err                                         AS [error_number],
-       NULLIF(@msg, N'')                            AS [error_message],
+       /* collected on the same terms as 041 and 042: every guarded read
+          returned. Two families here, so it is their conjunction. */
+       CASE WHEN @err_subs = 0 AND @err_agents = 0 THEN 1 ELSE 0 END
+                                                    AS [collected],
+       @err_subs                                    AS [errors.subscriptions],
+       @err_agents                                  AS [errors.agents],
+       NULLIF(@msg, N'')                            AS [errors.last_message],
        (SELECT COUNT(*) FROM @subs)                 AS [counts.subscriptions],
        (SELECT MIN(s.[last_updated]) FROM @subs AS s) AS [observed.oldest_update],
        (SELECT MAX(s.[last_updated]) FROM @subs AS s) AS [observed.newest_update]

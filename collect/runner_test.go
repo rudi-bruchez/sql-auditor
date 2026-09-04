@@ -350,3 +350,21 @@ func TestSelectTargetsWidensToEveryDistributor(t *testing.T) {
 		}
 	}
 }
+
+// A merge publisher sets is_merge_published and leaves is_published at 0 —
+// they are different flags for different replication types, and 040 has always
+// reported them separately. Widening on is_published alone therefore left a
+// merge shop's distribution database behind, with nothing saying so.
+func TestSelectTargetsWidensForAMergePublisher(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "MERGEDB", State: "ONLINE", HasAccess: true, IsMergePublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
+	}
+	sel, err := SelectTargets(cands, "MERGEDB", "")
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	if !containsString(sel.Included, "DISTDB") {
+		t.Errorf("a merge publisher keeps its distributor too; Included = %v", sel.Included)
+	}
+}

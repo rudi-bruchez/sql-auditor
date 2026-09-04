@@ -1,7 +1,9 @@
 # Replication collection — specification
 
-Status: draft, not implemented. Written 3 September 2026, rewritten the same
-day after a five-reader external review.
+Status: implemented in slice 1, on 4 September 2026, with the departures from
+this document recorded in "Where the implementation departed from this spec"
+at the end. Written 3 September 2026, rewritten the same day after a
+five-reader external review.
 
 The first draft's central mechanism was wrong, and every reader found it. That
 draft said a collector could be made harmless on a database it does not apply
@@ -330,16 +332,18 @@ into a cause.
 **Beware the homonyms.** `syspublications`, `sysarticles` and `syssubscriptions`
 exist *both* as tables in the publication database and as views with different
 column sets in the distribution database. 041 and 042 both run in both places.
-Every reference is guarded by `OBJECT_ID` and every projection is written for
-the database it is meant for; a column list that happens to compile in the
-wrong one is a silent wrong answer.
+Every projection is written for the database it is meant for; a column list
+that happens to compile in the wrong one is a silent wrong answer. The guard is
+the deferred read described above and NOT `OBJECT_ID`, for the reason set out
+in "Why there is no `OBJECT_ID` test, which there was": it returns NULL for an
+object the login may not see, turning a refusal into an apparent absence.
 
 ### `90.availability/042.replication-distribution.sql`
 
-Guarded on `is_distributor` and, separately, on the presence of each object
-family it reads — the msdb tables are absent on an instance that was never a
-distributor, so they get their own `OBJECT_ID` test rather than riding on the
-database flag.
+Guarded on `is_distributor` and, separately, on each object family it reads —
+the replication tables are absent on an instance that was never a distributor,
+so each family gets its own TRY/CATCH around a deferred read rather than riding
+on the database flag. Not an `OBJECT_ID` test, for the reason given above.
 
 **Configuration**, from `msdb.dbo.MSdistributiondbs`, filtered to
 `name = DB_NAME()` because the table holds one row per distribution database
@@ -722,3 +726,36 @@ test fixture with a stale flag.
 wants the distribution database inventoried can name it in `DB_INCLUDE`, at
 which point it is an ordinary target and the restriction does not apply. That
 seems sufficient, but it is untested against a real engagement.
+
+## Where the implementation departed from this spec
+
+Slice 1 landed on 4 September 2026. Four things in the document above were not
+built as written, and each was a decision rather than an omission.
+
+**`MSsubscriptions` and the agent profiles are not collected.** The topology
+section asks for `MSsubscriptions`, and a **Profiles** section asks for
+`msdb.dbo.MSagent_profiles` and `MSagent_profile_parameters` — the batch and
+polling parameters that, as that section says, explain more latency than any
+single failure does. Both are still worth having and neither is in `042`. They
+are the first thing to add to it, not a decision to leave them out for good.
+
+**Merge is in the agent inventory and not in the latency array.**
+`MSmerge_agents` has the same shape as the other three agent tables and joins
+them under `kind = 'merge'`. Its history does not: `MSmerge_history` carries a
+session id, a comment and a time, and the numbers are in `MSmerge_sessions` as
+`duration`, `delivery_time`, `upload_time`, `download_time` and row counts —
+measured against a configured merge publication, not read off documentation.
+Those are not delivery latency, and a column called `median_latency_ms` holding
+one of them would repeat the error this document warns about for the two
+transactional legs. Merge session statistics are not collected.
+
+**`collected` in `042` is the conjunction of four reads, not six.** The
+configuration read crosses into msdb and the table-size read needs a DMV right
+the file does not declare. Both report themselves in `errors.*`. Including them
+was measured to mark a complete document as failed: a login holding exactly
+what `042` declares collected the topology, the agents, the history and the
+errors, and the archive said `collected 0` because msdb was closed to it.
+
+**The publisher name is still unresolved**, as this document allowed for.
+`042` reports `publisher_id` and `publisher_db`; no join to a name was
+confirmed at the 2012 floor, so none was written.

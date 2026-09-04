@@ -617,7 +617,13 @@ func (m *Manifest) writeTargets(b *strings.Builder) {
 			// reason, and that reason belongs beside it. A reader comparing
 			// this list to the DB_INCLUDE they wrote would otherwise find one
 			// name too many and no account of it.
+			// "Covered" over the whole list would overstate this one: three
+			// collectors ran against it and the thirty ordinary ones did not,
+			// so a reader looking for its object inventory would find nothing
+			// and no account of why. The line says what was collected, not
+			// only why the database is here.
 			if d.RetentionReason != "" {
+				fmt.Fprintf(b, "      replication metadata only, not a full collection\n")
 				fmt.Fprintf(b, "      kept because: %s\n", d.RetentionReason)
 			}
 		}

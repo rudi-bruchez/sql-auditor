@@ -25,12 +25,32 @@
 -- Server: Msg 10753 on 2022. At the 2012 floor and everywhere else it is
 -- OVER (PARTITION BY ...) in a CTE, collapsed by a grouping outside it.
 --
+-- MERGE IS IN THE AGENT INVENTORY AND NOT IN THE LATENCY ARRAY, deliberately.
+-- MSmerge_agents has the same shape as the other three agent tables and joins
+-- them under kind = 'merge'. Its history does not: MSmerge_history carries only
+-- a session id, a comment and a time, and the numbers live in MSmerge_sessions
+-- as duration, delivery_time, upload_time, download_time and row counts —
+-- measured on a configured merge publication, not read off documentation.
+-- Those are not delivery latency and putting them in a column called
+-- median_latency_ms would be the same error as adding the two transactional
+-- legs together. Merge session statistics are therefore NOT COLLECTED here;
+-- what the archive holds for a merge topology is its agents, its errors and
+-- its configuration.
+--
 -- THE ROW COUNT OF MSrepl_commands HAS ITS OWN HANDLER because
 -- sys.dm_db_partition_stats needs VIEW DATABASE STATE, which this file does
 -- not declare. A login without it still gets the topology.
 --
 -- NO PASSWORD COLUMN IS PROJECTED. MSlogreader_agents carries
 -- publisher_password and job_password. Projections stay explicit.
+--
+-- comments IS TRUNCATED INSIDE THE CTE AND NOT OUTSIDE IT, WHICH IS THE WHOLE
+-- POINT. It is nvarchar(4000), and the CTE feeds a window sort of a week of
+-- history — millions of rows on a busy distributor, sorted single-threaded
+-- under MAXDOP 1. Carrying the full width through the sort is what turns a
+-- diagnostic into a memory grant that spills to tempdb and hits the timeout.
+-- Only the newest row's comment is ever emitted, so 512 characters is the
+-- widest anything downstream can see either way.
 --
 -- SQL Server 2012 is the floor.
 
@@ -134,6 +154,14 @@ BEGIN
                    NULL, a.job_id, a.local_job
             FROM dbo.MSsnapshot_agents AS a
             OPTION (RECOMPILE, MAXDOP 1)';
+
+        INSERT INTO @agents ([kind], [id], [name], [publisher_db], [publication],
+                             [subscriber_db], [job_id], [local_job])
+        EXEC sys.sp_executesql N'
+            SELECT ''merge'', a.id, a.name, a.publisher_db, a.publication,
+                   a.subscriber_db, a.job_id, a.local_job
+            FROM dbo.MSmerge_agents AS a
+            OPTION (RECOMPILE, MAXDOP 1)';
     END TRY
     BEGIN CATCH
         SELECT @err_agents = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
@@ -144,7 +172,7 @@ BEGIN
             WITH h AS (
                 SELECT ''distribution_to_subscriber'' AS leg, x.agent_id, x.runstatus,
                        x.[time], x.duration, x.delivery_latency, x.delivered_commands,
-                       x.comments,
+                       LEFT(x.comments, 512) AS comments,
                        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x.delivery_latency)
                            OVER (PARTITION BY x.agent_id) AS median_latency,
                        ROW_NUMBER() OVER (PARTITION BY x.agent_id ORDER BY x.[time] DESC) AS rn
@@ -153,7 +181,7 @@ BEGIN
                 UNION ALL
                 SELECT ''publisher_to_distribution'', x.agent_id, x.runstatus,
                        x.[time], x.duration, x.delivery_latency, x.delivered_commands,
-                       x.comments,
+                       LEFT(x.comments, 512),
                        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x.delivery_latency)
                            OVER (PARTITION BY x.agent_id),
                        ROW_NUMBER() OVER (PARTITION BY x.agent_id ORDER BY x.[time] DESC)
@@ -169,7 +197,7 @@ BEGIN
                    MAX(h.median_latency),
                    COUNT(*),
                    SUM(CONVERT(bigint, h.delivered_commands)),
-                   LEFT(MAX(CASE WHEN h.rn = 1 THEN h.comments END), 512)
+                   MAX(CASE WHEN h.rn = 1 THEN h.comments END)
             FROM h GROUP BY h.leg, h.agent_id
             OPTION (RECOMPILE, MAXDOP 1)',
             N'@days int', @days = @window_days;
@@ -213,12 +241,21 @@ BEGIN
 END
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)     AS [collected_at],
        CONVERT(int, @applies)                       AS [applies],
-       /* collected, on the same terms as 041, 043 and 044: every guarded read
-          returned. Six guards here rather than one, so it is their conjunction.
-          A reader comparing files should not have to learn a second convention
-          because this one happens to have more error codes. */
-       CASE WHEN @err_cfg = 0 AND @err_topo = 0 AND @err_agents = 0
-             AND @err_hist = 0 AND @err_errs = 0 AND @err_size = 0
+       /* collected, on the same terms as 041, 043 and 044: every read this
+          file's declared permissions entitle it to returned. That is the four
+          reads INSIDE this database, and deliberately not the two that are
+          not: the configuration read crosses into msdb, and the size read
+          needs a DMV right this file does not declare and says so above. Both
+          report themselves in errors.* and neither falsifies this flag.
+
+          The conjunction of all six was measured wrong. A login holding
+          exactly what the header declares collected the topology, the four
+          agents, the history and the errors — everything this file exists for
+          — and the archive still said collected 0, because msdb was closed to
+          it and sys.dm_db_partition_stats answered Msg 262. An analysis layer
+          reading that flag would have discarded a complete document. */
+       CASE WHEN @err_topo = 0 AND @err_agents = 0
+             AND @err_hist = 0 AND @err_errs = 0
             THEN 1 ELSE 0 END                       AS [collected],
        @window_days                                 AS [window_days],
        @err_cfg    AS [errors.configuration], @err_topo  AS [errors.topology],
@@ -256,8 +293,17 @@ SELECT a.[publisher_db], a.[publication_id], a.[article], a.[article_id],
 FROM @arts AS a ORDER BY a.[publisher_db], a.[article]
 OPTION (RECOMPILE, MAXDOP 1);
 
+/* job_id is staged and now projected, because it is the join to the Agent job
+   inventory 50.agent/010.jobs.sql already collects: an agent that is failing
+   here and a job that is failing there are the same fact reported twice, and
+   without this column nothing connects them. It is binary(16) in these tables
+   and a uniqueidentifier in msdb.dbo.sysjobs; the conversion was measured
+   against both and yields the matching GUID. local_job stays beside it — it
+   answers a different question, whether the job runs on this server at all. */
 SELECT a.[kind], a.[id], a.[name], a.[publisher_db], a.[publication],
-       a.[subscriber_db], CONVERT(int, a.[local_job]) AS [local_job]
+       a.[subscriber_db],
+       CONVERT(char(36), CONVERT(uniqueidentifier, a.[job_id])) AS [job_id],
+       CONVERT(int, a.[local_job]) AS [local_job]
 FROM @agents AS a ORDER BY a.[kind], a.[name]
 OPTION (RECOMPILE, MAXDOP 1);
 

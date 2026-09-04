@@ -66,14 +66,20 @@ type DatabaseInfo struct {
 	Name, State string
 	IsSnapshot  bool
 	HasAccess   bool
-	// The three replication roles, read from sys.databases in the same pass
-	// that lists the candidates. They are flags and not proof of activity: a
+	// The replication roles, read from sys.databases in the same pass that
+	// lists the candidates. They are flags and not proof of activity: a
 	// database restored from a publisher keeps them set, which is why the
 	// collectors that use them record what they found rather than trusting the
 	// flag.
-	IsPublished   bool
-	IsSubscribed  bool
-	IsDistributor bool
+	//
+	// IsPublished and IsMergePublished are separate flags for separate
+	// replication types, not a general one and a special case: a merge
+	// publisher sets the second and leaves the first at 0. Reading only the
+	// first is how a merge topology loses its distribution database silently.
+	IsPublished      bool
+	IsMergePublished bool
+	IsSubscribed     bool
+	IsDistributor    bool
 }
 
 // SkipNoAccess is the reason a database is left out because the login
@@ -297,6 +303,7 @@ func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error
                CASE WHEN d.source_database_id IS NULL THEN 0 ELSE 1 END,
                CASE WHEN HAS_DBACCESS(d.name) = 1 THEN 1 ELSE 0 END,
                CONVERT(int, d.is_published),
+               CONVERT(int, d.is_merge_published),
                CONVERT(int, d.is_subscribed),
                CONVERT(int, d.is_distributor)
         FROM sys.databases AS d
@@ -309,12 +316,13 @@ func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error
 	var out []DatabaseInfo
 	for rows.Next() {
 		var d DatabaseInfo
-		var snap, acc, pub, sub, dist int
-		if err := rows.Scan(&d.Name, &d.State, &snap, &acc, &pub, &sub, &dist); err != nil {
+		var snap, acc, pub, merge, sub, dist int
+		if err := rows.Scan(&d.Name, &d.State, &snap, &acc, &pub, &merge, &sub, &dist); err != nil {
 			return nil, err
 		}
 		d.IsSnapshot, d.HasAccess = snap == 1, acc == 1
-		d.IsPublished, d.IsSubscribed, d.IsDistributor = pub == 1, sub == 1, dist == 1
+		d.IsPublished, d.IsMergePublished = pub == 1, merge == 1
+		d.IsSubscribed, d.IsDistributor = sub == 1, dist == 1
 		out = append(out, d)
 	}
 	return out, rows.Err()
@@ -366,9 +374,14 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error)
 	// what encodes it: a publisher the operator excluded, or one the login
 	// cannot reach, is not in there and does not count. Re-testing DB_INCLUDE
 	// here would be a tautology.
+	// Both publishing flags count. is_published covers transactional and
+	// snapshot replication; a merge publisher sets is_merge_published and
+	// leaves is_published at 0, and it uses the distribution database too —
+	// its agent history and its errors are there. Counting only the first
+	// dropped a merge topology's distributor with nothing recorded.
 	published := 0
 	for _, d := range c {
-		if d.IsPublished && containsString(sel.Included, d.Name) {
+		if (d.IsPublished || d.IsMergePublished) && containsString(sel.Included, d.Name) {
 			published++
 		}
 	}
