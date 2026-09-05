@@ -1,6 +1,6 @@
 -- @scope:       instance
 -- @resultsets:  root:object, steps:array
--- @permissions: CONNECT, AGENT JOB STEPS
+-- @permissions: CONNECT, AGENT JOBS, AGENT JOB STEPS
 -- @timeout:     60
 -- @discloses:   job_step_text
 --
@@ -14,6 +14,12 @@
 -- question at all — passing only against a sysadmin login in a lab. So the
 -- steps get their own file and their own declared permission, and an instance
 -- that refuses them loses this collector and nothing else.
+--
+-- The steps are declared, but they are not the only permission this file
+-- reads. The job names come from sysjobs_view and the proxy names from
+-- sysproxies, so AGENT JOBS is declared too: a login granted SELECT on
+-- sysjobsteps but denied SQLAgentReaderRole fails on the join, and the
+-- manifest must be able to say so.
 --
 -- What it buys: an archive can already say that a maintenance job exists and
 -- ran successfully. It cannot say what it did. On a real audit, heap

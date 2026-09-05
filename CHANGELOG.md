@@ -137,6 +137,13 @@ unasked by default.
 
 ### Fixed
 
+- **`50.agent/020.job-steps.sql` now declares the `AGENT JOBS` permission it
+  already used.** The collector joins `sysjobs_view` for job names and
+  `sysproxies` for proxy names, but only `AGENT JOB STEPS` was declared — so
+  a login granted SELECT on `sysjobsteps` without SQLAgentReaderRole failed
+  at run time instead of being reported up front. The manifest now conditions
+  the collector on both capabilities and the grant script lists it under
+  both sections.
 - **Two collections of the same instance on the same day ran into each other.**
   Nothing prevented it: both renamed the same predecessor aside, both wrote into
   the same folder, and both exited 0 printing the same archive path, so the
