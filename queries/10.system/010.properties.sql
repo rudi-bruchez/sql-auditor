@@ -85,8 +85,9 @@ SELECT
       WHERE bchr.counter_name = 'Buffer cache hit ratio'
         AND bchr.object_name LIKE '%Buffer Manager%')               AS [memory.buffer_cache_hit_ratio_pct],
 
-    -- THROUGHPUT. These four are cumulative counts since the instance started,
-    -- not rates, and they are projected raw for that reason: dividing by the
+    -- THROUGHPUT. These are cumulative counts since the instance started,
+    -- not rates, despite what their names say, and they are projected raw for
+    -- that reason: dividing by the
     -- uptime beside them gives an average per second, and an average is the
     -- only honest thing a single sample can produce. Two samples would be
     -- needed for a real rate, and this collector takes one.
@@ -119,6 +120,46 @@ SELECT
     (SELECT cntr_value FROM sys.dm_os_performance_counters
       WHERE counter_name = 'Checkpoint pages/sec'
         AND object_name LIKE '%Buffer Manager%')                    AS [throughput.checkpoint_pages_total],
+    -- CONNECTION CHURN. Logins beside batch requests is what separates an
+    -- application that pools its connections from one that opens a new one per
+    -- operation, and nothing else in the corpus can tell them apart. The two
+    -- counters are cumulative like the ones above, so the ratio to read is
+    -- logins per batch request, not logins per second: an instance serving a
+    -- hundred batches a second on one login a second is opening a connection
+    -- for every hundred statements, and that is a client-side configuration
+    -- defect with a fix.
+    --
+    -- It earns its place because the cost is not only the connection: on local
+    -- Windows-authenticated connections each establishment runs an SSPI
+    -- impersonation that appends a record to RING_BUFFER_SECURITY_ERROR, and a
+    -- high enough login rate empties system_health of everything else. Read
+    -- beside 060.system-health and 048.security-errors it turns 'benign noise
+    -- you cannot act on' into a named cause. Measured on a client estate in
+    -- September 2026: one security ring buffer record per 117 batch requests,
+    -- on two instances at once.
+    --
+    -- Logouts is projected next to logins rather than inferred from it, because
+    -- a gap between the two is a connection leak and the subtraction has to be
+    -- available to whoever looks.
+    (SELECT cntr_value FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'Logins/sec'
+        AND object_name LIKE '%General Statistics%')                AS [throughput.logins_total],
+    (SELECT cntr_value FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'Logouts/sec'
+        AND object_name LIKE '%General Statistics%')                AS [throughput.logouts_total],
+    -- Connection Reset/sec counts the resets a connection pool performs when it
+    -- hands a pooled connection back out. Logins high AND resets low is churn
+    -- with no pool at all; logins high AND resets high is a pool that is being
+    -- reset far more often than it is reused. The distinction changes what you
+    -- ask the application vendor for.
+    (SELECT cntr_value FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'Connection Reset/sec'
+        AND object_name LIKE '%General Statistics%')                AS [throughput.connection_resets_total],
+    -- The level, beside the rates. A single sample, and the only one of this
+    -- group that is a gauge rather than a counter.
+    (SELECT cntr_value FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'User Connections'
+        AND object_name LIKE '%General Statistics%')                AS [throughput.user_connections],
     -- The divisor, restated here so the counters above are usable without
     -- opening another file.
     (SELECT DATEDIFF(second, sqlserver_start_time, GETDATE())
