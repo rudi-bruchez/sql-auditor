@@ -103,6 +103,16 @@ unasked by default.
 
 ### Changed
 
+- **`20.databases/010.all-databases.sql` (and its 011/012 companions) no longer
+  exclude the system databases.** `WHERE d.database_id > 4` is gone, so
+  `$.databases[*]` gains four rows per archive — master, tempdb, model, msdb.
+  This is a breaking change for anything diffing archives across the boundary.
+  The reason is model: `auto_shrink` on it is copied to every database created
+  afterwards, and a collector that cannot see model blinds the audit rules
+  that read it. tempdb has no backups at all and master never has a log
+  backup, so their backup columns are NULL and the analysis layer must
+  exclude them by name before judging staleness.
+
 - **The corpus inventory is `testdata/corpus.txt`, not a number in a test.**
   `TestEmbeddedCorpusIsValid` hardcoded how many collectors there are and
   aborted on a mismatch, so adding one failed twice: once on the count, and

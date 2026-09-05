@@ -15,8 +15,10 @@
 --
 -- There is no root result set: this is a list keyed by db_id, meant to be
 -- joined to the databases array of 20.databases/010.all-databases.sql, and
--- root must be a single-row object. The same WHERE d.database_id > 4 excludes
--- the system databases, so the two lists line up row for row.
+-- root must be a single-row object. It covers the same databases as 010,
+-- system ones included — auto_shrink on model propagates to every database
+-- created afterwards, and the audit rules must see it — so the two lists
+-- line up row for row.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -29,6 +31,5 @@ SELECT
     d.delayed_durability_desc                                    AS [delayed_durability_desc],
     d.is_auto_create_stats_incremental_on                        AS [auto_create_stats_incremental]
 FROM sys.databases AS d
-WHERE d.database_id > 4                   -- exclude system DBs; remove to include them
 ORDER BY d.name
 OPTION (RECOMPILE, MAXDOP 1);

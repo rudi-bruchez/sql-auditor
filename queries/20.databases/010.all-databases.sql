@@ -3,8 +3,14 @@
 -- @permissions: VIEW ANY DEFINITION, MSDB READ
 -- @timeout:     60
 --
--- One row per user database: options, file counts and sizes, and the raw
--- backup timestamps.
+-- One row per database, system ones included: options, file counts and
+-- sizes, and the raw backup timestamps.
+--
+-- System databases are in scope on purpose. auto_shrink on model is copied to
+-- every database created afterwards, and a collector that cannot see model
+-- blinds the audit rules that read it. tempdb has no backups at all and
+-- master never has a log backup, so their backup columns stay NULL — the
+-- analysis layer must exclude them by name before judging staleness.
 --
 -- There is no root result set here: this collector projects a list, not a
 -- property bag, and root must be a single-row object. The whole list is the
@@ -88,6 +94,5 @@ OUTER APPLY (
     FROM msdb.dbo.backupset AS bs
     WHERE bs.database_name = d.name
 ) AS bk
-WHERE d.database_id > 4                   -- exclude system DBs; remove to include them
 ORDER BY d.name
 OPTION (RECOMPILE, MAXDOP 1);
