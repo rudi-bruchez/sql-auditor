@@ -83,8 +83,9 @@ SELECT
     x.value('(self::node()/@*:ObjectName)[1]',  'nvarchar(256)') AS [task],
     -- CreationName: the immutable task type
     -- (Microsoft.SqlServer.Management.DatabaseMaintenance.*). This is the
-    -- column downstream rules test.
-    x.value('(self::node()/@*:CreationName)[1]', 'nvarchar(256)') AS [task_type]
+    -- column downstream rules test. Projected from the apply that computes
+    -- it once, so the projection and the container filter cannot disagree.
+    cn.task_type                                                AS [task_type]
 FROM msdb.dbo.sysssispackages AS p
 -- The cast goes through a one-row subquery because the engine does not
 -- accept .nodes() invoked directly on a (TRY_)CAST expression in an APPLY.
@@ -92,9 +93,14 @@ OUTER APPLY (SELECT TRY_CAST(CAST(p.packagedata AS varbinary(max)) AS xml)) AS p
 -- OUTER APPLY, not CROSS: an encrypted or unreadable package must survive
 -- as a row with task NULL; nodes() over a NULL xml simply yields no task.
 OUTER APPLY pkg.x2.nodes('//*:Executable') AS t(x)
+-- The task type is computed once, in its own apply: when nodes() yields no
+-- row, x is NULL, and a NULL NOT LIKE in the WHERE is UNKNOWN — it would
+-- filter out the very row the OUTER APPLY exists to keep. Measured on a
+-- 2022 instance: without the IS NULL arm below, the encrypted plan vanishes.
+OUTER APPLY (SELECT x.value('(self::node()/@*:CreationName)[1]', 'nvarchar(256)')) AS cn(task_type)
 WHERE p.packagetype = 6
   -- The package root, subplans and sequence containers are not tasks.
-  AND x.value('(self::node()/@*:CreationName)[1]', 'nvarchar(256)') NOT LIKE 'SSIS.Package%'
-  AND x.value('(self::node()/@*:CreationName)[1]', 'nvarchar(256)') NOT LIKE 'STOCK:%'
+  AND (cn.task_type IS NULL
+       OR (cn.task_type NOT LIKE 'SSIS.Package%' AND cn.task_type NOT LIKE 'STOCK:%'))
 ORDER BY p.name
 OPTION (RECOMPILE, MAXDOP 1);
