@@ -19,7 +19,7 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
-The corpus goes from 62 collectors to 81, and every gap
+The corpus goes from 62 collectors to 83, and every gap
 [docs/collection-gaps-spec.md](docs/collection-gaps-spec.md) records is closed
 except three it deliberately leaves open. The bar for entry there is that an
 audit needed the answer, could not find it in an archive, and had to go back to
