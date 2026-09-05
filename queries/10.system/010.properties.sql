@@ -47,6 +47,26 @@ SELECT
     si.max_workers_count                                            AS [system.max_workers],
     CAST(si.physical_memory_kb / 1048576.0 AS DECIMAL(10,1))        AS [system.ram_gb],
 
+    -- SCHEDULER PRESSURE, an instantaneous snapshot: runnable_tasks_count
+    -- and work_queue_count are gauges of the moment the query runs, not
+    -- rates, and a single read catches that moment and nothing else. All
+    -- four aggregates cover the 'VISIBLE ONLINE' schedulers only, the same
+    -- convention as 050.tempdb.sql; the hidden and offline schedulers carry
+    -- no workload to judge. visible_count is the divisor, and it is
+    -- indispensable: the worker-exhaustion rule judges the AVERAGE load
+    -- per scheduler (SUM/COUNT — its own probe filters scheduler_id < 255),
+    -- so the raw sum alone would falsely accuse a wide server, where 128
+    -- vCPU sharing 5 runnable tasks is idle. The MAX keeps a local spike
+    -- visible that the average flattens.
+    (SELECT COUNT(*) FROM sys.dm_os_schedulers
+       WHERE status = 'VISIBLE ONLINE')                             AS [schedulers.visible_count],
+    (SELECT SUM(runnable_tasks_count) FROM sys.dm_os_schedulers
+       WHERE status = 'VISIBLE ONLINE')                             AS [schedulers.runnable_tasks],
+    (SELECT MAX(runnable_tasks_count) FROM sys.dm_os_schedulers
+       WHERE status = 'VISIBLE ONLINE')                             AS [schedulers.runnable_tasks_max],
+    (SELECT SUM(work_queue_count) FROM sys.dm_os_schedulers
+       WHERE status = 'VISIBLE ONLINE')                             AS [schedulers.work_queue],
+
     /* ───────── memory ───────── */
     CAST(pm.physical_memory_in_use_kb   / 1024.0 AS DECIMAL(12,1))  AS [memory.sql_ram_in_use_mb],
     CAST(si.committed_kb                / 1024.0 AS DECIMAL(12,1))  AS [memory.sql_committed_mb],
@@ -58,6 +78,13 @@ SELECT
     CAST(pm.process_virtual_memory_low  AS BIT)                     AS [memory.virtual_pressure_signal],
     CAST(sm.total_physical_memory_kb     / 1024.0 AS DECIMAL(12,1)) AS [memory.total_physical_ram_mb],
     CAST(sm.available_physical_memory_kb / 1024.0 AS DECIMAL(12,1)) AS [memory.available_physical_ram_mb],
+    -- PAGE FILE. Total and available page file are OS-level facts, read from
+    -- the same sys.dm_os_sys_memory row as the physical RAM columns above:
+    -- the page file belongs to the machine, not to any database, and its
+    -- free space is the backstop the OS relies on when physical RAM runs
+    -- out, so it is collected beside the RAM numbers it protects.
+    CAST(sm.total_page_file_kb     / 1024.0 AS DECIMAL(12,1))       AS [memory.total_page_file_mb],
+    CAST(sm.available_page_file_kb / 1024.0 AS DECIMAL(12,1))       AS [memory.available_page_file_mb],
     CAST(100.0 * sm.available_physical_memory_kb
               / NULLIF(sm.total_physical_memory_kb,0) AS DECIMAL(5,2)) AS [memory.pct_ram_free],
     sm.system_memory_state_desc                                     AS [memory.system_memory_state],

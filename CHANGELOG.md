@@ -30,6 +30,16 @@ unasked by default.
 
 ### Added
 
+- **New keys in existing collectors, non-breaking.** Archives produced by older
+  builds simply lack them.
+  `10.system/010.properties.sql` gains `memory.total_page_file_mb` and
+  `memory.available_page_file_mb` (OS page file from `sys.dm_os_sys_memory`) and
+  the scheduler gauges `schedulers.visible_count`, `schedulers.runnable_tasks`,
+  `schedulers.runnable_tasks_max` and `schedulers.work_queue` (instantaneous,
+  `VISIBLE ONLINE` schedulers only, so the average per scheduler and the local
+  peak are both computable). `20.databases/010.all-databases.sql` gains
+  `parameterization_forced`. `20.databases/020.properties.sql` gains `is_sparse`
+  per file, which the size columns cannot reveal.
 - **An exclusive version ceiling, `@max_version`**, the mirror of
   `@min_version`: a script declaring it does not run on the named version nor
   above. It exists because the corpus knew floors only, and one window can

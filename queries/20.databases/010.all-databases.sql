@@ -49,6 +49,7 @@ SELECT
     d.is_auto_create_stats_on                                    AS [auto_create_stats],
     d.is_auto_update_stats_on                                    AS [auto_update_stats],
     d.is_auto_update_stats_async_on                              AS [auto_update_stats_async],
+    CAST(d.is_parameterization_forced AS bit)                    AS [parameterization_forced],
     d.page_verify_option_desc                                    AS [page_verify],
     d.is_read_committed_snapshot_on                              AS [rcsi],
     d.snapshot_isolation_state_desc                              AS [snapshot_isolation],

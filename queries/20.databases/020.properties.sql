@@ -80,6 +80,7 @@ DECLARE @files TABLE (
     [used_mb]        decimal(14,1) NULL,
     [max_mb]         varchar(20),
     [percent_growth] bit,
+    [is_sparse]      bit,
     [growth]         nvarchar(4000));
 
 /* reserved_pages is buffered although it is never emitted: the ranking is by
@@ -212,6 +213,10 @@ BEGIN TRY
                 WHEN df.max_size = 268435456 THEN 'log_2tb'
                 ELSE CAST(CAST(CAST(df.max_size AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)) AS varchar(20)) END,
            CAST(df.is_percent_growth AS BIT),
+           -- Outside database snapshots, a sparse file is a fact in itself:
+           -- the attribute is invisible in the size columns, which report
+           -- the file as sized, not the disk it actually occupies.
+           CAST(df.is_sparse AS BIT),
            CASE WHEN df.is_percent_growth = 1 THEN CONCAT(df.growth, ' %')
                 ELSE CONCAT(CAST(CAST(df.growth AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)), ' MB') END
     FROM sys.database_files AS df
@@ -376,7 +381,7 @@ SELECT @last_full         AS last_full,
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT f.[name], f.[type], f.[physical_name], f.[state], f.[size_mb],
-       f.[used_mb], f.[max_mb], f.[percent_growth], f.[growth]
+       f.[used_mb], f.[max_mb], f.[percent_growth], f.[is_sparse], f.[growth]
 FROM @files AS f
 ORDER BY f.[file_type], f.[file_id]
 OPTION (RECOMPILE, MAXDOP 1);
