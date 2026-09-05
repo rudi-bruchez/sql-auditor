@@ -30,6 +30,7 @@
 10.system/075.deprecated-features.sql
 10.system/076.pending-io.sql
 10.system/077.fulltext.sql
+10.system/095.master-user-objects.sql
 20.databases/010.all-databases.sql
 20.databases/011.all-databases-2014.sql
 20.databases/012.all-databases-query-store.sql
@@ -55,6 +56,7 @@
 70.schema/050.heaps.sql
 70.schema/060.columns.sql
 70.schema/070.index-columns.sql
+70.schema/075.foreign-keys.sql
 70.schema/080.modules.sql
 70.schema/090.statistics.sql
 70.schema/091.statistics-density.sql

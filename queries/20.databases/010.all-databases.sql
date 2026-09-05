@@ -31,6 +31,18 @@
 --   sys.databases.delayed_durability_desc              (2014)
 --   sys.databases.is_query_store_on                    (2016)
 -- containment_desc and target_recovery_time_in_seconds are both 2012, kept.
+--
+-- last_good_checkdb comes from DATABASEPROPERTYEX(db, 'LastGoodCheckDbTime'),
+-- one line per database in this instance-scoped list rather than a
+-- database-scoped collector: the per-database collectors never run against
+-- master, model or msdb, which are precisely the databases whose integrity
+-- history matters most and are covered here. The property answers under
+-- VIEW SERVER STATE alone (verified on a minimally-granted login). It
+-- renders 1900-01-01 for a database that never had a successful CHECKDB; the
+-- analysis layer reads that as "never", not as a date. On SQL Server builds
+-- older than 2016 SP2 the property is unknown and returns NULL — TRY_CAST
+-- keeps the column silent rather than failing — so the first collection on a
+-- 2012/2014 instance confirms the gap by itself.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -63,6 +75,8 @@ SELECT
     d.collation_name                                             AS [collation],
     SUSER_SNAME(d.owner_sid)                                     AS [owner],
     d.create_date                                                AS [create_date],
+    TRY_CAST(DATABASEPROPERTYEX(d.name, 'LastGoodCheckDbTime') AS datetime)
+                                                                 AS [last_good_checkdb],
     ds.data_files, ds.data_mb,
     ls.log_files, ls.log_mb,
     bk.last_full, bk.last_diff, bk.last_log

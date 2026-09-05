@@ -19,7 +19,7 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
-The corpus goes from 62 collectors to 79, and every gap
+The corpus goes from 62 collectors to 81, and every gap
 [docs/collection-gaps-spec.md](docs/collection-gaps-spec.md) records is closed
 except three it deliberately leaves open. The bar for entry there is that an
 audit needed the answer, could not find it in an archive, and had to go back to
@@ -40,6 +40,26 @@ unasked by default.
   peak are both computable). `20.databases/010.all-databases.sql` gains
   `parameterization_forced`. `20.databases/020.properties.sql` gains `is_sparse`
   per file, which the size columns cannot reveal.
+  `20.databases/010.all-databases.sql` also gains `last_good_checkdb` from
+  `DATABASEPROPERTYEX(db, 'LastGoodCheckDbTime')`, one line per database in the
+  instance list because the per-database collectors never run against master,
+  model or msdb — the databases whose integrity history matters most. It reads
+  `1900-01-01` for a database that never had a successful CHECKDB and NULL on
+  builds older than 2016 SP2, where the property is unknown.
+  `70.schema/020.index-usage.sql` gains `hypothetical` on the usage result set,
+  because a hypothetical index shows the same zero counters as a dead one and
+  the two are otherwise indistinguishable in a baseline.
+- **Two more instance- and schema-scoped probes for assessment rules the
+  archive could not answer** (`10.system/095.master-user-objects.sql` and
+  `70.schema/075.foreign-keys.sql`). User objects in master are read from the
+  instance scope, under the three-part name `master.sys.objects`, because the
+  database-scoped collectors never run against master and nothing else in the
+  archive could see a table parked there; the newest 200 are listed with the
+  true total beside the cap, and an empty list is the healthy answer, not a
+  failed read. Foreign keys are projected one row per (key, column) with the
+  referenced table and column, so the archive can join them offline to the
+  index key columns of `070.index-columns.sql` — whether a foreign key is
+  supported by an index is a judgement this file deliberately does not make.
 - **Four instance probes for assessment rules the archive could not answer**
   (`10.system/075.deprecated-features.sql`, `10.system/076.pending-io.sql`,
   `10.system/077.fulltext.sql` and `80.workload/052.optimizer-hints.sql`).

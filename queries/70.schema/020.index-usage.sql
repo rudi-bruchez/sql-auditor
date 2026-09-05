@@ -53,6 +53,13 @@
 -- …) overflows a 32-bit int after about 24 days, so it fails on precisely the
 -- long-uptime servers whose counters are most worth collecting.
 --
+-- hypothetical is projected because a hypothetical index — a what-if structure
+-- created by the Database Tuning Advisor — is never used, yet it would show up
+-- here with zero counters like any other unused index. Without the flag the
+-- two are indistinguishable in the usage result set. The flag lives on
+-- sys.indexes only; statistics have no such column, which is why nothing was
+-- added to 090.statistics.sql for it.
+--
 -- The instance start time is emitted because a usage counter is meaningless
 -- without the period it accumulated over. It is an upper bound on that period,
 -- not a measurement — the counters can also be cleared without a restart.
@@ -86,6 +93,7 @@ DECLARE @usage TABLE (
     [is_unique_constraint] int,
     [is_disabled]          int,
     [filter_definition]    nvarchar(max) NULL,
+    [hypothetical]         bit,
     [rows]                 bigint NULL,
     [reserved_mb]          decimal(18,2) NULL,
     [has_usage_row]        int,
@@ -153,6 +161,7 @@ BEGIN TRY
            CAST(i.is_unique_constraint AS int),
            CAST(i.is_disabled AS int),
            i.filter_definition,
+           CAST(i.is_hypothetical AS bit),
            ps.row_count,
            CAST(ps.reserved_page_count * 8.0 / 1024 AS DECIMAL(18,2)),
            CASE WHEN us.index_id IS NULL THEN 0 ELSE 1 END,
@@ -224,7 +233,7 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT u.[table], u.[index_name], u.[index_id], u.[index_type],
        u.[is_unique], u.[is_primary_key], u.[is_unique_constraint],
-       u.[is_disabled], u.[filter_definition],
+       u.[is_disabled], u.[filter_definition], u.[hypothetical],
        u.[rows]                                             AS [size.rows],
        u.[reserved_mb]                                      AS [size.reserved_mb],
        u.[has_usage_row]                                    AS [usage.has_usage_row],
