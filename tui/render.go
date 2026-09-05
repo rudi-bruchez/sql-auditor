@@ -319,11 +319,11 @@ func serverBlock(s State, width int) []string {
 	}
 }
 
-// permissionBlock lists ALL eight capabilities, in the order Capabilities()
+// permissionBlock lists ALL nine capabilities, in the order Capabilities()
 // probes them, with the total derived from that same slice rather than written
-// down here. Writing "8" would be a number this screen invented, and the
+// down here. Writing "9" would be a number this screen invented, and the
 // repository's rule is that nothing on screen is invented: it would also
-// survive the day a ninth capability is added, silently.
+// survive the day a tenth capability is added, silently.
 //
 // An "ok" fits on one line; a "denied" or "error" is followed by its Impact,
 // FOLDED and never truncated. Cutting "the report must not read this as 'no log

@@ -95,7 +95,7 @@ type GrantScriptInput struct {
 // needs a user there belongs in this list: the script creates that user once,
 // and a capability missing from here produces GRANTs against a principal that
 // was never created.
-var msdbCapabilities = []string{"msdb_read", "agent_jobs", "agent_job_steps", "log_shipping", "agent_alerts"}
+var msdbCapabilities = []string{"msdb_read", "agent_jobs", "agent_job_steps", "maintenance_plans", "log_shipping", "agent_alerts"}
 
 func majorVersion(v string) int {
 	head, _, _ := strings.Cut(v, ".")
@@ -396,6 +396,35 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 				"in full. Decide on the login, not on the collector.",
 			},
 			statement: []string{fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.sysjobsteps TO %s;", login)},
+		})
+	}
+
+	if denied["maintenance_plans"] {
+		sections = append(sections, grantSection{
+			title:  "Read what the maintenance plans actually do",
+			marker: sectionInMsdb,
+			why: append([]string{
+				"SELECT on one table. Maintenance plans store each task definition",
+				"as an SSIS package in msdb.dbo.sysssispackages, and no fixed role",
+				"reads that table — so without this the report can say a maintenance",
+				"plan exists and nothing about what it does: which task types it",
+				"runs, including whether any of them shrinks databases or files.",
+				"",
+				"The collector projects only the task name and task type from the",
+				"package XML, never the package body, which can carry connection",
+				"strings.",
+				"",
+				"Collectors that need it:",
+			}, indentList(collectorsFor(in.Scripts, "maintenance_plans"))...),
+			caveat: []string{
+				"The db_ssis* roles are deliberately not offered. db_ssisoperator",
+				"can execute every package on the instance, not only maintenance",
+				"plans, and Microsoft documents a privilege escalation through",
+				"db_ssisadmin (a member can gain sysadmin via a maintenance plan",
+				"running as the Agent service account). The direct SELECT is the",
+				"only grant this script proposes for this table.",
+			},
+			statement: []string{fmt.Sprintf("GRANT SELECT ON OBJECT::dbo.sysssispackages TO %s;", login)},
 		})
 	}
 

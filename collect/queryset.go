@@ -318,7 +318,7 @@ func parseScript(rel, sql string) Script {
 				key, ok := NormalisePermission(p)
 				if !ok {
 					setLint(fmt.Sprintf("@permissions: unknown permission %q; "+
-						"expected one of VIEW SERVER STATE, VIEW ANY DEFINITION, MSDB READ, AGENT JOBS, AGENT JOB STEPS, AGENT ALERTS, LOG SHIPPING, ERROR LOG, CONNECT", p))
+						"expected one of VIEW SERVER STATE, VIEW ANY DEFINITION, MSDB READ, AGENT JOBS, AGENT JOB STEPS, AGENT ALERTS, LOG SHIPPING, MAINTENANCE PLANS, ERROR LOG, CONNECT", p))
 					continue
 				}
 				s.Permissions = append(s.Permissions, key)
@@ -564,6 +564,7 @@ var permissionKeys = map[string]string{
 	"msdb read":           "msdb_read",
 	"agent jobs":          "agent_jobs",
 	"agent job steps":     "agent_job_steps",
+	"maintenance plans":   "maintenance_plans",
 	"log shipping":        "log_shipping",
 	"agent alerts":        "agent_alerts",
 	"error log":           "error_log",

@@ -101,6 +101,18 @@ func Capabilities() []Capability {
 		{Name: "agent_job_steps", Label: "Read the Agent job steps (msdb.dbo.sysjobsteps)",
 			SQL:    "SELECT TOP 1 step_id FROM msdb.dbo.sysjobsteps",
 			Impact: "job steps not collected — the report can say a job exists but not what it runs"},
+		// Maintenance plans store their task definitions as SSIS packages in
+		// sysssispackages (packagetype 6). A fifth slice of msdb: no fixed role
+		// reads this table at all — the db_ssis* roles are deliberately not
+		// offered, for the reasons the grant script's caveat states — so the
+		// only route is a direct SELECT, and it gets its own probe.
+		//
+		// Deliberately not NeedsRows, like agent_jobs: an instance with no
+		// maintenance plans returns zero rows, and that is an answer, not a
+		// denial. TOP 0: the compile is what does the testing.
+		{Name: "maintenance_plans", Label: "Read the maintenance plan tasks (msdb.dbo.sysssispackages)",
+			SQL:    "SELECT TOP 0 1 FROM msdb.dbo.sysssispackages",
+			Impact: "maintenance plan tasks not collected — the report must not read this as 'no maintenance plans'"},
 		// A third slice of msdb, and a third grant. MSDB READ is SELECT on
 		// backupset and nothing else; SQLAgentReaderRole does not reach the log
 		// shipping tables either. So an instance can report its backups and its

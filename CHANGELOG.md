@@ -79,6 +79,19 @@ unasked by default.
   new capability**: it is probed, it appears in `check`, the grant script writes
   it, and `docs/dba-guide.md` lists it. No operator address is collected, only
   whether one is configured.
+- **What the maintenance plans actually do** (`50.agent/040.maintenance-plans.sql`),
+  task by task. Until now the archive could say a maintenance plan exists —
+  the Agent job step says only "Subplan_1" — and nothing about what it does.
+  Each plan stores its tasks as SSIS packages in `msdb.dbo.sysssispackages`,
+  and the collector reads the task name and the immutable task type
+  (`DbMaintenanceShrinkTask` and so on) out of the package XML, never the
+  package body, which can carry connection strings. An encrypted or unreadable
+  plan still appears, as a row with a null task. No fixed role reads that
+  table — the `db_ssis*` roles are deliberately not offered, `db_ssisoperator`
+  being execution rights on every package and `db_ssisadmin` a documented
+  escalation path — so **`MAINTENANCE PLANS` is a new capability**: probed,
+  shown in `check`, and granted as `SELECT` on that one table. Verified
+  against a SQL Server 2022 instance with a login holding nothing else.
 - **Execution plans when the Query Store is off** (`--plan-cache-plans`). Until
   now an instance without the Query Store contributed no plan at all, and the
   analysis had aggregate counters with no way to see a plan shape. This keeps up

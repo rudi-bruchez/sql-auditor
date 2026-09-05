@@ -127,9 +127,9 @@ definition. Read the file, then hand it to someone who can run it.
 The rest of this section is what that script contains, for the reader who wants
 to know before running anything.
 
-### The six rights, and what each one costs when missing
+### The rights, and what each one costs when missing
 
-The login must be able to connect. Beyond that there are six rights the
+The login must be able to connect. Beyond that there are nine rights the
 collector uses, and **none of them is required**: it probes each one before it
 starts and carries on without whatever it was refused, recording the omission.
 
@@ -144,6 +144,7 @@ archive.
 | Read backup history | `SELECT` on `msdb.dbo.backupset` | backup history not collected — the report must not read this as 'no backups exist' |
 | Read the Agent job inventory | `SQLAgentReaderRole` in msdb | Agent jobs not collected — the report must not read this as 'no jobs' or 'no failing jobs' |
 | Read the Agent job steps | `SELECT` on `msdb.dbo.sysjobsteps` | job steps not collected — the report can say a job exists but not what it runs |
+| Read the maintenance plan tasks | `SELECT` on `msdb.dbo.sysssispackages` | maintenance plan tasks not collected — the report must not read this as 'no maintenance plans' |
 | Read the log shipping tables | `SELECT` on the six `msdb.dbo.log_shipping_*` tables | log shipping configuration and lag not collected — the report must not read this as 'no log shipping' |
 | Read the Agent alerts and operators | `SELECT` on `msdb.dbo.sysalerts`, `sysoperators` and `sysnotifications` | alerts and operators not collected — the report must not read this as 'no alerts are configured', which is the opposite finding |
 | Read the SQL Server error log | covered by `VIEW SERVER STATE` before 2022; `VIEW ANY ERROR LOG` from 2022 | the error log is not collected — the report must not read this as 'no errors were logged' |
@@ -190,6 +191,13 @@ it:
 PERFORMANCE STATE` rather than `VIEW SERVER STATE`. It covers the dynamic
 management views the collector reads without also opening the security-related
 ones, and it is the narrower of the two.
+
+**Maintenance plan tasks are read directly, not through a role.** The
+`db_ssis*` roles are deliberately not offered: `db_ssisoperator` can execute
+every package on the instance, not only maintenance plans, and Microsoft
+documents a privilege escalation through `db_ssisadmin`. The generated script
+grants `SELECT` on `msdb.dbo.sysssispackages` alone, which is the narrowest
+right that answers the question.
 
 ### One caution about `VIEW ANY DEFINITION`
 
@@ -366,6 +374,7 @@ Permissions:
   ok      msdb_read
   ok      agent_jobs
   ok      agent_job_steps
+  ok      maintenance_plans
   ok      error_log
 
 Server   : SQLPROD01  16.0.4265.3  Developer Edition (64-bit)
@@ -408,6 +417,7 @@ Permissions:
   ok      msdb_read
   ok      agent_jobs
   denied  agent_job_steps — job steps not collected — the report can say a job exists but not what it runs
+  ok      maintenance_plans
   ok      error_log
 
 Server   : SQLPROD01  16.0.4265.3  Developer Edition (64-bit)
