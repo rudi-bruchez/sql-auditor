@@ -30,6 +30,20 @@ unasked by default.
 
 ### Added
 
+- **An exclusive version ceiling, `@max_version`**, the mirror of
+  `@min_version`: a script declaring it does not run on the named version nor
+  above. It exists because the corpus knew floors only, and one window can
+  only be covered without overlap once a ceiling exists: the floor of
+  `10.system/020.host-services.sql` comes from a single services-view column
+  (`instant_file_initialization_enabled`, 2016 SP1), not from the view that
+  carries the startup parameters.
+- **The persisted startup parameters for 2012 to 2016 RTM**
+  (`10.system/025.startup-parameters-2012.sql`). It projects exactly the
+  `startup_parameters` result set of `020.host-services.sql` — the trace flags
+  that survive a restart — and mutes itself from 2016 SP1 up, where 020 runs
+  instead. The window it serves is Windows by construction: SQL Server on
+  Linux starts with 2017, so `sys.dm_server_registry` is reliable on every
+  version the ceiling lets it reach.
 - **The host and its operating system** (`10.system/021.host-info.sql`). The
   archive said nothing about the machine, so three questions an audit is
   routinely asked — is the host still supported, does a known fix apply, does

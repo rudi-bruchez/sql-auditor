@@ -34,6 +34,10 @@ type Script struct {
 	// MinVersion is the dotted ProductVersion prefix below which this script
 	// must not run. nil means ungated.
 	MinVersion []int
+	// MaxVersion is the dotted ProductVersion prefix at which and above which
+	// this script must not run: the ceiling is EXCLUSIVE, so a version equal
+	// to MaxVersion is already past it. nil means ungated.
+	MaxVersion []int
 	// RequiresFlag names an opt-in the operator must have switched on for this
 	// script to run. Empty means the script always runs. It exists for
 	// collectors whose output is more revealing than metadata — the archive's
@@ -255,7 +259,7 @@ func filepathRel(root, p string) (string, error) {
 // what the nine are.
 var knownDirectives = []string{
 	"scope", "timeout", "permissions", "resultsets", "min_version",
-	"requires_flag", "writer", "widened", "correlated", "discloses",
+	"max_version", "requires_flag", "writer", "widened", "correlated", "discloses",
 }
 
 func parseScript(rel, sql string) Script {
@@ -336,6 +340,13 @@ func parseScript(rel, sql string) Script {
 				continue
 			}
 			s.MinVersion = v
+		case "max_version":
+			v := ParseVersion(val)
+			if v == nil {
+				setLint(fmt.Sprintf("@max_version: %q is not a dotted version number", val))
+				continue
+			}
+			s.MaxVersion = v
 		case "requires_flag":
 			name := strings.ToLower(strings.TrimSpace(val))
 			if _, ok := KnownFlags[name]; !ok {

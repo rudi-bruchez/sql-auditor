@@ -510,6 +510,14 @@ func skipReason(s Script, denied map[string]bool, serverVersion []int, enabled m
 		return fmt.Sprintf("needs SQL Server %s or later; this instance reports %s",
 			joinVersion(s.MinVersion), joinVersion(serverVersion)), true
 	}
+	// The ceiling is exclusive: VersionAtLeast reports the equal-to case as
+	// satisfied, which here means "at or past the ceiling, skip". The same
+	// unparseable-or-absent ProductVersion rule as MinVersion applies — an
+	// unknown version is not evidence the ceiling is above this instance.
+	if len(serverVersion) > 0 && len(s.MaxVersion) > 0 && VersionAtLeast(serverVersion, s.MaxVersion) {
+		return fmt.Sprintf("applies below SQL Server %s; this instance reports %s",
+			joinVersion(s.MaxVersion), joinVersion(serverVersion)), true
+	}
 	for _, p := range s.Permissions {
 		if denied[p] {
 			return fmt.Sprintf("the login cannot %s, which this query declares in @permissions",
@@ -950,6 +958,9 @@ func scriptNote(s Script, enabled map[string]bool) string {
 	}
 	if len(s.MinVersion) > 0 {
 		notes = append(notes, "SQL Server "+joinVersion(s.MinVersion)+"+")
+	}
+	if len(s.MaxVersion) > 0 {
+		notes = append(notes, "below SQL Server "+joinVersion(s.MaxVersion))
 	}
 	if s.RequiresFlag != "" {
 		state := "off"

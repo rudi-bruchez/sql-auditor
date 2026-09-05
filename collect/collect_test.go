@@ -354,6 +354,28 @@ func TestSkipReasonForVersionGate(t *testing.T) {
 	}
 }
 
+func TestSkipReasonForMaxVersionGate(t *testing.T) {
+	// The ceiling is exclusive: 13.0.4001 itself is already past it.
+	s := Script{Path: "10.system/025.startup-parameters-2012.sql", MaxVersion: []int{13, 0, 4001}}
+	reason, skip := skipReason(s, nil, []int{13, 0, 4001}, nil)
+	if !skip {
+		t.Fatal("a script gated below the instance's version must be skipped")
+	}
+	if !strings.Contains(reason, "13.0.4001") {
+		t.Errorf("reason %q does not name the ceiling version", reason)
+	}
+	if _, skip := skipReason(s, nil, []int{14, 0, 1000}, nil); !skip {
+		t.Error("a version above the ceiling must be skipped")
+	}
+	if _, skip := skipReason(s, nil, []int{12, 0, 5000}, nil); skip {
+		t.Error("the instance is below the ceiling; the script must run")
+	}
+	// Same rule as MinVersion: an unknown server version must not gate out.
+	if _, skip := skipReason(s, nil, nil, nil); skip {
+		t.Error("an unknown server version must not gate a script out")
+	}
+}
+
 const sessionTextDisclosure = "SQL text of statements running during collection"
 
 // The disclosure paragraph and the decision to run the session-text collector

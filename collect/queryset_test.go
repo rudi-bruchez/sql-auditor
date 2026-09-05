@@ -394,6 +394,43 @@ func TestDiscoverRejectsBadMinVersion(t *testing.T) {
 	}
 }
 
+func TestDiscoverParsesMaxVersion(t *testing.T) {
+	fsys := fstest.MapFS{
+		"queries/10.system/025.startup-parameters-2012.sql": {Data: []byte(
+			"-- @resultsets: root:object\n-- @max_version: 13.0.4001\nSELECT 1 AS x;")},
+		"queries/10.system/010.a.sql": {Data: []byte(
+			"-- @resultsets: root:object\nSELECT 1 AS x;")},
+	}
+	got, err := Discover(fsys, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if got[0].MaxVersion != nil {
+		t.Errorf("ungated script has MaxVersion %v, want nil", got[0].MaxVersion)
+	}
+	want := []int{13, 0, 4001}
+	if len(got[1].MaxVersion) != len(want) {
+		t.Fatalf("MaxVersion = %v, want %v", got[1].MaxVersion, want)
+	}
+	for i := range want {
+		if got[1].MaxVersion[i] != want[i] {
+			t.Fatalf("MaxVersion = %v, want %v", got[1].MaxVersion, want)
+		}
+	}
+}
+
+func TestDiscoverRejectsBadMaxVersion(t *testing.T) {
+	fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(
+		"-- @resultsets: root:object\n-- @max_version: sixteen\nSELECT 1;")}}
+	got, err := Discover(fsys, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if got[0].LintError == "" || !strings.Contains(got[0].LintError, "sixteen") {
+		t.Errorf("lint error = %q, want it to name the bad value", got[0].LintError)
+	}
+}
+
 // The auditor contract is what makes a collector safe to run on a production
 // instance. Fourteen files comply by review; these tests are so the fifteenth
 // complies by rule.
