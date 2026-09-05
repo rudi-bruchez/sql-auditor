@@ -27,6 +27,9 @@
 10.system/072.resource-governor.sql
 10.system/073.accelerators.sql
 10.system/074.memory-health.sql
+10.system/075.deprecated-features.sql
+10.system/076.pending-io.sql
+10.system/077.fulltext.sql
 20.databases/010.all-databases.sql
 20.databases/011.all-databases-2014.sql
 20.databases/012.all-databases-query-store.sql
@@ -66,6 +69,7 @@
 80.workload/041.plan-cache-plans.sql
 80.workload/050.procedure-stats.sql
 80.workload/051.function-stats.sql
+80.workload/052.optimizer-hints.sql
 90.availability/010.topology.sql
 90.availability/020.always-on.sql
 90.availability/021.always-on-2016.sql

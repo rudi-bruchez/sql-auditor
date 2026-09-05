@@ -19,7 +19,7 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
-The corpus goes from 62 collectors to 75, and every gap
+The corpus goes from 62 collectors to 79, and every gap
 [docs/collection-gaps-spec.md](docs/collection-gaps-spec.md) records is closed
 except three it deliberately leaves open. The bar for entry there is that an
 audit needed the answer, could not find it in an archive, and had to go back to
@@ -40,6 +40,22 @@ unasked by default.
   peak are both computable). `20.databases/010.all-databases.sql` gains
   `parameterization_forced`. `20.databases/020.properties.sql` gains `is_sparse`
   per file, which the size columns cannot reveal.
+- **Four instance probes for assessment rules the archive could not answer**
+  (`10.system/075.deprecated-features.sql`, `10.system/076.pending-io.sql`,
+  `10.system/077.fulltext.sql` and `80.workload/052.optimizer-hints.sql`).
+  Deprecated features keep only the counters above zero — the filter the
+  Microsoft probe itself applies, and the difference between a signal and the
+  ~250 zero counters an old instance carries — with RTRIM on the padded nchar
+  feature names, and every counter bounded by the last restart, which the root
+  object states beside the numbers. Pending I/O is attributed per database and
+  file through the `io_handle` = `file_handle` join on
+  `sys.dm_io_virtual_file_stats`, because the pending-requests DMV names
+  neither database nor file; an empty array is the expected reading of a quiet
+  instant, not a failure. Optimizer hints are reported next to the total
+  optimization count, because a bare hint count confuses "few queries" with
+  "few hints". The Full-Text service answers installed or not, with its two
+  security properties NULL when it is not — a success by design, not a
+  collection failure.
 - **An exclusive version ceiling, `@max_version`**, the mirror of
   `@min_version`: a script declaring it does not run on the named version nor
   above. It exists because the corpus knew floors only, and one window can
