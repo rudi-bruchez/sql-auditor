@@ -17,7 +17,7 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.22.0] - 2026-09-06
 
 The corpus goes from 62 collectors to 83, and every gap
 [docs/collection-gaps-spec.md](docs/collection-gaps-spec.md) records is closed
