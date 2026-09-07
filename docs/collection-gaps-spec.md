@@ -1,10 +1,18 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis, 12 and 18, which are open.
-Sections 1 to 8, 10 and 13 to 17 are built and in the corpus; each closed
+**Status:** implemented, except sections 10 bis and 18, which are open.
+Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
+
+**The `slug:` lines are an interface, not decoration.** Each names a gap so
+that the topic corpus in `sql-auditor-private` can cite it as evidence, in the
+form `gap:<slug>`, and have that citation checked against this file. A closed
+section **keeps its slug**, for the same reason it keeps its argument. So the
+slug alone does not say whether a gap is still open — the `— closed` on the
+heading does, and a topic that cites a closed gap is asserting something this
+document contradicts.
 **Revised:** 3 September 2026, after a five-reader external review. Every claim
 below that says "measured" was measured on SQL Server 2022 (16.0.4265.3,
 Developer, on Linux) unless another version is named. Four of the five
@@ -1211,35 +1219,59 @@ separate command — `CREATE EVENT SESSION` creates a permanent object.
 
 ---
 
-## 12. The foreign key graph
+## 12. The foreign key graph — closed
 
 slug: foreign-key-graph
 
-**Status: not collected.** `70.schema/010.objects.sql` reads `sys.foreign_keys`,
-but only to count the constraints the optimizer no longer trusts — those with
-`is_not_trusted = 1` or `is_disabled = 1`. The graph itself, which table
-references which and through which columns, is nowhere in an archive.
+**Closed.** `70.schema/075.foreign-keys.sql` is in the corpus and projects the
+graph: the constraint, its parent table, the referencing column and its
+position in the key, and the referenced table and column. Both analyses below
+can now be made from an archive alone.
 
-Two analyses need it and neither can be done today.
+Two of the columns this section asked for are not projected, and saying so is
+the point of keeping the record: whether the constraint is trusted, and whether
+it cascades. `010.objects.sql` still only counts the untrusted and disabled
+ones. Neither is needed by the two analyses that made this a gap, and both
+remain available to a later pass on a row the collector already reads.
+
+Index coverage is answered differently rather than left out. No correlation is
+computed server-side: this file projects the foreign-key side,
+`070.index-columns.sql` projects the index side, and the archive joins them
+offline. That is deliberate, and the collector's own header says why — the
+interesting case is a partial or mis-ordered match, which a server-side boolean
+would flatten.
+
+**What it was.** `70.schema/010.objects.sql` reads `sys.foreign_keys`, but only
+to count the constraints the optimizer no longer trusts — those with
+`is_not_trusted = 1` or `is_disabled = 1`. The graph itself, which table
+references which and through which columns, was nowhere in an archive.
+
+Two analyses needed it and neither could be done from an archive.
 
 A missing foreign key is a data-model finding in its own right, and the first
 one an auditor reaches for on a schema built by an application that enforces
-its own integrity. Without the graph, the finding cannot be made from an
-archive at all; it has to be asked for by hand, every time.
+its own integrity. Without the graph, the finding could not be made from an
+archive at all; it had to be asked for by hand, every time.
 
 And a purge routine that rediscovers the reference graph on every pass is a
 recurring, expensive pattern. Reading one from `INFORMATION_SCHEMA` per table
 per call costs more than the deletions it exists to order. Recognising that
 shape from an archive needs the graph the routine is rebuilding.
 
-What a collector would project: the constraint, its parent and referenced
-table, the ordered column pairs, whether it is trusted, whether it cascades,
-and whether an index covers the referencing columns — that last one is what
-turns the graph into an indexing finding as well.
-
 Scope is `database`, and the cost is a catalog read: `sys.foreign_keys` joined
-to `sys.foreign_key_columns`, bounded by the same 200-table cap the rest of
-`70.schema` uses so one archive does not carry ten thousand rows nobody reads.
+to `sys.foreign_key_columns`. This section specified the same 200-table cap the
+rest of `70.schema` uses, so that one archive would not carry ten thousand rows
+nobody reads.
+
+**The built collector has no cap, and that reversal is the right one.** A
+truncated foreign-key list cannot be joined to a complete index list, and the
+join is the reason the file exists — so the cap would have removed the
+collector's purpose to save rows nobody was paying for. It projects
+`fks_total` and `fk_columns_total` beside the array instead, read from the same
+population, so a reader of an archive cut short by a failed read can tell the
+list is short rather than assume the schema is clean. Recorded here because a
+specification a collector deliberately contradicts is worth one paragraph now
+rather than an argument later.
 
 ## Gaps recorded on 4 September 2026
 
