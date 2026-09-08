@@ -18,9 +18,46 @@ What it does to your instance:
 - it does **not** change any configuration;
 - read-only is not the same as free. One collector samples pages of the largest
   heaps in each database to count forwarded records, which is real I/O on a
-  large instance — [what it costs the
+  large instance. [What it costs the
   instance](docs/dba-guide.md#what-the-default-run-costs-a-large-instance) says
   what that means and how to avoid it.
+
+## Why this exists
+
+Three claims. The tool follows from them, including the things it refuses to do.
+
+Most of the time the problem is not the hardware. It is the use made of the
+engine: the code, the configuration, the indexing, the data model. Instances get
+memory and cores added to them for years without anyone establishing what they
+were actually short of, because adding hardware is a decision one person can
+make in an afternoon and reading a workload is not.
+
+SQL Server already holds what is needed to establish it. The catalog views and
+the dynamic management views describe an instance in more detail than any
+external agent could, and reading them requires installing nothing. The facts
+are sitting there, on every server, unread.
+
+Few people know where to look. That is the entire difficulty, and it is where
+the cost of an audit actually sits. Gathering the numbers is mechanical and
+takes minutes once it is written down. Reading them is not, and no amount of
+tooling makes it so.
+
+That is why this collector gathers and stops. A tool that hands you a score of
+68 out of 100 has made the second decision for you and hidden how it made it:
+it has picked the thresholds, weighted them against each other, and thrown away
+everything that did not fit the number. It looks like it has done the hard part.
+It has done the easy part and concealed the hard one.
+
+The consequence worth naming, because nobody measures it: an over-provisioned
+server never complains. A badly indexed one on a large enough machine returns
+correct results at an acceptable speed, and the bill for that goes on being paid
+every month, on premises as an oversized host and in the cloud as a tier. The
+absence of a symptom is read as the absence of a problem.
+
+The archive this tool produces is the input to that reading, and it is yours.
+Read it yourself, hand it to your DBA, or [have it read by someone who does this
+for a living](https://www.pachadata.com/en/services/remote-sql-server-audit/).
+The collector does not care which, and it works the same either way.
 
 ## In a hurry
 
@@ -46,8 +83,8 @@ Before you point it at production, read [docs/dba-guide.md](docs/dba-guide.md).
 ### Download a release
 
 [Releases](https://github.com/rudi-bruchez/sql-auditor/releases) carry an
-archive per platform — `sql-auditor_<version>_linux_amd64.tar.gz` and
-`sql-auditor_<version>_windows_amd64.zip` — each holding the binary, the licence
+archive per platform, `sql-auditor_<version>_linux_amd64.tar.gz` and
+`sql-auditor_<version>_windows_amd64.zip`, each holding the binary, the licence
 and this file. Alongside them sits `sql-auditor_<version>_checksums.txt`.
 
 Check what you downloaded before you run it against an instance:
@@ -82,7 +119,7 @@ go build ./cmd/sql-auditor
 go install github.com/rudi-bruchez/sql-auditor/cmd/sql-auditor@latest
 ```
 
-`@latest` resolves to the highest published tag. Name one — `@v0.22.0` — to get
+`@latest` resolves to the highest published tag. Name one, `@v0.22.0`, to get
 the version this file describes rather than whatever has been tagged since. A
 build made this way carries no attestation: the module proxy hands you source,
 and the binary is compiled on your machine.
@@ -91,7 +128,7 @@ and the binary is compiled on your machine.
 
 A release archive can be checked two ways, both above: its digest against the
 published checksum file, and its attestation against this repository. A binary
-that arrived some other way — an email, a share, a USB key — can be checked
+that arrived some other way (an email, a share, a USB key) can be checked
 against neither. What it can still be made to do is say what it will ask:
 
 ```
