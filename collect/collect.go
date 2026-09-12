@@ -138,10 +138,14 @@ const FlagQueryStorePlanStats = "query_store_plan_stats"
 
 type Options struct {
 	Config *Config
-	Corpus fs.FS
-	Root   string
-	Now    time.Time
-	Keep   bool
+	// EnvFile is the resolved .env path. The wizard uses it only after a
+	// successful connection when the operator chose to save its non-secret
+	// connection details.
+	EnvFile string
+	Corpus  fs.FS
+	Root    string
+	Now     time.Time
+	Keep    bool
 	// Flags holds the opt-ins a script may name in @requires_flag. A flag
 	// absent from the map is off, so the default is always the narrow one.
 	Flags           map[string]bool

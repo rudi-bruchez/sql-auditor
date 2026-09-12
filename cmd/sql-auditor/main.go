@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"flag"
@@ -249,15 +250,31 @@ func defineFlags(cmd string) *cliFlags {
 // decides where it goes: a subcommand puts it on stderr, and the wizard cannot,
 // because it is about to take the screen.
 func buildOptions(cmd string, args []string, env func(string) string, stdin io.Reader) (collect.Options, int, error) {
-	return buildOptionsWithDebug(cmd, args, env, stdin, nil)
+	return buildOptionsForCommand(cmd, args, env, stdin, nil)
 }
 
 // buildOptionsWithDebug is the same resolution with the timeline switched on.
 // A nil log is a silent one, which is what buildOptions passes and what every
 // test gets.
 func buildOptionsWithDebug(cmd string, args []string, env func(string) string, stdin io.Reader, dbg *debugLog) (collect.Options, int, error) {
+	return buildOptionsForCommand(cmd, args, env, stdin, dbg)
+}
+
+func buildOptionsForCommand(cmd string, args []string, env func(string) string, stdin io.Reader, dbg *debugLog) (collect.Options, int, error) {
 	c := defineFlags(cmd)
 	_ = c.fs.Parse(args)
+	o, code, err := optionsFrom(c, env, stdin, dbg)
+	if err != nil {
+		return o, code, err
+	}
+	if err := o.Config.CheckConnectable(); err != nil {
+		return collect.Options{}, 2, err
+	}
+	return o, 0, nil
+}
+
+func buildOptionsForWizard(env func(string) string, stdin io.Reader, dbg *debugLog) (collect.Options, int, error) {
+	c := defineFlags("collect")
 	return optionsFrom(c, env, stdin, dbg)
 }
 
@@ -431,7 +448,8 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 
 	opts := collect.Options{
 		Config: cfg, Corpus: sqlauditor.Queries, Root: "queries",
-		Now: time.Now(), Keep: c.keep, Version: version, Commit: buildStamp(),
+		EnvFile: c.envFile,
+		Now:     time.Now(), Keep: c.keep, Version: version, Commit: buildStamp(),
 		GrantScript: c.grantScript,
 		Flags: map[string]bool{
 			collect.FlagIncludeSessionText:    c.all || c.sessionText,
@@ -599,6 +617,9 @@ func run() int {
 		// the whole complaint this answers is that the finding was never made.
 		fmt.Fprintf(os.Stderr, "%s\n\n%s\n\n", banner(), nothingToDo(fileExists, os.Getenv))
 		writeUsageBody(os.Stderr)
+		if shouldHoldConsole(len(os.Args) == 1, screen.AloneInConsole(), false) {
+			holdConsole(os.Stderr, os.Stdin)
+		}
 		dbg.printf("nothing to do; help printed, exit 2")
 		return 2
 	case ModeTUI:
@@ -607,10 +628,13 @@ func run() int {
 		// server and supply a password on screen 1. A refusal here is a .env
 		// the wizard cannot show, so it is reported the way a subcommand would
 		// report it — before the terminal is taken.
-		o, code, err := buildOptionsWithDebug("collect", nil, os.Getenv, os.Stdin, dbg)
+		o, code, err := buildOptionsForWizard(os.Getenv, os.Stdin, dbg)
 		if err != nil {
 			dbg.printf("configuration refused: %v", err)
 			fmt.Fprintln(os.Stderr, err)
+			if shouldHoldConsole(len(os.Args) == 1, screen.AloneInConsole(), false) {
+				holdConsole(os.Stderr, os.Stdin)
+			}
 			return code
 		}
 		// From here the wizard owns the screen, and a stamped line written to
@@ -744,6 +768,11 @@ func run() int {
 		fmt.Fprintln(os.Stderr, err)
 		return code
 	}
+	if err := opts.Config.CheckConnectable(); err != nil {
+		dbg.printf("configuration refused: %v", err)
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
 	// The timeline follows the run into collect, where the waits actually
 	// happen. Nil when the mode is off, which that package reads as silence.
 	opts.Debug = dbg.Writer()
@@ -810,6 +839,27 @@ func run() int {
 	}
 	dbg.printf("%s finished, exit %d", cmd, code)
 	return code
+}
+
+func shouldHoldConsole(noArguments, alone, enteredWizard bool) bool {
+	return noArguments && alone && !enteredWizard
+}
+
+// holdConsole keeps a window open long enough for the message above it to be
+// read. It ignores the read's outcome: the window is already open and the
+// process is already finished, so there is nothing left for an error to
+// change.
+//
+// Through bufio rather than a loop over Read, and that is the whole reason the
+// helper is not four lines of its own. io.Reader is permitted to return
+// (0, nil), and a hand-rolled loop that waits for '\n' has no bound on that —
+// it spins a core, invisibly, in a window the operator cannot close.
+// bufio.Reader.fill gives up after a hundred consecutive empty reads and
+// returns io.ErrNoProgress, which is the bound already written down in the
+// standard library.
+func holdConsole(w io.Writer, r io.Reader) {
+	fmt.Fprintln(w, "\npress Enter to close this window")
+	_, _ = bufio.NewReader(r).ReadString('\n')
 }
 
 // banner is how this program names itself and the build it came from. One

@@ -119,6 +119,26 @@ var knownKeys = map[string]bool{
 	"QUERY_STORE_TOP": true, "QUERY_STORE_DB_INCLUDE": true,
 }
 
+// ErrNoServer and ErrNoPassword identify the two omissions screen 1 can ask
+// the operator to correct.
+var (
+	ErrNoServer   = errors.New("SQL_SERVER is not set: put it in .env or pass --server")
+	ErrNoPassword = errors.New("SQL_USER is set but SQL_PASSWORD is empty")
+)
+
+// CheckConnectable reports configuration omissions that prevent opening a
+// connection. Resolve intentionally does not call it: the wizard opens on an
+// incomplete configuration so that screen 1 can complete it.
+func (c *Config) CheckConnectable() error {
+	if c.Server == "" {
+		return ErrNoServer
+	}
+	if c.User != "" && c.Password == "" && !c.Integrated {
+		return ErrNoPassword
+	}
+	return nil
+}
+
 // DefaultAppName is what SQL Server reports in program_name when the operator
 // set no SQL_APPLICATION_NAME. It is exported because the caller stamps the
 // version onto it: the version lives in main, where the release workflow can
@@ -166,6 +186,85 @@ func ParseDotEnv(r io.Reader) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, sc.Err()
+}
+
+// UpdateDotEnv changes the supplied keys without disturbing comments, blank
+// lines, ordering, or settings it was not asked to change. Existing files are
+// truncated through their original file object so their permissions/ACL remain.
+func UpdateDotEnv(path string, set map[string]string) error {
+	b, err := os.ReadFile(path)
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing {
+		return err
+	}
+	text := string(b)
+	found := make(map[string]bool, len(set))
+	lines := strings.SplitAfter(text, "\n")
+	for i, line := range lines {
+		raw, ending := line, ""
+		if strings.HasSuffix(raw, "\n") {
+			raw, ending = strings.TrimSuffix(raw, "\n"), "\n"
+		}
+		trim := strings.TrimSpace(raw)
+		keyPart := strings.TrimPrefix(trim, "export ")
+		key, _, ok := strings.Cut(keyPart, "=")
+		key = strings.TrimSpace(key)
+		v, wanted := set[key]
+		if !ok || !wanted {
+			continue
+		}
+		// Keep everything before the value (including indentation, export and
+		// spacing around '=') and the existing quote/comment style.
+		eq := strings.IndexByte(raw, '=')
+		prefix, value := raw[:eq+1], raw[eq+1:]
+		spaces := value[:len(value)-len(strings.TrimLeft(value, " \t"))]
+		val := strings.TrimSpace(value)
+		style, suffix := "", ""
+		if len(val) > 0 && (val[0] == '\'' || val[0] == '"') {
+			style = val[:1]
+			if end := strings.IndexByte(val[1:], val[0]); end >= 0 {
+				suffix = val[end+2:]
+			}
+		} else if comment := strings.Index(value, " #"); comment >= 0 {
+			suffix = value[comment:]
+		}
+		if style != "" && !strings.Contains(v, style) {
+			v = style + v + style
+		}
+		lines[i] = prefix + spaces + v + suffix + ending
+		found[key] = true
+	}
+	result := strings.Join(lines, "")
+	if result != "" && !strings.HasSuffix(result, "\n") {
+		result += "\n"
+	}
+	var unwritten []string
+	for key := range set {
+		if !found[key] {
+			unwritten = append(unwritten, key)
+		}
+	}
+	sort.Strings(unwritten)
+	for _, key := range unwritten {
+		result += key + "=" + set[key] + "\n"
+	}
+	if missing {
+		result = "# Run sql-auditor env init for the annotated template.\n" + result
+	}
+	flags := os.O_WRONLY | os.O_TRUNC
+	if missing {
+		flags |= os.O_CREATE
+	}
+	f, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = io.WriteString(f, result); err == nil {
+		err = f.Close()
+	} else {
+		_ = f.Close()
+	}
+	return err
 }
 
 // flagNameFor turns a setting key into the command-line flag that carries it,
@@ -370,12 +469,6 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 	}
 	if firstErr != nil {
 		return nil, firstErr
-	}
-	if cfg.Server == "" {
-		return nil, fmt.Errorf("SQL_SERVER is not set: put it in .env or pass --server")
-	}
-	if cfg.User != "" && cfg.Password == "" && !cfg.Integrated {
-		return nil, fmt.Errorf("SQL_USER is set but SQL_PASSWORD is empty")
 	}
 	return cfg, nil
 }

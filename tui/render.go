@@ -146,10 +146,13 @@ func renderConnection(s State, width int) []string {
 		pad + "Connection",
 		"",
 		fieldPad + fmt.Sprintf("%-11s%s", "Server", editable(s.Server, s.Field == fieldServer)),
+		fieldPad + fmt.Sprintf("%-11s%s", "Login", editable(s.User, s.Field == fieldUser)),
+		fieldPad + fmt.Sprintf("%-11s%s", "Password", editable(mask(s.Password), s.Field == fieldPassword)),
 		fieldPad + fmt.Sprintf("%-11s%s", "Database", s.Catalog),
 		fieldPad + fmt.Sprintf("%-11s%s", "Auth", authLine(s)),
-		fieldPad + fmt.Sprintf("%-11s%s", "Password", editable(mask(s.Password), s.Field == fieldPassword)),
 		fieldPad + fmt.Sprintf("%-11s%s", "Encrypted", encryptionLine(s)),
+		"",
+		fieldPad + editableCheckbox("save the connection to .env", s.SaveEnv, s.Field == fieldSaveEnv),
 	}
 	if s.ConnError != nil {
 		// The one error in this wizard that does not end a step. The server's
@@ -158,6 +161,9 @@ func renderConnection(s State, width int) []string {
 		// have to guess which.
 		out = append(out, "")
 		out = append(out, screen.Wrap(s.ConnError.Error(), width, fieldPad)...)
+	}
+	if s.SaveError != nil {
+		out = append(out, "", fieldPad+"Could not save .env: "+s.SaveError.Error())
 	}
 	if s.Source != "" {
 		out = append(out, "", fieldPad+s.Source)
@@ -171,6 +177,18 @@ func renderConnection(s State, width int) []string {
 	// arrives — an advertised key that takes two presses to work. Nothing binds
 	// an arrow, so nothing needs Esc at all.
 	return append(out, "", pad+"[enter] connect   [tab] next field   [ctrl-c] quit")
+}
+
+func editableCheckbox(label string, checked, focused bool) string {
+	mark := " "
+	if checked {
+		mark = "x"
+	}
+	v := "[" + mark + "] " + label
+	if focused {
+		return editable(v, true)
+	}
+	return v
 }
 
 // editable draws one of the two editable values, underscoring the rest of the
@@ -201,12 +219,9 @@ func mask(p string) string { return strings.Repeat("*", utf8.RuneCountInString(p
 
 func authLine(s State) string {
 	if s.Integrated {
-		if s.User != "" {
-			return "Windows integrated  " + s.User
-		}
 		return "Windows integrated"
 	}
-	return "SQL login  " + s.User
+	return "SQL login"
 }
 
 // encryptionLine spells out what the connection actually does, including the
@@ -252,6 +267,10 @@ func renderVerifying(s State, width int) []string {
 
 func renderVerification(s State, width int) []string {
 	out := []string{row(pad+"Verification", "step 2/4", width), ""}
+	if s.SaveError != nil {
+		out = append(out, screen.Wrap("Could not save .env: "+s.SaveError.Error(), width, fieldPad)...)
+		out = append(out, "")
+	}
 	out = append(out, serverBlock(s, width)...)
 	out = append(out, "")
 	if local := localBlock(s, width); len(local) > 0 {

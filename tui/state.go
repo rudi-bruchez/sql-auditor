@@ -10,6 +10,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"time"
 	"unicode/utf8"
@@ -68,12 +69,20 @@ func (s Step) String() string {
 	return fmt.Sprintf("Step(%d)", int(s))
 }
 
-// The two editable fields of screen 1, in tab order. They are the only two:
-// the database, the authentication mode and the encryption settings come from
-// the resolved configuration and the wizard does not edit .env.
+// The editable controls of screen 1, in tab order. The database, the
+// authentication mode and the encryption settings are not among them: they
+// come from the resolved configuration and none of them blocks a first
+// connection. There is no authentication control because an empty login
+// already is a Windows integrated connection — connURL attaches credentials
+// only when a login is set and integrated security is off.
+//
+// Every stop is reachable, which is what lets keyConnection advance with one
+// modulo. A skipped stop would need something else.
 const (
 	fieldServer = iota
+	fieldUser
 	fieldPassword
+	fieldSaveEnv
 	fieldCount
 )
 
@@ -120,15 +129,16 @@ type State struct {
 
 	// Screen 1. Password is held here and nowhere else: it is never written
 	// to disk, never rendered, and never leaves the process.
-	Server, Password string
-	Field            int
+	Server, User, Password string
+	SaveEnv                bool
+	EnvFile                string
+	Field                  int
 	// The three facts screen 1 shows and does not edit. They come from the
 	// resolved configuration — flag, then .env, then environment, then default
 	// — and stay read-only because the wizard displays the effect of .env and
 	// never rewrites it. Catalog is the initial catalog of the connection, not
 	// the database a collector is currently reading, which is Database below.
 	Catalog            string
-	User               string
 	Integrated         bool
 	Encrypt, TrustCert bool
 	// Source says where those values came from, in the operator's terms
@@ -140,6 +150,7 @@ type State struct {
 	// wizard that does not end it: the operator stays on the screen, with the
 	// cursor back in the server field.
 	ConnError error
+	SaveError error
 
 	// Screen 2.
 	Verify     collect.VerifyResult
@@ -266,6 +277,7 @@ func (s State) keyConnection(k screen.Key) State {
 		// The previous refusal disappears the moment a new attempt starts, so
 		// the screen never shows an error belonging to an older address.
 		s.ConnError = nil
+		s.SaveError = nil
 		s.Step = StepConnecting
 		return s
 	case screen.KeyCtrlC:
@@ -287,6 +299,10 @@ func (s State) keyConnection(k screen.Key) State {
 			return v[:len(v)-size]
 		})
 	case screen.KeySpace:
+		if s.Field == fieldSaveEnv {
+			s.SaveEnv = !s.SaveEnv
+			return s
+		}
 		return s.editField(func(v string) string { return v + " " })
 	}
 	if k.Rune >= 0x20 && k.Rune != 0x7f {
@@ -298,11 +314,14 @@ func (s State) keyConnection(k screen.Key) State {
 // editField applies one edit to whichever of the two fields has the cursor, so
 // the three call sites above do not each have to choose one.
 func (s State) editField(edit func(string) string) State {
-	if s.Field == fieldPassword {
+	switch s.Field {
+	case fieldPassword:
 		s.Password = edit(s.Password)
-		return s
+	case fieldUser:
+		s.User = edit(s.User)
+	case fieldServer:
+		s.Server = edit(s.Server)
 	}
-	s.Server = edit(s.Server)
 	return s
 }
 
@@ -317,6 +336,9 @@ func (s State) connectFailed(err error) State {
 	s.Step = StepConnection
 	s.ConnError = err
 	s.Field = fieldServer
+	if errors.Is(err, collect.ErrNoPassword) {
+		s.Field = fieldPassword
+	}
 	return s
 }
 

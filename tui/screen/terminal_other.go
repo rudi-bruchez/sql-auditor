@@ -25,3 +25,5 @@ func prepareConsole(out *os.File) (restore func(), asciiOnly bool, err error) {
 func EnableEscapes(f *os.File) (restore func(), ok bool) {
 	return func() {}, true
 }
+
+func AloneInConsole() bool { return false }
