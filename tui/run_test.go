@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ func baseOptions() collect.Options {
 
 func TestApplyStateCarriesTheTypedServerAndPasswordIntoTheConfig(t *testing.T) {
 	o := baseOptions()
-	s := State{Server: "SRV\\BI_PROD", Password: "typed"}
+	s := State{Server: "SRV\\BI_PROD", User: "auditor", Password: "typed"}
 
 	got := applyState(s, o)
 
@@ -51,9 +52,29 @@ func TestApplyStateCarriesTheTypedServerAndPasswordIntoTheConfig(t *testing.T) {
 // no password": the field starts empty because the wizard never reads a secret
 // back onto a screen.
 func TestApplyStateKeepsTheResolvedPasswordWhenNothingWasTyped(t *testing.T) {
-	got := applyState(State{Server: "invalid.invalid"}, baseOptions())
+	got := applyState(State{Server: "invalid.invalid", User: "auditor"}, baseOptions())
 	if got.Config.Password != "from-dotenv" {
 		t.Errorf("Password = %q, want the resolved one", got.Config.Password)
+	}
+}
+
+func TestApplyStateDropsInheritedPasswordWhenLoginChanges(t *testing.T) {
+	got := applyState(State{Server: "invalid.invalid", User: "other-login"}, baseOptions())
+	if got.Config.Password != "" {
+		t.Fatalf("Password = %q; an edited login must not inherit .env's password", got.Config.Password)
+	}
+	if err := got.Config.CheckConnectable(); !errors.Is(err, collect.ErrNoPassword) {
+		t.Fatalf("CheckConnectable = %v, want ErrNoPassword", err)
+	}
+}
+
+func TestApplyStateClearingLoginDropsInheritedPassword(t *testing.T) {
+	got := applyState(State{Server: "invalid.invalid"}, baseOptions())
+	if got.Config.User != "" || got.Config.Password != "" {
+		t.Fatalf("cleared login produced user=%q password=%q", got.Config.User, got.Config.Password)
+	}
+	if err := got.Config.CheckConnectable(); err != nil {
+		t.Fatalf("CheckConnectable: %v", err)
 	}
 }
 

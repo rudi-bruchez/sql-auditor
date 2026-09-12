@@ -27,6 +27,11 @@ func contains(t *testing.T, lines []string, want string) {
 	}
 }
 
+func TestVerificationShowsSaveFailure(t *testing.T) {
+	lines := renderVerification(State{SaveError: errors.New("access denied")}, testWidth)
+	contains(t, lines, "Could not save .env: access denied")
+}
+
 func absent(t *testing.T, lines []string, unwanted string) {
 	t.Helper()
 	if strings.Contains(joined(lines), unwanted) {

@@ -230,7 +230,7 @@ func (e pressEvent) apply(s State) State {
 // to answer is already on the state, and the same-day collision cannot be
 // answered here — the name the run will use is the one the SERVER gives
 // itself, which only the probe brings back.
-type connectedEvent struct{}
+type connectedEvent struct{ saveErr error }
 
 func (e connectedEvent) apply(s State) State {
 	// A result that belongs to an attempt the operator has already cancelled is
@@ -239,6 +239,7 @@ func (e connectedEvent) apply(s State) State {
 	if s.Step != StepConnecting {
 		return s
 	}
+	s.SaveError = e.saveErr
 	s.Step = StepVerifying
 	return s
 }
@@ -480,6 +481,10 @@ func (r *runner) stopWork() {
 // capabilities as unknown.
 func (r *runner) connect(ctx context.Context, s State) {
 	o := applyState(s, r.opts)
+	if err := o.Config.CheckConnectable(); err != nil {
+		r.send(connectFailedEvent{err: err})
+		return
+	}
 	db, err := collect.Open(o.Config)
 	if err != nil {
 		r.send(connectFailedEvent{err: err})
@@ -502,7 +507,11 @@ func (r *runner) connect(ctx context.Context, s State) {
 	if ctx.Err() != nil {
 		return
 	}
-	r.send(connectedEvent{})
+	var saveErr error
+	if s.SaveEnv {
+		saveErr = collect.UpdateDotEnv(s.EnvFile, map[string]string{"SQL_SERVER": s.Server, "SQL_USER": s.User})
+	}
+	r.send(connectedEvent{saveErr: saveErr})
 }
 
 func (r *runner) verify(ctx context.Context, s State) {
@@ -580,12 +589,15 @@ func (r *runner) collect(ctx context.Context, s State) {
 func applyState(s State, o collect.Options) collect.Options {
 	cfg := *o.Config
 	cfg.Server = s.Server
+	cfg.User = s.User
 	// Only when something was typed. The field starts empty even when .env
 	// holds a password — the wizard displays the effect of .env, it does not
 	// read a secret back onto a screen — so an empty field means "use what was
 	// resolved", not "connect with no password".
 	if s.Password != "" {
 		cfg.Password = s.Password
+	} else if s.User != o.Config.User {
+		cfg.Password = ""
 	}
 	o.Config = &cfg
 	flags := make(map[string]bool, len(s.Flags))
@@ -609,6 +621,7 @@ func initialState(o collect.Options, ascii bool) State {
 		Version:    o.Version,
 		Build:      o.Commit,
 		Server:     cfg.Server,
+		EnvFile:    o.EnvFile,
 		Catalog:    cfg.Database,
 		User:       cfg.User,
 		Integrated: cfg.Integrated,

@@ -55,8 +55,12 @@ var (
 		"PAGE":            true,
 	}
 
-	// Statement keywords no collector may use in any form.
-	forbiddenOutright = regexp.MustCompile(`(?i)\b(ALTER|BACKUP|RESTORE|GRANT|REVOKE|DENY|KILL|MERGE|RECONFIGURE|SHUTDOWN|WRITETEXT|UPDATETEXT|OPENROWSET|OPENQUERY|OPENDATASOURCE|BULK\s+INSERT|SETUSER)\b`)
+	// Statement keywords no collector may use in any form. CHECKPOINT joined
+	// the list on 12 September 2026: it writes dirty pages and it carries none
+	// of the keywords every other rule here looks for, so it passed. Word
+	// boundaries keep it off the corpus's own column names — log_checkpoint_lsn
+	// and since_last_checkpoint_mb have no boundary before "checkpoint".
+	forbiddenOutright = regexp.MustCompile(`(?i)\b(ALTER|BACKUP|RESTORE|GRANT|REVOKE|DENY|KILL|MERGE|RECONFIGURE|SHUTDOWN|WRITETEXT|UPDATETEXT|OPENROWSET|OPENQUERY|OPENDATASOURCE|BULK\s+INSERT|SETUSER|CHECKPOINT)\b`)
 
 	// EXECUTE AS switches the security context the rest of the batch runs
 	// under, which is the one thing that would make every other rule here
@@ -68,7 +72,40 @@ var (
 	// collector needs it; the corpus reads the error log through
 	// sys.sp_readerrorlog rather than through xp_readerrorlog for exactly this
 	// reason. The sp_ names are the ones that change the instance.
-	forbiddenProcedure = regexp.MustCompile(`(?i)\b(xp_[a-z0-9_]+|sp_configure|sp_addlogin|sp_droplogin|sp_addsrvrolemember|sp_addrolemember|sp_add_job|sp_start_job|sp_stop_job|sp_delete_job|sp_setapprole|sp_send_dbmail|sp_OACreate|sp_OAMethod|sp_attach_db|sp_detach_db|sp_dropserver|sp_addlinkedserver|sp_add_jobstep|sp_update_job)\b`)
+	//
+	// THE FOREACH PROCEDURES ARE THE MOST IMPORTANT NAMES IN THIS LIST, and
+	// they were missing until the harm review of 12 September 2026. They are
+	// execution vehicles: sp_msforeachdb runs its literal argument against
+	// every database on the instance. executedLiterals recognises EXEC(...)
+	// and sp_executesql and descends into what they execute, so
+	//
+	//	EXEC('ALTER DATABASE x SET OFFLINE WITH ROLLBACK IMMEDIATE')
+	//
+	// is refused — but handed to sp_msforeachdb the identical payload was
+	// blanked as an ordinary string literal by BlankSQLStrings and seen by no
+	// rule in this file. Measured: it took every database offline past every
+	// rule here. Refusing the names outright rather than teaching
+	// executedLiterals a third vehicle is both smaller and safer: they are
+	// undocumented, and no collector that reads has any reason to call one.
+	//
+	// The four after them write and carry no keyword any other rule looks for.
+	// sp_updatestats rewrites every statistic in the database, sp_recompile
+	// takes a schema-modification lock on a live object, sp_cycle_errorlog
+	// discards the oldest error log, sp_trace_setstatus stops somebody else's
+	// trace. All four are staples of the maintenance script this lint exists
+	// to catch on its way into a corpus directory.
+	forbiddenProcedure = regexp.MustCompile(`(?i)\b(xp_[a-z0-9_]+|sp_msforeachdb|sp_msforeachtable|sp_MSforeach_worker|sp_updatestats|sp_recompile|sp_cycle_errorlog|sp_trace_setstatus|sp_configure|sp_addlogin|sp_droplogin|sp_addsrvrolemember|sp_addrolemember|sp_add_job|sp_start_job|sp_stop_job|sp_delete_job|sp_setapprole|sp_send_dbmail|sp_OACreate|sp_OAMethod|sp_attach_db|sp_detach_db|sp_dropserver|sp_addlinkedserver|sp_add_jobstep|sp_update_job)\b`)
+
+	// DBCC SQLPERF is the one allowlisted command word that also takes a
+	// destructive argument. DBCC SQLPERF(LOGSPACE) is a genuine read, which is
+	// why the word is on the allowlist; DBCC SQLPERF('sys.dm_os_wait_stats',
+	// CLEAR) resets the instance's accumulated wait statistics, with no undo
+	// and no restart. For a tool whose whole purpose is to collect that
+	// evidence, destroying it on the run meant to gather it is the worst thing
+	// in this file's reach — and the client's own monitoring may be trending
+	// the same counters. CLEAR sits outside the string literal, so it survives
+	// BlankSQLStrings and is visible here.
+	dbccSqlperfClear = regexp.MustCompile(`(?i)\bDBCC\s+SQLPERF\b[^;]*\bCLEAR\b`)
 
 	// The statements a collector may use, but only against session-scoped
 	// scratch: a table variable or a #temp table, both of which die with the
@@ -169,6 +206,11 @@ func scanStatements(code string) string {
 	}
 	if m := forbiddenProcedure.FindString(code); m != "" {
 		return fmt.Sprintf("%s changes the instance rather than reading it: a collector may only call procedures that return rows", m)
+	}
+	// Before the allowlist below, because that one answers on the command word
+	// and this is the one command whose argument decides.
+	if dbccSqlperfClear.MatchString(code) {
+		return "DBCC SQLPERF with CLEAR resets the instance's accumulated wait or latch statistics, which cannot be recovered without a restart: DBCC SQLPERF(LOGSPACE) reads, this one destroys the evidence a collection exists to gather"
 	}
 	if n := countAll(scopedKeyword, code); n > countAll(scopedStatement, code) {
 		return fmt.Sprintf("%s: a collector may only write to a table variable or a #temp table, which die with the connection — anything else belongs to the server it is auditing",

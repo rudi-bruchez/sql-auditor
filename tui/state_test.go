@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,16 +199,14 @@ func TestTheFinalScreenAnswersCtrlCLikeEveryOther(t *testing.T) {
 	}
 }
 
-func TestTabCyclesOverTheTwoEditableFields(t *testing.T) {
+func TestTabCyclesOverTheConnectionControls(t *testing.T) {
 	s := State{Step: StepConnection}
 	seen := []int{}
 	for i := 0; i < 4; i++ {
 		s = s.Key(named(screen.KeyTab))
 		seen = append(seen, s.Field)
 	}
-	// Two fields, not five: the database, the authentication mode and the
-	// encryption settings are shown and not edited.
-	want := []int{fieldPassword, fieldServer, fieldPassword, fieldServer}
+	want := []int{fieldUser, fieldPassword, fieldSaveEnv, fieldServer}
 	for i := range want {
 		if seen[i] != want[i] {
 			t.Fatalf("tab %d landed on field %d, want %d", i+1, seen[i], want[i])
@@ -221,6 +220,10 @@ func TestTypingGoesToTheSelectedField(t *testing.T) {
 		s = s.Key(typed(r))
 	}
 	s = s.Key(named(screen.KeyTab))
+	for _, r := range "user" {
+		s = s.Key(typed(r))
+	}
+	s = s.Key(named(screen.KeyTab))
 	// A space is a keystroke like any other while editing: passwords contain
 	// them, and a wizard that swallowed the space would refuse a password the
 	// operator cannot type any other way.
@@ -230,8 +233,23 @@ func TestTypingGoesToTheSelectedField(t *testing.T) {
 	if s.Server != "SRV" {
 		t.Errorf("Server = %q, want %q", s.Server, "SRV")
 	}
+	if s.User != "user" {
+		t.Errorf("User = %q, want user", s.User)
+	}
 	if s.Password != "p w" {
 		t.Errorf("Password = %q, want %q", s.Password, "p w")
+	}
+	s = s.Key(named(screen.KeyTab))
+	before := s
+	for _, r := range "x1" {
+		s = s.Key(typed(r))
+	}
+	if s.Server != before.Server || s.User != before.User || s.Password != before.Password {
+		t.Error("typing on the save checkbox edited a text field")
+	}
+	s = s.Key(named(screen.KeySpace))
+	if !s.SaveEnv {
+		t.Error("space on the save checkbox did not enable saving")
 	}
 	if s.Step != StepConnection {
 		t.Errorf("typing left the screen: Step = %v", s.Step)
@@ -253,23 +271,36 @@ func TestBackspaceRemovesAWholeRune(t *testing.T) {
 	}
 }
 
+func TestNewConnectionAttemptClearsOldSaveError(t *testing.T) {
+	s := State{Step: StepConnection, SaveError: errors.New("access denied")}
+	got := s.Key(named(screen.KeyEnter))
+	if got.SaveError != nil {
+		t.Errorf("SaveError = %v, want nil", got.SaveError)
+	}
+}
+
 func TestARefusedConnectionStaysOnTheConnectionScreen(t *testing.T) {
-	s := State{Step: StepConnecting, Server: "invalid.invalid", Field: fieldPassword}
-	got := s.connectFailed(errConnRefusedForTest)
-	if got.Step != StepConnection {
-		t.Fatalf("Step = %v, want StepConnection", got.Step)
-	}
-	if got.ConnError == nil {
-		t.Error("ConnError is nil, want the server's refusal")
-	}
-	// The cursor goes back to the server field: the address is what the
-	// operator is most likely to be fixing, and it is the field a wrong
-	// password does not explain.
-	if got.Field != fieldServer {
-		t.Errorf("Field = %d, want fieldServer", got.Field)
-	}
-	if got.Server != s.Server {
-		t.Errorf("the refusal cleared the address: %q", got.Server)
+	for _, tc := range []struct {
+		name  string
+		err   error
+		field int
+	}{
+		{"server refusal", errConnRefusedForTest, fieldServer},
+		{"missing password", fmt.Errorf("connect: %w", collect.ErrNoPassword), fieldPassword},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := State{Step: StepConnecting, Server: "invalid.invalid", Field: fieldSaveEnv}
+			got := s.connectFailed(tc.err)
+			if got.Step != StepConnection || got.ConnError == nil {
+				t.Fatalf("connectFailed = %+v, want connection screen with error", got)
+			}
+			if got.Field != tc.field {
+				t.Errorf("Field = %d, want %d", got.Field, tc.field)
+			}
+			if got.Server != s.Server {
+				t.Errorf("the refusal cleared the address: %q", got.Server)
+			}
+		})
 	}
 }
 

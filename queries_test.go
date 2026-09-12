@@ -181,8 +181,11 @@ func TestEmbeddedEnvTemplateIsAcceptedByTheResolver(t *testing.T) {
 		if len(parsed) == 0 {
 			t.Fatalf("%s: the template set no keys at all", c.name)
 		}
-		if _, err := collect.Resolve(nil, parsed, func(string) string { return "" }); err != nil {
+		cfg, err := collect.Resolve(nil, parsed, func(string) string { return "" })
+		if err != nil {
 			t.Errorf("%s: the resolver refuses the template it ships: %v", c.name, err)
+		} else if err := cfg.CheckConnectable(); err != nil {
+			t.Errorf("%s: template is not connectable: %v", c.name, err)
 		}
 	}
 }

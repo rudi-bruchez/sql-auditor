@@ -19,14 +19,23 @@ import (
 // keystroke arrives as. Setting only the first is the bug this pair was written
 // to close: see prepareConsole.
 var (
-	kernel32               = syscall.NewLazyDLL("kernel32.dll")
-	procGetConsoleMode     = kernel32.NewProc("GetConsoleMode")
-	procSetConsoleMode     = kernel32.NewProc("SetConsoleMode")
-	procGetConsoleOutputCP = kernel32.NewProc("GetConsoleOutputCP")
-	procSetConsoleOutputCP = kernel32.NewProc("SetConsoleOutputCP")
-	procGetConsoleCP       = kernel32.NewProc("GetConsoleCP")
-	procSetConsoleCP       = kernel32.NewProc("SetConsoleCP")
+	kernel32                  = syscall.NewLazyDLL("kernel32.dll")
+	procGetConsoleMode        = kernel32.NewProc("GetConsoleMode")
+	procSetConsoleMode        = kernel32.NewProc("SetConsoleMode")
+	procGetConsoleOutputCP    = kernel32.NewProc("GetConsoleOutputCP")
+	procSetConsoleOutputCP    = kernel32.NewProc("SetConsoleOutputCP")
+	procGetConsoleCP          = kernel32.NewProc("GetConsoleCP")
+	procSetConsoleCP          = kernel32.NewProc("SetConsoleCP")
+	procGetConsoleProcessList = kernel32.NewProc("GetConsoleProcessList")
 )
+
+// AloneInConsole reports whether this process is the sole process attached to
+// its console. Zero is the API's error/no-console result and is not alone.
+func AloneInConsole() bool {
+	var ids [1]uint32
+	r, _, _ := procGetConsoleProcessList.Call(uintptr(unsafe.Pointer(&ids[0])), 1)
+	return r == 1
+}
 
 const (
 	enableVirtualTerminal = uint32(0x0004) // ENABLE_VIRTUAL_TERMINAL_PROCESSING

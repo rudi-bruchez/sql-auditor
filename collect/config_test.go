@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -85,9 +86,31 @@ func TestResolveRejectsUnknownSQLKey(t *testing.T) {
 }
 
 func TestResolveRequiresServer(t *testing.T) {
-	_, err := Resolve(nil, nil, func(string) string { return "" })
-	if err == nil {
-		t.Fatal("expected an error when SQL_SERVER is unset")
+	cfg, err := Resolve(nil, nil, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := cfg.CheckConnectable(); !errors.Is(err, ErrNoServer) {
+		t.Fatalf("CheckConnectable = %v, want ErrNoServer", err)
+	}
+}
+
+func TestCheckConnectable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want error
+	}{
+		{"missing server", Config{}, ErrNoServer},
+		{"login without password", Config{Server: "SQL01", User: "AUDIT_RO"}, ErrNoPassword},
+		{"integrated", Config{Server: "SQL01"}, nil},
+		{"complete login", Config{Server: "SQL01", User: "AUDIT_RO", Password: "secret"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.CheckConnectable(); !errors.Is(got, tc.want) {
+				t.Fatalf("CheckConnectable = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -111,6 +134,78 @@ func TestParseDotEnvQuotesAndComments(t *testing.T) {
 				t.Errorf("V = %q, want %q", got["V"], tt.want)
 			}
 		})
+	}
+}
+
+func TestUpdateDotEnvRewritesDuplicatesAndPreservesOtherLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	in := "# keep\nexport SQL_SERVER=old # keep\nOTHER=unchanged\nSQL_SERVER=older\nSQL_USER='olduser'\n"
+	if err := os.WriteFile(path, []byte(in), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateDotEnv(path, map[string]string{"SQL_SERVER": "SQL01", "SQL_USER": ""}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(b), "# keep\nexport SQL_SERVER=SQL01 # keep\nOTHER=unchanged\nSQL_SERVER=SQL01\nSQL_USER=''\n"; got != want {
+		t.Errorf("file = %q, want %q", got, want)
+	}
+	got, err := ParseDotEnv(strings.NewReader(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["SQL_SERVER"] != "SQL01" || got["SQL_USER"] != "" {
+		t.Errorf("parsed = %#v", got)
+	}
+}
+
+func TestUpdateDotEnvCreatesOnlyConnectionSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := UpdateDotEnv(path, map[string]string{"SQL_SERVER": "SQL01", "SQL_USER": ""}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(b), "# Run sql-auditor env init for the annotated template.\nSQL_SERVER=SQL01\nSQL_USER=\n"; got != want {
+		t.Errorf("file = %q, want %q", got, want)
+	}
+	parsed, err := ParseDotEnv(strings.NewReader(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed["SQL_SERVER"] != "SQL01" || parsed["SQL_USER"] != "" {
+		t.Errorf("parsed = %#v", parsed)
+	}
+}
+
+func TestUpdateDotEnvReturnsWriteErrors(t *testing.T) {
+	if err := UpdateDotEnv(t.TempDir(), map[string]string{"SQL_SERVER": "SQL01"}); err == nil {
+		t.Fatal("UpdateDotEnv succeeded on a directory")
+	}
+}
+
+func TestUpdateDotEnvPreservesExistingMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes on Windows are a read-only bit, not permission bits")
+	}
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("SQL_SERVER=old\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateDotEnv(path, map[string]string{"SQL_SERVER": "new"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o640 {
+		t.Errorf("mode = %04o, want 0640", got)
 	}
 }
 

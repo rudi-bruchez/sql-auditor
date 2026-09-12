@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,33 @@ func writeDotEnv(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestShouldHoldConsole(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		noArguments, alone, entered bool
+		want                        bool
+	}{
+		{"double-click early error", true, true, false, true},
+		{"arguments are scripted", false, true, false, false},
+		{"shared console", true, false, false, false},
+		{"wizard has read stdin", true, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldHoldConsole(tc.noArguments, tc.alone, tc.entered); got != tc.want {
+				t.Errorf("shouldHoldConsole = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHoldConsoleWaitsForNewline(t *testing.T) {
+	var out bytes.Buffer
+	holdConsole(&out, strings.NewReader("x\n"))
+	if got := out.String(); got != "\npress Enter to close this window\n" {
+		t.Errorf("output = %q", got)
+	}
 }
 
 // noEnv is an environment with nothing in it. Passing it rather than os.Getenv
@@ -164,6 +192,24 @@ func TestBuildOptionsResolvesWithoutAnyArguments(t *testing.T) {
 	}
 	if o.Version == "" {
 		t.Error("Version is empty; every archive records the build that made it")
+	}
+}
+
+func TestWizardAcceptsMissingServerWhileCommandRefusesIt(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+
+	if _, code, err := buildOptionsForWizard(noEnv, noStdin, nil); err != nil || code != 0 {
+		t.Fatalf("buildOptionsForWizard: code %d, err %v", code, err)
+	}
+	if _, code, err := buildOptions("collect", nil, noEnv, noStdin); code != 2 || !errors.Is(err, collect.ErrNoServer) {
+		t.Fatalf("buildOptions: code %d, err %v; want code 2 and ErrNoServer", code, err)
 	}
 }
 
