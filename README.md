@@ -50,6 +50,20 @@ archive per platform — `sql-auditor_<version>_linux_amd64.tar.gz` and
 `sql-auditor_<version>_windows_amd64.zip` — each holding the binary, the licence
 and this file. Alongside them sits `sql-auditor_<version>_checksums.txt`.
 
+On Windows Server, unpack the zip with `tar` rather than through Explorer:
+
+```
+tar -xf sql-auditor_<version>_windows_amd64.zip
+```
+
+Both are already on the server, but they do not leave the same thing behind.
+Windows tags a downloaded archive with a Zone.Identifier stream, and Explorer's
+own extractor copies that tag onto every file it unpacks — including the
+binary, which is then stopped by SmartScreen with a warning the operator has to
+click through, or cleared by hand with `Unblock-File`. `tar` copies no such tag,
+so the unpacked collector starts without either. Downloading with `curl -LO`
+instead of a browser avoids the tag in the first place.
+
 Check what you downloaded before you run it against an instance:
 
 ```
