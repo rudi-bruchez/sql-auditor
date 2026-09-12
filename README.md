@@ -118,6 +118,22 @@ What no amount of tooling will give you is a byte-identical rebuild to compare
 against. What can and cannot be verified is set out in full in
 [docs/dba-guide.md](docs/dba-guide.md#can-i-verify-the-binary).
 
+### If you run a corpus of your own
+
+`--queries-dir` and `QUERIES_DIR` run the SQL you give them. Every file is
+linted first for what its statements do, and one that would change the server
+is refused rather than run — but that guard has now been walked past by two
+separate adversarial reviews, six weeks apart, each time by a statement its
+patterns did not anticipate. Both are closed and the statements that got
+through are a test
+([docs/harm-review-2026-09-12.md](docs/harm-review-2026-09-12.md)).
+
+Read that as the measure of what the guard is for. **It stops an accident, not
+an author.** A corpus you have not read is a corpus you are running against
+production, with the privileges of the login you configured, and the archive's
+own manifest says so: it withdraws its read-only attestation for any corpus
+this project has not published, and records the SHA-256 of what it ran instead.
+
 ## Running it
 
 ### The wizard
