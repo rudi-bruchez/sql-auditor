@@ -144,7 +144,10 @@ type Options struct {
 	Keep   bool
 	// Flags holds the opt-ins a script may name in @requires_flag. A flag
 	// absent from the map is off, so the default is always the narrow one.
-	Flags           map[string]bool
+	Flags map[string]bool
+	// Profile is the requested collection profile, "" for the whole corpus.
+	// It only removes collectors: see skipReason.
+	Profile         string
 	Version, Commit string
 	// GrantScript, when set, is where "check" writes the T-SQL that grants
 	// the permissions the probe found missing. Empty means write nothing.
@@ -484,18 +487,23 @@ type plannedScript struct {
 	Skip   string
 }
 
-// skipReason applies the three gates that keep a script from running. None of
+// skipReason applies the four gates that keep a script from running. None of
 // them is an error: a degraded run is a success, so each returns an
 // explanation for the manifest and the run carries on.
 //
 // The operator's own choice is reported first, then the server's version, then
 // the login's rights — most actionable first, so a DBA reading the list starts
-// with the thing they can change without asking anyone.
+// with the thing they can change without asking anyone. The profile comes
+// first of all, because choosing it is the operator's choice and a later gate
+// would name an option that changes nothing for this run.
 //
 // denied must not contain "connect": an unreachable instance abandons the run
 // before any script is considered, and treating it as an ordinary skip would
 // emit an archive describing a server that was never reached.
-func skipReason(s Script, denied map[string]bool, serverVersion []int, enabled map[string]bool) (string, bool) {
+func skipReason(s Script, profile string, denied map[string]bool, serverVersion []int, enabled map[string]bool) (string, bool) {
+	if !inProfile(s, profile) {
+		return ProfileSkipReason(profile), true
+	}
 	if s.RequiresFlag != "" && !enabled[s.RequiresFlag] {
 		flag := KnownFlags[s.RequiresFlag]
 		if flag == "" {
@@ -571,14 +579,14 @@ func joinVersion(v []int) string {
 	return strings.Join(parts, ".")
 }
 
-func planScripts(scripts []Script, denied map[string]bool, serverVersion []int, enabled map[string]bool) []plannedScript {
+func planScripts(scripts []Script, profile string, denied map[string]bool, serverVersion []int, enabled map[string]bool) []plannedScript {
 	out := make([]plannedScript, 0, len(scripts))
 	for _, s := range scripts {
 		p := plannedScript{Script: s}
 		// A lint failure is an error rather than a skip, and Run reports it as
 		// one; the gates below would only bury it under a milder explanation.
 		if s.LintError == "" {
-			p.Skip, _ = skipReason(s, denied, serverVersion, enabled)
+			p.Skip, _ = skipReason(s, profile, denied, serverVersion, enabled)
 		}
 		out = append(out, p)
 	}
@@ -1498,7 +1506,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	folders := SelectedFolders(sel)
 	m.Targets = TargetBlock{Databases: folders, Skipped: sel.Skipped}
 
-	plan := planScripts(scripts, denied, ParseVersion(si.Version), o.Flags)
+	plan := planScripts(scripts, o.Profile, denied, ParseVersion(si.Version), o.Flags)
 	// The disclosure paragraph and the queries that run come from this one
 	// decision. Split them and the manifest eventually describes a different
 	// archive from the one beside it.

@@ -168,7 +168,7 @@ func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 		denied := DeniedCapabilities(v.Checks)
 		// connect is not a per-script gate. Getting here means it answered.
 		delete(denied, "connect")
-		plan := planScripts(v.Scripts, denied, ParseVersion(si.Version), o.Flags)
+		plan := planScripts(v.Scripts, o.Profile, denied, ParseVersion(si.Version), o.Flags)
 		v.Collectors = countCollectors(plan)
 	}
 	return nil

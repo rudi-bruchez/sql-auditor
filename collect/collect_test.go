@@ -299,21 +299,21 @@ func TestOutOfTimeLeavesAnOrdinaryFailureAlone(t *testing.T) {
 
 func TestSkipReasonForRequiredFlag(t *testing.T) {
 	s := Script{Path: "10.system/052.session-text.sql", RequiresFlag: FlagIncludeSessionText}
-	reason, skip := skipReason(s, nil, nil, nil)
+	reason, skip := skipReason(s, "", nil, nil, nil)
 	if !skip {
 		t.Fatal("a script gated on an unset flag must be skipped")
 	}
 	if !strings.Contains(reason, "--include-session-text") {
 		t.Errorf("reason %q does not say which flag would enable it", reason)
 	}
-	if _, skip := skipReason(s, nil, nil, map[string]bool{FlagIncludeSessionText: true}); skip {
+	if _, skip := skipReason(s, "", nil, nil, map[string]bool{FlagIncludeSessionText: true}); skip {
 		t.Error("the flag was set; the script must run")
 	}
 }
 
 func TestSkipReasonForDeniedPermission(t *testing.T) {
 	s := Script{Path: "10.system/050.tempdb.sql", Permissions: []string{"view_server_state"}}
-	reason, skip := skipReason(s, map[string]bool{"view_server_state": true}, nil, nil)
+	reason, skip := skipReason(s, "", map[string]bool{"view_server_state": true}, nil, nil)
 	if !skip {
 		t.Fatal("a script declaring a denied permission must be skipped")
 	}
@@ -330,26 +330,26 @@ func TestSkipReasonForDeniedPermission(t *testing.T) {
 	// instance abandons the run rather than skipping the scripts that declare
 	// CONNECT while the rest carry on describing a server never reached.
 	c := Script{Path: "10.system/010.properties.sql", Permissions: []string{"connect"}}
-	if _, skip := skipReason(c, map[string]bool{}, nil, nil); skip {
+	if _, skip := skipReason(c, "", map[string]bool{}, nil, nil); skip {
 		t.Error("connect was not in the denied set; the script must run")
 	}
 }
 
 func TestSkipReasonForVersionGate(t *testing.T) {
 	s := Script{Path: "10.system/012.soft-numa.sql", MinVersion: []int{13}}
-	reason, skip := skipReason(s, nil, []int{11, 0, 7001}, nil)
+	reason, skip := skipReason(s, "", nil, []int{11, 0, 7001}, nil)
 	if !skip {
 		t.Fatal("a script gated above the instance's version must be skipped")
 	}
 	if !strings.Contains(reason, "13") {
 		t.Errorf("reason %q does not name the required version", reason)
 	}
-	if _, skip := skipReason(s, nil, []int{13, 0, 5026}, nil); skip {
+	if _, skip := skipReason(s, "", nil, []int{13, 0, 5026}, nil); skip {
 		t.Error("the instance is new enough; the script must run")
 	}
 	// An unparseable ProductVersion is not evidence that the server is old.
 	// Skipping on it would silently drop every gated collector.
-	if _, skip := skipReason(s, nil, nil, nil); skip {
+	if _, skip := skipReason(s, "", nil, nil, nil); skip {
 		t.Error("an unknown server version must not gate a script out")
 	}
 }
@@ -357,21 +357,21 @@ func TestSkipReasonForVersionGate(t *testing.T) {
 func TestSkipReasonForMaxVersionGate(t *testing.T) {
 	// The ceiling is exclusive: 13.0.4001 itself is already past it.
 	s := Script{Path: "10.system/025.startup-parameters-2012.sql", MaxVersion: []int{13, 0, 4001}}
-	reason, skip := skipReason(s, nil, []int{13, 0, 4001}, nil)
+	reason, skip := skipReason(s, "", nil, []int{13, 0, 4001}, nil)
 	if !skip {
 		t.Fatal("a script gated below the instance's version must be skipped")
 	}
 	if !strings.Contains(reason, "13.0.4001") {
 		t.Errorf("reason %q does not name the ceiling version", reason)
 	}
-	if _, skip := skipReason(s, nil, []int{14, 0, 1000}, nil); !skip {
+	if _, skip := skipReason(s, "", nil, []int{14, 0, 1000}, nil); !skip {
 		t.Error("a version above the ceiling must be skipped")
 	}
-	if _, skip := skipReason(s, nil, []int{12, 0, 5000}, nil); skip {
+	if _, skip := skipReason(s, "", nil, []int{12, 0, 5000}, nil); skip {
 		t.Error("the instance is below the ceiling; the script must run")
 	}
 	// Same rule as MinVersion: an unknown server version must not gate out.
-	if _, skip := skipReason(s, nil, nil, nil); skip {
+	if _, skip := skipReason(s, "", nil, nil, nil); skip {
 		t.Error("an unknown server version must not gate a script out")
 	}
 }
@@ -389,7 +389,7 @@ func TestSessionTextFlagDrivesTheDisclosure(t *testing.T) {
 	}}
 
 	off := &Manifest{}
-	off.Collected.SessionText = len(collectsSessionText(planScripts(corpus, nil, nil, nil))) > 0
+	off.Collected.SessionText = len(collectsSessionText(planScripts(corpus, "", nil, nil, nil))) > 0
 	if off.Collected.SessionText {
 		t.Error("the flag was off; the manifest must not claim session text is present")
 	}
@@ -399,7 +399,7 @@ func TestSessionTextFlagDrivesTheDisclosure(t *testing.T) {
 
 	on := &Manifest{}
 	on.Collected.SessionText = len(collectsSessionText(
-		planScripts(corpus, nil, nil, map[string]bool{FlagIncludeSessionText: true}))) > 0
+		planScripts(corpus, "", nil, nil, map[string]bool{FlagIncludeSessionText: true}))) > 0
 	if !on.Collected.SessionText {
 		t.Fatal("the flag was on; the manifest must disclose session text")
 	}
@@ -420,7 +420,7 @@ func TestSessionTextClaimFollowsTheSQLNotOnlyTheDirective(t *testing.T) {
 			"JOIN sys.dm_exec_sessions es ON es.session_id = r.session_id\n" +
 			"CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS est;",
 	}}
-	by := collectsSessionText(planScripts(ungated, nil, nil, nil))
+	by := collectsSessionText(planScripts(ungated, "", nil, nil, nil))
 	if len(by) != 1 || by[0] != "10.system/099.local.sql" {
 		t.Fatalf("an ungated collector reading dm_exec_sql_text was not detected: %v", by)
 	}
@@ -442,7 +442,7 @@ func TestSessionTextClaimIgnoresComments(t *testing.T) {
 			"/* sys.dm_exec_sql_text is deliberately not used below. */\n" +
 			"SELECT session_id FROM sys.dm_tran_active_snapshot_database_transactions;",
 	}}
-	if by := collectsSessionText(planScripts(commented, nil, nil, nil)); len(by) > 0 {
+	if by := collectsSessionText(planScripts(commented, "", nil, nil, nil)); len(by) > 0 {
 		t.Errorf("a comment mentioning the DMF was read as a collector: %v", by)
 	}
 }
@@ -452,7 +452,7 @@ func TestSessionTextClaimIgnoresComments(t *testing.T) {
 func TestSessionTextNotClaimedWhenNoScriptCollectsIt(t *testing.T) {
 	plain := []Script{{Path: "10.system/010.properties.sql", SQL: "SELECT 1;"}}
 	on := map[string]bool{FlagIncludeSessionText: true}
-	if by := collectsSessionText(planScripts(plain, nil, nil, on)); len(by) > 0 {
+	if by := collectsSessionText(planScripts(plain, "", nil, nil, on)); len(by) > 0 {
 		t.Errorf("no script collects session text; the flag alone must not set the claim: %v", by)
 	}
 }
@@ -467,7 +467,7 @@ func TestSessionTextNotClaimedWhenTheScriptWasSkippedAnyway(t *testing.T) {
 		SQL:          "SELECT est.text FROM sys.dm_exec_sql_text(@h) AS est;",
 	}}
 	on := map[string]bool{FlagIncludeSessionText: true}
-	plan := planScripts(gated, map[string]bool{"view_server_state": true}, nil, on)
+	plan := planScripts(gated, "", map[string]bool{"view_server_state": true}, nil, on)
 	if by := collectsSessionText(plan); len(by) > 0 {
 		t.Errorf("the collector was skipped for want of a permission; nothing was captured to disclose: %v", by)
 	}
@@ -509,10 +509,10 @@ func TestEmbeddedCorpusGatesSessionTextBehindTheFlag(t *testing.T) {
 	if gated != 1 {
 		t.Errorf("got %d session-text collectors, want exactly 1", gated)
 	}
-	if by := collectsSessionText(planScripts(scripts, nil, nil, nil)); len(by) > 0 {
+	if by := collectsSessionText(planScripts(scripts, "", nil, nil, nil)); len(by) > 0 {
 		t.Errorf("the default run would collect session text: %v", by)
 	}
-	if len(collectsSessionText(planScripts(scripts, nil, nil, map[string]bool{FlagIncludeSessionText: true}))) == 0 {
+	if len(collectsSessionText(planScripts(scripts, "", nil, nil, map[string]bool{FlagIncludeSessionText: true}))) == 0 {
 		t.Error("--include-session-text would collect nothing")
 	}
 }
