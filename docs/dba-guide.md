@@ -58,8 +58,9 @@ before you run anything:
 sql-auditor queries export --to ./queries-to-review
 ```
 
-The corpus is 62 files. The archive records the SHA-256 of the exact corpus that
-was used, so a run can be tied to the questions it asked.
+The output is the exact set of files this run will use. The archive records the
+SHA-256 of the exact corpus that was used, so a run can be tied to the
+questions it asked.
 
 ### Ten files are opt-in
 
