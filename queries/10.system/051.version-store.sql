@@ -3,6 +3,7 @@
 -- @permissions: VIEW SERVER STATE
 -- @timeout:     60
 -- @min_version: 13.0.5026
+-- @profiles:    space
 --
 -- Which databases are consuming the tempdb version store, and by how much.
 -- Restored from 10.system/050.tempdb.sql, which holds the SQL Server 2012

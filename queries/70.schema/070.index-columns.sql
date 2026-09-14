@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, indexes:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION
 -- @timeout:     120
+-- @profiles:    space
 --
 -- The definition of every index: its key columns in order, its included
 -- columns, its filter, and the filegroup or partition scheme it sits on.

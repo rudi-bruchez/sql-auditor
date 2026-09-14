@@ -2,6 +2,7 @@
 -- @resultsets:  databases:array
 -- @permissions: VIEW ANY DEFINITION, MSDB READ
 -- @timeout:     60
+-- @profiles:    space
 --
 -- One row per database, system ones included: options, file counts and
 -- sizes, and the raw backup timestamps.

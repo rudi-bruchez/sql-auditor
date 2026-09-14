@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, columns:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     120
+-- @profiles:    space
 --
 -- The columns of the largest tables: type, nullability, identity, computed
 -- expression and default constraint.

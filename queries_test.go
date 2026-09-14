@@ -271,3 +271,24 @@ func TestBlankSQLStringsAndCommentStrippingCommute(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryKnownProfileHasACollector compares two sets decided in different
+// places: the names @profiles may say, and the names the embedded corpus does
+// say. A profile nobody declares would refuse every run that asks for it.
+func TestEveryKnownProfileHasACollector(t *testing.T) {
+	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	declared := map[string]bool{}
+	for _, s := range scripts {
+		for _, p := range s.Profiles {
+			declared[p] = true
+		}
+	}
+	for name := range collect.KnownProfiles {
+		if !declared[name] {
+			t.Errorf("profile %q is known and no embedded collector declares it", name)
+		}
+	}
+}

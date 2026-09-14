@@ -3,6 +3,7 @@
 -- @permissions: CONNECT, AGENT JOBS, AGENT JOB STEPS
 -- @timeout:     60
 -- @discloses:   job_step_text
+-- @profiles:    space
 --
 -- What the Agent jobs actually run, step by step.
 --

@@ -2,6 +2,7 @@
 -- @resultsets:  jobs:array, outcomes:array, outcomes_status:object
 -- @permissions: CONNECT, AGENT JOBS
 -- @timeout:     60
+-- @profiles:    space
 --
 -- SQL Server Agent job inventory, and how each job's runs have gone.
 --

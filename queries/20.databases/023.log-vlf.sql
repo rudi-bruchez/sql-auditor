@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, vlf_per_file:array
 -- @permissions: CONNECT, VIEW SERVER STATE
 -- @timeout:     60
+-- @profiles:    space
 --
 -- Runs once per user database, with the connection context switched to it.
 --

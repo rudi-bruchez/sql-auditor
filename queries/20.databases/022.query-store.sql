@@ -3,6 +3,7 @@
 -- @permissions: CONNECT, VIEW SERVER STATE, VIEW ANY DEFINITION
 -- @timeout:     60
 -- @min_version: 13
+-- @profiles:    space
 --
 -- Runs once per user database, with the connection context switched to it.
 --

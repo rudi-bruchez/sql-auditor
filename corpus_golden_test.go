@@ -36,7 +36,7 @@ func checkCorpusInventory(t *testing.T, scripts []collect.Script) {
 
 	got := make([]string, 0, len(scripts))
 	for _, s := range scripts {
-		got = append(got, s.Path)
+		got = append(got, inventoryLine(s))
 	}
 	sort.Strings(got)
 
@@ -62,26 +62,50 @@ func checkCorpusInventory(t *testing.T, scripts []collect.Script) {
 	// never ran and every collector added cost one round trip to learn the
 	// count and another to learn what was wrong with the file. The inventory
 	// and the lint are independent facts; one run should report both.
-	inWant := map[string]bool{}
-	for _, p := range want {
-		inWant[p] = true
+	wantProfiles := map[string]string{}
+	for _, l := range want {
+		p, prof := splitInventoryLine(l)
+		wantProfiles[p] = prof
 	}
-	inGot := map[string]bool{}
-	for _, p := range got {
-		inGot[p] = true
+	gotProfiles := map[string]string{}
+	for _, l := range got {
+		p, prof := splitInventoryLine(l)
+		gotProfiles[p] = prof
 	}
-	for _, p := range got {
-		if !inWant[p] {
+	for p, prof := range gotProfiles {
+		w, ok := wantProfiles[p]
+		switch {
+		case !ok:
 			t.Errorf("%s is in the corpus and not in %s: a new collector, or a rename "+
 				"whose other half is below", p, corpusGolden)
+		case w != prof:
+			t.Errorf("%s: profiles %q in the corpus, %q in %s", p, prof, w, corpusGolden)
 		}
 	}
-	for _, p := range want {
-		if !inGot[p] {
+	for p := range wantProfiles {
+		if _, ok := gotProfiles[p]; !ok {
 			t.Errorf("%s is in %s and not in the corpus: a collector was removed, renamed, "+
 				"or is no longer embedded", p, corpusGolden)
 		}
 	}
+}
+
+// inventoryLine is the path, followed by the profiles the collector declares
+// when it declares any. Membership is in the golden file so that a collector
+// cannot enter or leave a profile without the diff saying so.
+func inventoryLine(s collect.Script) string {
+	if len(s.Profiles) == 0 {
+		return s.Path
+	}
+	p := append([]string(nil), s.Profiles...)
+	sort.Strings(p)
+	return s.Path + " @profiles: " + strings.Join(p, ", ")
+}
+
+// splitInventoryLine undoes inventoryLine.
+func splitInventoryLine(line string) (path, profiles string) {
+	path, profiles, _ = strings.Cut(line, " @profiles: ")
+	return path, profiles
 }
 
 // readCorpusGolden tolerates CRLF: the working tree of this repository is CRLF

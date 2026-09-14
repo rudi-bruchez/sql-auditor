@@ -3,6 +3,7 @@
 -- @permissions:   CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:       1800
 -- @requires_flag: estimate_compression
+-- @profiles:    space
 --
 -- Estimated page-compression savings on the largest uncompressed objects.
 --

@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, by_compression:array, largest_uncompressed:array, mixed_tables:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     120
+-- @profiles:    space
 --
 -- Which tables and indexes are compressed, and which are not.
 --

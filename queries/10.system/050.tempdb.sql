@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, trace_flags:array, space:object, version_store:object, oldest_snapshot_transactions:array, files:array, file_io:array, perf_counters:array, live_page_contention:array, instance_latch_waits:array
 -- @permissions: VIEW SERVER STATE, VIEW ANY DEFINITION
 -- @timeout:     60
+-- @profiles:    space
 --
 -- tempdb configuration, space, version store and allocation contention.
 --

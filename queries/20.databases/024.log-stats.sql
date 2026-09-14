@@ -3,6 +3,7 @@
 -- @permissions: CONNECT, VIEW SERVER STATE
 -- @timeout:     30
 -- @min_version: 13.0.5026
+-- @profiles:    space
 --
 -- How much of this database's transaction log is live, and what is holding it.
 --

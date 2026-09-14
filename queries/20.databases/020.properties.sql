@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, backups:object, files:array, largest_objects:array, unused_indexes:array, missing_indexes:array, fragmentation:array
 -- @permissions: CONNECT, VIEW SERVER STATE, VIEW ANY DEFINITION, MSDB READ
 -- @timeout:     300
+-- @profiles:    space
 --
 -- Runs once per user database, with the connection context switched to it.
 --

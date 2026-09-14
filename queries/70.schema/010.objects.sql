@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, object_counts:array, tables:array, untrusted_constraints:array, deprecated_types:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     120
+-- @profiles:    space
 --
 -- The shape of one database: what objects exist, which tables have no
 -- clustered index or no primary key, which constraints the optimizer does not
