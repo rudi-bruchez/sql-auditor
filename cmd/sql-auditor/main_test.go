@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -605,4 +606,70 @@ func TestOptionsFromReadsTheCorpusOnlyForAProfile(t *testing.T) {
 			t.Errorf("%v: corpus read = %v, want %v; debug log:\n%s", c.args, got, c.read, buf.String())
 		}
 	}
+}
+
+// runCLI runs the real dispatch exactly as main() would. run() is not written
+// to take its arguments or its stderr as parameters: it reads os.Args and
+// writes os.Stderr directly, the way a CLI's entry point ordinarily does,
+// and refactoring it to take them just for a test would be a bigger change
+// than borrowing the two package-level variables it already uses. Safe
+// because this package runs its tests sequentially; a t.Parallel() test added
+// here later would race on both.
+func runCLI(t *testing.T, args ...string) (code int, stderr string) {
+	t.Helper()
+	oldArgs, oldStderr := os.Args, os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Args = append([]string{"sql-auditor"}, args...)
+	os.Stderr = w
+	code = run()
+	w.Close()
+	os.Args, os.Stderr = oldArgs, oldStderr
+	out, _ := io.ReadAll(r)
+	r.Close()
+	return code, string(out)
+}
+
+// --profile is a check and collect option; every other command must refuse
+// it rather than silently ignore it, the way `queries export` and `env init`
+// both did before this fix (see the comment above the refusal in run()).
+// Both cases assert the same three things a refusal owes: exit 2, a message
+// naming what the option belongs to, and nothing written to disk. An
+// operator who sees exit 2 must not also find a half-done export or a
+// freshly written .env behind it.
+func TestProfileIsRefusedOutsideCheckAndCollect(t *testing.T) {
+	t.Run("queries export", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "export")
+		code, stderr := runCLI(t, "queries", "export", "--profile", "space", "--to", dir)
+		if code != 2 {
+			t.Errorf("code = %d, want 2", code)
+		}
+		if !strings.Contains(stderr, "--profile belongs to check and collect") {
+			t.Errorf("stderr = %q, want it to say --profile belongs to check and collect", stderr)
+		}
+		if !strings.Contains(stderr, "queries export") {
+			t.Errorf("stderr = %q, want it to name the command typed", stderr)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("export directory exists at %s; the refusal must come before any file is written", dir)
+		}
+	})
+	t.Run("env init", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), ".env")
+		code, stderr := runCLI(t, "env", "init", "--profile", "bogus", "--to", dest)
+		if code != 2 {
+			t.Errorf("code = %d, want 2", code)
+		}
+		if !strings.Contains(stderr, "--profile belongs to check and collect") {
+			t.Errorf("stderr = %q, want it to say --profile belongs to check and collect", stderr)
+		}
+		if !strings.Contains(stderr, "env init") {
+			t.Errorf("stderr = %q, want it to name the command typed", stderr)
+		}
+		if _, err := os.Stat(dest); !os.IsNotExist(err) {
+			t.Errorf(".env exists at %s; the refusal must come before any file is written", dest)
+		}
+	})
 }

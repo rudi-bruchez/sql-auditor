@@ -711,6 +711,34 @@ func run() int {
 	c := defineFlags(cmd)
 	_ = c.fs.Parse(args)
 
+	// --profile is a check and collect option and the help says so, but
+	// nothing refused it anywhere else: `queries export --profile space`
+	// exported all 84 collectors, and `env init --profile bogus` wrote a
+	// file regardless, because the profile has no .env key for it to reach.
+	// An operator who typed the option believes the export or the file is
+	// narrowed, and it is not. Same trap as --grant-script below, refused
+	// here instead because queries export and env init return before ever
+	// reaching that check. Detected from the flag set, not the value, so a
+	// typed --profile "" is refused here too, the same way it is refused for
+	// check and collect in optionsFrom.
+	profileTyped := false
+	c.fs.Visit(func(f *flag.Flag) {
+		if f.Name == "profile" {
+			profileTyped = true
+		}
+	})
+	if profileTyped && cmd != "collect" && cmd != "check" {
+		typedCmd := cmd
+		if sub != "" {
+			typedCmd += " " + sub
+		}
+		fmt.Fprintf(os.Stderr,
+			"--profile belongs to check and collect: sql-auditor %s does not read it. "+
+				"Run sql-auditor check --profile %s or sql-auditor collect --profile %s instead.\n",
+			typedCmd, c.profile, c.profile)
+		return 2
+	}
+
 	if cmd == "version" {
 		fmt.Println(banner())
 		return 0
