@@ -892,9 +892,20 @@ func Check(ctx context.Context, o Options) (int, error) {
 	} else if anyDenied(checks) || len(v.NoAccess) > 0 {
 		fmt.Print("\nSomething is missing above. To generate the T-SQL that grants\n" +
 			"exactly what is missing, and nothing more, for a DBA to review:\n\n" +
-			"  sql-auditor check --grant-script grants.sql\n")
+			"  " + grantScriptAdvice(o.Profile) + "\n")
 	}
 	return PreflightExitCode(checks, v.LintFailures, v.OutputWritable), nil
+}
+
+// grantScriptAdvice is the command check suggests for writing the grant
+// script. It carries the profile, or the script it writes would ask for the
+// rights of the whole corpus and mark the ones the profile does not need as
+// missing.
+func grantScriptAdvice(profile string) string {
+	if profile == "" {
+		return "sql-auditor check --grant-script grants.sql"
+	}
+	return "sql-auditor check --profile " + profile + " --grant-script grants.sql"
 }
 
 // printQueries writes the Queries block of check. Under a profile it lists the

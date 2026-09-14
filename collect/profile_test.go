@@ -395,3 +395,15 @@ func TestPlannedCollectorsFollowsProfile(t *testing.T) {
 		t.Errorf("unprobed = %d, want 0", got)
 	}
 }
+
+// A grant script written under a profile must carry it: otherwise it asks for
+// the rights of the whole corpus and marks the ones the profile does not need
+// as missing.
+func TestGrantScriptAdviceCarriesTheProfile(t *testing.T) {
+	if got := grantScriptAdvice(""); got != "sql-auditor check --grant-script grants.sql" {
+		t.Errorf("no profile: %q", got)
+	}
+	if got := grantScriptAdvice("space"); got != "sql-auditor check --profile space --grant-script grants.sql" {
+		t.Errorf("space profile: %q", got)
+	}
+}
