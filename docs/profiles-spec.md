@@ -1,6 +1,8 @@
 # Collection profiles: specification
 
-Status: draft, not implemented. Written 14 September 2026.
+Status: draft, not implemented. Written 14 September 2026, and revised the same
+day after a review by five independent readers; what the review changed is
+recorded at the end.
 
 ## What it is for
 
@@ -33,8 +35,8 @@ intersection of the two.
 It is not a new command. `observe` is a separate command because it breaks the
 read-only promise `MANIFEST.txt` makes (see `docs/observe-spec.md`). A profile
 cannot break that promise: every collector it keeps is one the default run
-already executes, under the same manifest paragraph. What changes is how much of
-the corpus ran, and the manifest says so.
+already executes or already offers behind a flag, under the same manifest
+paragraph. What changes is how much of the corpus ran, and the manifest says so.
 
 It is not a filter by path. `--only 70.schema/*` was considered and rejected: an
 operator running the tool alone would have to know the layout of the corpus,
@@ -76,6 +78,9 @@ A lint error anywhere in the corpus keeps its present meaning whatever the
 profile. A corpus from `--queries-dir` that fails lint outside the profile is
 still a broken corpus, and the run still reports it.
 
+A member of a profile is a script that declares the profile and passed lint.
+Every count in this document that says "members" means that.
+
 ## Selecting the plan
 
 `skipReason` and `planScripts` take the profile, and the profile gate is
@@ -104,13 +109,42 @@ First, because the comment above `skipReason` already orders the reasons with
 the operator's own choice ahead of the server's version and the login's rights,
 and choosing a profile is the operator's choice. A collector outside the profile
 that is also gated on a flag reports the profile, not the flag: telling the
-operator to pass `--estimate-compression` for a collector the profile excluded
-would send them to an option that changes nothing.
+operator to pass an option for a collector the profile excluded would send them
+to an option that changes nothing.
 
-`Options` gains `Profile string`. Both callers of `planScripts`,
-`collect/collect.go` in `Run` and `collect/verify.go` in `VerifyServer`, pass
-it. `VerifyResult.Collectors` is therefore the count under the profile, and so
-is the wizard's "Always collected" figure.
+`Options` gains `Profile string`. Both callers of `planScripts`, `Run` in
+`collect/collect.go` and `VerifyServer` in `collect/verify.go`, pass it.
+
+## Selecting the databases
+
+`planScripts` decides which collectors run. It does not decide which databases
+are targets, and one rule outside it does: the second pass of `SelectTargets`
+(`collect/runner.go`) brings the distribution database back into a narrowed run
+whenever a published database survived the first pass. Under a profile that
+keeps no replication collector, that database would be listed in `MANIFEST.txt`
+under "Databases covered", with "kept because: local distributor" and the
+notice that its catalogs describe every publication on the instance, while no
+collector runs against it. A reviewer reproduced exactly that with an overlay
+test over the current `SelectTargets`, `planUnits` and manifest writer.
+
+So the widening becomes conditional on the purposes the run can actually use:
+
+```go
+// WideningPurposes returns the @widened purposes declared by the members of
+// the profile (every lint-clean script when profile is empty) whose flag, if
+// they have one, is on. Version and permission gates are not consulted: they
+// are not known when databases are selected, and a purpose kept here whose
+// collectors are later skipped is recorded in skipped_scripts like any skip.
+func WideningPurposes(scripts []Script, profile string, flags map[string]bool) map[string]bool
+
+func SelectTargets(c []DatabaseInfo, include, exclude string,
+	widen map[string]bool) (Selection, error)
+```
+
+The second pass runs only when `widen["replication"]` is true. Both callers,
+`Run` and `VerifyServer`, pass `WideningPurposes(scripts, o.Profile, o.Flags)`.
+Without a profile the replication collectors of the embedded corpus carry no
+flag, so the purpose is always present and nothing changes for a full run.
 
 ## The command line
 
@@ -118,54 +152,133 @@ is the wizard's "Always collected" figure.
 belongs to the run being prepared, not to the machine, and a key would make an
 unattended run quietly narrower than the operator believed.
 
-Three refusals, all exit 2, all before the instance is touched:
+### Four refusals, all exit 2
 
-| Refused | Message | Where |
-| --- | --- | --- |
-| a name outside `KnownProfiles` | `unknown profile "spaec"; expected one of space` | `CheckProfile` |
-| `--all` with `--profile` | `--all and --profile cannot be combined: --all asks for the widest archive this tool can produce, and a profile for a narrow one` | `buildOptions` in `cmd/sql-auditor/main.go` |
-| a flag with no collector in the profile | `--query-store-detail has no collector in profile space, so it would collect nothing; drop the option or the profile` | `CheckProfile` |
+| Refused | Message |
+| --- | --- |
+| a name outside `KnownProfiles` | `unknown profile "spaec"; expected one of space` |
+| `--all` with `--profile` | `--all and --profile cannot be combined: --all asks for the widest archive this tool can produce, and a profile for a narrow one` |
+| a profile with no member in the corpus | `profile space has no collector in this corpus; a corpus exported before profiles existed declares none` |
+| an option whose flag has no member | `--query-store-detail has no collector in profile space, so it would collect nothing; drop the option or the profile` |
+
+When every script gated on the flag that declares the profile failed lint, the
+fourth message names the lint failure instead, because that is what explains
+it: `--measure-page-density has no usable collector in profile space:
+70.schema/055.page-density.sql failed lint (<the lint error>)`.
+
+The third refusal exists for a corpus from `--queries-dir`. Any corpus exported
+before this feature, including the one `docs/dba-guide.md` tells operators to
+build in order to drop a costly collector, declares no profile. Without the
+refusal, `--profile space` on it skips every collector, writes an archive and
+exits 0.
 
 ```go
 // CheckProfile refuses the profile and flag combinations that would produce a
-// run which looks successful and collects nothing the operator asked for.
-// scripts is the corpus as discovered; a script that failed lint does not
-// count as a member.
+// run which looks successful and collects nothing the operator asked for. It
+// judges membership and lint only. A member that the instance's version or the
+// login's rights will gate off is not known here; it is skipped at planning
+// and recorded in skipped_scripts, as a flagged collector too recent for the
+// instance is today.
 func CheckProfile(scripts []Script, profile string, flags map[string]bool) error
 ```
 
-The third refusal exists because the failure it prevents is silent. Without it,
-`collect --profile space --query-store-detail` finishes with exit 0, and the
-operator believes the archive holds plans it does not hold.
+### Where the refusals happen
 
-`--all` is refused in `buildOptions` because it needs no corpus to be judged.
-`CheckProfile` needs the corpus, so it runs where the corpus is first known:
-in `Run`, immediately after `Discover` and before `Open`, and in `VerifyLocal`,
-before the `Queries` listing is printed. A malformed command line has always
-been refused before anything else happens, and this keeps that true.
+In `optionsFrom` (`cmd/sql-auditor/main.go`), the function both paths go
+through: `run()` calls it for `check` and `collect`, and `buildOptionsWithDebug`
+calls it for the tests and the wizard. `buildOptions` alone would not do, since
+the real command line never calls it.
+
+`optionsFrom` refuses `--all` with `--profile` before anything else, because it
+needs no corpus. It then discovers the corpus it has just chosen (embedded, or
+`--queries-dir`) and calls `CheckProfile`. A corpus that cannot be read is not
+judged there: validation is skipped, and the existing corpus error is reported
+by `Run` or `Check` exactly as today. A refusal from `optionsFrom` prints the
+message and nothing else, writes nothing, and never opens a connection.
+
+`VerifyLocal` and `Run` repeat `CheckProfile`, as a guard for a caller that
+builds `Options` itself. `VerifyResult` gains `ProfileErr error`; `Check`
+returns 2 with it before printing the listing, next to the existing `CorpusErr`
+branch. `Run` calls it immediately after `Discover`; a refusal there goes
+through `finishWith`, so it leaves a `failed-run-*` record whose profile block
+names what was asked. The wizard cannot reach either guard: it offers no
+refused combination.
+
+## Permissions under a profile
+
+The preflight probes every capability the corpus knows, whatever the profile. A
+login prepared for a space run is refused rights no member uses, such as
+`log_shipping`, `agent_alerts` and `error_log`. Left as they are, those refusals
+would make `MANIFEST.txt` print "INCOMPLETE ... Parts of this instance were not
+read", mark them `MISSING` in the grant script header, and annotate them in
+`check`, three different statements of one fact.
+
+One rule replaces all three. Right after the probes, a capability the profile
+does not need gets its own status:
+
+```go
+// ProfileChecks returns checks with every capability that is not "ok", that no
+// member of the profile declares in @permissions, and that is not "connect",
+// set to the status "not_needed". With an empty profile it returns checks
+// unchanged.
+func ProfileChecks(checks []CapabilityCheck, scripts []Script, profile string) []CapabilityCheck
+```
+
+It is applied once per run: in `Run` to `m.Preflight` as soon as the preflight
+returns, before `DeniedCapabilities` and before coverage is computed; in
+`VerifyServer` to `v.Checks` as soon as the probes return. The wizard verifies
+before the profile is chosen, so it keeps the raw checks and applies
+`ProfileChecks` with `s.Profile` wherever it reads a status.
+
+| Reader | Under a profile |
+| --- | --- |
+| `DeniedCapabilities` | unchanged; `not_needed` is not `ok`, and no member declares the capability, so no member is skipped for it |
+| `refreshCoverage` | `not_needed` counts as `ok`: coverage is `complete` when every capability a member needs was granted |
+| `writeCoverage` | the COMPLETE and INCOMPLETE texts are unchanged; a paragraph follows, `Not needed by profile space`, listing the labels and saying they were refused and that no collector of this profile reads what they allow |
+| the `check` listing | `not needed  <name>`, without the impact text |
+| wizard screen 2 | status `not needed`, no impact text, counted with `ok` in the `N / M` figure |
+| `deniedPermissions` in `tui/render.go` | unchanged; it reads `denied` only |
+| `BuildGrantScript` | builds sections from `denied` only, so a `not_needed` capability gets none; the header marks it `not needed`, and its check sentence becomes "Every line should come back ok or not needed" |
+| `PreflightExitCode` | unchanged in code; a probe of an unneeded capability that got no answer no longer makes exit 1, which is the intent |
+
+`_run.json` therefore carries `"status": "not_needed"` in `preflight` under a
+profile, and never without one.
+
+### The grant script
+
+`GrantScriptInput` gains `Profile string`, printed in the header as `for profile
+space`. Both callers, `writeGrantScript` in `collect/collect.go` and the `[g]`
+key in the wizard, pass the members as `Scripts` and the checks after
+`ProfileChecks`, so `collectorsFor` names members only. The section for
+databases the login cannot enter is written only when at least one script in
+`Scripts` is database-scoped; a future profile made of instance collectors must
+not ask for per-database access. `space` has database-scoped members, so the
+section stays for it.
 
 ## What the archive says
 
 ### `_run.json`
 
-`Manifest` gains a block:
-
 ```go
 type ProfileBlock struct {
-	// Name is empty when no profile was requested: the whole corpus ran.
+	// Name is the profile requested, empty when none was.
 	Name string `json:"name"`
-	// Collectors is how many scripts of the corpus belong to the profile, and
-	// Corpus how many the corpus holds, lint failures excluded from both. The
-	// pair says how much of the corpus the archive stands for.
-	Collectors int `json:"collectors"`
-	Corpus     int `json:"corpus"`
+	// Members is how many members the profile has in the corpus, and Corpus
+	// how many lint-clean scripts the corpus holds. Both are 0 when the run
+	// ended before the corpus was read. What actually ran is in results.
+	Members int `json:"members"`
+	Corpus  int `json:"corpus"`
 }
 ```
 
-serialised as `"profile": {"name": "space", "collectors": 21, "corpus": 84}`. It
-is written on every run, with `"name": ""` when there is no profile, for the
-reason the transport block is: an absent key and a key saying "none" must not be
-told apart by guesswork.
+serialised as `"profile": {"name": "space", "members": 21, "corpus": 84}`.
+`Name` is set from `Options` when the manifest is created, before the first
+thing that can fail, so every `failed-run-*` record says what was asked.
+`Members` and `Corpus` are set after `Discover`.
+
+The block is written on every run, with `"name": ""` when there is no profile,
+for the reason the transport block is: an absent key and a key saying "none"
+must not be told apart by guesswork.
 
 `skipped_scripts` keeps one entry per collector left out by the profile, with
 `ProfileSkipReason` as the reason. The analysis layer reads that list to tell
@@ -177,23 +290,30 @@ was refused", and it must stay complete.
 One header line, printed unconditionally, after `Contents`:
 
 ```
-Profile      : none, the whole corpus ran
-Profile      : space, 21 of 84 collectors (what makes the databases on this instance larger than they need to be: ...)
+Profile      : none, the whole corpus
+Profile      : space, 21 of the 84 collectors in the corpus belong to it
+Profile      : space, requested; the corpus was not read
 ```
 
-And in "Queries not run", the entries whose reason equals
+The count is membership, not execution: `041.compression-savings` and
+`055.page-density` are members behind flags, so a space run with neither flag
+executes at most 19, and "Queries run" says how many did.
+
+In "Queries not run", the entries whose reason equals
 `ProfileSkipReason(m.Profile.Name)` are collapsed into one line placed first:
 
 ```
-Queries not run (64):
+Queries not run (65):
   - 63 collectors outside profile space, each listed in _run.json
   - 70.schema/041.compression-savings.sql
       not collected by default; pass --estimate-compression to include it
+  - 70.schema/055.page-density.sql
+      not collected by default; pass --measure-page-density to include it
 ```
 
 The count in the heading stays the count of entries in `skipped_scripts`. The
 document a security officer reads has to stay readable; 63 identical lines
-bury the two skips that carry information.
+bury the skips that carry information.
 
 This changes the text of every manifest, profiled or not.
 `collect/manifest_test.go` and `collect/collect_test.go` assert on `Human()`
@@ -208,16 +328,14 @@ func RunFolderFor(outputDir, server, profile string, now time.Time, keep bool) s
 
 With a profile the name is `<server>-<date>-<profile>`, for example
 `SQL01_PROD-2026-09-14-space`; without one it is unchanged. The `--keep` time
-suffix is appended after it. The callers are `collect/collect.go` (twice),
-`tui/state.go`, and the tests in `collect/output_test.go`,
+suffix is appended after it. The callers are `Run` in `collect/collect.go`,
+`runFolderFor` in `tui/state.go`, and the tests in `collect/output_test.go`,
 `collect/collect_test.go` and `tui/state_test.go`.
 
-A consequence worth having: a full run and a space run on the same day no
-longer collide, so neither replaces the other.
+A full run and a space run on the same day no longer collide, so neither
+replaces the other.
 
 ## `check`
-
-The listing prints the profile before the queries and lists the members only:
 
 ```
 Profile: space, 21 of 84 collectors
@@ -225,27 +343,14 @@ Queries (21):
   10.system/010.properties.sql               ...
   ...
 Not in profile space: 63 collectors. Run check without --profile to list them.
+Lint failures outside profile space (1):
+  !! 80.workload/099.custom.sql              <the lint error>
 ```
 
-Lint failures outside the profile are still listed, with the `!!` prefix, for
-the reason given under "The directive".
-
-A capability probed as denied that no member of the profile declares in
-`@permissions` is annotated `(not needed by profile space)`. Its status is
-unchanged, so `PreflightExitCode`, which does not read `denied`, is unaffected.
-
-### The grant script
-
-`GrantScriptInput` gains `Profile string`. When it is set,
-`BuildGrantScript` restricts `in.Scripts` to the members of the profile and
-removes from `denied` every capability none of them declares, before any
-section is built. Those capabilities are named in the header under one line:
-`Denied, and not needed by profile space: <names>`. Without a profile nothing
-changes, including for capabilities no collector declares.
-
-Both callers pass it: `writeGrantScript` in `collect/collect.go` and the `[g]`
-key in `tui/grants.go`. A grant script for a space run asks for what a space run
-reads, which is the argument that gets a cautious client to run it.
+The `Queries` block lists the members, including a member that failed lint with
+its `!!` line, and its heading counts members. Lint failures outside the profile
+get a block of their own, printed only when there are some, so the heading of
+each block counts the lines under it.
 
 ## The wizard
 
@@ -256,28 +361,41 @@ Screen 3, "What to collect", gains a first row above the options:
                       space: what makes the databases on this instance larger ...
 ```
 
-- `State` gains `Profile string`; `[p]` cycles through `""` and every key of
+- `State` gains `Profile string`. `[p]` cycles through `""` and every key of
   `KnownProfiles` in sorted order, then back to `""`.
+- `[p]` is handled in `pressEvent.apply` in `tui/run.go`, beside `[g]`, and not
+  in the pure `keyOptions`, because it has to look at the output directory.
+  After changing the profile it recomputes `s.Collision = collisionFor(s,
+  e.opts)`; when the banner changes, `Keep` returns to `false`, since an answer
+  given for the previous folder name does not apply to the new one. Without
+  this, a same-day space archive would be replaced by pressing `[enter]` with
+  no banner, because the collision was probed for the full-run name during
+  verification.
 - The option rows shown are the flags of `flagOrder` that have at least one
-  member in the profile, or all of them when there is no profile. `FlagIndex`
-  is clamped to the rows shown.
-- Changing the profile turns off every flag whose row it hides. A combination
-  `CheckProfile` refuses can therefore never be started from the wizard.
+  member in the profile, or all of them without a profile. Changing the profile
+  turns off every flag whose row it hides and clamps `FlagIndex`. The wizard
+  therefore never starts a combination `CheckProfile` refuses.
+- `[g]` is accepted on screen 3 as well as on screen 2, and uses `s.Profile`:
+  the members as scripts, the checks after `ProfileChecks`. On screen 2, before
+  a profile is chosen, it writes the full script as today; screen 3 says
+  `[g] write the T-SQL for this profile`.
 - The collector count is recomputed from the plan whenever the profile or a
-  flag changes, through an exported function over what the verification step
-  already holds:
+  flag changes:
 
   ```go
   // PlannedCollectors is VerifyResult.Collectors for another profile or
-  // another set of flags. It is zero when v.Probed is false.
+  // another set of flags: planScripts over v.Scripts, with the denied
+  // capabilities of ProfileChecks(v.Checks, v.Scripts, profile) and the
+  // version of v.Server. It is zero when v.Probed is false. Like
+  // countCollectors, it counts scripts that would run at least once and
+  // does not look at which databases were selected.
   func PlannedCollectors(v VerifyResult, profile string, flags map[string]bool) int
   ```
 
-- With a profile, the sentence reads `Profile space: N collectors on this
-  instance, computed from the resolved plan.` and the sentence introducing the
-  options describes the rows actually shown.
-- `applyState` copies `Profile` into `Options`; the collision probe in
-  `tui/state.go` and the `[g]` key pass it on.
+- With a profile, the sentence reads `Profile space: N collectors will run on
+  this instance, computed from the resolved plan.` and the sentence introducing
+  the options describes the rows actually shown.
+- `applyState` copies `Profile` into `Options`.
 
 The wizard has no command line, so this row is the only way to choose a profile
 there.
@@ -286,7 +404,8 @@ there.
 
 ### Members
 
-21 collectors: 20 that exist today and one added by this specification.
+21 collectors: 20 that exist today and one added by this specification. Two of
+them are behind flags.
 
 | Collector | What the space question reads in it |
 | --- | --- |
@@ -300,20 +419,24 @@ there.
 | `20.databases/023.log-vlf.sql` | VLF layout |
 | `20.databases/024.log-stats.sql` | what holds the log back from truncating, and how much of it is active |
 | `50.agent/010.jobs.sql` | the jobs a scheduled shrink runs in |
-| `50.agent/020.job-steps.sql` | the step text, the only place a `DBCC SHRINKFILE` in a T-SQL job shows |
+| `50.agent/020.job-steps.sql` | the step text, where a `DBCC SHRINKFILE` in a T-SQL job shows |
 | `50.agent/040.maintenance-plans.sql` | shrink tasks in maintenance plans |
 | `60.backup/010.history.sql` | how far back msdb history goes, log backup cadence |
 | `70.schema/010.objects.sql` | table sizes, data and indexes apart, creation and modification dates |
 | `70.schema/020.index-usage.sql` | the size and usage counters of every index, uncapped |
 | `70.schema/040.compression.sql` | what is compressed today |
-| `70.schema/041.compression-savings.sql` | estimated savings, still only with `--estimate-compression` |
+| `70.schema/041.compression-savings.sql` | estimated savings, only with `--estimate-compression` |
 | `70.schema/050.heaps.sql` | page fullness and forwarded records on the 50 largest heaps |
-| `70.schema/055.page-density.sql` | new: page fullness on the 50 largest rowstore indexes |
+| `70.schema/055.page-density.sql` | new: page fullness on the 50 largest rowstore index partitions, only with `--measure-page-density` |
 | `70.schema/060.columns.sql` | declared types, LOB columns |
 | `70.schema/070.index-columns.sql` | keys and included columns, fill factor, disabled indexes |
 
 `50.agent/020.job-steps.sql` carries `@discloses: job_step_text`. It stays in
 the profile, and the manifest discloses it exactly as it does for a full run.
+
+The wizard offers both flags under the profile. The documentation says that a
+space question is answered better with `--measure-page-density`, and says what
+it costs, so the operator decides per instance.
 
 ### Left out, and why
 
@@ -324,19 +447,23 @@ the profile, and the manifest discloses it exactly as it does for a full run.
 | `80.workload/*` | about time spent, not space occupied |
 | `10.system/020.host-services.sql` | instant file initialisation decides how fast a file grows, not how large it is |
 | `10.system/040.error-log.sql` | discloses the error log for one marginal question, the size of the log file itself |
-| `20.databases/011.all-databases-2014.sql`, `012.all-databases-query-store.sql`, `021.properties-2014.sql` | version extensions of members, carrying delayed durability, incremental statistics and the requested Query Store state, none of which bears on size; `022.query-store` carries the storage figures |
+| `20.databases/011.all-databases-2014.sql`, `012.all-databases-query-store.sql`, `021.properties-2014.sql` | additive version extensions of members, carrying delayed durability, incremental statistics and the requested Query Store state; none bears on size, and `022.query-store` carries the storage figures |
 
 ### What the profile cannot say
 
 Why one table compresses by three quarters and another by a third. The share of
-NULLs and the actual width of the values are properties of the data, and a
-profile made of metadata collectors does not read data. The estimate itself
-comes from `041.compression-savings`, which does, and which stays behind its
-flag for that reason.
+NULLs and the actual width of the values are properties of the data, and the
+metadata collectors do not read data. The estimate comes from
+`041.compression-savings`, which does, and which stays behind its flag for that
+reason.
 
 Whether an index unused since the last restart is used once a year. The uptime
 is collected so the analysis can say how long the window was; it cannot say what
 happened outside it.
+
+Whether a shrink is scheduled when the command sits after the first 200
+characters of a T-SQL job step: `50.agent/020.job-steps.sql` keeps only that
+much of the step text.
 
 ## New collector: `70.schema/055.page-density.sql`
 
@@ -352,24 +479,69 @@ single compression candidate was a table fragmented at about 1 %, which that
 filter never lists; and a table can be perfectly ordered and half empty, which
 is exactly the table a rebuild shrinks.
 
-It runs in the default corpus as well as in the profile. The index maintenance
-questions of a full audit need the same measure, and the cost is of the same
-kind and bound as the heap scan every default run already pays.
+### Why it is behind a flag
+
+`SAMPLED` does not read 1 % of the pages. Measured on SQL Server 2025 with the
+database taken offline and back online before each run, and
+`sys.dm_io_virtual_file_stats` read before and after one call:
+
+| Target | Leaf pages | Pages read | Share |
+| --- | ---: | ---: | ---: |
+| clustered index, contiguous, `SAMPLED` | 30,000 | 2,608 | 8.7 % |
+| clustered index, fragmented at 99 %, `SAMPLED` | 39,985 | 4,672 | 11.7 % |
+| heap, `SAMPLED` | 30,100 | 2,520 | 8.4 % |
+| both indexes, `DETAILED` (control) | | | about 100 % |
+
+The documentation's 1 % counts sampled reads; each read brings in a whole
+extent. On the 820 GB client database this profile was designed from, the 50
+largest partitions would put in the order of 70 to 95 GB into the buffer pool
+per database, evicting what the workload had there, and neither `SET
+LOCK_TIMEOUT` nor `@timeout` bounds that.
+
+So it is an opt-in for cost, like `--estimate-compression`:
+
+```go
+const FlagMeasurePageDensity = "measure_page_density"
+
+// in KnownFlags:
+"measure_page_density": "--measure-page-density",
+```
+
+The flag name is spelt so that `collectorsFor`, which derives the option from
+the flag by replacing `_` with `-`, prints the real option. `--all` turns it on
+with the others, `TestAllTurnsOnEveryOptIn` covers it through `KnownFlags`,
+`flagOrder` in `tui/state.go` gains it after `FlagEstimateCompression`, and the
+option text reads `measure page density: reads 8 to 12 % of the pages of the
+largest indexes into the buffer pool`.
+
+### The unit is the partition
+
+`sys.dm_db_partition_stats` has one row per partition, and a rebuild can be run
+per partition, so the collector ranks and caps partitions and says so: the root
+fields are `sample.largest_partitions_scanned` and `counts.eligible_partitions`,
+and `counts.indexes_covered` says how many distinct indexes the list holds. One
+heavily partitioned index can take every slot; the root makes that visible
+instead of calling 50 partitions 50 indexes.
 
 ### The file
 
 To be committed verbatim. It was executed on the SQL Server 2025 container
-exactly as below except for the `@profiles` line, which the current parser
-rejects as an unknown directive until this specification is implemented.
+exactly as below, except for the `@requires_flag` and `@profiles` lines, which
+the current parser rejects as an unknown flag and an unknown directive until
+this specification is implemented. On a database holding one clustered index
+split into five partitions over 128 in-row pages each, and one ordinary
+clustered index, it returned `eligible_partitions 6`, `indexes_covered 2` and
+six rows, and it passed lint through the tool.
 
 ```sql
 -- @scope:       database
 -- @resultsets:  root:object, indexes:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     300
+-- @requires_flag: measure_page_density
 -- @profiles:    space
 --
--- How full the leaf pages of the largest rowstore indexes are.
+-- How full the leaf pages of the largest rowstore index partitions are.
 --
 -- Why this collector exists: whether rebuilding an index gives space back
 -- depends on how full its pages are, and nothing else in the corpus says.
@@ -379,10 +551,18 @@ rejects as an unknown directive until this specification is implemented.
 -- page FULLNESS: a table can be perfectly ordered and half empty, and it is
 -- then the one a rebuild shrinks.
 --
--- THE COST IS BOUNDED THE WAY 050.heaps BOUNDS IT. SAMPLED reads a sample of
--- the pages rather than metadata, so the scan is applied only to the 50
--- largest rowstore indexes, chosen from metadata first. The cap is projected
--- in root so a reader never mistakes the list for the whole.
+-- IT IS BEHIND A FLAG FOR COST, LIKE 041.compression-savings. SAMPLED is not
+-- the 1 % read its name suggests. Measured on SQL Server 2025, from a cold
+-- buffer pool: 8.7 % of the leaf pages of a contiguous clustered index were
+-- read, 11.7 % of a fragmented one, because each sample brings in a whole
+-- extent. On a large database that is tens of gigabytes pulled into the
+-- buffer pool, evicting what the workload had there, and neither
+-- SET LOCK_TIMEOUT nor @timeout bounds it.
+--
+-- THE UNIT IS THE PARTITION, NOT THE INDEX. sys.dm_db_partition_stats has one
+-- row per partition, and a rebuild can be run per partition, so the cap of 50
+-- is 50 partitions. One heavily partitioned index can take every slot; root
+-- says how many distinct indexes the list covers so a reader sees it.
 --
 -- CHOSEN AND ORDERED BY IN-ROW PAGES, NOT BY RESERVED PAGES. reserved_page_count
 -- counts LOB and row-overflow pages too. Measured on SQL Server 2025: a table
@@ -408,21 +588,21 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
 DECLARE @top int = 50;
-DECLARE @eligible int = NULL;
+DECLARE @eligible int = NULL, @indexes_covered int = NULL;
 DECLARE @err int = 0, @msg nvarchar(2048) = N'';
 DECLARE @density TABLE (
-    [table]            nvarchar(300) NOT NULL,
-    index_name         sysname       NULL,
-    index_id           int           NOT NULL,
-    index_type         nvarchar(60)  NOT NULL,
-    partition_number   int           NOT NULL,
-    fill_factor        tinyint       NOT NULL,
-    reserved_mb        decimal(18,1) NOT NULL,
+    [table]           nvarchar(300) NOT NULL,
+    index_name        sysname       NULL,
+    index_id          int           NOT NULL,
+    index_type        nvarchar(60)  NOT NULL,
+    partition_number  int           NOT NULL,
+    fill_factor       tinyint       NOT NULL,
+    reserved_mb       decimal(18,1) NOT NULL,
     in_row_reserved_mb decimal(18,1) NOT NULL,
-    page_count         bigint        NULL,
-    page_fullness_pct  decimal(5,2)  NULL,
-    fragmentation_pct  decimal(5,2)  NULL,
-    record_count       bigint        NULL
+    page_count        bigint        NULL,
+    page_fullness_pct decimal(5,2)  NULL,
+    fragmentation_pct decimal(5,2)  NULL,
+    record_count      bigint        NULL
 );
 
 /* Read inside TRY/CATCH into a table variable, and emitted unconditionally
@@ -455,8 +635,8 @@ BEGIN TRY
     FROM (
         SELECT TOP (@top)
                ps.object_id, ps.index_id, ps.partition_number,
-               i.name                        AS index_name,
-               i.type_desc                   AS index_type,
+               i.name                 AS index_name,
+               i.type_desc            AS index_type,
                i.fill_factor,
                ps.reserved_page_count        AS reserved_pages,
                ps.in_row_reserved_page_count AS in_row_reserved_pages
@@ -477,11 +657,15 @@ BEGIN CATCH
     SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
 END CATCH
 
+SELECT @indexes_covered = COUNT(*)
+FROM (SELECT DISTINCT [table], index_id FROM @density) AS d;
+
 SELECT DB_NAME()                                   AS [database],
        CONVERT(varchar(23), SYSDATETIME(), 126)    AS [collected_at],
-       @top                                        AS [sample.largest_indexes_scanned],
+       @top                                        AS [sample.largest_partitions_scanned],
        'SAMPLED'                                   AS [sample.mode],
-       @eligible                                   AS [counts.eligible_indexes],
+       @eligible                                   AS [counts.eligible_partitions],
+       @indexes_covered                            AS [counts.indexes_covered],
        CASE WHEN @err = 0 THEN 1 ELSE 0 END        AS [collected.indexes],
        @err                                        AS [errors.indexes],
        NULLIF(@msg, N'')                           AS [error_message]
@@ -493,16 +677,6 @@ FROM @density
 ORDER BY in_row_reserved_mb DESC, [table], index_id, partition_number
 OPTION (RECOMPILE, MAXDOP 1);
 ```
-
-### Cost
-
-`SAMPLED` reads about 1 % of the pages of an index, and switches to `DETAILED`
-below 10,000 pages, where a full read is cheap. On the client database of about
-820 GB this profile was designed from, the 50 largest indexes would mean reads
-in the order of 8 GB, per database. That figure is an estimate: the file has
-only been run on a small test database, and the first collection on a large
-instance measures it. Like the heap scan, the cost is buffer-pool eviction,
-which neither `SET LOCK_TIMEOUT` nor `@timeout` bounds.
 
 ## Change to `70.schema/010.objects.sql` and `70.schema/060.columns.sql`
 
@@ -522,6 +696,7 @@ tables with the most reserved pages, all allocation units included. Both files
 carry the same fragment, verbatim, for the reason the comment in
 `010.objects.sql` gives for the ORDER BY today: two statements that choose
 different tables produce an archive listing a table whose columns are missing.
+The fragment defines a set; neither file depends on its order.
 
 In `060.columns.sql`, the body of both `sized` CTEs becomes:
 
@@ -552,24 +727,38 @@ Its `ORDER BY` stays; it no longer decides membership.
 Both root objects gain `50 AS [listing_cap_by_size]` beside `listing_cap`, so a
 reader can see that the list holds up to 250 tables and why.
 
-Measured on SQL Server 2025, on the same test database, before and after:
+### Measured
+
+Membership, on the 203-table database, before and after:
 
 | | `tables` in `010.objects` | the LOB table listed | its columns in `060.columns` |
 | --- | --- | --- | --- |
 | today | 200 | no | none |
 | with the change | 201 | yes | `id`, `body` |
 
-`tables_covered` in `060.columns` read 201, matching `010.objects`.
+`tables_covered` in `060.columns` read 201, matching `010.objects`. Three
+reviewers reproduced this table independently.
+
+Cost, the whole `010.objects` file through sqlcmd, wall clock, two runs each:
+
+| Catalog | Today | With the change |
+| --- | ---: | ---: |
+| 261 tables | 349 to 610 ms | 414 to 440 ms |
+| 5,001 tables | 1,593 to 1,750 ms | 572 to 593 ms |
+
+The change is faster on a large catalog, because today's statement computes the
+per-table aggregates for every table before its `TOP`. Materialising the
+fragment into a table variable first measured the same as the `IN` form, so the
+simpler form stays.
 
 ## What does not change
 
 - The read-only paragraph of `MANIFEST.txt`, and every disclosure rule.
 - `--queries-dir`: a corpus from disk may declare `@profiles`, under the same
   closed vocabulary.
-- `DB_INCLUDE` and `DB_EXCLUDE`: a profile narrows the collectors, never the
-  databases.
-- The exit codes of `collect`, apart from the three refusals above, which use
-  the existing 2.
+- `DB_INCLUDE` and `DB_EXCLUDE`: a profile narrows the collectors, and only the
+  replication widening follows it.
+- The exit codes, apart from the four refusals above, which use the existing 2.
 
 ## Tests
 
@@ -581,20 +770,35 @@ In `collect`:
   an unset flag and a denied permission reports the profile.
 - `TestDiscoverParsesProfiles`, and two cases in `TestDiscoverLintErrors`: an
   unknown value, and an empty one.
-- `TestCheckProfile`: an unknown name; a flag with no member; a flag with a
-  member; a lint-failed member does not count as one.
+- `TestCheckProfile`: an unknown name; a corpus with no member; a flag with no
+  member; a flag whose only member failed lint, whose message names the lint
+  error; a flag with a member.
+- `TestWideningPurposes`, and `TestSelectTargetsWidensOnlyForAPurpose`: the
+  distribution database is kept with `widen["replication"]` and not without it,
+  with the publisher selected in both cases.
+- `TestProfileChecks`: a non-ok capability no member declares becomes
+  `not_needed`; one a member declares keeps its status; `ok` is untouched;
+  `connect` is never changed; an empty profile returns the checks unchanged.
+- `TestRefreshCoverageTreatsNotNeededAsOk` and
+  `TestManifestHumanNotNeededParagraph`.
+- `TestBuildGrantScriptUnderProfile`: a `not_needed` capability gets no section
+  and is marked in the header; without a profile the same input produces the
+  script it produces today; the no-access section is absent when no script is
+  database-scoped.
+- `TestCheckRefusesProfileBeforeListing`: `Check` returns 2 with `ProfileErr`
+  and prints no `Queries` line.
 - `TestRunFolderNameCarriesProfile`, and the existing `RunFolderFor` tests with
   a profile, including the `--keep` suffix after it.
-- `TestManifestHumanProfileLine`, for both forms of the header line, and
+- `TestManifestHumanProfileLine`, for the three forms of the header line, and
   `TestManifestHumanGroupsProfileSkips`, which also checks that a skip for
   another reason is still listed on its own.
-- `TestBuildGrantScriptRestrictedToProfile`: a capability denied and declared
-  by no member produces no section and is named in the header; without a
-  profile, the same input produces the script it produces today.
 - `TestPlannedCollectorsFollowsProfile`.
 
-In `cmd/sql-auditor`: `--profile` is parsed into `Options.Profile`, and `--all`
-with `--profile` returns exit 2 with the message above.
+In `cmd/sql-auditor`, through `buildOptions`, which reaches `optionsFrom` like
+`run()` does: `--profile` is parsed into `Options.Profile`; `--all` with
+`--profile` returns exit 2 with its message; an unknown profile and an option
+with no member return exit 2; a `--queries-dir` corpus with no `@profiles` line
+returns exit 2 under `--profile space`.
 
 In the root package:
 
@@ -608,24 +812,33 @@ In the root package:
   `70.schema/050.heaps.sql: profiles "space" in the corpus, "" in testdata/corpus.txt`.
   A collector cannot enter or leave a profile without the diff saying so.
 
-In `tui`: `[p]` cycles the profiles; changing the profile turns off the flags
-it hides and clamps `FlagIndex`; the count follows `PlannedCollectors`.
+In `tui`: `[p]` cycles the profiles; `[p]` recomputes the collision, and a
+same-day folder for the new name brings the banner up; changing the profile
+turns off the flags it hides and clamps `FlagIndex`; `[g]` on screen 3 writes
+the script for the profile; screen 2 renders `not needed`; the count follows
+`PlannedCollectors`.
 
 Verification against a real instance, before the release: `check --profile
-space` and `collect --profile space` against the local SQL Server 2025
-container, reading the listing, `MANIFEST.txt`, `_run.json` and the grant
-script, then leaving the container as it was found.
+space` and `collect --profile space --measure-page-density` against the local
+SQL Server 2025 container, reading the listing, `MANIFEST.txt`, `_run.json` and
+the grant script of a login missing an unneeded right, then leaving the
+container as it was found.
 
 ## Documentation
 
-- `README.md`: `--profile` in the table of options for `check` and `collect`,
-  and a section "Collecting for one question" saying what a profile removes,
-  what it does not, and how it combines with the flags.
-- `docs/dba-guide.md`: the same section, written for the DBA who approves the
-  run; a row for `70.schema/055.page-density.sql` in "What the default run costs
-  a large instance"; the collector counts it states.
-- `CHANGELOG.md`: an Unreleased entry for the profile, the collector and the
-  table listing change.
+- `README.md`: `--profile` and `--measure-page-density` in the table of options
+  for `check` and `collect`; `--all` turns on ten options; a section "Collecting
+  for one question" saying what a profile removes, what it does not, how it
+  combines with the flags, and which flag a space question wants.
+- `docs/dba-guide.md`: the same section written for the DBA who approves the
+  run, and what `not needed` means in `check` and in `MANIFEST.txt`;
+  `70.schema/055.page-density.sql` in the table of opt-in files, whose heading
+  becomes ten; and a correction in "What the default run costs a large
+  instance": the heap scan reads 8 to 12 % of the pages of the 50 largest heaps,
+  not about 1 %, so a 500 GB heap costs tens of gigabytes of reads, not 5 GB. The
+  measurement above is the source.
+- `CHANGELOG.md`: an Unreleased entry for the profile, the collector, the
+  `not_needed` status, the table listing change and the corrected cost.
 
 ## What this does not do
 
@@ -637,12 +850,68 @@ script, then leaving the container as it was found.
   on chosen candidates rather than a second sweep.
 - Offer any profile other than `space`.
 
+## The review of 14 September 2026
+
+Five readers reviewed the first version: two runs each of agy and of codex, one
+with a prompt naming the load-bearing claims and one without, and a fresh Claude
+subagent. Each finding was checked before it changed anything here.
+
+What changed, and who established it:
+
+1. `055.page-density` moved behind `--measure-page-density`. The first version
+   put it in the default run on the strength of the documented 1 %; a reviewer
+   measured about 8.6 % of the pages brought into the buffer pool, and a second
+   measurement, above, found 8.4 to 11.7 %.
+2. Its cap and counts were renamed to partitions, with `indexes_covered` added.
+   Four readers found it, three by running the file on partitioned tables.
+3. The replication widening follows the profile ("Selecting the databases"),
+   from an overlay test that showed the distribution database listed as covered
+   with nothing run against it.
+4. The refusal of `--all` moved from `buildOptions` to `optionsFrom`, which the
+   real command line calls; `buildOptions` is reached only by tests and the
+   wizard.
+5. `Check` handles the profile refusal through `ProfileErr`; the first version
+   put the refusal in `VerifyLocal` without saying how `Check` would stop.
+6. A profile with no member in the corpus is refused; before, an old exported
+   corpus produced an empty archive with exit 0, which was measured.
+7. The `not_needed` status replaces a `check`-only annotation, after readers
+   showed that coverage would read INCOMPLETE and the grant script header would
+   contradict itself for rights the profile never uses.
+8. The profile block counts members, and `MANIFEST.txt` says membership is not
+   execution; the first version gave "collectors" two meanings, 21 members
+   against at most 20, now 19, planned.
+9. The wizard recomputes the collision on `[p]` and accepts `[g]` on screen 3;
+   three readers showed that a same-day space archive could be replaced without
+   a banner, and two that `[g]` came before the profile could be chosen.
+10. Smaller corrections: `CheckProfile` states that it does not see version and
+    permission gates; a refusal caused by lint names the lint error; `check`
+    gives outside-profile lint failures their own block; the no-access section
+    of the grant script needs a database-scoped script; the 200-character limit
+    of job step text is stated; `RunFolderFor` has one caller in
+    `collect/collect.go`, not two; a refusal in `Run` leaves a failed-run record,
+    which the document now says.
+
+What was rejected, and why:
+
+- "The `IN (union)` form makes `010.objects` 269 times slower." Not reproduced:
+  the measurements above show it as fast on 261 tables and three times faster on
+  5,001.
+- "`UNION` destroys the size ordering." The fragment defines a set, used by
+  `IN` in one file and as a join in the other; no output depends on its order.
+- "Disabled indexes are excluded although they are rebuild candidates." A
+  disabled nonclustered index has no pages to measure, and a disabled clustered
+  index makes the table unreadable, which is not a space question.
+- "`--keep` does not protect the first run of the day." That is the present
+  behaviour of `RunFolderFor`, and the profile suffix does not change it.
+
 ## Open questions
 
-1. The cost of `055.page-density` on a large database is estimated, not
-   measured. If the first large collection shows it is unacceptable in the
-   default run, the options are a lower `@top` or making it a profile member
-   that the default corpus does not run, which would need a notion of
-   profile-only collectors this document deliberately does not introduce.
-2. The SQL Server 2012 floor of `055.page-density` rests on the documentation
+1. The SQL Server 2012 floor of `055.page-density` rests on the documentation
    of the columns it reads. No 2012 instance is available locally.
+2. The share of pages `SAMPLED` reads was measured on one Linux container, on
+   extents written by a fresh insert and by random inserts. A production file on
+   Windows may read differently. The flag makes the cost the operator's decision;
+   it does not bound it.
+3. `countCollectors`, and so `PlannedCollectors`, counts a database-scoped script
+   as a collector even when no database is selected. That predates profiles and
+   is left as it is; the wizard's figure inherits it.
