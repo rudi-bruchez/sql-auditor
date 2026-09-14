@@ -338,7 +338,23 @@ func readPassword(c *cliFlags, stdin io.Reader) (string, error) {
 // "unknown command" message — and parsing it a second time here would only
 // produce the same values.
 func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *debugLog) (collect.Options, int, error) {
-	// Before anything else, because it needs no corpus and no configuration.
+	// Before anything else, because it needs no corpus and no configuration,
+	// and before the --all refusal below: an explicitly empty --profile ""
+	// must be caught here too, not read as "no profile" and let through to
+	// widen the run --all was just refused for narrowing. Detected from the
+	// flag set, not the value, the same way --env is below: a wrapper script
+	// expanding an unset variable into --profile "" must not silently
+	// collect the whole corpus.
+	profileTyped := false
+	c.fs.Visit(func(f *flag.Flag) {
+		if f.Name == "profile" {
+			profileTyped = true
+		}
+	})
+	if profileTyped && c.profile == "" {
+		return collect.Options{}, 2, fmt.Errorf("--profile was given an empty name: " +
+			"name a profile, or drop the option to collect the whole corpus")
+	}
 	if c.all && c.profile != "" {
 		return collect.Options{}, 2, fmt.Errorf("--all and --profile cannot be combined: " +
 			"--all asks for the widest archive this tool can produce, and a profile for a narrow one")

@@ -570,6 +570,8 @@ func TestProfileRefusals(t *testing.T) {
 			"--query-store-detail has no collector in profile space"},
 		{"a corpus exported before profiles", []string{"--profile", "space", "--queries-dir", oldCorpus},
 			"a corpus exported before profiles existed declares none"},
+		{"an empty profile", []string{"--profile", ""}, "--profile was given an empty name"},
+		{"an empty profile beside --all", []string{"--all", "--profile", ""}, "--profile was given an empty name"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
