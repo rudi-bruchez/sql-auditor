@@ -370,8 +370,8 @@ func replacingRunWarning(path string) string {
 // everybody's output files. A run collected without --include-session-text
 // ended up shipping a zip containing session text under a MANIFEST.txt that
 // denied it.
-func RunFolderFor(outputDir, server string, now time.Time, keep bool) string {
-	base := filepath.Join(outputDir, RunFolderName(server, now))
+func RunFolderFor(outputDir, server, profile string, now time.Time, keep bool) string {
+	base := filepath.Join(outputDir, RunFolderName(server, profile, now))
 	if !keep {
 		return base
 	}
@@ -1552,7 +1552,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// collision, or a path the process may not create — so it exits 2 like the
 	// other configuration refusals rather than 1, which claims the instance was
 	// unreachable when it has in fact just been read successfully.
-	runFolder := RunFolderFor(o.Config.OutputDir, si.Name, o.Now, o.Keep)
+	runFolder := RunFolderFor(o.Config.OutputDir, si.Name, o.Profile, o.Now, o.Keep)
 	// Before prepareRunFolder, because prepareRunFolder is where the previous
 	// run gets renamed aside: two runs reaching that together is exactly the
 	// collision the lock exists to stop.

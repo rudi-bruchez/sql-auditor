@@ -324,11 +324,11 @@ func TestTheRunFolderIsNamedAfterTheProbedServerAndNotTheTypedAddress(t *testing
 	now := time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC)
 	s, o := probedAt(dir, now, false)
 
-	want := collect.RunFolderFor(dir, s.Verify.Server.Name, now, false)
+	want := collect.RunFolderFor(dir, s.Verify.Server.Name, "", now, false)
 	if got := runFolderFor(s, o); got != want {
 		t.Fatalf("runFolderFor = %q, want the path collect.Run will use, %q", got, want)
 	}
-	if typed := collect.RunFolderFor(dir, s.Server, now, false); typed == want {
+	if typed := collect.RunFolderFor(dir, s.Server, "", now, false); typed == want {
 		t.Fatal("the two spellings coincide; this test proves nothing as written")
 	}
 }
@@ -342,7 +342,7 @@ func TestTheSameDayArchiveIsDetectedBeforeAnythingIsDestroyed(t *testing.T) {
 	}
 	// The archive alone is enough. It sits beside the run folder rather than
 	// inside it, and it is the file that was mailed onward.
-	zip := filepath.Join(dir, collect.RunFolderName(`SQL01\PROD`, now)+".zip")
+	zip := filepath.Join(dir, collect.RunFolderName(`SQL01\PROD`, "", now)+".zip")
 	if err := os.WriteFile(zip, []byte("previous run"), 0o600); err != nil {
 		t.Fatal(err)
 	}

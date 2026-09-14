@@ -523,17 +523,17 @@ func TestRunFolderForSuffixesOnlyWhenKeeping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := filepath.Join(dir, RunFolderName("SRV01", now))
-	if got := RunFolderFor(dir, "SRV01", now, false); got != base {
+	base := filepath.Join(dir, RunFolderName("SRV01", "", now))
+	if got := RunFolderFor(dir, "SRV01", "", now, false); got != base {
 		t.Errorf("without --keep: got %q, want %q", got, base)
 	}
-	if got := RunFolderFor(dir, "SRV01", now, true); got != base {
+	if got := RunFolderFor(dir, "SRV01", "", now, true); got != base {
 		t.Errorf("nothing exists yet, so --keep must still use the plain name: got %q", got)
 	}
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := RunFolderFor(dir, "SRV01", now, true); got != base+"-1345" {
+	if got := RunFolderFor(dir, "SRV01", "", now, true); got != base+"-1345" {
 		t.Errorf("--keep over an existing folder: got %q, want %q", got, base+"-1345")
 	}
 }
@@ -552,7 +552,7 @@ func TestRunFolderForNeverRepeatsWithinTheSameMinute(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for i := 0; i < 4; i++ {
-		got := RunFolderFor(dir, "SRV01", now, true)
+		got := RunFolderFor(dir, "SRV01", "", now, true)
 		if seen[got] {
 			t.Fatalf("run %d reused %q; two runs would merge into one folder", i+1, got)
 		}
@@ -575,7 +575,7 @@ func TestKeepRunsNeverLandOnAnExistingRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		folder := RunFolderFor(dir, "SRV01", now, true)
+		folder := RunFolderFor(dir, "SRV01", "", now, true)
 		if entries, derr := os.ReadDir(folder); derr == nil && len(entries) > 0 {
 			t.Fatalf("run %d was pointed at %q, which already holds %d file(s)",
 				i+1, folder, len(entries))
@@ -602,6 +602,24 @@ func TestKeepRunsNeverLandOnAnExistingRun(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Errorf("want 3 folders and 3 archives, got %d entries: %v", len(entries), names)
+	}
+}
+
+func TestRunFolderForPutsTheKeepSuffixAfterTheProfile(t *testing.T) {
+	dir := t.TempDir()
+	now, err := time.Parse(time.RFC3339, "2026-08-08T13:45:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(dir, "SRV01-2026-08-08-space")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := RunFolderFor(dir, "SRV01", "space", now, true); got != base+"-1345" {
+		t.Errorf("got %q, want %q", got, base+"-1345")
+	}
+	if got := RunFolderFor(dir, "SRV01", "", now, true); got != filepath.Join(dir, "SRV01-2026-08-08") {
+		t.Errorf("a full run is not in the way of a space run: got %q", got)
 	}
 }
 

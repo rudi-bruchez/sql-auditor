@@ -105,8 +105,12 @@ func ResolveDatabaseFolders(names []string) []DatabaseFolder {
 	return out
 }
 
-func RunFolderName(server string, t time.Time) string {
-	return fmt.Sprintf("%s-%s", SafeFolderName(server), t.Format("2006-01-02"))
+func RunFolderName(server, profile string, t time.Time) string {
+	name := fmt.Sprintf("%s-%s", SafeFolderName(server), t.Format("2006-01-02"))
+	if profile != "" {
+		name += "-" + profile
+	}
+	return name
 }
 
 // FailedRunFolderName names the directory a fatal run's manifest goes into. A

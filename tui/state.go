@@ -458,7 +458,7 @@ func (s State) writeGrantScript(outputDir, tool string, now time.Time) State {
 // keep is taken from the resolved Options because RunFolderFor's answer
 // depends on it: under --keep it suffixes until it finds a free name.
 func runFolderFor(s State, o collect.Options) string {
-	return collect.RunFolderFor(o.Config.OutputDir, s.Verify.Server.Name, o.Now, o.Keep)
+	return collect.RunFolderFor(o.Config.OutputDir, s.Verify.Server.Name, "", o.Now, o.Keep)
 }
 
 // collisionFor names what an earlier run of the same day already occupies, or
