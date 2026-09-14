@@ -596,9 +596,9 @@ rm ./corpus/70.schema/050.heaps.sql
 sql-auditor collect --queries-dir ./corpus
 ```
 
-The archive then carries 74 collectors instead of 75, and `MANIFEST.txt`
-records that the corpus did not come from the published one — which is the
-honest record of the trade.
+The archive then carries one collector fewer than the full corpus, and
+`MANIFEST.txt` records that the corpus did not come from the published one:
+the honest record of the trade.
 
 `--estimate-compression` is in a different class again and is opt-in for
 exactly this reason: `sp_estimate_data_compression_savings` copies sampled real
@@ -994,15 +994,17 @@ expires, the instance is in trouble rather than merely busy.
 And it is the one you probably came here for. **Each collector declares its own
 timeout in the query file, and a declared timeout wins over
 `SQL_QUERY_TIMEOUT_SEC` outright.** Every file in the shipped corpus declares
-one, across five tiers:
+one, across seven tiers:
 
 | `@timeout` | Files |
 | --- | --- |
-| 30 s | 2 |
-| 60 s | 19 |
-| 120 s | 11 |
-| 300 s | 5 |
-| 1800 s | 1 |
+| 30 s | 6 |
+| 60 s | 41 |
+| 120 s | 21 |
+| 180 s | 2 |
+| 300 s | 11 |
+| 600 s | 1 |
+| 1800 s | 2 |
 
 So raising `SQL_QUERY_TIMEOUT_SEC` will not give a slow collector longer to
 finish.
