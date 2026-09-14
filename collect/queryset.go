@@ -71,6 +71,10 @@ type Script struct {
 	// declares it here, and the paragraph a security officer reads grows with
 	// it.
 	Discloses []string
+	// Profiles names the profiles this collector belongs to, in the vocabulary
+	// of KnownProfiles. Empty means the collector runs only when no profile is
+	// requested. A profile only ever removes collectors from a run.
+	Profiles  []string
 	LintError string
 }
 
@@ -260,6 +264,7 @@ func filepathRel(root, p string) (string, error) {
 var knownDirectives = []string{
 	"scope", "timeout", "permissions", "resultsets", "min_version",
 	"max_version", "requires_flag", "writer", "widened", "correlated", "discloses",
+	"profiles",
 }
 
 func parseScript(rel, sql string) Script {
@@ -395,6 +400,26 @@ func parseScript(rel, sql string) Script {
 					s.Discloses = append(s.Discloses, name)
 				}
 			}
+		case "profiles":
+			named := 0
+			for _, part := range strings.Split(val, ",") {
+				name := strings.ToLower(strings.TrimSpace(part))
+				if name == "" {
+					continue
+				}
+				named++
+				if _, ok := KnownProfiles[name]; !ok {
+					setLint(fmt.Sprintf("@profiles: unknown value %q; expected one of %s",
+						strings.TrimSpace(part), strings.Join(knownProfileNames(), ", ")))
+					break
+				}
+				if !slices.Contains(s.Profiles, name) {
+					s.Profiles = append(s.Profiles, name)
+				}
+			}
+			if named == 0 {
+				setLint("@profiles: no profile named")
+			}
 		case "correlated":
 			setLint("correlated result sets are not supported: a result set must not " +
 				"reference a column of another; split it into its own query")
@@ -512,6 +537,30 @@ var KnownDisclosures = map[string][]string{
 func knownDisclosureNames() []string {
 	names := make([]string, 0, len(KnownDisclosures))
 	for n := range KnownDisclosures {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Profile describes one named subset of the corpus. Description is what
+// check, MANIFEST.txt and the wizard print beside the name.
+type Profile struct {
+	Description string
+}
+
+// KnownProfiles is the closed set of names @profiles accepts, for the reason
+// KnownFlags is closed: a misspelt name would silently leave a collector out
+// of every profiled run.
+var KnownProfiles = map[string]Profile{
+	"space": {Description: "what makes the databases on this instance larger " +
+		"than they need to be: index usage and size, compression, page fullness, " +
+		"files, logs and tempdb"},
+}
+
+func knownProfileNames() []string {
+	names := make([]string, 0, len(KnownProfiles))
+	for n := range KnownProfiles {
 		names = append(names, n)
 	}
 	sort.Strings(names)
