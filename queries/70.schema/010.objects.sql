@@ -33,10 +33,11 @@
 --
 -- WHAT IS COUNTED AND WHAT IS LISTED ARE DIFFERENT DECISIONS. Object counts
 -- are exhaustive because they are cheap and bounded by the number of types.
--- Tables are capped at the 200 largest by row count, and the cap is reported:
--- a database with 5 000 tables would otherwise produce an archive nobody
--- opens, and the tail of that list is empty tables. Constraints and deprecated
--- columns are capped the same way and for the same reason.
+-- Tables are capped at the union of the 200 largest by row count and the 50
+-- largest by reserved pages, up to 250 tables in all, and both caps are
+-- reported: a database with 5 000 tables would otherwise produce an archive
+-- nobody opens, and the tail of that list is empty tables. Constraints and
+-- deprecated columns are capped at 200 by the same reasoning.
 --
 -- is_not_trusted is the point of the constraints result set, and it is not a
 -- style question. A foreign key or check constraint left untrusted after a

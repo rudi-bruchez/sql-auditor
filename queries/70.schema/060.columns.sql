@@ -14,13 +14,16 @@
 -- of a NOT IN, and the defaults to make sense of an INSERT that names half the
 -- columns. None of that was in the archive.
 --
--- THE SAME 200 TABLES AS 010.objects.sql, by the same ordering, and the cap is
--- projected here too so this file is readable on its own. Two different caps in
--- one directory would be a trap: a table found here and absent there reads as a
--- defect in the collector rather than as two different rules. The tie-break on
--- object_id is in both files for the same reason — without it two tables with
--- equal row counts can swap places between the two statements and the sets stop
--- matching, silently.
+-- THE SAME SELECTION AS 010.objects.sql: the union of the 200 tables with the
+-- most rows and the 50 with the most reserved pages, up to 250 tables, and
+-- both caps are projected here too so this file is readable on its own. Two
+-- different selections in one directory would be a trap: a table found here
+-- and absent there reads as a defect in the collector rather than as two
+-- different rules, so TestObjectsAndColumnsSelectTheSameTables keeps the
+-- three copies of that selection, one in 010.objects.sql and two here,
+-- textually identical. Within the selection, the tie-break on object_id
+-- matters for the same reason: without it, two tables tied on the same
+-- measure could swap places between the two TOPs and stop matching, silently.
 --
 -- WHY max_length IS PROJECTED RAW BESIDE A RENDERED DECLARATION. max_length
 -- counts bytes, so an nvarchar(50) reports 100, and -1 means (max). Printing
