@@ -190,7 +190,7 @@ END CATCH
    a fragmentation question, and 030 and 050 already own that ground. */
 BEGIN TRY
     INSERT INTO @tables
-    SELECT TOP (200)
+    SELECT
            SCHEMA_NAME(t.schema_id) + '.' + t.name,
            CASE WHEN EXISTS (SELECT 1 FROM sys.indexes AS i
                              WHERE i.object_id = t.object_id AND i.index_id = 0)
@@ -227,12 +227,29 @@ BEGIN TRY
                  FROM sys.dm_db_partition_stats AS p
                  WHERE p.object_id = t.object_id) AS ps
     WHERE t.is_ms_shipped = 0
-    /* object_id is the tie-break, and 060.columns.sql repeats this ORDER BY
-       verbatim. Two tables with equal row counts — empty ones, of which a real
-       database has many — would otherwise be ordered by nothing in particular, and
-       the 200th place could go to a different table in each of the two statements.
-       The archive would then carry the columns of a table it does not list, and
-       list a table whose columns are missing, with nothing anywhere saying why. */
+      AND t.object_id IN (
+          SELECT by_rows.object_id
+          FROM (SELECT TOP (200) t2.object_id
+                FROM sys.tables AS t2
+                CROSS APPLY (SELECT SUM(p.row_count) AS row_count
+                             FROM sys.dm_db_partition_stats AS p
+                             WHERE p.object_id = t2.object_id AND p.index_id IN (0, 1)) AS r
+                WHERE t2.is_ms_shipped = 0
+                ORDER BY r.row_count DESC, t2.object_id) AS by_rows
+          UNION
+          SELECT by_size.object_id
+          FROM (SELECT TOP (50) t2.object_id
+                FROM sys.tables AS t2
+                CROSS APPLY (SELECT SUM(p.reserved_page_count) AS reserved_pages
+                             FROM sys.dm_db_partition_stats AS p
+                             WHERE p.object_id = t2.object_id) AS r
+                WHERE t2.is_ms_shipped = 0
+                ORDER BY r.reserved_pages DESC, t2.object_id) AS by_size)
+    /* Membership is decided by the IN list above: the union of the 200 tables
+       with the most rows and the 50 with the most reserved pages, so a large LOB
+       table holding few rows is kept. object_id breaks the ties of each TOP, and
+       060.columns.sql repeats the same selection twice; a test keeps the three
+       copies identical. This ORDER BY only orders the rows. */
     ORDER BY ps.row_count DESC, t.object_id
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
@@ -303,6 +320,7 @@ SELECT DB_NAME()                                                  AS [database],
        @n_untrusted_ck                                            AS [counts.untrusted_check_constraints],
        @n_deprecated_cols                                         AS [counts.deprecated_type_columns],
        200                                                        AS [listing_cap],
+       50                                                         AS [listing_cap_by_size],
        CASE WHEN @err_counts        = 0 THEN 1 ELSE 0 END         AS [collected.counts],
        CASE WHEN @err_object_counts = 0 THEN 1 ELSE 0 END         AS [collected.object_counts],
        CASE WHEN @err_tables        = 0 THEN 1 ELSE 0 END         AS [collected.tables],

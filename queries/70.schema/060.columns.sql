@@ -49,17 +49,30 @@ SET LOCK_TIMEOUT 10000;
    structure this file does not carry; either number alone invites the wrong
    conclusion. */
 WITH sized AS (
-    SELECT TOP (200) t.object_id
-    FROM sys.tables AS t
-    CROSS APPLY (SELECT SUM(p.row_count) AS row_count
-                 FROM sys.dm_db_partition_stats AS p
-                 WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)) AS ps
-    WHERE t.is_ms_shipped = 0
-    ORDER BY ps.row_count DESC, t.object_id
+    /* The same selection as 010.objects.sql, kept identical by a test: the 200
+       tables with the most rows and the 50 with the most reserved pages. */
+    SELECT by_rows.object_id
+    FROM (SELECT TOP (200) t2.object_id
+          FROM sys.tables AS t2
+          CROSS APPLY (SELECT SUM(p.row_count) AS row_count
+                       FROM sys.dm_db_partition_stats AS p
+                       WHERE p.object_id = t2.object_id AND p.index_id IN (0, 1)) AS r
+          WHERE t2.is_ms_shipped = 0
+          ORDER BY r.row_count DESC, t2.object_id) AS by_rows
+    UNION
+    SELECT by_size.object_id
+    FROM (SELECT TOP (50) t2.object_id
+          FROM sys.tables AS t2
+          CROSS APPLY (SELECT SUM(p.reserved_page_count) AS reserved_pages
+                       FROM sys.dm_db_partition_stats AS p
+                       WHERE p.object_id = t2.object_id) AS r
+          WHERE t2.is_ms_shipped = 0
+          ORDER BY r.reserved_pages DESC, t2.object_id) AS by_size
 )
 SELECT DB_NAME()                                                  AS [database],
        CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_at],
        200                                                        AS [listing_cap],
+       50                                                         AS [listing_cap_by_size],
        /* Fewer than the cap on a small database, and saying so keeps a short
           list from reading as a truncated one. */
        (SELECT COUNT(*) FROM sized)                               AS [tables_covered],
@@ -79,13 +92,25 @@ OPTION (RECOMPILE, MAXDOP 1);
    the same column declared last, and a reader comparing the archive to a CREATE
    TABLE script needs the order to line up. */
 WITH sized AS (
-    SELECT TOP (200) t.object_id
-    FROM sys.tables AS t
-    CROSS APPLY (SELECT SUM(p.row_count) AS row_count
-                 FROM sys.dm_db_partition_stats AS p
-                 WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)) AS ps
-    WHERE t.is_ms_shipped = 0
-    ORDER BY ps.row_count DESC, t.object_id
+    /* The same selection as 010.objects.sql, kept identical by a test: the 200
+       tables with the most rows and the 50 with the most reserved pages. */
+    SELECT by_rows.object_id
+    FROM (SELECT TOP (200) t2.object_id
+          FROM sys.tables AS t2
+          CROSS APPLY (SELECT SUM(p.row_count) AS row_count
+                       FROM sys.dm_db_partition_stats AS p
+                       WHERE p.object_id = t2.object_id AND p.index_id IN (0, 1)) AS r
+          WHERE t2.is_ms_shipped = 0
+          ORDER BY r.row_count DESC, t2.object_id) AS by_rows
+    UNION
+    SELECT by_size.object_id
+    FROM (SELECT TOP (50) t2.object_id
+          FROM sys.tables AS t2
+          CROSS APPLY (SELECT SUM(p.reserved_page_count) AS reserved_pages
+                       FROM sys.dm_db_partition_stats AS p
+                       WHERE p.object_id = t2.object_id) AS r
+          WHERE t2.is_ms_shipped = 0
+          ORDER BY r.reserved_pages DESC, t2.object_id) AS by_size
 )
 SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
        c.name                                                     AS [column],

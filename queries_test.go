@@ -292,3 +292,31 @@ func TestEveryKnownProfileHasACollector(t *testing.T) {
 		}
 	}
 }
+
+// The two collectors must choose the same tables, or the archive lists a table
+// whose columns are missing. The selection is written three times, once in
+// 010.objects and twice in 060.columns, and this keeps the copies identical.
+func TestObjectsAndColumnsSelectTheSameTables(t *testing.T) {
+	read := func(name string) string {
+		b, err := sqlauditor.Queries.ReadFile("queries/70.schema/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	re := regexp.MustCompile(`(?s)SELECT by_rows\.object_id.*?AS by_size`)
+	var copies []string
+	for _, name := range []string{"010.objects.sql", "060.columns.sql"} {
+		for _, m := range re.FindAllString(read(name), -1) {
+			copies = append(copies, strings.Join(strings.Fields(m), " "))
+		}
+	}
+	if len(copies) != 3 {
+		t.Fatalf("found %d copies of the table selection, want 3 (one in 010.objects, two in 060.columns)", len(copies))
+	}
+	for i := 1; i < len(copies); i++ {
+		if copies[i] != copies[0] {
+			t.Errorf("copy %d differs from copy 0:\n%s\n%s", i, copies[i], copies[0])
+		}
+	}
+}
