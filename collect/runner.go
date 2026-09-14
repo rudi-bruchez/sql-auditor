@@ -379,7 +379,11 @@ func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error
 // A malformed pattern is an error, not a pattern that matches nothing: an
 // unclosed [ in DB_EXCLUDE would otherwise collect a database the user
 // explicitly asked to leave alone, and say nothing about it.
-func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error) {
+//
+// widen gates the second pass: widen["replication"] must be true for it to
+// run at all, so a caller passes the purposes of the collectors that will
+// actually run, not the whole closed vocabulary.
+func SelectTargets(c []DatabaseInfo, include, exclude string, widen map[string]bool) (Selection, error) {
 	var sel Selection
 	inc, exc := splitPatterns(include), splitPatterns(exclude)
 	if err := checkPatterns("DB_INCLUDE", inc); err != nil {
@@ -423,6 +427,13 @@ func SelectTargets(c []DatabaseInfo, include, exclude string) (Selection, error)
 	// leaves is_published at 0, and it uses the distribution database too —
 	// its agent history and its errors are there. Counting only the first
 	// dropped a merge topology's distributor with nothing recorded.
+	//
+	// The second pass exists for a collector that will read the distribution
+	// database. When no such collector will run, widening would list a
+	// database as covered that nothing reads.
+	if !widen["replication"] {
+		return sel, nil
+	}
 	published := 0
 	for _, d := range c {
 		if (d.IsPublished || d.IsMergePublished) && slices.Contains(sel.Included, d.Name) {

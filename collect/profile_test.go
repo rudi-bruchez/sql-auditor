@@ -235,3 +235,32 @@ func TestRunRefusesTheProfileAfterDiscoveryAndRecordsIt(t *testing.T) {
 		t.Errorf("profile block = %+v, want name space, corpus 1, members 0", got.Profile)
 	}
 }
+
+func TestWideningPurposesFollowsThePlan(t *testing.T) {
+	repl := Script{Path: "90.availability/042.replication-distribution.sql", Widened: "replication"}
+	plain := Script{Path: "70.schema/010.objects.sql"}
+	if got := WideningPurposes([]plannedScript{{Script: repl}, {Script: plain}}); !got["replication"] {
+		t.Errorf("a planned replication collector must widen, got %v", got)
+	}
+	skipped := []plannedScript{{Script: repl, Skip: ProfileSkipReason("space")}, {Script: plain}}
+	if got := WideningPurposes(skipped); got["replication"] {
+		t.Errorf("a skipped replication collector must not widen, got %v", got)
+	}
+}
+
+func TestMembershipPurposes(t *testing.T) {
+	repl := Script{Path: "r.sql", Widened: "replication"}
+	gated := Script{Path: "g.sql", Widened: "replication", Profiles: []string{"space"}, RequiresFlag: FlagQueryStoreDetail}
+	if got := membershipPurposes([]Script{repl}, "", nil); !got["replication"] {
+		t.Errorf("without a profile, an ungated replication collector widens, got %v", got)
+	}
+	if got := membershipPurposes([]Script{repl}, "space", nil); got["replication"] {
+		t.Errorf("a replication collector outside the profile must not widen, got %v", got)
+	}
+	if got := membershipPurposes([]Script{gated}, "space", nil); got["replication"] {
+		t.Errorf("a member whose flag is off must not widen, got %v", got)
+	}
+	if got := membershipPurposes([]Script{gated}, "space", map[string]bool{FlagQueryStoreDetail: true}); !got["replication"] {
+		t.Errorf("a member whose flag is on widens, got %v", got)
+	}
+}

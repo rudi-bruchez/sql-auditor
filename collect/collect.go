@@ -1498,13 +1498,14 @@ func Run(ctx context.Context, o Options) (int, error) {
 	}
 
 	o.Debugf("instance %s, %s, %s", si.Name, si.Edition, si.Version)
+	plan := planScripts(scripts, o.Profile, denied, ParseVersion(si.Version), o.Flags)
 	o.Debugf("listing the databases")
 	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 1, err)
 	}
-	sel, err := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude)
+	sel, err := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude, WideningPurposes(plan))
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)
@@ -1519,7 +1520,6 @@ func Run(ctx context.Context, o Options) (int, error) {
 	folders := SelectedFolders(sel)
 	m.Targets = TargetBlock{Databases: folders, Skipped: sel.Skipped}
 
-	plan := planScripts(scripts, o.Profile, denied, ParseVersion(si.Version), o.Flags)
 	// The disclosure paragraph and the queries that run come from this one
 	// decision. Split them and the manifest eventually describes a different
 	// archive from the one beside it.

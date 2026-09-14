@@ -283,7 +283,7 @@ func TestWidenedDatabaseSurvivesSelectionIntoUnits(t *testing.T) {
 		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
 		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
 	}
-	sel, err := SelectTargets(cands, "SALESDB", "")
+	sel, err := SelectTargets(cands, "SALESDB", "", map[string]bool{"replication": true})
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}

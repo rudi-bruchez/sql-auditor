@@ -19,6 +19,36 @@ func inProfile(s Script, profile string) bool {
 	return profile == "" || slices.Contains(s.Profiles, profile)
 }
 
+// WideningPurposes returns the @widened purposes of the planned scripts that
+// will run, that is, those planScripts did not skip.
+func WideningPurposes(plan []plannedScript) map[string]bool {
+	out := map[string]bool{}
+	for _, p := range plan {
+		if p.Skip == "" && p.Script.LintError == "" && p.Script.Widened != "" {
+			out[p.Script.Widened] = true
+		}
+	}
+	return out
+}
+
+// membershipPurposes is the fallback when no plan can be built because the
+// version probe failed: the purposes of the lint-clean scripts in the profile
+// whose flag, if any, is on. It is the most a selection without a version can
+// know.
+func membershipPurposes(scripts []Script, profile string, flags map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for _, s := range scripts {
+		if s.LintError != "" || s.Widened == "" || !inProfile(s, profile) {
+			continue
+		}
+		if s.RequiresFlag != "" && !flags[s.RequiresFlag] {
+			continue
+		}
+		out[s.Widened] = true
+	}
+	return out
+}
+
 // ProfileMembers returns the lint-clean scripts that declare the profile, or
 // scripts unchanged when no profile is requested.
 func ProfileMembers(scripts []Script, profile string) []Script {

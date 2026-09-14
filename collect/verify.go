@@ -145,6 +145,16 @@ func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 
 	v.Blocking = blockingWithDeadline(ctx, conn, o.Config)
 
+	var plan []plannedScript
+	widen := membershipPurposes(v.Scripts, o.Profile, o.Flags)
+	if v.Probed {
+		denied := DeniedCapabilities(v.Checks)
+		// connect is not a per-script gate. Getting here means it answered.
+		delete(denied, "connect")
+		plan = planScripts(v.Scripts, o.Profile, denied, ParseVersion(si.Version), o.Flags)
+		widen = WideningPurposes(plan)
+	}
+
 	// The database list is the blast radius, and it is gathered even when it
 	// comes back empty: an empty list is itself the finding when VIEW ANY
 	// DEFINITION is missing.
@@ -153,7 +163,7 @@ func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 	case cerr != nil:
 		v.CandidatesErr = cerr
 	default:
-		sel, serr := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude)
+		sel, serr := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude, widen)
 		if serr != nil {
 			v.SelectErr = serr
 			break
@@ -172,10 +182,6 @@ func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 	// version-gated collector would be reported as running. Leaving Collectors
 	// at zero and letting the caller read Probed is the honest shape.
 	if v.Probed {
-		denied := DeniedCapabilities(v.Checks)
-		// connect is not a per-script gate. Getting here means it answered.
-		delete(denied, "connect")
-		plan := planScripts(v.Scripts, o.Profile, denied, ParseVersion(si.Version), o.Flags)
 		v.Collectors = countCollectors(plan)
 	}
 	return nil
