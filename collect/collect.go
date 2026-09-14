@@ -1264,6 +1264,9 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// A nil Observer — every command-line run — makes all of them no-ops.
 	obs := observer{o: o.Observer}
 	m := NewManifest("sql-auditor", o.Version, o.Commit)
+	// Set before anything can fail, so every failed-run record says what was
+	// asked.
+	m.Profile.Name = o.Profile
 	// Recorded from the resolved configuration rather than from the connection
 	// string, so that what the archive claims and what the driver was told come
 	// from one value. See TransportBlock for why both halves are kept.
@@ -1389,6 +1392,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)
 	}
+	m.Profile.Members, m.Profile.Corpus = profileCounts(scripts, o.Profile)
 
 	o.Debugf("%d script(s) in the corpus", len(scripts))
 

@@ -1,8 +1,13 @@
 package collect
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSkipReasonForProfile(t *testing.T) {
@@ -93,5 +98,86 @@ func TestProfileMembers(t *testing.T) {
 	got := ProfileMembers(all, "space")
 	if len(got) != 1 || got[0].Path != "a.sql" {
 		t.Errorf("members = %+v, want only a.sql", got)
+	}
+}
+
+func TestManifestHumanProfileLine(t *testing.T) {
+	cases := []struct {
+		block ProfileBlock
+		want  string
+	}{
+		{ProfileBlock{}, "Profile : none, the whole corpus"},
+		{ProfileBlock{Name: "space", Members: 21, Corpus: 84}, "Profile : space, 21 of the 84 collectors in the corpus belong to it"},
+		{ProfileBlock{Name: "space"}, "Profile : space, requested; the corpus was not read"},
+	}
+	for _, c := range cases {
+		m := &Manifest{Profile: c.block}
+		if h := flatten(m.Human()); !strings.Contains(h, c.want) {
+			t.Errorf("MANIFEST.txt does not say %q:\n%s", c.want, m.Human())
+		}
+	}
+}
+
+func TestManifestHumanGroupsProfileSkips(t *testing.T) {
+	m := &Manifest{Profile: ProfileBlock{Name: "space", Members: 2, Corpus: 5}}
+	m.Skipped = []SkippedScript{
+		{Script: "80.workload/010.wait-stats.sql", Reason: ProfileSkipReason("space")},
+		{Script: "80.workload/020.query-store.sql", Reason: ProfileSkipReason("space")},
+		{Script: "70.schema/041.compression-savings.sql", Reason: "not collected by default; pass --estimate-compression to include it"},
+	}
+	h := m.Human()
+	if !strings.Contains(h, "Queries not run (3):") {
+		t.Errorf("the heading must count every entry of skipped_scripts:\n%s", h)
+	}
+	if !strings.Contains(h, "  - 2 collectors outside profile space, each listed in _run.json") {
+		t.Errorf("the profile skips must collapse into one line:\n%s", h)
+	}
+	if strings.Contains(h, "80.workload/010.wait-stats.sql") {
+		t.Errorf("a collapsed skip must not also be listed:\n%s", h)
+	}
+	if !strings.Contains(h, "70.schema/041.compression-savings.sql") {
+		t.Errorf("a skip for another reason must still be listed:\n%s", h)
+	}
+}
+
+func TestRunRecordsTheRequestedProfileWhenTheCorpusCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "output")
+	missing := filepath.Join(dir, "no-such-corpus")
+	if _, err := Run(context.Background(), Options{
+		Config:  &Config{Server: "localhost", OutputDir: out, QueriesDir: missing},
+		Corpus:  os.DirFS(missing),
+		Root:    ".",
+		Now:     time.Now(),
+		Profile: "space",
+	}); err == nil {
+		t.Fatal("want an error")
+	}
+	b, err := os.ReadFile(filepath.Join(failedRunDir(t, out), "_run.json"))
+	if err != nil {
+		t.Fatalf("no manifest written: %v", err)
+	}
+	var got struct {
+		Profile ProfileBlock `json:"profile"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Profile != (ProfileBlock{Name: "space"}) {
+		t.Errorf("profile block = %+v, want the requested name and no counts", got.Profile)
+	}
+}
+
+func TestProfileCounts(t *testing.T) {
+	scripts := []Script{
+		{Path: "a.sql", Profiles: []string{"space"}},
+		{Path: "b.sql"},
+		{Path: "c.sql", Profiles: []string{"space"}, LintError: "bad"},
+	}
+	if m, c := profileCounts(scripts, "space"); m != 1 || c != 2 {
+		t.Errorf("members, corpus = %d, %d, want 1, 2", m, c)
+	}
+	if m, c := profileCounts(scripts, ""); m != 0 || c != 2 {
+		t.Errorf("without a profile: members, corpus = %d, %d, want 0, 2", m, c)
 	}
 }

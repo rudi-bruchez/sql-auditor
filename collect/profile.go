@@ -98,6 +98,21 @@ func CheckProfile(scripts []Script, profile string, flags map[string]bool) error
 	return nil
 }
 
+// profileCounts returns how many lint-clean scripts declare the profile (0
+// without one) and how many lint-clean scripts the corpus holds.
+func profileCounts(scripts []Script, profile string) (members, corpus int) {
+	for _, s := range scripts {
+		if s.LintError != "" {
+			continue
+		}
+		corpus++
+		if profile != "" && slices.Contains(s.Profiles, profile) {
+			members++
+		}
+	}
+	return members, corpus
+}
+
 func lintFailures(scripts []Script) string {
 	parts := make([]string, 0, len(scripts))
 	for _, s := range scripts {
