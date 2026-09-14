@@ -89,7 +89,7 @@ func verifyForGrants() collect.VerifyResult {
 func TestWriteGrantsPutsTheScriptInTheOutputDirectory(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 8, 13, 14, 5, 0, 0, time.UTC)
-	path, err := writeGrants(verifyForGrants(), dir, "0.18.0", now)
+	path, err := writeGrants(verifyForGrants(), "", dir, "0.18.0", now)
 	if err != nil {
 		t.Fatalf("writeGrants: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestWriteGrantsRefusesWithoutASuccessfulProbe(t *testing.T) {
 	v.Probed = false
 	// Without a probe there is no login and no version, so the script would
 	// either fail on its first statement or grant to a principal nobody uses.
-	if _, err := writeGrants(v, t.TempDir(), "0.18.0", time.Now()); err == nil {
+	if _, err := writeGrants(v, "", t.TempDir(), "0.18.0", time.Now()); err == nil {
 		t.Fatal("writeGrants accepted an unprobed instance")
 	}
 }
@@ -136,7 +136,7 @@ func TestWriteGrantsRefusesWithoutASuccessfulProbe(t *testing.T) {
 // prints "%!w(<nil>)", and that string was what the operator got as the reason
 // they could not have their grant script.
 func TestGrantsRefusalReadsAsASentenceWhenNoCauseWasFolded(t *testing.T) {
-	_, err := writeGrants(collect.VerifyResult{Probed: false}, t.TempDir(), "0.19.0", time.Now())
+	_, err := writeGrants(collect.VerifyResult{Probed: false}, "", t.TempDir(), "0.19.0", time.Now())
 	if err == nil {
 		t.Fatal("an unprobed server produced a grant script")
 	}

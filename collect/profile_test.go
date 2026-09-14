@@ -372,3 +372,26 @@ func TestPrintQueriesUnderAProfile(t *testing.T) {
 		t.Errorf("without a profile the listing is today's:\n%s", whole)
 	}
 }
+
+func TestPlannedCollectorsFollowsProfile(t *testing.T) {
+	v := VerifyResult{Probed: true, Server: ServerInfo{Version: "16.0.4135.4"},
+		Checks: []CapabilityCheck{{Name: "connect", Status: "ok"}, {Name: "agent_alerts", Status: "denied"}},
+		Scripts: []Script{
+			{Path: "a.sql", Profiles: []string{"space"}, Permissions: []string{"connect"}},
+			{Path: "b.sql", Profiles: []string{"space"}, RequiresFlag: FlagEstimateCompression},
+			{Path: "c.sql", Permissions: []string{"agent_alerts"}},
+		}}
+	if got := PlannedCollectors(v, "space", nil); got != 1 {
+		t.Errorf("space without flags = %d, want 1", got)
+	}
+	if got := PlannedCollectors(v, "space", map[string]bool{FlagEstimateCompression: true}); got != 2 {
+		t.Errorf("space with the flag = %d, want 2", got)
+	}
+	if got := PlannedCollectors(v, "", nil); got != 1 {
+		t.Errorf("no profile = %d, want 1: c.sql is denied and b.sql gated", got)
+	}
+	v.Probed = false
+	if got := PlannedCollectors(v, "space", nil); got != 0 {
+		t.Errorf("unprobed = %d, want 0", got)
+	}
+}

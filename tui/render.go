@@ -332,7 +332,7 @@ func serverBlock(s State, width int) []string {
 func permissionBlock(s State, width int) []string {
 	caps := collect.Capabilities()
 	byName := map[string]collect.CapabilityCheck{}
-	for _, c := range s.Verify.Checks {
+	for _, c := range collect.ProfileChecks(s.Verify.Checks, s.Verify.Scripts, s.Profile) {
 		byName[c.Name] = c
 	}
 
@@ -345,6 +345,11 @@ func permissionBlock(s State, width int) []string {
 		// was never the problem.
 		if !s.Verify.Probed || !found {
 			body = append(body, fieldPad+status(statusNotChecked)+c.Name)
+			continue
+		}
+		if check.Status == collect.StatusNotNeeded {
+			body = append(body, fieldPad+status("not needed")+c.Name)
+			ok++
 			continue
 		}
 		body = append(body, fieldPad+status(check.Status)+c.Name)
@@ -497,6 +502,22 @@ func options(s State) []option {
 	}
 }
 
+// visibleOptions is options narrowed to the rows visibleFlags keeps, in the
+// same order, so FlagIndex points at the row it names.
+func visibleOptions(s State) []option {
+	keep := map[string]bool{}
+	for _, f := range visibleFlags(s) {
+		keep[f] = true
+	}
+	var out []option
+	for _, o := range options(s) {
+		if keep[o.flag] {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
 func renderOptions(s State, width int) []string {
 	out := []string{row(pad+"What to collect", "step 3/4", width), ""}
 
@@ -504,18 +525,43 @@ func renderOptions(s State, width int) []string {
 	// holds 55 files, 8 of them behind a flag, and the version gates close more
 	// on each instance: a screen announcing 55 would be contradicted by the
 	// gauge on the next screen.
-	out = append(out, screen.Wrap(fmt.Sprintf("Always collected: %d collectors on this instance, computed from "+
-		"the resolved plan. No statement text, no source code, no execution plans. Query Store configuration, "+
-		"top queries and forced plans are included.", s.Verify.Collectors), width, pad)...)
+	if s.Profile == "" {
+		out = append(out, screen.Wrap(fmt.Sprintf("Always collected: %d collectors on this instance, computed from "+
+			"the resolved plan. No statement text, no source code, no execution plans. Query Store configuration, "+
+			"top queries and forced plans are included.", s.collectors()), width, pad)...)
+	} else {
+		out = append(out, screen.Wrap(fmt.Sprintf("Profile %s: %d collectors will run on this instance, "+
+			"computed from the resolved plan.", s.Profile, s.collectors()), width, pad)...)
+	}
 	out = append(out, "")
-	out = append(out, screen.Wrap("Additional. The first eight widen what the archive discloses; "+
-		"the last one only costs time.", width, pad)...)
+	profileDesc := "none, the whole corpus"
+	if s.Profile != "" {
+		profileDesc = s.Profile + ": " + collect.KnownProfiles[s.Profile].Description
+	}
+	out = append(out, hang(pad+"Profile [p]", 29, profileDesc, width)...)
+	if s.Profile == "" {
+		out = append(out, screen.Wrap("Additional. The first eight widen what the archive discloses; "+
+			"the last one only costs time.", width, pad)...)
+	} else {
+		out = append(out, screen.Wrap("Additional. Only the options this profile can use are shown.", width, pad)...)
+	}
 	out = append(out, "")
 
-	for i, o := range options(s) {
+	for i, o := range visibleOptions(s) {
 		out = append(out, optionLines(s, i, o, width)...)
 	}
 	out = append(out, "")
+
+	if s.Profile != "" {
+		out = append(out, fieldPad+"[g] write the T-SQL for this profile")
+		switch {
+		case s.GrantError != nil:
+			out = append(out, screen.Wrap("could not write it: "+s.GrantError.Error(), width, fieldPad)...)
+		case s.GrantPath != "":
+			out = append(out, fieldPad+"written to:", fieldPad+"  "+s.GrantPath)
+		}
+		out = append(out, "")
+	}
 
 	// Displayed, never edited: .env stays the place where settings live, and
 	// the window is what bounds everything the Query Store options above export.
@@ -545,7 +591,7 @@ func renderOptions(s State, width int) []string {
 	if s.Collision != "" {
 		start = "[enter] replace it   [k] keep both"
 	}
-	return append(out, pad+"[tab] next   [space] toggle   "+start+"   [b] back   [q] quit")
+	return append(out, pad+"[tab] next   [space] toggle   [p] profile   "+start+"   [b] back   [q] quit")
 }
 
 // nothingReason says which of the two empty plans this is. They are not the
@@ -793,7 +839,7 @@ func summaryLine(s State) string {
 // the script generator refuses to write.
 func deniedPermissions(s State) int {
 	n := 0
-	for _, c := range s.Verify.Checks {
+	for _, c := range collect.ProfileChecks(s.Verify.Checks, s.Verify.Scripts, s.Profile) {
 		if c.Status == "denied" {
 			n++
 		}

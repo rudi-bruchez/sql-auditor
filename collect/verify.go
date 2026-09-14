@@ -204,6 +204,20 @@ func countCollectors(plan []plannedScript) int {
 	return n
 }
 
+// PlannedCollectors is VerifyResult.Collectors for another profile or another
+// set of flags: planScripts over v.Scripts, with the denied capabilities of
+// ProfileChecks(v.Checks, v.Scripts, profile) and the version of v.Server. It
+// is zero when v.Probed is false. Like countCollectors, it counts scripts that
+// would run at least once and does not look at which databases were selected.
+func PlannedCollectors(v VerifyResult, profile string, flags map[string]bool) int {
+	if !v.Probed {
+		return 0
+	}
+	denied := DeniedCapabilities(ProfileChecks(v.Checks, v.Scripts, profile))
+	delete(denied, "connect")
+	return countCollectors(planScripts(v.Scripts, profile, denied, ParseVersion(v.Server.Version), flags))
+}
+
 // blockingWithDeadline is the fourth of the bounded read-only calls this
 // package makes outside runUnit, and it was the one missing a bound. It sits
 // beside the other three for the same reason they sit together: these are the

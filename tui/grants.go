@@ -73,7 +73,7 @@ func createFree(dir, name string) (*os.File, error) {
 // carries Scripts — each section of the file lists the collectors that
 // declared the permission it grants, so the reader sees what a line buys in
 // terms of output rather than in terms of a permission name.
-func writeGrants(v collect.VerifyResult, outputDir, tool string, now time.Time) (string, error) {
+func writeGrants(v collect.VerifyResult, profile, outputDir, tool string, now time.Time) (string, error) {
 	// The same two refusals check makes, for the same reason: the login must
 	// be the one the SERVER reports, since a Windows login arrives as
 	// DOMAIN\user whatever was typed and can be reached through a group. A
@@ -95,7 +95,8 @@ func writeGrants(v collect.VerifyResult, outputDir, tool string, now time.Time) 
 	}
 	body, _ := collect.BuildGrantScript(collect.GrantScriptInput{
 		Login: v.Server.Login, Instance: v.Server.Name, Version: v.Server.Version,
-		Edition: v.Server.Edition, Checks: v.Checks, Scripts: v.Scripts,
+		Edition: v.Server.Edition, Checks: collect.ProfileChecks(v.Checks, v.Scripts, profile),
+		Scripts: collect.ProfileMembers(v.Scripts, profile), Profile: profile,
 		NoAccessDatabases: v.NoAccess, Tool: tool,
 	})
 	// A file with nothing to grant is still written, exactly as check does:

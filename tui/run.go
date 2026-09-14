@@ -220,8 +220,13 @@ type pressEvent struct {
 }
 
 func (e pressEvent) apply(s State) State {
-	if e.key.Rune == 'g' && s.Step == StepVerification {
+	// Screen 3 shows [g] only under a profile; without one, screen 2 writes
+	// the full script.
+	if e.key.Rune == 'g' && (s.Step == StepVerification || (s.Step == StepOptions && s.Profile != "")) {
 		return s.writeGrantScript(e.opts.Config.OutputDir, e.opts.Version, time.Now())
+	}
+	if e.key.Rune == 'p' && s.Step == StepOptions {
+		return s.withProfile(s.nextProfile(), e.opts)
 	}
 	return s.Key(e.key)
 }
@@ -594,6 +599,7 @@ func applyState(s State, o collect.Options) collect.Options {
 	}
 	o.Flags = flags
 	o.Keep = s.Keep
+	o.Profile = s.Profile
 	return o
 }
 
