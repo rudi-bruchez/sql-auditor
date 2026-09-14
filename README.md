@@ -359,18 +359,20 @@ Exactly three cases.
 | `--queries-dir DIR` | run a corpus from disk instead of the embedded one. Every file is checked first for what its statements DO, and one that changes the server is refused rather than run. That check is a syntactic guard against the accident and **not a sandbox**: it bounds what a mistake can do, it does not vouch for an author this project has never seen ([what is allowed](docs/dba-guide.md#what-a-corpus-from-a-directory-is-allowed-to-contain)) |
 | `--output-dir DIR` | where to write results |
 | `--keep` | keep an existing same-day run folder, suffixing this run |
+| `--profile NAME` | collect only the collectors of a profile. The one profile is `space`. Refused beside `--all`. See [Collecting for one question](#collecting-for-one-question) |
 | `--grant-script FILE` | `check` only. Write the T-SQL that grants the permissions found missing, for the login the server reports, with the reason for each. Never executed. |
 
 ### Collecting more than the default
 
 | Flag | Meaning |
 | --- | --- |
-| `--all` | turn on all nine options below at once: the eight off for disclosure and the one off for cost. See the note under these tables |
+| `--all` | turn on all ten options below at once: the eight off for disclosure and the two off for cost. See the note under these tables |
 | `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
 | `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
 | `--include-deadlock-graphs` | also collect the deadlock reports `system_health` still holds, one `.xdl` file each |
 | `--include-blocked-process-reports` | also collect the blocked process reports an Extended Events session captured, one `.xml` file each |
 | `--estimate-compression` | also estimate page-compression savings on the largest uncompressed objects. Off for cost, not for disclosure: it samples real data into tempdb and is slow on large tables |
+| `--measure-page-density` | also measure how full the pages of the 50 largest index partitions are, which says what a rebuild would give back. Off for cost, not for disclosure: `SAMPLED` reads 8 to 12 % of every large partition into the buffer pool, LOB pages included, and all of a small one |
 | `--query-store-detail` | also collect the full text and the execution plans of the heaviest Query Store queries, per database |
 | `--query-store-plan-stats` | also look for the last profiled plan of each query the option above extracted. Does nothing on its own |
 
@@ -387,15 +389,49 @@ Exactly three cases.
 ### `--all` asks for the widest archive this tool can produce
 
 It is the one option that is a convenience rather than a decision, and it should
-be read as what it is: eight of the nine collectors it turns on are off by
+be read as what it is: eight of the ten collectors it turns on are off by
 default because of what they put in the archive, not because of what they cost.
 
 That is the right thing on an instance you have a written mandate for and the
 wrong thing everywhere else, and the tool will not ask you which it is.
 
-It changes nothing else: no confirmation, no extra collectors beyond the nine,
+It changes nothing else: no confirmation, no extra collectors beyond the ten,
 and `MANIFEST.txt` still discloses them one by one, because what the archive
 contains is the fact that matters and how briefly it was requested is not.
+
+## Collecting for one question
+
+`--profile space` runs only the collectors that answer one question: what makes
+the databases on this instance larger than they need to be, and what could be
+given back without buying disk. That is 21 of the 84 collectors: index usage and
+size, compression, page fullness, files and volumes, the transaction log,
+tempdb, and the Agent jobs and maintenance plans a scheduled shrink hides in.
+
+A profile only removes collectors. It never adds one: the two collectors of the
+space profile that are opt-in still need their option.
+
+- `--measure-page-density` is the one a space question needs most, because it
+  says whether a rebuild would give anything back. It reads pages, not
+  metadata, so decide per instance.
+- `--estimate-compression` gives the saving a compression pass would bring. It
+  reads sampled data into tempdb.
+
+What changes in the archive:
+
+- the run folder and the archive are named `<server>-<date>-space`, so a full
+  run and a space run of the same day do not replace each other;
+- `MANIFEST.txt` says which profile produced it, and lists the collectors the
+  profile left out in one line;
+- a right the login was refused and that no collector of the profile reads is
+  reported as `not needed` and does not make the coverage incomplete.
+
+`check --profile space` lists the profile's collectors, and
+`check --profile space --grant-script grants.sql` asks only for what a space run
+reads. In the wizard, `[p]` on the third screen chooses the profile.
+
+`--profile` is refused beside `--all`, which asks for the opposite, and when it
+would collect nothing: an option with no collector in the profile, or a
+`--queries-dir` corpus exported before profiles existed, which declares none.
 
 ## Passwords
 

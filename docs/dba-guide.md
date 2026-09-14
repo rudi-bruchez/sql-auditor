@@ -61,7 +61,7 @@ sql-auditor queries export --to ./queries-to-review
 The corpus is 62 files. The archive records the SHA-256 of the exact corpus that
 was used, so a run can be tied to the questions it asked.
 
-### Nine files are opt-in
+### Ten files are opt-in
 
 They produce nothing unless you ask for them:
 
@@ -72,14 +72,15 @@ They produce nothing unless you ask for them:
 | `10.system/061.deadlock-graphs.sql` | `--include-deadlock-graphs` |
 | `10.system/063.blocked-process-reports.sql` | `--include-blocked-process-reports` |
 | `70.schema/041.compression-savings.sql` | `--estimate-compression` |
+| `70.schema/055.page-density.sql` | `--measure-page-density` |
 | `70.schema/080.modules.sql` | `--include-object-definitions` |
 | `80.workload/021.query-store-detail.sql` | `--query-store-detail` |
 | `80.workload/022.query-store-profiled.sql` | `--query-store-plan-stats` |
 | `80.workload/041.plan-cache-plans.sql` | `--plan-cache-plans` |
 
-Eight of the nine change what kind of data ends up in the archive and have
-sections of their own below. `--estimate-compression` is opt-in for cost rather
-than for disclosure.
+Eight of the ten change what kind of data ends up in the archive and have
+sections of their own below. `--estimate-compression` and
+`--measure-page-density` are opt-in for cost rather than for disclosure.
 
 `--plan-cache-plans` deserves reading twice before it is used on an instance you
 do not own. It keeps execution plans from the cache when the Query Store is off,
@@ -357,6 +358,7 @@ Queries (38):
   70.schema/040.compression.sql              per database
   70.schema/041.compression-savings.sql      per database, --estimate-compression (off)
   70.schema/050.heaps.sql                    per database
+  70.schema/055.page-density.sql             per database, --measure-page-density (off)
   80.workload/010.wait-stats.sql
   80.workload/020.query-store.sql            per database, SQL Server 13.0+
   80.workload/021.query-store-detail.sql     per database, SQL Server 13+, --query-store-detail (off), one directory per database: query text, plans and per-interval statistics
@@ -535,6 +537,30 @@ Two things worth knowing:
   a second; on a large estate the per-database collectors dominate, so budget by
   database count.
 
+## Collecting for one question
+
+`--profile space` is for an engagement that asks one question: how to make the
+databases of this instance smaller. It runs 21 collectors instead of 84, reads
+nothing the full run does not read, and changes nothing in what the manifest
+promises.
+
+What to approve differs in three ways.
+
+- The archive is smaller and says so: `MANIFEST.txt` names the profile and
+  counts the collectors it left out.
+- The rights to grant are fewer. `check --profile space --grant-script
+  grants.sql` writes only what a space run needs.
+- A right refused to the login that no collector of the profile reads is
+  printed `not needed` by `check`, marked `not needed` in the grant script, and
+  listed in `MANIFEST.txt` under "Not needed by profile space". It does not make
+  the coverage incomplete. A probe that got no answer is never reported that
+  way: it still means the instance was unreachable, and `check` still exits 1.
+
+The two opt-in collectors of the profile, `--estimate-compression` and
+`--measure-page-density`, are decided as they are for a full run, and their
+cost is described under [What the default run costs a large
+instance](#what-the-default-run-costs-a-large-instance).
+
 ## What is in the archive
 
 ### What the default run costs a large instance
@@ -545,7 +571,7 @@ run scale with the size of the instance rather than with the number of objects:
 
 | What | Where | What it actually does |
 | --- | --- | --- |
-| Sampled page reads on heaps | `70.schema/050.heaps.sql` | `sys.dm_db_index_physical_stats(..., 'SAMPLED')` reads about 1% of the pages of the 50 largest heaps **in every collected database**. On a 500 GB heap that is 5 GB of reads. |
+| Sampled page reads on heaps | `70.schema/050.heaps.sql` | `sys.dm_db_index_physical_stats(..., 'SAMPLED')` on the 50 largest heaps **in every collected database**. SAMPLED works allocation unit by allocation unit: a unit of 10,000 pages or more brings 8 to 12 % of its pages into the buffer pool, because each sample reads a whole extent, and a smaller one is read in full. On a 500 GB heap that is in the order of 40 to 60 GB of reads, not the 1 % the name suggests. |
 | The whole current error log | `10.system/040.error-log.sql` | copied into a `#temp` table before it is summarised. An instance that never cycles its log can carry hundreds of megabytes. |
 | A string search over cached plans | `80.workload/030.implicit-conversions.sql` | `CAST(query_plan AS nvarchar(max)) LIKE '%CONVERT_IMPLICIT%'` over the 200 heaviest plans — CPU, on a busy cache. |
 
@@ -581,6 +607,12 @@ objects over 100 MB **per database**, with a 1800-second timeout per database.
 On a large
 estate that is the difference between an audit that takes a minute and an
 afternoon of tempdb pressure.
+
+`--measure-page-density` is opt-in for the same reason as the heap scan above is
+costly: it runs the same kind of sampled read on the 50 largest index partitions
+of each database, LOB pages included. It is what tells a space question whether
+a rebuild would give anything back, and it is the operator's decision per
+instance.
 
 ### Three limits that are known and not fixed
 
@@ -989,8 +1021,9 @@ the run. A database with tens of thousands of objects, or a heavily fragmented
 one, can pass even that mark.
 
 **`70.schema/041.compression-savings.sql`** has the corpus's longest timeout at
-1800 seconds and is the only collector that samples real data:
-`sp_estimate_data_compression_savings` copies rows into tempdb to measure them.
+1800 seconds, which it shares with 70.schema/055.page-density.sql, and is the
+only collector that copies real rows: `sp_estimate_data_compression_savings`
+copies rows into tempdb to measure them.
 
 It runs only under `--estimate-compression`, and half an hour per database is
 what it was given because the objects worth asking about are the large ones.

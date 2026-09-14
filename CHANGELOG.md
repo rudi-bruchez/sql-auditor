@@ -17,6 +17,34 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Added
+
+- `--profile space` on `check`, `collect` and the wizard: runs only the 21
+  collectors that answer what makes the databases of an instance larger than
+  they need to be. The archive names the profile, the run folder carries it,
+  and rights the profile does not need are reported `not needed`.
+- `70.schema/055.page-density.sql`, behind `--measure-page-density`: page
+  fullness of the 50 largest rowstore index partitions, indexed views included.
+  84 collectors.
+
+### Changed
+
+- `70.schema/010.objects.sql` and `70.schema/060.columns.sql` list the union of
+  the 200 tables with the most rows and the 50 with the most reserved pages, so
+  a large LOB table with few rows is no longer left out.
+- The replication widening brings the distribution database into a narrowed run
+  only when a collector that will run reads it. On an instance where the
+  replication collectors are gated off, it is no longer listed as covered.
+- `--all` turns on ten options.
+
+### Fixed
+
+- `docs/dba-guide.md` stated that the heap scan reads about 1 % of the pages.
+  Measured, it brings 8 to 12 % of a large heap into the buffer pool and all of
+  a small one.
+
 ## [0.22.0] - 2026-09-06
 
 The corpus goes from 62 collectors to 83, and every gap
