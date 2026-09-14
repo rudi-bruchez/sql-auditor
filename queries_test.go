@@ -319,4 +319,26 @@ func TestObjectsAndColumnsSelectTheSameTables(t *testing.T) {
 			t.Errorf("copy %d differs from copy 0:\n%s\n%s", i, copies[i], copies[0])
 		}
 	}
+	// The identity check above only says the three copies agree with each
+	// other, not that they still say what the docs, the spec and the root
+	// fields promise: the three could drift together, changing TOP (50) to
+	// TOP (49) in lockstep, and stay green. Pin the two caps the selection is
+	// for, and the two root fields that carry them into every result row.
+	if !strings.Contains(copies[0], "TOP (200)") {
+		t.Errorf("the table selection has lost TOP (200):\n%s", copies[0])
+	}
+	if !strings.Contains(copies[0], "TOP (50)") {
+		t.Errorf("the table selection has lost TOP (50):\n%s", copies[0])
+	}
+	listingCap := regexp.MustCompile(`(?m)^\s*200\s+AS \[listing_cap\],`)
+	listingCapBySize := regexp.MustCompile(`(?m)^\s*50\s+AS \[listing_cap_by_size\],`)
+	for _, name := range []string{"010.objects.sql", "060.columns.sql"} {
+		body := read(name)
+		if !listingCap.MatchString(body) {
+			t.Errorf("%s: listing_cap is not 200", name)
+		}
+		if !listingCapBySize.MatchString(body) {
+			t.Errorf("%s: listing_cap_by_size is not 50", name)
+		}
+	}
 }
