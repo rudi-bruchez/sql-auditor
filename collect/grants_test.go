@@ -336,3 +336,65 @@ func TestMajorVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestGrantScriptLeavesANotNeededRightAlone(t *testing.T) {
+	in := baseInput("view_server_state")
+	for i := range in.Checks {
+		if in.Checks[i].Name == "agent_alerts" {
+			in.Checks[i].Status = StatusNotNeeded
+		}
+	}
+	in.Profile = "space"
+	body, has := BuildGrantScript(in)
+	if !has {
+		t.Fatal("view_server_state was denied, so there is something to grant")
+	}
+	stmts := statements(body)
+	if strings.Contains(stmts, "sysalerts") || strings.Contains(stmts, "USE msdb") {
+		t.Errorf("a right the profile does not need must not be granted:\n%s", stmts)
+	}
+	// The bare words would match the header's own instruction, which says a
+	// check should come back "ok" or "not needed". The mark is on the line that
+	// names the capability.
+	if !strings.Contains(body, "not needed agent_alerts") {
+		t.Errorf("the header must mark the unneeded right:\n%s", body)
+	}
+}
+
+func TestGrantScriptHeaderChecksWithTheProfile(t *testing.T) {
+	in := baseInput("view_server_state")
+	in.Profile = "space"
+	body, _ := BuildGrantScript(in)
+	if !strings.Contains(body, "sql-auditor check --profile space") {
+		t.Errorf("the check command must carry the profile, or the unneeded rights print denied again:\n%s", body)
+	}
+	if !strings.Contains(body, `"ok" or "not needed"`) {
+		t.Errorf("the header must say what a successful check looks like under a profile:\n%s", body)
+	}
+	plain, _ := BuildGrantScript(baseInput("view_server_state"))
+	if strings.Contains(plain, "--profile") {
+		t.Errorf("without a profile the header must not mention one:\n%s", plain)
+	}
+}
+
+func TestNoAccessSectionUnderAProfileNeedsADatabaseScopedScript(t *testing.T) {
+	in := baseInput()
+	in.NoAccessDatabases = []string{"SALESDB"}
+	in.Profile = "space"
+	instanceOnly, _ := BuildGrantScript(in)
+	if strings.Contains(statements(instanceOnly), "SALESDB") {
+		t.Errorf("no script of the profile enters a database, so none must be granted:\n%s", instanceOnly)
+	}
+	in.Scripts = append(in.Scripts, Script{Path: "queries/70.schema/020.index-usage.sql",
+		Scope: ScopeDatabase, Permissions: []string{"connect"}})
+	withDatabase, _ := BuildGrantScript(in)
+	if !strings.Contains(statements(withDatabase), "SALESDB") {
+		t.Errorf("a database-scoped member needs the database:\n%s", withDatabase)
+	}
+	noProfile := baseInput()
+	noProfile.NoAccessDatabases = []string{"SALESDB"}
+	unchanged, _ := BuildGrantScript(noProfile)
+	if !strings.Contains(statements(unchanged), "SALESDB") {
+		t.Errorf("without a profile the section is written as today:\n%s", unchanged)
+	}
+}

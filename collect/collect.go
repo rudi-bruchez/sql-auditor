@@ -888,7 +888,7 @@ func Check(ctx context.Context, o Options) (int, error) {
 	// cannot see, and the one that silently costs two thirds of the
 	// collectors.
 	if o.GrantScript != "" {
-		if werr := writeGrantScript(o, v.Scripts, checks, v.Server, v.ServerErr, v.NoAccess); werr != nil {
+		if werr := writeGrantScript(o, ProfileMembers(v.Scripts, o.Profile), checks, v.Server, v.ServerErr, v.NoAccess); werr != nil {
 			fmt.Fprintf(o.progress(), "could not write %s: %v\n", o.GrantScript, werr)
 			return 2, nil
 		}
@@ -918,7 +918,7 @@ func writeGrantScript(o Options, scripts []Script, checks []CapabilityCheck, si 
 	}
 	body, hasStatements := BuildGrantScript(GrantScriptInput{
 		Login: si.Login, Instance: si.Name, Version: si.Version, Edition: si.Edition,
-		Checks: checks, Scripts: scripts, NoAccessDatabases: noAccess, Tool: o.Version,
+		Checks: checks, Scripts: scripts, NoAccessDatabases: noAccess, Profile: o.Profile, Tool: o.Version,
 	})
 	if err := os.WriteFile(o.GrantScript, []byte(body), 0o600); err != nil {
 		return err
