@@ -15,7 +15,7 @@ Spec: `docs/profiles-spec.md` at commit `6531af9`. Read it before your task; thi
 - This repository is public. No client identifier anywhere: code, SQL comments, tests, fixtures, docs, commit messages, file names. Use `SQL01`, `SQL01\PROD`, `SALESDB`, `192.0.2.0/24`, `example.com`.
 - Commit messages are in English. The body is prose that explains why. No `Co-Authored-By`, no `Generated with`, no attribution trailer of any kind.
 - Documentation you write (README, docs, CHANGELOG) uses no bold and no em dash or en dash.
-- `go test ./...` must pass before every commit.
+- `gofmt -l .` must print nothing and `go test ./...` must pass before every commit. Some code blocks below are not aligned the way gofmt wants (a new struct field, map entry or trailing comment beside longer neighbours): run `gofmt -w` on the Go files you touched before the full suite.
 - `testdata/corpus.txt` is regenerated with `go test . -run TestEmbeddedCorpusIsValid -update`, never edited by hand and never regenerated in CI. Read its diff before committing.
 - A header comment line of a collector must not begin with an `@` word: the parser reads it as a directive.
 - Profile name: `space`. Skip reason: `not in profile space`. Preflight status: `not_needed`. Flag: `measure_page_density`, option `--measure-page-density`. JSON block: `"profile": {"name", "members", "corpus"}`.
@@ -24,6 +24,7 @@ Spec: `docs/profiles-spec.md` at commit `6531af9`. Read it before your task; thi
 - Every task that adds an assertion has a break step: break the behaviour, confirm the named test fails, restore. Reporting "two of three broke as predicted" is the successful outcome of that step. Keep a copy of the file outside the repository to restore it; never `git checkout`, `git restore`, `git stash` or `git clean` a file holding uncommitted work.
 - If your own measurement contradicts this plan or the spec, stop and say so in your report rather than making the code match the brief.
 - SQL verification runs only against `sql2025` (`localhost,11533`). Its `sa` password stays in the container: `podman exec sql2025 printenv MSSQL_SA_PASSWORD | ... --password-stdin`, and T-SQL through `podman exec -i sql2025 bash -c '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -b -i /dev/stdin'`. Databases you create are named `review_<something>` and dropped before you finish. Never create logins, jobs or Extended Events sessions; never touch another database.
+- The SQL steps build in a fresh `mktemp -d` directory, never a fixed `/tmp` path another run may share, and drop their database from an `EXIT` trap, so a command that fails under `set -e` cannot leave the database on the server.
 
 ---
 
@@ -446,7 +447,7 @@ Expected: 6 top-level tests (the four existing `TestSkipReasonFor*`, `TestSkipRe
 
 - [ ] Step 5: break it
 
-Copy `collect/collect.go` aside. (a) Move the profile check after the `RequiresFlag` check: `TestSkipReasonForProfile` must fail on the outsider's reason. (b) Restore, then make `inProfile` return `true` always: both new tests must fail. Restore and rerun Step 4.
+Copy `collect/collect.go` aside. (a) Move the profile check after the `RequiresFlag` check: `TestSkipReasonForProfile` must fail on the outsider's reason. (b) Restore, then make `inProfile` return `true` always, and remove the `slices` import it no longer uses, or the package does not build: both new tests must fail. Restore and rerun Step 4.
 
 - [ ] Step 6: full suite and commit
 
@@ -634,7 +635,7 @@ Expected: 2 top-level tests, PASS, with 8 subtests under `TestCheckProfile`.
 
 - [ ] Step 5: break it
 
-Copy `collect/profile.go` aside. (a) Delete the `if on` filter so every key of `flags` is judged: "a flag that is off is not judged" must fail. (b) Restore, then delete the `gatedFailed` branch: "a flag whose only member failed lint" must fail. (c) Restore, then delete the `len(failed) > 0` branch in the zero-member case: "every declaring script failed lint" must fail. Restore, rerun Step 4, report the count that bit.
+Copy `collect/profile.go` aside. (a) Delete the `if on` filter so every key of `flags` is judged, and change `for name, on := range flags` to `for name := range flags`, or the unused `on` stops the build: "a flag that is off is not judged" must fail. (b) Restore, then delete the `gatedFailed` branch: "a flag whose only member failed lint" must fail. (c) Restore, then delete the `len(failed) > 0` branch in the zero-member case: "every declaring script failed lint" must fail. Restore, rerun Step 4, report the count that bit.
 
 - [ ] Step 6: full suite and commit
 
@@ -659,7 +660,7 @@ Interfaces:
 
 - [ ] Step 1: write the failing tests
 
-Append to `collect/profile_test.go` (add imports `context`, `encoding/json`, `os`, `path/filepath`, `testing/fstest`, `time`):
+Append to `collect/profile_test.go` (add imports `context`, `encoding/json`, `os`, `path/filepath`, `time`; `testing/fstest` comes in Task 7, where it is first used, because an unused import does not compile):
 
 ```go
 func TestManifestHumanProfileLine(t *testing.T) {
@@ -853,8 +854,8 @@ Expected: 4 tests, PASS.
 
 - [ ] Step 5: the existing manifest tests
 
-Run: `go test ./collect -run 'Manifest|Human|Coverage' -v 2>&1 | grep -c '^--- '`
-Every `Human()` test in the repository asserts with `strings.Contains`, so none should need a change; if one fails, it asserted an exact line order: update it to the new text and say which in your report.
+Run: `go test ./collect -run 'Manifest|Human|Coverage' -v 2>&1 | grep -E '^(--- FAIL|FAIL|ok)'` and then `go test ./collect -run 'Manifest|Human|Coverage' -v 2>&1 | grep -c '^--- PASS'`.
+Expected: `ok` and no FAIL line, then 35 (the existing tests these patterns match, the new ones of this task among them). Every `Human()` test in the repository asserts with `strings.Contains`, so none should need a change; if one fails, it asserted an exact line order: update it to the new text and say which in your report.
 
 - [ ] Step 6: break it
 
@@ -972,7 +973,7 @@ Where things are: `run()` in `main.go` parses the flag set and calls `optionsFro
 
 - [ ] Step 1: write the failing tests
 
-Append to `cmd/sql-auditor/main_test.go` (it already imports `os`, `path/filepath`, `strings`, `testing`):
+Append to `cmd/sql-auditor/main_test.go` (it already imports `os`, `path/filepath`, `strings`, `testing`; add `bytes` and `time` if they are absent):
 
 ```go
 func TestProfileIsParsedIntoOptions(t *testing.T) {
@@ -1017,31 +1018,34 @@ func TestProfileRefusals(t *testing.T) {
 		})
 	}
 }
+
+// optionsFrom reads the corpus only when a profile asks for it: a run without
+// one, and the wizard, must not pay for a second discovery.
+func TestOptionsFromReadsTheCorpusOnlyForAProfile(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		read bool
+	}{
+		{nil, false},
+		{[]string{"--profile", "space"}, true},
+	} {
+		env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+		var buf bytes.Buffer
+		_, code, err := buildOptionsWithDebug("collect", append([]string{"--env", env}, c.args...),
+			noEnv, noStdin, newDebugLog(&buf, time.Now))
+		if err != nil || code != 0 {
+			t.Fatalf("%v: code %d, err %v", c.args, code, err)
+		}
+		if got := strings.Contains(buf.String(), "checking profile"); got != c.read {
+			t.Errorf("%v: corpus read = %v, want %v; debug log:\n%s", c.args, got, c.read, buf.String())
+		}
+	}
+}
 ```
 
-Append to `collect/profile_test.go` (add imports `io` if not present):
+Append to `collect/profile_test.go`, and add `"testing/fstest"` to its imports. `captureStdout` already exists in `collect/check_test.go`, in the same package and with the signature these tests use: call it, and do not declare another, which would not compile.
 
 ```go
-// captureStdout runs f with os.Stdout redirected and returns what it printed.
-func captureStdout(t *testing.T, f func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := os.Stdout
-	os.Stdout = w
-	done := make(chan string)
-	go func() {
-		b, _ := io.ReadAll(r)
-		done <- string(b)
-	}()
-	f()
-	w.Close()
-	os.Stdout = old
-	return <-done
-}
-
 // noMemberCorpus holds one valid collector that declares no profile.
 func noMemberCorpus() fstest.MapFS {
 	body := "-- @scope:       instance\n-- @resultsets:  a:object\n-- @permissions: VIEW SERVER STATE\n-- @timeout:     60\n" +
@@ -1100,7 +1104,7 @@ func TestRunRefusesTheProfileAfterDiscoveryAndRecordsIt(t *testing.T) {
 
 - [ ] Step 2: run and watch them fail
 
-Run: `go test ./cmd/sql-auditor -run 'TestProfileIsParsedIntoOptions|TestProfileRefusals' -v; go test ./collect -run 'TestCheckRefusesTheProfileBeforeListing|TestRunRefusesTheProfileAfterDiscovery' -v`
+Run: `go test ./cmd/sql-auditor -run 'TestProfileIsParsedIntoOptions|TestProfileRefusals|TestOptionsFromReadsTheCorpusOnlyForAProfile' -v; go test ./collect -run 'TestCheckRefusesTheProfileBeforeListing|TestRunRefusesTheProfileAfterDiscovery' -v`
 Expected: `flag provided but not defined: -profile` exits the first test binary (the flag set uses `ExitOnError`), and the two `collect` tests fail (Check prints the listing; Run gets past discovery).
 
 - [ ] Step 3: implement the command line
@@ -1192,12 +1196,12 @@ In `Run`, right after the counts line added in Task 5 (after `Discover`):
 
 - [ ] Step 5: run and watch them pass
 
-Run: `go test ./cmd/sql-auditor -run 'TestProfileIsParsedIntoOptions|TestProfileRefusals' -v && go test ./collect -run 'TestCheckRefusesTheProfileBeforeListing|TestRunRefusesTheProfileAfterDiscovery' -v`
-Expected: 2 tests (4 subtests) in `cmd/sql-auditor`, 2 tests in `collect`, all PASS.
+Run: `go test ./cmd/sql-auditor -run 'TestProfileIsParsedIntoOptions|TestProfileRefusals|TestOptionsFromReadsTheCorpusOnlyForAProfile' -v && go test ./collect -run 'TestCheckRefusesTheProfileBeforeListing|TestRunRefusesTheProfileAfterDiscovery' -v`
+Expected: 3 tests (4 subtests) in `cmd/sql-auditor`, 2 tests in `collect`, all PASS.
 
 - [ ] Step 6: break it
 
-Copy the three files aside. (a) Remove the `--all` check from `optionsFrom`: its subtest must fail (the run would now be refused later, or accepted; read which). (b) Restore, then remove the `CheckProfile` call in `optionsFrom`: the three other subtests must fail. (c) Restore, then remove the `ProfileErr` branch in `Check`: `TestCheckRefusesTheProfileBeforeListing` must fail on the printed listing. (d) Restore, then remove the guard in `Run`: `TestRunRefusesTheProfileAfterDiscovery` must fail; if it hangs trying to connect to `localhost`, stop it with the `-timeout 60s` flag and count it as bitten. Restore everything, rerun Step 5, report the count.
+Copy the three files aside. (a) Remove the `--all` check from `optionsFrom`: its subtest must fail (the run would now be refused later, or accepted; read which). (b) Restore, then remove the `CheckProfile` call in `optionsFrom`: the three other subtests must fail. (c) Restore, then remove the `ProfileErr` branch in `Check`: `TestCheckRefusesTheProfileBeforeListing` must fail on the printed listing. (d) Restore, then remove the guard in `Run`: `TestRunRefusesTheProfileAfterDiscovery` must fail; if it hangs trying to connect to `localhost`, stop it with the `-timeout 60s` flag and count it as bitten. (e) Restore, then take the discovery out of its `if opts.Profile != ""` guard so it runs on every invocation: `TestOptionsFromReadsTheCorpusOnlyForAProfile` must fail on the run without a profile. Restore everything, rerun Step 5, report the count.
 
 - [ ] Step 7: full suite and commit
 
@@ -1215,7 +1219,7 @@ Files:
 - Modify: `collect/profile.go` (`WideningPurposes`, `membershipPurposes`)
 - Modify: `collect/collect.go` (`Run`: build the plan before selecting)
 - Modify: `collect/verify.go` (`VerifyServer`: same)
-- Test: `collect/runner_test.go` (13 existing calls), `collect/profile_test.go`
+- Test: `collect/runner_test.go` (11 existing calls), `collect/observer_test.go` (1 call), `collect/profile_test.go`
 
 Interfaces:
 - Consumes: `planScripts` with profile (Task 3), `inProfile` (Task 3).
@@ -1225,7 +1229,7 @@ Why the order can change: in `Run`, the preflight (`collect.go` around 1422), th
 
 - [ ] Step 1: write the failing tests
 
-In `collect/runner_test.go`, add at the top level `var widenReplication = map[string]bool{"replication": true}` and add the fourth argument `widenReplication` to all 13 existing `SelectTargets(...)` calls, so their meaning is unchanged. Then add:
+In `collect/runner_test.go`, add at the top level `var widenReplication = map[string]bool{"replication": true}` and add the fourth argument `widenReplication` to its 11 existing `SelectTargets(...)` calls, so their meaning is unchanged. A twelfth occurrence of the name, near line 59, is inside a `t.Errorf` message and is not a call; the file's other call site is `collect/observer_test.go` around line 286, which Step 3 fixes. Then add:
 
 ```go
 func TestSelectTargetsWidensOnlyForAPurpose(t *testing.T) {
@@ -1364,7 +1368,7 @@ pass `widen` to `SelectTargets`, and replace the final `if v.Probed { ... }` blo
 	}
 ```
 
-keeping its comment. Fix any other `SelectTargets` call the compiler reports (a test helper may call it) by passing `map[string]bool{"replication": true}`.
+keeping its comment. Fix the call in `collect/observer_test.go` (around line 286), and any other the compiler reports, by passing `map[string]bool{"replication": true}`.
 
 - [ ] Step 4: run and watch them pass
 
@@ -1466,11 +1470,25 @@ func TestCoverageUnderAProfile(t *testing.T) {
 		t.Errorf("coverage = %q, want incomplete: an unanswered probe is still unanswered", m.Coverage.Status)
 	}
 }
+
+// Check computes its exit code from the checks after ProfileChecks. What keeps
+// a lost instance from passing for success is that "error" is never rewritten,
+// so an unanswered probe on a capability no member declares still gives exit 1.
+func TestCheckExitsOneWhenAnUnneededProbeGotNoAnswer(t *testing.T) {
+	checks := []CapabilityCheck{
+		{Name: "connect", Status: "ok"},
+		{Name: "log_shipping", Status: "error"},
+	}
+	scripts := []Script{{Path: "a.sql", Profiles: []string{"space"}, Permissions: []string{"connect"}}}
+	if got := PreflightExitCode(ProfileChecks(checks, scripts, "space"), 0, true); got != 1 {
+		t.Errorf("exit code = %d, want 1: the instance stopped answering", got)
+	}
+}
 ```
 
 - [ ] Step 2: run and watch them fail
 
-Run: `go test ./collect -run 'TestProfileChecks|TestCoverageUnderAProfile' -v`
+Run: `go test ./collect -run 'TestProfileChecks|TestCoverageUnderAProfile|TestCheckExitsOneWhenAnUnneededProbeGotNoAnswer' -v`
 Expected: compile failure, `undefined: ProfileChecks`.
 
 - [ ] Step 3: implement the rule
@@ -1569,12 +1587,12 @@ Replace `v.Checks` by `checks` in the `Permissions:` loop, in the `writeGrantScr
 
 - [ ] Step 5: run and watch them pass
 
-Run: `go test ./collect -run 'TestProfileChecks|TestCoverageUnderAProfile|Coverage' -v`
-Expected: every test matching `Coverage` in `collect/manifest_test.go` (5 of them) plus the 2 new ones, 7 top-level tests, all PASS.
+Run: `go test ./collect -run 'TestProfileChecks|TestCoverageUnderAProfile|Coverage|TestCheckExitsOneWhenAnUnneededProbeGotNoAnswer' -v`
+Expected: every test matching `Coverage` in `collect/manifest_test.go` (5 of them) plus the 3 new ones, 8 top-level tests, all PASS.
 
 - [ ] Step 6: break it
 
-Copy `preflight.go` and `manifest.go` aside. (a) Change `c.Status == "denied"` to `c.Status != "ok"` in `ProfileChecks`: `TestProfileChecks` must fail on `log_shipping`. (b) Restore, then remove the `view_any_definition` exclusion: it must fail on that line. (c) Restore, then drop `|| chk.Status == StatusNotNeeded` from `refreshCoverage`: `TestCoverageUnderAProfile` must fail. (d) Restore, then delete the `Not needed by profile` paragraph: the same test must fail on its second assertion. Restore, rerun Step 5, report the count.
+Copy `preflight.go` and `manifest.go` aside. (a) Change `c.Status == "denied"` to `c.Status != "ok"` in `ProfileChecks`: `TestProfileChecks` must fail on `log_shipping`, and `TestCheckExitsOneWhenAnUnneededProbeGotNoAnswer` with exit code 0. (b) Restore, then remove the `view_any_definition` exclusion: it must fail on that line. (c) Restore, then drop `|| chk.Status == StatusNotNeeded` from `refreshCoverage`: `TestCoverageUnderAProfile` must fail. (d) Restore, then delete the `Not needed by profile` paragraph: the same test must fail on its second assertion. Restore, rerun Step 5, report the count.
 
 - [ ] Step 7: full suite and commit
 
@@ -1617,7 +1635,10 @@ func TestGrantScriptLeavesANotNeededRightAlone(t *testing.T) {
 	if strings.Contains(stmts, "sysalerts") || strings.Contains(stmts, "USE msdb") {
 		t.Errorf("a right the profile does not need must not be granted:\n%s", stmts)
 	}
-	if !strings.Contains(body, "not needed") {
+	// The bare words would match the header's own instruction, which says a
+	// check should come back "ok" or "not needed". The mark is on the line that
+	// names the capability.
+	if !strings.Contains(body, "not needed agent_alerts") {
 		t.Errorf("the header must mark the unneeded right:\n%s", body)
 	}
 }
@@ -1715,18 +1736,18 @@ computed before the `fmt.Fprintf`:
 	}
 ```
 
-In the `WHAT THE PROBE FOUND` switch, add `case StatusNotNeeded: mark = "not needed"`.
+In the `WHAT THE PROBE FOUND` switch, add `case StatusNotNeeded: mark = "not needed"`. The line is printed with `"        %s %-22s %s\n"`, so the mark and the name read `not needed agent_alerts`, which is what the test looks for.
 
 In `collect/collect.go`, `writeGrantScript` takes the scripts and checks it is given; change its `BuildGrantScript` call to add `Profile: o.Profile`, and change the call site in `Check` to pass `ProfileMembers(v.Scripts, o.Profile)` and `checks`.
 
 - [ ] Step 4: run and watch them pass
 
 Run: `go test ./collect -run 'TestGrantScript|TestNoAccessSectionUnderAProfile|TestErrorLog|TestMsdb|TestAgentRole|TestErroredCapabilities|TestEveryProbedCapabilityCanBeGranted' -v`
-Expected: 16 top-level tests: the 13 existing grant tests matched by these patterns (8 `TestGrantScript*`, `TestErrorLogNeedsNoSeparateGrantBefore2022`, `TestMsdbGrantsRunInMsdbAndCreateTheUserFirst`, `TestAgentRoleCarriesItsCaveat`, `TestErroredCapabilitiesGrantNothing`, `TestEveryProbedCapabilityCanBeGranted`) and the 3 new ones, all PASS. List the names if the count differs.
+Expected: 21 top-level tests: the 18 existing grant tests matched by these patterns (13 `TestGrantScript*`, `TestErrorLogNeedsNoSeparateGrantBefore2022`, `TestMsdbGrantsRunInMsdbAndCreateTheUserFirst`, `TestAgentRoleCarriesItsCaveat`, `TestErroredCapabilitiesGrantNothing`, `TestEveryProbedCapabilityCanBeGranted`) and the 3 new ones, all PASS. A lower count means the filter is wrong; list the names if it differs.
 
 - [ ] Step 5: break it
 
-Copy `grants.go` aside. (a) Remove `&& (in.Profile == "" || anyDatabaseScoped(in.Scripts))`: the no-access test must fail on its first assertion. (b) Restore, then pass `"sql-auditor check"` instead of `checkCommand`: the header test must fail. (c) Restore, then remove the `StatusNotNeeded` case in the switch: `TestGrantScriptLeavesANotNeededRightAlone` must fail on "not needed". Restore, rerun Step 4.
+Copy `grants.go` aside. (a) Remove `&& (in.Profile == "" || anyDatabaseScoped(in.Scripts))`: the no-access test must fail on its first assertion. (b) Restore, then pass `"sql-auditor check"` instead of `checkCommand`: the header test must fail. (c) Restore, then remove the `StatusNotNeeded` case in the switch: `TestGrantScriptLeavesANotNeededRightAlone` must fail on `not needed agent_alerts`. Restore, rerun Step 4.
 
 - [ ] Step 6: full suite and commit
 
@@ -1744,7 +1765,7 @@ Files:
 - Test: `collect/profile_test.go`
 
 Interfaces:
-- Consumes: `profileCounts` (Task 5), `captureStdout` (Task 7 test helper), `scriptNote`.
+- Consumes: `profileCounts` (Task 5), `captureStdout` (existing, `collect/check_test.go`), `scriptNote`.
 - Produces: `func printQueries(o Options, scripts []Script)`; `func printQueryLine(o Options, s Script)`.
 
 - [ ] Step 1: write the failing test
@@ -1968,6 +1989,11 @@ func TestChangingTheProfileReprobesTheCollisionAndClearsTheGrant(t *testing.T) {
 	if got.GrantPath != "" || got.GrantError != nil {
 		t.Errorf("the grant result of the previous profile survived: %q, %v", got.GrantPath, got.GrantError)
 	}
+	// The profile is applied where a status is read, never stored: a later [b]
+	// or [r] verifies again into s.Verify and must find the raw statuses.
+	if got.Verify.Checks[2].Status != "denied" {
+		t.Errorf("agent_alerts = %q after [p], want the raw denied", got.Verify.Checks[2].Status)
+	}
 	got.Keep = true
 	back := pressEvent{key: typed('p'), opts: o}.apply(got)
 	if back.Profile != "" || back.Collision != "" || back.Keep {
@@ -1993,7 +2019,11 @@ func TestChangingTheProfileTurnsOffHiddenFlags(t *testing.T) {
 }
 
 func TestTheCountAndTheStartGateFollowTheProfile(t *testing.T) {
-	s := State{Step: StepOptions, Verify: spaceVerify(), Profile: "space"}
+	// Verify.Collectors is the count made for the whole corpus at verification.
+	// Zero here makes a start gate that reads it refuse a runnable profile.
+	v := spaceVerify()
+	v.Collectors = 0
+	s := State{Step: StepOptions, Verify: v, Profile: "space"}
 	if got := s.collectors(); got != 1 {
 		t.Errorf("collectors = %d, want 1", got)
 	}
@@ -2018,11 +2048,16 @@ func TestTheGrantKeyOnScreenThreeWritesTheProfileScript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "--profile space") || !strings.Contains(string(b), "not needed") {
+	if !strings.Contains(string(b), "--profile space") || !strings.Contains(string(b), "not needed agent_alerts") {
 		t.Errorf("the script is not the profile's:\n%s", b)
 	}
 	if got.Step != StepOptions {
 		t.Errorf("Step = %v, want StepOptions", got.Step)
+	}
+	// Screen 3 shows [g] only under a profile, so it acts only under one.
+	unprofiled := State{Step: StepOptions, Verify: spaceVerify()}
+	if got := (pressEvent{key: typed('g'), opts: opts}).apply(unprofiled); got.GrantPath != "" {
+		t.Errorf("[g] on screen 3 without a profile wrote %q; the screen does not offer it", got.GrantPath)
 	}
 }
 ```
@@ -2196,7 +2231,9 @@ In `tui/run.go`, `pressEvent.apply`:
 
 ```go
 func (e pressEvent) apply(s State) State {
-	if e.key.Rune == 'g' && (s.Step == StepVerification || s.Step == StepOptions) {
+	// Screen 3 shows [g] only under a profile; without one, screen 2 writes
+	// the full script.
+	if e.key.Rune == 'g' && (s.Step == StepVerification || (s.Step == StepOptions && s.Profile != "")) {
 		return s.writeGrantScript(e.opts.Config.OutputDir, e.opts.Version, time.Now())
 	}
 	if e.key.Rune == 'p' && s.Step == StepOptions {
@@ -2269,7 +2306,18 @@ func visibleOptions(s State) []option {
 	out = append(out, hang(pad+"Profile [p]", 29, profileDesc, width)...)
 ```
 
-  replace the `Additional.` sentence by `"Additional. The first eight widen what the archive discloses; the last two only cost time."` without a profile and `"Additional. Only the options this profile can use are shown."` with one (Task 13 adds the tenth option; until then the unprofiled sentence still says "the last one", so keep today's sentence in this task and let Task 13 change it); iterate `visibleOptions(s)` instead of `options(s)` in the checkbox loop; before the `if !s.canStart()` block, add when `s.Profile != ""`:
+  replace the `Additional.` sentence by the block below, which keeps today's wording without a profile (Task 13 adds the tenth option and changes that wording):
+
+```go
+	if s.Profile == "" {
+		out = append(out, screen.Wrap("Additional. The first eight widen what the archive discloses; "+
+			"the last one only costs time.", width, pad)...)
+	} else {
+		out = append(out, screen.Wrap("Additional. Only the options this profile can use are shown.", width, pad)...)
+	}
+```
+
+  Then iterate `visibleOptions(s)` instead of `options(s)` in the checkbox loop; before the `if !s.canStart()` block, add when `s.Profile != ""`:
 
 ```go
 		out = append(out, fieldPad+"[g] write the T-SQL for this profile")
@@ -2284,6 +2332,8 @@ func visibleOptions(s State) []option {
 
   and change the keys line to `pad+"[tab] next   [space] toggle   [p] profile   "+start+"   [b] back   [q] quit"`.
 
+  `TestOptionsShowsTheSameDayCollisionAboveTheKeysItKeeps` in `tui/render_test.go` (around line 207) asserts the old keys line. Add `[p] profile   ` after `[space] toggle   ` in its expected string. It is the one existing test the new line breaks, and the narrow filter of Step 6 does not run it; Step 8 would.
+
 - [ ] Step 6: run and watch them pass
 
 Run: `go test ./collect -run TestPlannedCollectorsFollowsProfile -v && go test ./tui -run 'TestProfileKey|TestChangingTheProfile|TestTheCountAndTheStartGate|TestTheGrantKeyOnScreenThree|TestScreenTwoShowsARight|TestTheFinalScreenIgnoresRefusals' -v`
@@ -2291,7 +2341,7 @@ Expected: 1 test in `collect`, 7 in `tui`, all PASS.
 
 - [ ] Step 7: break it
 
-Copy the four `tui` files aside. (a) Remove the `collisionFor` line from `withProfile`: the collision test must fail. (b) Restore, then remove the `GrantPath` reset: the same test must fail on its second assertion. (c) Restore, then make `nextProfile` cycle over every key of `KnownProfiles`: the offer test must fail on the bare corpus. (d) Restore, then make `deniedPermissions` read `s.Verify.Checks`: its test must fail. (e) Restore, then make `canStart` read `s.Verify.Collectors`: re-run with a state whose Verify has `Collectors: 0` and a profile with a member; write that check inline and report whether it bit. Restore, rerun Step 6, report the count.
+Copy the four `tui` files aside. (a) Remove the `collisionFor` line from `withProfile`: the collision test must fail. (b) Restore, then remove the `GrantPath` reset: the same test must fail on its second assertion. (c) Restore, then make `nextProfile` cycle over every key of `KnownProfiles`: the offer test must fail on the bare corpus. (d) Restore, then make `deniedPermissions` read `s.Verify.Checks`: its test must fail. (e) Restore, then make `canStart` read `s.Verify.Collectors`: `TestTheCountAndTheStartGateFollowTheProfile` must fail on the start gate. (f) Restore, then drop `&& s.Profile != ""` from the `[g]` condition: `TestTheGrantKeyOnScreenThreeWritesTheProfileScript` must fail on the unprofiled press. (g) Restore, then add `s.Verify.Checks = collect.ProfileChecks(s.Verify.Checks, s.Verify.Scripts, profile)` as the first line of `withProfile`: the collision test must fail on `agent_alerts`. Restore, rerun Step 6, report the count.
 
 - [ ] Step 8: full suite and commit
 
@@ -2364,7 +2414,17 @@ In `cmd/sql-auditor/main.go`: add `measurePageDensity` to the `estimateCompressi
 			"this reads 8 to 12 % of every large partition into the buffer pool, LOB included, and all of a small one")
 ```
 
-In the `Flags` map of `optionsFrom`: `collect.FlagMeasurePageDensity: c.all || c.measurePageDensity,`. Change the `--all` help to `"turn on every optional collector at once, including the ones off by default for disclosure and the ones off for cost"` and its comment from "nine" and "one is a cost decision" to "ten" and "two are cost decisions". In `usage()`, change the `--all` entry to say "all ten options below at once: the eight that are off for disclosure and the two that are off for cost" and "still records the ten individually", and add after the `--estimate-compression` entry:
+In the `Flags` map of `optionsFrom`: `collect.FlagMeasurePageDensity: c.all || c.measurePageDensity,`. Change the `--all` help to `"turn on every optional collector at once, including the ones off by default for disclosure and the ones off for cost"` and its comment from "nine" and "one is a cost decision" to "ten" and "two are cost decisions". In `usage()`, replace the `--all` entry with:
+
+```
+  --all                       turn on all ten options below at once: the eight
+                              that are off for disclosure and the two that are
+                              off for cost. The widest archive this tool can
+                              produce. It changes nothing else, and MANIFEST.txt
+                              still records the ten individually.
+```
+
+and add after the `--estimate-compression` entry:
 
 ```
   --measure-page-density      also measure how full the pages of the 50 largest
@@ -2381,7 +2441,7 @@ In `tui/state.go`, append `collect.FlagMeasurePageDensity` to `flagOrder` after 
 			"reads 8 to 12 % of every large index partition into the buffer pool, LOB included, and all of a small one", false},
 ```
 
-and change the unprofiled `Additional.` sentence to `"Additional. The first eight widen what the archive discloses; the last two only cost time."`.
+and, in the unprofiled branch of the `Additional.` block Task 12 wrote, change `"the last one only costs time."` to `"the last two only cost time."`.
 
 - [ ] Step 4: regenerate the inventory and run the tests
 
@@ -2398,10 +2458,13 @@ This fixture is the one the spec's verification used. Run it as one command:
 
 ```bash
 set -e
-go build -o /tmp/profiles-t13/sql-auditor ./cmd/sql-auditor
-mkdir -p /tmp/profiles-t13/q/70.schema /tmp/profiles-t13/out
-grep -vE '^-- @(requires_flag|profiles):' queries/70.schema/055.page-density.sql > /tmp/profiles-t13/q/70.schema/055.page-density.sql
+W=$(mktemp -d)
+go build -o $W/sql-auditor ./cmd/sql-auditor
+mkdir -p $W/q/70.schema $W/out
+grep -vE '^-- @(requires_flag|profiles):' queries/70.schema/055.page-density.sql > $W/q/70.schema/055.page-density.sql
 Q() { podman exec -i sql2025 bash -c '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -b -h -1 -W -i /dev/stdin'; }
+drop() { echo "IF DB_ID(N'review_t13') IS NOT NULL BEGIN ALTER DATABASE review_t13 SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE review_t13; END" | Q; }
+trap drop EXIT
 Q <<'SQL'
 CREATE DATABASE review_t13;
 GO
@@ -2431,11 +2494,11 @@ USE review_t13;
 CREATE UNIQUE CLUSTERED INDEX cx ON dbo.v_idx(id);
 GO
 SQL
-: > /tmp/profiles-t13/empty.env
-podman exec sql2025 printenv MSSQL_SA_PASSWORD | SQL_SERVER=localhost,11533 SQL_USER=sa SQL_TRUST_SERVER_CERTIFICATE=true DB_INCLUDE=review_t13 OUTPUT_DIR=/tmp/profiles-t13/out \
-  /tmp/profiles-t13/sql-auditor collect --env /tmp/profiles-t13/empty.env --password-stdin --queries-dir /tmp/profiles-t13/q 2>&1 | grep 'result(s)'
+: > $W/empty.env
+podman exec sql2025 printenv MSSQL_SA_PASSWORD | SQL_SERVER=localhost,11533 SQL_USER=sa SQL_TRUST_SERVER_CERTIFICATE=true DB_INCLUDE=review_t13 OUTPUT_DIR=$W/out \
+  $W/sql-auditor collect --env $W/empty.env --password-stdin --queries-dir $W/q 2>&1 | grep 'result(s)'
 python3 -c "
-import json,glob; j=json.load(open(glob.glob('/tmp/profiles-t13/out/*/70.schema/review_t13/055.page-density.json')[0]))
+import json,glob; j=json.load(open(glob.glob('$W/out/*/70.schema/review_t13/055.page-density.json')[0]))
 print(j['counts'], j['errors']); print(sorted({(i['table'], i['index_name']) for i in j['indexes']}))"
 echo "ALTER DATABASE review_t13 SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE review_t13; SELECT COUNT(*) FROM sys.databases WHERE name = N'review_t13';" | Q
 ```
@@ -2534,11 +2597,25 @@ inner = "\n".join("          " + l[4:] if l.startswith("    ") else l for l in f
 o = sub(o, "    WHERE t.is_ms_shipped = 0\n    /* object_id is the tie-break", "    WHERE t.is_ms_shipped = 0\n      AND t.object_id IN (\n" + inner + ")\n    /* object_id is the tie-break", 1)
 o = sub(o, cap, cap + "\n       50                                                         AS [listing_cap_by_size],", 1)
 (d / "010.objects.sql").write_text(o)
+new_comment = """    /* Membership is decided by the IN list above: the union of the 200 tables
+       with the most rows and the 50 with the most reserved pages, so a large LOB
+       table holding few rows is kept. object_id breaks the ties of each TOP, and
+       060.columns.sql repeats the same selection twice; a test keeps the three
+       copies identical. This ORDER BY only orders the rows. */
+"""
+o = (d / "010.objects.sql").read_text()
+assert o.count("    /* object_id is the tie-break") == 1
+start, end = o.index("    /* object_id is the tie-break"), o.index("    ORDER BY ps.row_count DESC, t.object_id")
+assert start < end
+(d / "010.objects.sql").write_text(o[:start] + new_comment + o[end:])
+c = (d / "060.columns.sql").read_text()
+c = sub(c, "WITH sized AS (\n", "WITH sized AS (\n    /* The same selection as 010.objects.sql, kept identical by a test: the 200\n       tables with the most rows and the 50 with the most reserved pages. */\n", 2)
+(d / "060.columns.sql").write_text(c)
 print("applied")
 EOF
 ```
 
-Then extend the comment above the `ORDER BY` in `010.objects.sql` with two sentences: the list is the union of the 200 tables with the most rows and the 50 with the most reserved pages, so a large LOB table with few rows is kept; the `ORDER BY` no longer decides membership. Add the same two sentences above the first `sized` CTE of `060.columns.sql`.
+The script also replaces the comment above the `ORDER BY` of `010.objects.sql`, whose reasoning (the 200th place going to a different table in each of two statements) the change makes false, and opens both `sized` CTEs of `060.columns.sql` with a short comment. Read the three comments in `git diff` before going on.
 
 - [ ] Step 4: run the tests
 
@@ -2553,23 +2630,26 @@ Copy `060.columns.sql` aside and change `TOP (50)` to `TOP (51)` in its second C
 
 ```bash
 set -e
-go build -o /tmp/profiles-t14/sql-auditor ./cmd/sql-auditor
-for v in before after; do mkdir -p /tmp/profiles-t14/$v/70.schema /tmp/profiles-t14/out-$v; done
-git show HEAD:queries/70.schema/010.objects.sql > /tmp/profiles-t14/before/70.schema/010.objects.sql
-git show HEAD:queries/70.schema/060.columns.sql > /tmp/profiles-t14/before/70.schema/060.columns.sql
-cp queries/70.schema/010.objects.sql queries/70.schema/060.columns.sql /tmp/profiles-t14/after/70.schema/
+W=$(mktemp -d)
+go build -o $W/sql-auditor ./cmd/sql-auditor
+for v in before after; do mkdir -p $W/$v/70.schema $W/out-$v; done
+git show HEAD:queries/70.schema/010.objects.sql > $W/before/70.schema/010.objects.sql
+git show HEAD:queries/70.schema/060.columns.sql > $W/before/70.schema/060.columns.sql
+cp queries/70.schema/010.objects.sql queries/70.schema/060.columns.sql $W/after/70.schema/
 Q() { podman exec -i sql2025 bash -c '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -b -h -1 -W -i /dev/stdin'; }
+drop() { echo "IF DB_ID(N'review_t14') IS NOT NULL BEGIN ALTER DATABASE review_t14 SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE review_t14; END" | Q; }
+trap drop EXIT
 { echo "CREATE DATABASE review_t14;"; echo "GO"; echo "USE review_t14;"; echo "SET NOCOUNT ON;"
   for i in $(seq 1 201); do echo "CREATE TABLE dbo.small_$i (id int NOT NULL PRIMARY KEY); INSERT dbo.small_$i VALUES (1),(2);"; done
   echo "CREATE TABLE dbo.dense (id int NOT NULL PRIMARY KEY, pad char(400) NOT NULL); INSERT dbo.dense SELECT value, 'x' FROM GENERATE_SERIES(1, 50000);"
   echo "CREATE TABLE dbo.docs (id int NOT NULL PRIMARY KEY, body varbinary(max) NOT NULL); INSERT dbo.docs VALUES (1, CAST(REPLICATE(CAST('a' AS varchar(max)), 30000000) AS varbinary(max)));"
   echo "GO"; } | Q > /dev/null
-: > /tmp/profiles-t14/empty.env
+: > $W/empty.env
 for v in before after; do
-  podman exec sql2025 printenv MSSQL_SA_PASSWORD | SQL_SERVER=localhost,11533 SQL_USER=sa SQL_TRUST_SERVER_CERTIFICATE=true DB_INCLUDE=review_t14 OUTPUT_DIR=/tmp/profiles-t14/out-$v \
-    /tmp/profiles-t14/sql-auditor collect --env /tmp/profiles-t14/empty.env --password-stdin --queries-dir /tmp/profiles-t14/$v 2>&1 | grep 'result(s)'
+  podman exec sql2025 printenv MSSQL_SA_PASSWORD | SQL_SERVER=localhost,11533 SQL_USER=sa SQL_TRUST_SERVER_CERTIFICATE=true DB_INCLUDE=review_t14 OUTPUT_DIR=$W/out-$v \
+    $W/sql-auditor collect --env $W/empty.env --password-stdin --queries-dir $W/$v 2>&1 | grep 'result(s)'
   python3 -c "
-import json,glob; d=glob.glob('/tmp/profiles-t14/out-$v/*/70.schema/review_t14')[0]
+import json,glob; d=glob.glob('$W/out-$v/*/70.schema/review_t14')[0]
 o=json.load(open(d+'/010.objects.json')); c=json.load(open(d+'/060.columns.json'))
 print('$v', 'tables', len(o['tables']), 'docs', any(x['table']=='dbo.docs' for x in o['tables']), 'docs columns', [x['column'] for x in c['columns'] if x['table']=='dbo.docs'], 'covered', c.get('tables_covered'))"
 done
@@ -2658,6 +2738,14 @@ Rename `### Nine files are opt-in` to `### Ten files are opt-in`. In its table, 
 ```
 | `70.schema/055.page-density.sql` | `--measure-page-density` |
 ```
+
+In the sample `check` listing (around line 358), add after the `70.schema/050.heaps.sql` line, aligned like it:
+
+```
+  70.schema/055.page-density.sql             per database, --measure-page-density (off)
+```
+
+In the paragraph on `70.schema/041.compression-savings.sql` (around line 991), replace `1800 seconds and is the only collector that samples real data:` with `1800 seconds, which it shares with 70.schema/055.page-density.sql, and is the only collector that copies real rows:`, rewrapped to the paragraph's width. Leave the bold that opens the paragraph as it is.
 
 Replace the sentence that starts "Eight of the nine change what kind of data ends up in the archive" and its continuation with:
 
@@ -2749,7 +2837,7 @@ Insert immediately before `## [0.22.0] - 2026-09-06`:
 
 - [ ] Step 4: check the prose
 
-Run: `grep -nP '[\x{2013}\x{2014}]' README.md docs/dba-guide.md CHANGELOG.md | grep -n 'profile\|page-density\|not needed\|Ten files\|Unreleased'` and `git diff | grep -nE '^\+.*\*\*' | grep -v 'in every collected database'`.
+Run: `grep -nP '[\x{2013}\x{2014}]' README.md docs/dba-guide.md CHANGELOG.md | grep -n 'profile\|page-density\|not needed\|Ten files\|Unreleased'` and `git diff | grep -nE '^\+.*\*\*' | grep -v 'in every collected database\|compression-savings'`.
 Expected: no output from either. Any output is a new em dash or new bold in the added text: remove it.
 
 - [ ] Step 5: commit
@@ -2775,9 +2863,11 @@ Expected: `gofmt -l` prints nothing; `go vet` and `go test` pass.
 
 ```bash
 set -e
-W=/tmp/profiles-t16; rm -rf $W; mkdir -p $W/out
+W=$(mktemp -d); mkdir -p $W/out
 go build -o $W/sql-auditor ./cmd/sql-auditor
 Q() { podman exec -i sql2025 bash -c '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -b -h -1 -W -i /dev/stdin'; }
+drop() { echo "IF DB_ID(N'review_t16') IS NOT NULL BEGIN ALTER DATABASE review_t16 SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE review_t16; END" | Q; }
+trap drop EXIT
 Q <<'SQL' > /dev/null
 CREATE DATABASE review_t16;
 GO
@@ -2809,8 +2899,8 @@ echo "ALTER DATABASE review_t16 SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DA
 Expected, and report each:
 
 - `ls $W/out` shows a folder and a zip whose names end in `-space`;
-- `check.txt` starts with `Profile: space, 21 of 84 collectors`, then `Queries (21):`, then `Not in profile space: 63 collectors`;
-- `grants.sql` names `for profile space` and `sql-auditor check --profile space` (with `sa`, it also says there is nothing to grant);
+- `check.txt` holds, after the version banner, the `instance :` line and any certificate note, `Profile: space, 21 of 84 collectors`, then `Queries (21):`, then `Not in profile space: 63 collectors`;
+- `grants.sql` holds the header line `profile    space` and `sql-auditor check --profile space` (with `sa`, it also says there is nothing to grant);
 - `MANIFEST.txt` has `Profile      : space, 21 of the 84 collectors in the corpus belong to it` and one line `63 collectors outside profile space, each listed in _run.json`;
 - `_run.json` has `{'name': 'space', 'members': 21, 'corpus': 84}`;
 - the results include `70.schema/055.page-density.sql` and `70.schema/041.compression-savings.sql`, and no `80.workload/` collector;
@@ -2839,6 +2929,9 @@ Each is a decision the spec did not settle to the letter, with what it costs if 
 3. `ProfileBlock.Members` is 0 without a profile (Task 5). Cost if wrong: a reader of `_run.json` must read `name` before `members`, which the spec's example already implies.
 4. `055.page-density.sql` and the listing fragment are extracted from the spec by script rather than copied into this plan (Tasks 13 and 14). The spec's copies are the ones measured on SQL Server; a second copy here could drift. Cost if wrong: an implementer without the spec cannot do those two tasks, and the plan names the spec as required reading.
 5. The live `not_needed` path is not verified against SQL Server (Task 16), because it needs a login this plan must not create.
+6. On screen 3, `[g]` acts only under a profile (Task 12). The spec accepts it on screen 3 unconditionally, but the screen shows the key only under a profile, and a key that works without being shown is a trap. Without a profile, `[g]` on screen 2 writes the full script as today. Cost if wrong: an operator pressing `[g]` on screen 3 without a profile gets nothing where the spec would give the full script.
+7. `TestVerifyServerReturnsRawChecks` is not written. The preflight inside `VerifyServer` needs a real instance, and `VerifyServer` reads the profile only for the plan and the widening, never to set a status. What the spec guards against, a status stored after the profile was applied, is asserted where a stored status is read again: in the wizard after `[p]` (Task 12, the collision test) and in `Check`, whose exit code is computed from a local variable (Task 9). Cost if wrong: a later change that applies `ProfileChecks` inside `VerifyServer` passes the suite.
+8. The spec's wizard case "`[p]`, `[b]`, `[r]` leaves the raw checks raw" is asserted for `[p]`. `[b]` and `[r]` store what `VerifyServer` returns and need an instance to run; ruling 7 covers them.
 
 ## Spec coverage
 
@@ -2858,5 +2951,6 @@ Each is a decision the spec did not settle to the letter, with what it costs if 
 | New collector, flag, cost, unit, file | 13 |
 | Change to `010.objects` and `060.columns` | 14 |
 | Tests (root package, corpus inventory) | 2, 13, 14 |
+| Tests (`collect`, `cmd/sql-auditor`, `tui`) | 1, 3 to 12; rulings 7 and 8 for the two named tests not written as such |
 | Documentation | 15 |
 | Verification against a real instance | 13, 14, 16 |
