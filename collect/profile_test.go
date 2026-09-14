@@ -264,3 +264,81 @@ func TestMembershipPurposes(t *testing.T) {
 		t.Errorf("a member whose flag is on widens, got %v", got)
 	}
 }
+
+func TestProfileChecks(t *testing.T) {
+	checks := []CapabilityCheck{
+		{Name: "connect", Status: "denied"},
+		{Name: "view_any_definition", Status: "denied"},
+		{Name: "view_server_state", Status: "denied"},
+		{Name: "msdb_read", Status: "ok"},
+		{Name: "agent_alerts", Status: "denied"},
+		{Name: "log_shipping", Status: "error"},
+	}
+	scripts := []Script{
+		{Path: "a.sql", Profiles: []string{"space"}, Permissions: []string{"connect", "view_server_state"}},
+		{Path: "b.sql", Permissions: []string{"agent_alerts", "log_shipping"}},
+		{Path: "c.sql", Profiles: []string{"space"}, Permissions: []string{"agent_alerts"}, LintError: "bad"},
+	}
+	got := ProfileChecks(checks, scripts, "space")
+	want := map[string]string{
+		"connect":             "denied",        // never rewritten
+		"view_any_definition": "denied",        // never rewritten: database discovery needs it
+		"view_server_state":   "denied",        // a member declares it
+		"msdb_read":           "ok",            // untouched
+		"agent_alerts":        StatusNotNeeded, // only a non-member and a lint failure declare it
+		"log_shipping":        "error",         // an unanswered probe is never rewritten
+	}
+	for _, c := range got {
+		if c.Status != want[c.Name] {
+			t.Errorf("%s = %q, want %q", c.Name, c.Status, want[c.Name])
+		}
+	}
+	if checks[4].Status != "denied" {
+		t.Error("ProfileChecks must not modify its input")
+	}
+	for i, c := range ProfileChecks(checks, scripts, "") {
+		if c != checks[i] {
+			t.Errorf("without a profile the checks come back unchanged, %s = %q", c.Name, c.Status)
+		}
+	}
+}
+
+func TestCoverageUnderAProfile(t *testing.T) {
+	m := &Manifest{Profile: ProfileBlock{Name: "space", Members: 21, Corpus: 84},
+		Preflight: []CapabilityCheck{
+			{Name: "connect", Status: "ok"},
+			{Name: "agent_alerts", Label: "Read the Agent alerts and operators (msdb.dbo.sysalerts)", Status: StatusNotNeeded},
+		}}
+	m.refreshCoverage()
+	if m.Coverage.Status != "complete" {
+		t.Errorf("coverage = %q, want complete: the only refusal is not needed", m.Coverage.Status)
+	}
+	h := flatten(m.Human())
+	if !strings.Contains(h, "COMPLETE") || strings.Contains(h, "INCOMPLETE") {
+		t.Errorf("MANIFEST.txt must say COMPLETE:\n%s", m.Human())
+	}
+	if !strings.Contains(h, "Not needed by profile space") ||
+		!strings.Contains(h, "Read the Agent alerts and operators") {
+		t.Errorf("MANIFEST.txt must list the unneeded right by its label:\n%s", m.Human())
+	}
+
+	m.Preflight = append(m.Preflight, CapabilityCheck{Name: "log_shipping", Status: "error"})
+	m.refreshCoverage()
+	if m.Coverage.Status != "incomplete" {
+		t.Errorf("coverage = %q, want incomplete: an unanswered probe is still unanswered", m.Coverage.Status)
+	}
+}
+
+// Check computes its exit code from the checks after ProfileChecks. What keeps
+// a lost instance from passing for success is that "error" is never rewritten,
+// so an unanswered probe on a capability no member declares still gives exit 1.
+func TestCheckExitsOneWhenAnUnneededProbeGotNoAnswer(t *testing.T) {
+	checks := []CapabilityCheck{
+		{Name: "connect", Status: "ok"},
+		{Name: "log_shipping", Status: "error"},
+	}
+	scripts := []Script{{Path: "a.sql", Profiles: []string{"space"}, Permissions: []string{"connect"}}}
+	if got := PreflightExitCode(ProfileChecks(checks, scripts, "space"), 0, true); got != 1 {
+		t.Errorf("exit code = %d, want 1: the instance stopped answering", got)
+	}
+}

@@ -381,7 +381,7 @@ func (m *Manifest) refreshCoverage() {
 	}
 	c.Status = "complete"
 	for _, chk := range m.Preflight {
-		if chk.Status == "ok" {
+		if chk.Status == "ok" || chk.Status == StatusNotNeeded {
 			continue
 		}
 		c.Status = "incomplete"
@@ -720,7 +720,7 @@ func (m *Manifest) writeCoverage(b *strings.Builder) {
 		b.WriteString("INCOMPLETE - the login used for this run was refused, or got no answer for,\n")
 		b.WriteString("some of what the collector needs. Parts of this instance were not read:\n\n")
 		for _, chk := range m.Preflight {
-			if chk.Status == "ok" {
+			if chk.Status == "ok" || chk.Status == StatusNotNeeded {
 				continue
 			}
 			state := "refused for this login"
@@ -737,6 +737,24 @@ func (m *Manifest) writeCoverage(b *strings.Builder) {
 			if chk.Impact != "" {
 				fmt.Fprintf(b, "      consequence: %s\n", chk.Impact)
 			}
+		}
+	}
+	var notNeeded []string
+	for _, chk := range m.Preflight {
+		if chk.Status != StatusNotNeeded {
+			continue
+		}
+		name := chk.Label
+		if name == "" {
+			name = chk.Name
+		}
+		notNeeded = append(notNeeded, name)
+	}
+	if len(notNeeded) > 0 {
+		fmt.Fprintf(b, "\nNot needed by profile %s: the login was refused these, and no collector\n", m.Profile.Name)
+		b.WriteString("of this profile reads what they allow.\n")
+		for _, n := range notNeeded {
+			fmt.Fprintf(b, "  - %s\n", n)
 		}
 	}
 	if m.Coverage.DatabaseListMayBeIncomplete {

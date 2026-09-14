@@ -787,6 +787,10 @@ func Check(ctx context.Context, o Options) (int, error) {
 	err = VerifyServer(ctx, o, &v)
 	o.Debugf("the instance has been probed")
 
+	// VerifyServer returns the raw statuses; check reads them through the
+	// profile, for the listing, the grant script, the advice and the exit code.
+	checks := ProfileChecks(v.Checks, v.Scripts, o.Profile)
+
 	// The two failures that end the listing, in the order VerifyServer meets
 	// them.
 	// Both are handed back so the CLI can print them; the unreachable instance
@@ -803,9 +807,13 @@ func Check(ctx context.Context, o Options) (int, error) {
 	}
 
 	fmt.Println("\nPermissions:")
-	for _, c := range v.Checks {
+	for _, c := range checks {
 		if c.Status == "ok" {
 			fmt.Printf("  ok      %s\n", c.Name)
+			continue
+		}
+		if c.Status == StatusNotNeeded {
+			fmt.Printf("  not needed  %s\n", c.Name)
 			continue
 		}
 		fmt.Printf("  %-7s %s — %s\n", c.Status, c.Name, c.Impact)
@@ -880,16 +888,16 @@ func Check(ctx context.Context, o Options) (int, error) {
 	// cannot see, and the one that silently costs two thirds of the
 	// collectors.
 	if o.GrantScript != "" {
-		if werr := writeGrantScript(o, v.Scripts, v.Checks, v.Server, v.ServerErr, v.NoAccess); werr != nil {
+		if werr := writeGrantScript(o, v.Scripts, checks, v.Server, v.ServerErr, v.NoAccess); werr != nil {
 			fmt.Fprintf(o.progress(), "could not write %s: %v\n", o.GrantScript, werr)
 			return 2, nil
 		}
-	} else if anyDenied(v.Checks) || len(v.NoAccess) > 0 {
+	} else if anyDenied(checks) || len(v.NoAccess) > 0 {
 		fmt.Print("\nSomething is missing above. To generate the T-SQL that grants\n" +
 			"exactly what is missing, and nothing more, for a DBA to review:\n\n" +
 			"  sql-auditor check --grant-script grants.sql\n")
 	}
-	return PreflightExitCode(v.Checks, v.LintFailures, v.OutputWritable), nil
+	return PreflightExitCode(checks, v.LintFailures, v.OutputWritable), nil
 }
 
 // writeGrantScript builds the permission script and puts it on disk. It is
@@ -1446,6 +1454,10 @@ func Run(ctx context.Context, o Options) (int, error) {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 1, err)
 	}
+	// Once, here: coverage, the plan's denied set and the manifest all read
+	// the profiled statuses from now on. PreflightExitCode above has already
+	// seen the raw ones, and "error" is never rewritten anyway.
+	m.Preflight = ProfileChecks(m.Preflight, scripts, o.Profile)
 	denied := DeniedCapabilities(m.Preflight)
 	// connect is not a per-script gate. Reaching here means it answered.
 	delete(denied, "connect")
