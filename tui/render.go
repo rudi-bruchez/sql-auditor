@@ -463,9 +463,9 @@ func blockingBlock(s State, width int) []string {
 // and whether it is the indented dependent one.
 //
 // Every option carries its consequence beside its box rather than in a README
-// nobody opens before running the tool. Eight of the nine widen what the
+// nobody opens before running the tool. Eight of the ten widen what the
 // archive DISCLOSES — that is a decision somebody may have to justify to a
-// security officer — and the ninth only costs time. Presenting them as one
+// security officer — and the other two only cost time. Presenting them as one
 // category would misprice the first eight.
 type option struct {
 	flag, label, desc string
@@ -611,7 +611,7 @@ func nothingReason(s State) string {
 }
 
 // optionLines draws one checkbox with its consequence folded under it. The
-// description column is fixed so that the nine consequences line up, and the
+// description column is fixed so that the ten consequences line up, and the
 // dependent option is indented under the one it needs — it does nothing on its
 // own, and a checkbox that looked independent would promise a collection that
 // will not happen.

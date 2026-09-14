@@ -78,10 +78,10 @@ const (
 	fieldCount
 )
 
-// flagOrder is the nine opt-ins in the order screen 3 lists them, which is
+// flagOrder is the ten opt-ins in the order screen 3 lists them, which is
 // the order the spec's mock-up fixes: the eight that widen what the archive
 // discloses first, with plan stats indented under its prerequisite, and the
-// one that only costs time last.
+// two that only cost time last.
 //
 // It was seven until the harm review of 4 September 2026. default_trace and
 // plan_cache_plans had been added to the command line and to --all without
