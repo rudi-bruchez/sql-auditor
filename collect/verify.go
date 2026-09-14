@@ -55,7 +55,10 @@ type VerifyResult struct {
 	// and prints nothing, an unusable address is exit 2 or 1 depending on the
 	// address, an instance that does not answer is exit 1, and a database list
 	// that could not be built is a warning the listing survives.
-	CorpusErr     error
+	CorpusErr error
+	// ProfileErr is a refused profile or flag combination, found once the
+	// corpus is known. Check returns 2 with it before printing anything.
+	ProfileErr    error
 	OpenErr       error
 	ConnErr       error
 	CandidatesErr error
@@ -93,6 +96,10 @@ func VerifyLocal(o Options) (VerifyResult, error) {
 		if s.LintError != "" {
 			v.LintFailures++
 		}
+	}
+	if perr := CheckProfile(scripts, o.Profile, o.Flags); perr != nil {
+		v.ProfileErr = perr
+		return v, perr
 	}
 
 	// OutputWritable false is a finding the caller must be able to trust even

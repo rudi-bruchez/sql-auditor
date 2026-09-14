@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -179,5 +180,58 @@ func TestProfileCounts(t *testing.T) {
 	}
 	if m, c := profileCounts(scripts, ""); m != 0 || c != 2 {
 		t.Errorf("without a profile: members, corpus = %d, %d, want 0, 2", m, c)
+	}
+}
+
+// noMemberCorpus holds one valid collector that declares no profile.
+func noMemberCorpus() fstest.MapFS {
+	body := "-- @scope:       instance\n-- @resultsets:  a:object\n-- @permissions: VIEW SERVER STATE\n-- @timeout:     60\n" +
+		contractPreamble + "SELECT 1 AS [x] OPTION (RECOMPILE, MAXDOP 1);\n"
+	return fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
+}
+
+func TestCheckRefusesTheProfileBeforeListing(t *testing.T) {
+	var code int
+	var err error
+	printed := captureStdout(t, func() {
+		code, err = Check(context.Background(), Options{
+			Config:  &Config{Server: "localhost", OutputDir: t.TempDir()},
+			Corpus:  noMemberCorpus(),
+			Root:    "queries",
+			Profile: "space",
+		})
+	})
+	if code != 2 || err == nil || !strings.Contains(err.Error(), "declares none") {
+		t.Errorf("code %d, err %v; want 2 with the no-member refusal", code, err)
+	}
+	if strings.Contains(printed, "Queries (") {
+		t.Errorf("the listing was printed before the refusal:\n%s", printed)
+	}
+}
+
+func TestRunRefusesTheProfileAfterDiscoveryAndRecordsIt(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "output")
+	code, err := Run(context.Background(), Options{
+		Config:  &Config{Server: "localhost", OutputDir: out},
+		Corpus:  noMemberCorpus(),
+		Root:    "queries",
+		Now:     time.Now(),
+		Profile: "space",
+	})
+	if code != 2 || err == nil || !strings.Contains(err.Error(), "declares none") {
+		t.Fatalf("code %d, err %v; want 2 with the no-member refusal", code, err)
+	}
+	b, rerr := os.ReadFile(filepath.Join(failedRunDir(t, out), "_run.json"))
+	if rerr != nil {
+		t.Fatalf("no failed-run record: %v", rerr)
+	}
+	var got struct {
+		Profile ProfileBlock `json:"profile"`
+	}
+	if jerr := json.Unmarshal(b, &got); jerr != nil {
+		t.Fatal(jerr)
+	}
+	if got.Profile.Name != "space" || got.Profile.Corpus != 1 || got.Profile.Members != 0 {
+		t.Errorf("profile block = %+v, want name space, corpus 1, members 0", got.Profile)
 	}
 }

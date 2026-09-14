@@ -748,6 +748,9 @@ func Check(ctx context.Context, o Options) (int, error) {
 		// empty corpus where in fact none was found.
 		return 2, err
 	}
+	if v.ProfileErr != nil {
+		return 2, v.ProfileErr
+	}
 	fmt.Printf("Queries (%d):\n", len(v.Scripts))
 	for _, s := range v.Scripts {
 		switch {
@@ -1393,6 +1396,12 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return finishWith("", 2, err)
 	}
 	m.Profile.Members, m.Profile.Corpus = profileCounts(scripts, o.Profile)
+	// The command line refuses this first; this guard is for a caller that
+	// builds Options itself. It leaves a failed-run record naming the request.
+	if err := CheckProfile(scripts, o.Profile, o.Flags); err != nil {
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", 2, err)
+	}
 
 	o.Debugf("%d script(s) in the corpus", len(scripts))
 

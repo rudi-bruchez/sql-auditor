@@ -88,7 +88,7 @@ type cliFlags struct {
 	fs *flag.FlagSet
 
 	server, user, envFile, queriesDir, outputDir string
-	to, grantScript                              string
+	to, grantScript, profile                     string
 	keep, force, all                             bool
 
 	passwordFile  string
@@ -142,6 +142,10 @@ func defineFlags(cmd string) *cliFlags {
 	fs.BoolVar(&c.all, "all", false,
 		"turn on every optional collector at once, including the ones off by default "+
 			"for disclosure and the one off for cost")
+	// A profile only removes collectors. It is refused beside --all, which
+	// asks for the opposite, and the refusal is in optionsFrom.
+	fs.StringVar(&c.profile, "profile", "",
+		"collect only the collectors of this profile: space")
 	fs.StringVar(&c.to, "to", "",
 		"destination: a directory for 'queries export', a file for 'env init' (default .env)")
 	fs.BoolVar(&c.force, "force", false, "replace existing files: the destination of 'env init', the corpus of 'queries export'")
@@ -327,6 +331,11 @@ func readPassword(c *cliFlags, stdin io.Reader) (string, error) {
 // "unknown command" message — and parsing it a second time here would only
 // produce the same values.
 func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *debugLog) (collect.Options, int, error) {
+	// Before anything else, because it needs no corpus and no configuration.
+	if c.all && c.profile != "" {
+		return collect.Options{}, 2, fmt.Errorf("--all and --profile cannot be combined: " +
+			"--all asks for the widest archive this tool can produce, and a profile for a narrow one")
+	}
 	// Before the .env is opened, because a password source the operator named
 	// and this program cannot read is their mistake to correct, and saying so
 	// first keeps the two refusals from arriving in an order that depends on
@@ -448,6 +457,19 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 	if cfg.QueriesDir != "" {
 		opts.Corpus = os.DirFS(cfg.QueriesDir)
 		opts.Root = "."
+	}
+	opts.Profile = c.profile
+	// Only when a profile was asked for, so a run without one, and the wizard,
+	// which never receives one on its command line, do no extra work. A corpus
+	// that cannot be read is not judged here: Run and Check report that error
+	// as they always have.
+	if opts.Profile != "" {
+		dbg.printf("checking profile %s against the corpus", opts.Profile)
+		if scripts, derr := collect.Discover(opts.Corpus, opts.Root); derr == nil {
+			if perr := collect.CheckProfile(scripts, opts.Profile, opts.Flags); perr != nil {
+				return collect.Options{}, 2, perr
+			}
+		}
 	}
 	return opts, 0, nil
 }
@@ -919,6 +941,11 @@ Options (check, collect):
   --queries-dir DIR           run a corpus from disk instead of the embedded one
   --output-dir DIR            where to write results
   --keep                      keep an existing same-day run folder
+  --profile NAME              collect only the collectors of a profile. The one
+                              profile is space: what makes the databases on this
+                              instance larger than they need to be. It removes
+                              collectors and never adds one; an opt-in option
+                              still needs to be given. Refused beside --all.
   --all                       turn on all nine options below at once: the eight
                               that are off for disclosure and the one that is
                               off for cost. The widest archive this tool can

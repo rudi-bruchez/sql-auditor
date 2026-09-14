@@ -538,3 +538,69 @@ func TestInterruptCancelsTheRunAndHandsTheSignalBack(t *testing.T) {
 		t.Errorf("the stop said nothing useful: %q", s)
 	}
 }
+
+func TestProfileIsParsedIntoOptions(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+	o, code, err := buildOptions("collect", []string{"--env", env, "--profile", "space"}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if o.Profile != "space" {
+		t.Errorf("Profile = %q, want space", o.Profile)
+	}
+}
+
+func TestProfileRefusals(t *testing.T) {
+	oldCorpus := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(oldCorpus, "10.system"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldCorpus, "10.system", "010.a.sql"),
+		[]byte("-- @resultsets: a:object\nSELECT 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"--all with --profile", []string{"--all", "--profile", "space"}, "--all and --profile cannot be combined"},
+		{"unknown profile", []string{"--profile", "spaec"}, `unknown profile "spaec"`},
+		{"an option with no member", []string{"--profile", "space", "--query-store-detail"},
+			"--query-store-detail has no collector in profile space"},
+		{"a corpus exported before profiles", []string{"--profile", "space", "--queries-dir", oldCorpus},
+			"a corpus exported before profiles existed declares none"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+			_, code, err := buildOptions("collect", append([]string{"--env", env}, c.args...), noEnv, noStdin)
+			if code != 2 || err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("code %d, err %v; want exit 2 with %q", code, err, c.want)
+			}
+		})
+	}
+}
+
+// optionsFrom reads the corpus only when a profile asks for it: a run without
+// one, and the wizard, must not pay for a second discovery.
+func TestOptionsFromReadsTheCorpusOnlyForAProfile(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		read bool
+	}{
+		{nil, false},
+		{[]string{"--profile", "space"}, true},
+	} {
+		env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+		var buf bytes.Buffer
+		_, code, err := buildOptionsWithDebug("collect", append([]string{"--env", env}, c.args...),
+			noEnv, noStdin, newDebugLog(&buf, time.Now))
+		if err != nil || code != 0 {
+			t.Fatalf("%v: code %d, err %v", c.args, code, err)
+		}
+		if got := strings.Contains(buf.String(), "checking profile"); got != c.read {
+			t.Errorf("%v: corpus read = %v, want %v; debug log:\n%s", c.args, got, c.read, buf.String())
+		}
+	}
+}
