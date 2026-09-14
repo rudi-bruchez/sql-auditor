@@ -540,7 +540,8 @@ Two things worth knowing:
 ## Collecting for one question
 
 `--profile space` is for an engagement that asks one question: how to make the
-databases of this instance smaller. It runs 21 collectors instead of 84, reads
+databases of this instance smaller. 21 of the 84 collectors belong to it, and
+the two opt-in ones among them still need their option; the profile reads
 nothing the full run does not read, and changes nothing in what the manifest
 promises.
 

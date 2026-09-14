@@ -21,10 +21,11 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Added
 
-- `--profile space` on `check`, `collect` and the wizard: runs only the 21
-  collectors that answer what makes the databases of an instance larger than
-  they need to be. The archive names the profile, the run folder carries it,
-  and rights the profile does not need are reported `not needed`.
+- `--profile space` on `check`, `collect` and the wizard: 21 of the 84
+  collectors answer what makes the databases of an instance larger than they
+  need to be, and the profile narrows a run to them. The archive names the
+  profile, the run folder carries it, and rights the profile does not need
+  are reported `not needed`.
 - `70.schema/055.page-density.sql`, behind `--measure-page-density`: page
   fullness of the 50 largest rowstore index partitions, indexed views included.
   84 collectors.
