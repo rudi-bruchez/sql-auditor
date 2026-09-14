@@ -342,3 +342,33 @@ func TestCheckExitsOneWhenAnUnneededProbeGotNoAnswer(t *testing.T) {
 		t.Errorf("exit code = %d, want 1: the instance stopped answering", got)
 	}
 }
+
+func TestPrintQueriesUnderAProfile(t *testing.T) {
+	scripts := []Script{
+		{Path: "70.schema/050.heaps.sql", Profiles: []string{"space"}},
+		{Path: "70.schema/099.custom.sql", Profiles: []string{"space"}, LintError: "@timeout: missing"},
+		{Path: "80.workload/010.wait-stats.sql"},
+		{Path: "80.workload/099.other.sql", LintError: "GO batch separator"},
+	}
+	out := captureStdout(t, func() { printQueries(Options{Profile: "space"}, scripts) })
+	for _, want := range []string{
+		"Profile: space, 1 of 2 collectors\n",
+		"Queries (2):\n",
+		"  70.schema/050.heaps.sql",
+		"  !! 70.schema/099.custom.sql",
+		"Not in profile space: 1 collectors. Run check without --profile to list them.\n",
+		"Lint failures outside profile space (1):\n",
+		"  !! 80.workload/099.other.sql",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("listing does not contain %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "80.workload/010.wait-stats.sql") {
+		t.Errorf("a clean script outside the profile must not be listed:\n%s", out)
+	}
+	whole := captureStdout(t, func() { printQueries(Options{}, scripts) })
+	if !strings.HasPrefix(whole, "Queries (4):\n") || strings.Contains(whole, "Profile:") {
+		t.Errorf("without a profile the listing is today's:\n%s", whole)
+	}
+}

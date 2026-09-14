@@ -751,15 +751,7 @@ func Check(ctx context.Context, o Options) (int, error) {
 	if v.ProfileErr != nil {
 		return 2, v.ProfileErr
 	}
-	fmt.Printf("Queries (%d):\n", len(v.Scripts))
-	for _, s := range v.Scripts {
-		switch {
-		case s.LintError != "":
-			fmt.Printf("  !! %-42s %s\n", s.Path, s.LintError)
-		default:
-			fmt.Printf("  %-42s %s\n", s.Path, scriptNote(s, o.Flags))
-		}
-	}
+	printQueries(o, v.Scripts)
 
 	// The window conflict is priced by the flags, so a collection that never
 	// reads the Query Store only warns about it. But check exists to say what
@@ -898,6 +890,51 @@ func Check(ctx context.Context, o Options) (int, error) {
 			"  sql-auditor check --grant-script grants.sql\n")
 	}
 	return PreflightExitCode(checks, v.LintFailures, v.OutputWritable), nil
+}
+
+// printQueries writes the Queries block of check. Under a profile it lists the
+// scripts that declare the profile, lint failures included, and gives the lint
+// failures of the other scripts a block of their own, so that each heading
+// counts the lines under it.
+func printQueries(o Options, scripts []Script) {
+	if o.Profile == "" {
+		fmt.Printf("Queries (%d):\n", len(scripts))
+		for _, s := range scripts {
+			printQueryLine(o, s)
+		}
+		return
+	}
+	members, corpus := profileCounts(scripts, o.Profile)
+	var declared, outsideLint []Script
+	for _, s := range scripts {
+		switch {
+		case slices.Contains(s.Profiles, o.Profile):
+			declared = append(declared, s)
+		case s.LintError != "":
+			outsideLint = append(outsideLint, s)
+		}
+	}
+	fmt.Printf("Profile: %s, %d of %d collectors\n", o.Profile, members, corpus)
+	fmt.Printf("Queries (%d):\n", len(declared))
+	for _, s := range declared {
+		printQueryLine(o, s)
+	}
+	fmt.Printf("Not in profile %s: %d collectors. Run check without --profile to list them.\n",
+		o.Profile, corpus-members)
+	if len(outsideLint) > 0 {
+		fmt.Printf("Lint failures outside profile %s (%d):\n", o.Profile, len(outsideLint))
+		for _, s := range outsideLint {
+			printQueryLine(o, s)
+		}
+	}
+}
+
+func printQueryLine(o Options, s Script) {
+	if s.LintError != "" {
+		fmt.Printf("  !! %-42s %s\n", s.Path, s.LintError)
+		return
+	}
+	fmt.Printf("  %-42s %s\n", s.Path, scriptNote(s, o.Flags))
 }
 
 // writeGrantScript builds the permission script and puts it on disk. It is
