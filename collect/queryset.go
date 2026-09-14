@@ -127,6 +127,7 @@ var KnownFlags = map[string]string{
 	"blocked_process_reports": "--include-blocked-process-reports",
 	"default_trace":           "--include-default-trace",
 	"plan_cache_plans":        "--plan-cache-plans",
+	"measure_page_density":    "--measure-page-density",
 }
 
 // KnownWriters is the closed set of names @writer accepts, mapped to the

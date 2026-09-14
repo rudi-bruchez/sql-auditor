@@ -41,6 +41,11 @@ const FlagIncludeSessionText = "include_session_text"
 // I/O, and it needs the same deliberateness as session text.
 const FlagEstimateCompression = "estimate_compression"
 
+// FlagMeasurePageDensity turns on 70.schema/055.page-density.sql. Off for
+// cost, not for disclosure: SAMPLED brings 8 to 12 % of every large index
+// partition into the buffer pool, LOB pages included, and all of a small one.
+const FlagMeasurePageDensity = "measure_page_density"
+
 // FlagQueryStoreDetail gates the deep read of the Query Store: the full,
 // untruncated text of the heaviest queries and their execution plans.
 //
@@ -1334,6 +1339,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		"deadlock_graphs":          fmt.Sprint(o.Flags[FlagDeadlockGraphs]),
 		"default_trace":            fmt.Sprint(o.Flags[FlagDefaultTrace]),
 		"plan_cache_plans":         fmt.Sprint(o.Flags[FlagPlanCachePlans]),
+		"measure_page_density":     fmt.Sprint(o.Flags[FlagMeasurePageDensity]),
 
 		"query_store_detail":     fmt.Sprint(o.Flags[FlagQueryStoreDetail]),
 		"query_store_plan_stats": fmt.Sprint(o.Flags[FlagQueryStorePlanStats]),

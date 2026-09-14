@@ -54,6 +54,7 @@
 70.schema/040.compression.sql @profiles: space
 70.schema/041.compression-savings.sql @profiles: space
 70.schema/050.heaps.sql @profiles: space
+70.schema/055.page-density.sql @profiles: space
 70.schema/060.columns.sql @profiles: space
 70.schema/070.index-columns.sql @profiles: space
 70.schema/075.foreign-keys.sql

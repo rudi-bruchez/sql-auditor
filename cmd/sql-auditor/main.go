@@ -98,6 +98,7 @@ type cliFlags struct {
 	deadlockGraphs, blockedProcessReports       bool
 	defaultTrace, planCachePlans                bool
 	estimateCompression                         bool
+	measurePageDensity                          bool
 	queryStoreDetail, queryStorePlanStats       bool
 	queryStoreDays, queryStoreTop               int
 	queryStoreFrom, queryStoreTo, queryStoreDBs string
@@ -131,17 +132,17 @@ func defineFlags(cmd string) *cliFlags {
 	_ = fs.Bool("debug", false,
 		"print a timeline of what the program is doing on stderr, stamped with the "+
 			"time since process start")
-	// A union of the nine opt-ins below, and deliberately not a mode: it
+	// A union of the ten opt-ins below, and deliberately not a mode: it
 	// turns them on and changes nothing else. Eight of them are disclosure
-	// decisions and one is a cost decision, so what this asks for is the
+	// decisions and two are cost decisions, so what this asks for is the
 	// widest archive the tool can produce — which is the right thing on an
 	// instance you have a mandate for, and the wrong thing everywhere else.
-	// MANIFEST.txt is unchanged by it: the archive keeps recording the nine
+	// MANIFEST.txt is unchanged by it: the archive keeps recording the ten
 	// individually, because what was collected is the fact worth keeping and
 	// how few words it took to ask is not.
 	fs.BoolVar(&c.all, "all", false,
 		"turn on every optional collector at once, including the ones off by default "+
-			"for disclosure and the one off for cost")
+			"for disclosure and the ones off for cost")
 	// A profile only removes collectors. It is refused beside --all, which
 	// asks for the opposite, and the refusal is in optionsFrom.
 	fs.StringVar(&c.profile, "profile", "",
@@ -199,6 +200,12 @@ func defineFlags(cmd string) *cliFlags {
 	fs.BoolVar(&c.estimateCompression, "estimate-compression", false,
 		"also estimate page-compression savings on the largest uncompressed objects — "+
 			"this samples data into tempdb and is slow on large tables")
+	// Off by default for cost, like --estimate-compression: the density scan
+	// reads pages, not metadata, and on a large database that is tens of
+	// gigabytes pulled into the buffer pool.
+	fs.BoolVar(&c.measurePageDensity, "measure-page-density", false,
+		"also measure how full the pages of the largest index partitions are: "+
+			"this reads 8 to 12 % of every large partition into the buffer pool, LOB included, and all of a small one")
 	// Off by default, and it has to stay that way: this is the option that
 	// puts the full text of production queries and their execution plans
 	// into the archive. A plan carries the compiled parameter values and
@@ -452,6 +459,7 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 			collect.FlagBlockedProcessReports: c.all || c.blockedProcessReports,
 			collect.FlagDefaultTrace:          c.all || c.defaultTrace,
 			collect.FlagPlanCachePlans:        c.all || c.planCachePlans,
+			collect.FlagMeasurePageDensity:    c.all || c.measurePageDensity,
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -946,11 +954,11 @@ Options (check, collect):
                               instance larger than they need to be. It removes
                               collectors and never adds one; an opt-in option
                               still needs to be given. Refused beside --all.
-  --all                       turn on all nine options below at once: the eight
-                              that are off for disclosure and the one that is
+  --all                       turn on all ten options below at once: the eight
+                              that are off for disclosure and the two that are
                               off for cost. The widest archive this tool can
                               produce. It changes nothing else, and MANIFEST.txt
-                              still records the nine individually.
+                              still records the ten individually.
   --grant-script FILE         check only. After probing permissions, write the
                               T-SQL that grants exactly the ones found missing,
                               for the login the server reports, with the reason
@@ -994,6 +1002,11 @@ Options (check, collect):
   --estimate-compression      also estimate page-compression savings on the largest
                               uncompressed objects. Off by default for cost: it
                               samples data into tempdb and is slow on big tables.
+  --measure-page-density      also measure how full the pages of the 50 largest
+                              index partitions are, which says what a rebuild
+                              would give back. Off for cost: SAMPLED reads 8 to
+                              12 % of every large partition into the buffer pool,
+                              LOB pages included, and all of a small one.
   --query-store-detail        also collect the full text and the execution plans of
                               the heaviest Query Store queries. Off by default: a
                               plan carries the compiled parameter values and the

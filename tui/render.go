@@ -499,6 +499,8 @@ func options(s State) []option {
 			".sqlplan from the cache when the Query Store is off; cached text can carry literal parameter values", false},
 		{collect.FlagEstimateCompression, "compression estimate",
 			"samples real data into tempdb; slow on large tables", false},
+		{collect.FlagMeasurePageDensity, "page density",
+			"reads 8 to 12 % of every large index partition into the buffer pool, LOB included, and all of a small one", false},
 	}
 }
 
@@ -541,7 +543,7 @@ func renderOptions(s State, width int) []string {
 	out = append(out, hang(pad+"Profile [p]", 29, profileDesc, width)...)
 	if s.Profile == "" {
 		out = append(out, screen.Wrap("Additional. The first eight widen what the archive discloses; "+
-			"the last one only costs time.", width, pad)...)
+			"the last two only cost time.", width, pad)...)
 	} else {
 		out = append(out, screen.Wrap("Additional. Only the options this profile can use are shown.", width, pad)...)
 	}
