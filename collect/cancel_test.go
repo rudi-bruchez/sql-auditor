@@ -2,9 +2,14 @@ package collect
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // An operator who presses Ctrl-C is not an instance that went away, and the
@@ -159,4 +164,60 @@ func TestNothingIsReportedToTheScreenThatTheManifestDenies(t *testing.T) {
 	if len(live.Errors) != 1 {
 		t.Errorf("the manifest records %d error(s), want 1", len(live.Errors))
 	}
+}
+
+// A ctrl-c between the connection and the first collector reached Run as the
+// error of whichever step was waiting, and was recorded as exit 1, "the
+// instance could not be reached", with no cancelled flag. Measured on SQL
+// Server 2025 by interrupting a collection 0.6 seconds in.
+func TestAStopBeforeTheFirstCollectorIsAStopNotAnUnreachableInstance(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "output")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	code, err := Run(ctx, Options{
+		Config: &Config{Server: "127.0.0.1,1", OutputDir: out},
+		Corpus: noMemberCorpus(),
+		Root:   "queries",
+		Now:    time.Now(),
+	})
+	if code != 2 || err == nil || !strings.Contains(err.Error(), "stopped before the first collector") {
+		t.Errorf("code %d, err %v; want 2 and a stop", code, err)
+	}
+	m := readFailedRunManifest(t, out)
+	if !m.Run.Cancelled || m.Run.ExitCode != 2 || len(m.Errors) != 0 {
+		t.Errorf("cancelled %v, exit_code %d, errors %v; want true, 2 and none",
+			m.Run.Cancelled, m.Run.ExitCode, m.Errors)
+	}
+}
+
+// The other half of the rule: on a live context the failure is the
+// instance's, and stays exit 1 with its error recorded.
+func TestAConnectionFailureOnALiveContextStaysUnreachable(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "output")
+	code, err := Run(context.Background(), Options{
+		Config: &Config{Server: "127.0.0.1,1", OutputDir: out, ConnectTimeout: 5 * time.Second},
+		Corpus: noMemberCorpus(),
+		Root:   "queries",
+		Now:    time.Now(),
+	})
+	if code != 1 || err == nil {
+		t.Errorf("code %d, err %v; want 1 and the connection error", code, err)
+	}
+	m := readFailedRunManifest(t, out)
+	if m.Run.Cancelled || len(m.Errors) != 1 {
+		t.Errorf("cancelled %v, errors %v; want false and one", m.Run.Cancelled, m.Errors)
+	}
+}
+
+func readFailedRunManifest(t *testing.T, out string) Manifest {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(failedRunDir(t, out), "_run.json"))
+	if err != nil {
+		t.Fatalf("no failed-run record: %v", err)
+	}
+	var m Manifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
 }

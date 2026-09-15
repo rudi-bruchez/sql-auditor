@@ -1505,6 +1505,22 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return c, cause
 	}
 
+	// stoppedOr is finishWith for the steps between the connection and the
+	// first collector, all of which wait on ctx. A ctrl-c there fails whichever
+	// of them is waiting with "context canceled", and following that error
+	// filed the operator's stop as exit 1, "the instance could not be reached",
+	// with no cancelled flag, in a manifest a scheduler reads as a network
+	// fault. It is recordUnitFailure's defect one step earlier, and the rule is
+	// the same: a dead context outranks the error, which describes the stopping
+	// and is dropped. Exit 2 is what settleRun gives a stop inside the loop.
+	stoppedOr := func(code int, err error) (int, error) {
+		if stopRequested(ctx, m) {
+			return finishWith("", 2, errors.New("stopped before the first collector: nothing was collected"))
+		}
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", code, err)
+	}
+
 	o.Debugf("probing the output directory %s for writability", o.Config.OutputDir)
 	if !outputWritable(o.Config.OutputDir) {
 		err := fmt.Errorf("output directory %s is not writable", o.Config.OutputDir)
@@ -1574,8 +1590,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		} else {
 			err = fmt.Errorf("cannot reach the instance: %w", err)
 		}
-		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finishWith("", 1, err)
+		return stoppedOr(1, err)
 	}
 	defer func() { conn.Close() }()
 
@@ -1585,8 +1600,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	m.Preflight = runPreflightWithDeadline(ctx, conn, o.Config)
 	if PreflightExitCode(m.Preflight, 0, true) == 1 {
 		err := errors.New("the instance did not answer the preflight; nothing was collected")
-		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finishWith("", 1, err)
+		return stoppedOr(1, err)
 	}
 	// Once, here: coverage, the plan's denied set and the manifest all read
 	// the profiled statuses from now on. PreflightExitCode above has already
@@ -1599,8 +1613,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	o.Debugf("asking the instance its name, version and UTC offset")
 	si, err := probeWithDeadline(ctx, conn, o.Config)
 	if err != nil {
-		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finishWith("", 1, err)
+		return stoppedOr(1, err)
 	}
 	m.Server = ServerBlock{Name: si.Name, Version: si.Version, Edition: si.Edition,
 		UTCOffsetMinutes: si.UTCOffsetMinutes, Auth: AuthLabel(o.Config)}
@@ -1648,8 +1661,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	o.Debugf("listing the databases")
 	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
 	if err != nil {
-		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finishWith("", 1, err)
+		return stoppedOr(1, err)
 	}
 	sel, err := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude, WideningPurposes(plan))
 	if err != nil {

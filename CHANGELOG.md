@@ -33,6 +33,11 @@ release workflow refuses a tag that disagrees with either this file or
   abandoned and its output lost. The message and the README now say so, and
   the README says what a second `ctrl-c` leaves behind: the files written so
   far, no manifest, no archive, and a `.lock` file to delete.
+- A collection stopped with `ctrl-c` while it was connecting, before its first
+  collector, exited `1`, the code for an instance that could not be reached,
+  and its manifest carried `context canceled` as an error with no `cancelled`
+  flag. It now exits `2`, the manifest says `cancelled` with no error, and the
+  command line says nothing was collected.
 - `check --grant-script FILE` replaced an existing `FILE` without a word, a
   reviewed script or a mistyped path alike. It now refuses, before connecting,
   unless `--force` is given, as `env init` and `queries export` already did.
