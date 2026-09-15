@@ -355,11 +355,11 @@ func TestTheRunFolderIsNamedAfterTheProbedServerAndNotTheTypedAddress(t *testing
 	now := time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC)
 	s, o := probedAt(dir, now, false)
 
-	want := collect.RunFolderFor(dir, s.Verify.Server.Name, now, false)
+	want := collect.RunFolderFor(dir, s.Verify.Server.Name, "", now, false)
 	if got := runFolderFor(s, o); got != want {
 		t.Fatalf("runFolderFor = %q, want the path collect.Run will use, %q", got, want)
 	}
-	if typed := collect.RunFolderFor(dir, s.Server, now, false); typed == want {
+	if typed := collect.RunFolderFor(dir, s.Server, "", now, false); typed == want {
 		t.Fatal("the two spellings coincide; this test proves nothing as written")
 	}
 }
@@ -373,7 +373,7 @@ func TestTheSameDayArchiveIsDetectedBeforeAnythingIsDestroyed(t *testing.T) {
 	}
 	// The archive alone is enough. It sits beside the run folder rather than
 	// inside it, and it is the file that was mailed onward.
-	zip := filepath.Join(dir, collect.RunFolderName(`SQL01\PROD`, now)+".zip")
+	zip := filepath.Join(dir, collect.RunFolderName(`SQL01\PROD`, "", now)+".zip")
 	if err := os.WriteFile(zip, []byte("previous run"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -531,5 +531,140 @@ func TestTheWizardOffersEveryOptInTheCommandLineHas(t *testing.T) {
 		if !described[f] {
 			t.Errorf("%s is in flagOrder and has no row on screen 3", f)
 		}
+	}
+}
+
+// spaceVerify is a probed instance whose corpus has two space members, one
+// behind a flag, and two scripts outside the profile, one needing a right the
+// login was refused.
+func spaceVerify() collect.VerifyResult {
+	return collect.VerifyResult{
+		Probed:     true,
+		Collectors: 47,
+		Server: collect.ServerInfo{Name: `SQL01\PROD`, Version: "16.0.4135.4",
+			Edition: "Standard Edition", Login: "AUDIT_RO"},
+		Checks: []collect.CapabilityCheck{
+			{Name: "connect", Status: "ok"},
+			{Name: "view_server_state", Status: "ok"},
+			{Name: "agent_alerts", Status: "denied", Impact: "alerts not collected"},
+		},
+		Scripts: []collect.Script{
+			{Path: "70.schema/050.heaps.sql", Scope: collect.ScopeDatabase,
+				Profiles: []string{"space"}, Permissions: []string{"connect", "view_server_state"}},
+			{Path: "70.schema/041.compression-savings.sql", Scope: collect.ScopeDatabase,
+				Profiles: []string{"space"}, RequiresFlag: collect.FlagEstimateCompression,
+				Permissions: []string{"connect"}},
+			{Path: "80.workload/021.query-store-detail.sql", Scope: collect.ScopeDatabase,
+				RequiresFlag: collect.FlagQueryStoreDetail, Permissions: []string{"connect"}},
+			{Path: "50.agent/030.alerts.sql", Permissions: []string{"agent_alerts"}},
+		},
+	}
+}
+
+func TestProfileKeyOffersOnlyProfilesWithAMember(t *testing.T) {
+	s := State{Step: StepOptions, Verify: spaceVerify()}
+	if got := s.nextProfile(); got != "space" {
+		t.Errorf("from none: next = %q, want space", got)
+	}
+	s.Profile = "space"
+	if got := s.nextProfile(); got != "" {
+		t.Errorf("from space: next = %q, want none", got)
+	}
+	bare := State{Step: StepOptions, Verify: collect.VerifyResult{Probed: true,
+		Scripts: []collect.Script{{Path: "80.workload/010.wait-stats.sql"}}}}
+	if got := bare.nextProfile(); got != "" {
+		t.Errorf("a profile with no member must not be offered, got %q", got)
+	}
+}
+
+func TestChangingTheProfileReprobesTheCollisionAndClearsTheGrant(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 9, 14, 9, 30, 0, 0, time.UTC)
+	s, o := probedAt(dir, now, false)
+	s.Verify = spaceVerify()
+	s.GrantPath = "grants-for-the-whole-corpus.sql"
+	zip := filepath.Join(dir, collect.RunFolderName(`SQL01\PROD`, "space", now)+".zip")
+	if err := os.WriteFile(zip, []byte("this morning's space run"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := pressEvent{key: typed('p'), opts: o}.apply(s)
+	if got.Profile != "space" {
+		t.Fatalf("Profile = %q, want space", got.Profile)
+	}
+	if !strings.Contains(got.Collision, zip) {
+		t.Errorf("Collision = %q, want it to name %q: the banner was probed for the full-run name", got.Collision, zip)
+	}
+	if got.GrantPath != "" || got.GrantError != nil {
+		t.Errorf("the grant result of the previous profile survived: %q, %v", got.GrantPath, got.GrantError)
+	}
+	// The profile is applied where a status is read, never stored: a later [b]
+	// or [r] verifies again into s.Verify and must find the raw statuses.
+	if got.Verify.Checks[2].Status != "denied" {
+		t.Errorf("agent_alerts = %q after [p], want the raw denied", got.Verify.Checks[2].Status)
+	}
+	got.Keep = true
+	back := pressEvent{key: typed('p'), opts: o}.apply(got)
+	if back.Profile != "" || back.Collision != "" || back.Keep {
+		t.Errorf("back to none: Profile %q, Collision %q, Keep %v", back.Profile, back.Collision, back.Keep)
+	}
+}
+
+func TestChangingTheProfileTurnsOffHiddenFlags(t *testing.T) {
+	s := State{Step: StepOptions, Verify: spaceVerify(), FlagIndex: 5,
+		Flags: map[string]bool{collect.FlagQueryStoreDetail: true, collect.FlagEstimateCompression: true}}
+	got := s.withProfile("space", collect.Options{Config: &collect.Config{OutputDir: t.TempDir()}})
+	if got.Flags[collect.FlagQueryStoreDetail] {
+		t.Error("a flag with no member in the profile must be turned off")
+	}
+	if !got.Flags[collect.FlagEstimateCompression] {
+		t.Error("a flag with a member keeps its value")
+	}
+	if n := len(visibleFlags(got)); got.FlagIndex >= n {
+		t.Errorf("FlagIndex = %d with %d visible rows", got.FlagIndex, n)
+	}
+	// Tab and space on a profile must not panic when few or no rows are shown.
+	_ = got.Key(named(screen.KeyTab)).Key(named(screen.KeySpace))
+}
+
+func TestTheCountAndTheStartGateFollowTheProfile(t *testing.T) {
+	// Verify.Collectors is the count made for the whole corpus at verification.
+	// Zero here makes a start gate that reads it refuse a runnable profile.
+	v := spaceVerify()
+	v.Collectors = 0
+	s := State{Step: StepOptions, Verify: v, Profile: "space"}
+	if got := s.collectors(); got != 1 {
+		t.Errorf("collectors = %d, want 1", got)
+	}
+	if !s.canStart() {
+		t.Error("one collector will run, so the run can start")
+	}
+	s.Flags = map[string]bool{collect.FlagEstimateCompression: true}
+	if got := s.collectors(); got != 2 {
+		t.Errorf("collectors with the flag = %d, want 2", got)
+	}
+}
+
+func TestTheGrantKeyOnScreenThreeWritesTheProfileScript(t *testing.T) {
+	dir := t.TempDir()
+	s := State{Step: StepOptions, Verify: spaceVerify(), Profile: "space"}
+	opts := collect.Options{Config: &collect.Config{OutputDir: dir}, Version: "0.23.0"}
+	got := pressEvent{key: typed('g'), opts: opts}.apply(s)
+	if got.GrantPath == "" || got.GrantError != nil {
+		t.Fatalf("GrantPath = %q, GrantError = %v", got.GrantPath, got.GrantError)
+	}
+	b, err := os.ReadFile(got.GrantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "--profile space") || !strings.Contains(string(b), "not needed agent_alerts") {
+		t.Errorf("the script is not the profile's:\n%s", b)
+	}
+	if got.Step != StepOptions {
+		t.Errorf("Step = %v, want StepOptions", got.Step)
+	}
+	// Screen 3 shows [g] only under a profile, so it acts only under one.
+	unprofiled := State{Step: StepOptions, Verify: spaceVerify()}
+	if got := (pressEvent{key: typed('g'), opts: opts}).apply(unprofiled); got.GrantPath != "" {
+		t.Errorf("[g] on screen 3 without a profile wrote %q; the screen does not offer it", got.GrantPath)
 	}
 }

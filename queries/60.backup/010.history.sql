@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, per_database:array, devices:array, recent:array
 -- @permissions: CONNECT, MSDB READ
 -- @timeout:     120
+-- @profiles:    space
 --
 -- The backup history, as msdb recorded it, over the last 30 days.
 --

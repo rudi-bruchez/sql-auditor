@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+var widenReplication = map[string]bool{"replication": true}
+
 func TestSelectTargetsWildcards(t *testing.T) {
 	cands := []DatabaseInfo{
 		{Name: "AppProd", State: "ONLINE", HasAccess: true},
@@ -16,7 +18,7 @@ func TestSelectTargetsWildcards(t *testing.T) {
 		{Name: "Snap", State: "ONLINE", HasAccess: true, IsSnapshot: true},
 		{Name: "NoRights", State: "ONLINE", HasAccess: false},
 	}
-	got, err := SelectTargets(cands, "App*", "*Test")
+	got, err := SelectTargets(cands, "App*", "*Test", widenReplication)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +40,7 @@ func TestSelectTargetsWildcards(t *testing.T) {
 }
 
 func TestSelectTargetsEmptyIncludeMeansAll(t *testing.T) {
-	got, err := SelectTargets([]DatabaseInfo{{Name: "X", State: "ONLINE", HasAccess: true}}, "", "")
+	got, err := SelectTargets([]DatabaseInfo{{Name: "X", State: "ONLINE", HasAccess: true}}, "", "", widenReplication)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +57,7 @@ func TestSelectTargetsRejectsMalformedPattern(t *testing.T) {
 		{"[Ab", ""},
 		{"", "[Ab"},
 	} {
-		if _, err := SelectTargets(cands, tc.include, tc.exclude); err == nil {
+		if _, err := SelectTargets(cands, tc.include, tc.exclude, widenReplication); err == nil {
 			t.Errorf("SelectTargets(include=%q, exclude=%q) = nil error, want a syntax error",
 				tc.include, tc.exclude)
 		}
@@ -206,7 +208,7 @@ func TestSelectTargetsWidensToDistributor(t *testing.T) {
 		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
 		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
 	}
-	sel, err := SelectTargets(cands, "SALESDB", "")
+	sel, err := SelectTargets(cands, "SALESDB", "", widenReplication)
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
@@ -230,7 +232,7 @@ func TestSelectTargetsDoesNotWidenWithoutARetainedPublisher(t *testing.T) {
 		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
 		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
 	}
-	sel, err := SelectTargets(cands, "OTHERDB", "SALESDB")
+	sel, err := SelectTargets(cands, "OTHERDB", "SALESDB", widenReplication)
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
@@ -244,7 +246,7 @@ func TestSelectTargetsExcludeBeatsWidening(t *testing.T) {
 		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
 		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
 	}
-	sel, err := SelectTargets(cands, "SALESDB", "DISTDB")
+	sel, err := SelectTargets(cands, "SALESDB", "DISTDB", widenReplication)
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
@@ -258,7 +260,7 @@ func TestSelectTargetsDoesNotWidenAnInaccessibleDistributor(t *testing.T) {
 		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
 		{Name: "DISTDB", State: "ONLINE", HasAccess: false, IsDistributor: true},
 	}
-	sel, err := SelectTargets(cands, "SALESDB", "")
+	sel, err := SelectTargets(cands, "SALESDB", "", widenReplication)
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
@@ -275,7 +277,7 @@ func TestSelectTargetsWidensOnAStaleFlag(t *testing.T) {
 		{Name: "RESTOREDDB", State: "ONLINE", HasAccess: true, IsPublished: true},
 		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
 	}
-	sel, err := SelectTargets(cands, "RESTOREDDB", "")
+	sel, err := SelectTargets(cands, "RESTOREDDB", "", widenReplication)
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
@@ -294,7 +296,7 @@ func TestSelectTargetsSeparatesPurposeFromReason(t *testing.T) {
 		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
 		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
 	}
-	sel, err := SelectTargets(cands, "SALESDB", "")
+	sel, err := SelectTargets(cands, "SALESDB", "", widenReplication)
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
@@ -321,7 +323,7 @@ func TestSelectTargetsWidensToEveryDistributor(t *testing.T) {
 		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
 		{Name: "DISTDB2", State: "ONLINE", HasAccess: true, IsDistributor: true},
 	}
-	sel, err := SelectTargets(cands, "SALESDB", "")
+	sel, err := SelectTargets(cands, "SALESDB", "", widenReplication)
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
@@ -344,11 +346,37 @@ func TestSelectTargetsWidensForAMergePublisher(t *testing.T) {
 		{Name: "MERGEDB", State: "ONLINE", HasAccess: true, IsMergePublished: true},
 		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
 	}
-	sel, err := SelectTargets(cands, "MERGEDB", "")
+	sel, err := SelectTargets(cands, "MERGEDB", "", widenReplication)
 	if err != nil {
 		t.Fatalf("SelectTargets: %v", err)
 	}
 	if !slices.Contains(sel.Included, "DISTDB") {
 		t.Errorf("a merge publisher keeps its distributor too; Included = %v", sel.Included)
+	}
+}
+
+func TestSelectTargetsWidensOnlyForAPurpose(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true, IsPublished: true},
+		{Name: "DISTDB", State: "ONLINE", HasAccess: true, IsDistributor: true},
+	}
+	with, err := SelectTargets(cands, "SALESDB", "", widenReplication)
+	if err != nil {
+		t.Fatal(err)
+	}
+	without, err := SelectTargets(cands, "SALESDB", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(with.Included, "DISTDB") {
+		t.Errorf("with the purpose, DISTDB must be widened in; Included = %v", with.Included)
+	}
+	// No collector that will run reads the distribution database, so listing
+	// it as covered would describe data the archive does not hold.
+	if slices.Contains(without.Included, "DISTDB") {
+		t.Errorf("without the purpose, DISTDB must not be widened in; Included = %v", without.Included)
+	}
+	if !slices.Contains(without.Included, "SALESDB") {
+		t.Errorf("the publisher stays selected either way; Included = %v", without.Included)
 	}
 }

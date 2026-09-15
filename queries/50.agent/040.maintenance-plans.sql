@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, tasks:array
 -- @permissions: CONNECT, MAINTENANCE PLANS
 -- @timeout:     60
+-- @profiles:    space
 --
 -- What the maintenance plans actually do, task by task.
 --

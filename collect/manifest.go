@@ -197,11 +197,27 @@ type CollectedKinds struct {
 	BlockedProcessReports bool `json:"blocked_process_reports"`
 }
 
+// ProfileBlock says which profile produced the archive. It is written on every
+// run, with an empty Name when none was requested, for the reason the
+// transport block is: an absent key and a key saying "none" must not be told
+// apart by guesswork.
+type ProfileBlock struct {
+	// Name is the profile requested, empty when none was.
+	Name string `json:"name"`
+	// Members is how many lint-clean scripts of the corpus declare the
+	// profile, 0 without one; Corpus is how many lint-clean scripts the
+	// corpus holds. Both are 0 when the run ended before the corpus was read.
+	// What actually ran is in results.
+	Members int `json:"members"`
+	Corpus  int `json:"corpus"`
+}
+
 type Manifest struct {
 	Tool      ToolInfo              `json:"tool"`
 	Run       RunInfo               `json:"run"`
 	Server    ServerBlock           `json:"server"`
 	Config    map[string]string     `json:"config"`
+	Profile   ProfileBlock          `json:"profile"`
 	Sources   map[string]SourceInfo `json:"sources"`
 	Transport TransportBlock        `json:"transport"`
 	Preflight []CapabilityCheck     `json:"preflight"`
@@ -365,7 +381,7 @@ func (m *Manifest) refreshCoverage() {
 	}
 	c.Status = "complete"
 	for _, chk := range m.Preflight {
-		if chk.Status == "ok" {
+		if chk.Status == "ok" || chk.Status == StatusNotNeeded {
 			continue
 		}
 		c.Status = "incomplete"
@@ -468,6 +484,7 @@ func (m *Manifest) Human() string {
 	// that the archive is the size a metadata collection should be.
 	files, bytes := m.contents()
 	fmt.Fprintf(&b, "Contents     : %d data files, %s\n", files, HumanBytes(bytes))
+	fmt.Fprintf(&b, "Profile      : %s\n", m.profileLine())
 
 	m.writeDataNature(&b)
 	m.writeCoverage(&b)
@@ -487,6 +504,18 @@ func (m *Manifest) Human() string {
 // it has to be true of THIS run, which is why the disclosure list is driven by
 // m.Collected and the provenance sentence by m.Sources rather than by prose
 // fixed at compile time.
+func (m *Manifest) profileLine() string {
+	switch {
+	case m.Profile.Name == "":
+		return "none, the whole corpus"
+	case m.Profile.Corpus == 0:
+		return m.Profile.Name + ", requested; the corpus was not read"
+	default:
+		return fmt.Sprintf("%s, %d of the %d collectors in the corpus belong to it",
+			m.Profile.Name, m.Profile.Members, m.Profile.Corpus)
+	}
+}
+
 func (m *Manifest) writeDataNature(b *strings.Builder) {
 	b.WriteString(`
 What this archive contains
@@ -691,7 +720,7 @@ func (m *Manifest) writeCoverage(b *strings.Builder) {
 		b.WriteString("INCOMPLETE - the login used for this run was refused, or got no answer for,\n")
 		b.WriteString("some of what the collector needs. Parts of this instance were not read:\n\n")
 		for _, chk := range m.Preflight {
-			if chk.Status == "ok" {
+			if chk.Status == "ok" || chk.Status == StatusNotNeeded {
 				continue
 			}
 			state := "refused for this login"
@@ -708,6 +737,24 @@ func (m *Manifest) writeCoverage(b *strings.Builder) {
 			if chk.Impact != "" {
 				fmt.Fprintf(b, "      consequence: %s\n", chk.Impact)
 			}
+		}
+	}
+	var notNeeded []string
+	for _, chk := range m.Preflight {
+		if chk.Status != StatusNotNeeded {
+			continue
+		}
+		name := chk.Label
+		if name == "" {
+			name = chk.Name
+		}
+		notNeeded = append(notNeeded, name)
+	}
+	if len(notNeeded) > 0 {
+		fmt.Fprintf(b, "\nNot needed by profile %s: the login was refused these, and no collector\n", m.Profile.Name)
+		b.WriteString("of this profile reads what they allow.\n")
+		for _, n := range notNeeded {
+			fmt.Fprintf(b, "  - %s\n", n)
 		}
 	}
 	if m.Coverage.DatabaseListMayBeIncomplete {
@@ -847,7 +894,26 @@ func (m *Manifest) writeNotRun(b *strings.Builder) {
 		return
 	}
 	fmt.Fprintf(b, "\nQueries not run (%d):\n", len(m.Skipped))
+	// The profile's skips collapse into one line placed first. A security
+	// officer reads this document, and sixty identical lines bury the skips
+	// that carry information. _run.json keeps every entry.
+	profiled := 0
+	if m.Profile.Name != "" {
+		reason := ProfileSkipReason(m.Profile.Name)
+		for _, s := range m.Skipped {
+			if s.Reason == reason {
+				profiled++
+			}
+		}
+		if profiled > 0 {
+			fmt.Fprintf(b, "  - %d collectors outside profile %s, each listed in _run.json\n",
+				profiled, m.Profile.Name)
+		}
+	}
 	for _, s := range m.Skipped {
+		if profiled > 0 && s.Reason == ProfileSkipReason(m.Profile.Name) {
+			continue
+		}
 		if s.Target != "" {
 			fmt.Fprintf(b, "  - %s on %s\n      %s\n", s.Script, s.Target, s.Reason)
 			continue

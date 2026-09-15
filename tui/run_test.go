@@ -101,6 +101,46 @@ func TestApplyStateCarriesTheSevenFlagsAndKeep(t *testing.T) {
 	}
 }
 
+// The run is what must be narrowed to the profile: Run plans and collects
+// under it.
+func TestApplyStateCarriesTheProfileToTheRun(t *testing.T) {
+	s := State{Server: "invalid.invalid", Profile: "space"}
+	got := applyState(s, baseOptions())
+	if got.Profile != "space" {
+		t.Errorf("Profile = %q, want %q", got.Profile, "space")
+	}
+}
+
+// The wizard's own verification is never narrowed: what it stores in
+// State.Verify must describe the whole corpus, so a profile chosen, undone
+// and chosen again always reads a count and a status planned for the whole
+// corpus, never for whichever profile was selected at verification time.
+func TestTheWizardVerifiesTheWholeCorpus(t *testing.T) {
+	s := State{Server: "invalid.invalid", Profile: "space"}
+	o := baseOptions()
+
+	got := verifyOptions(s, o)
+	want := applyState(s, o)
+
+	if got.Profile != "" {
+		t.Errorf("Profile = %q, want empty", got.Profile)
+	}
+	if got.Keep != want.Keep {
+		t.Errorf("Keep = %v, want %v", got.Keep, want.Keep)
+	}
+	if len(got.Flags) != len(want.Flags) {
+		t.Errorf("Flags = %v, want %v", got.Flags, want.Flags)
+	}
+	for k, v := range want.Flags {
+		if got.Flags[k] != v {
+			t.Errorf("Flags[%q] = %v, want %v", k, got.Flags[k], v)
+		}
+	}
+	if got.Config.Server != want.Config.Server {
+		t.Errorf("Config.Server = %q, want %q", got.Config.Server, want.Config.Server)
+	}
+}
+
 func TestInitialStateShowsTheResolvedConnectionWithoutThePassword(t *testing.T) {
 	o := baseOptions()
 	o.Config.QueryStoreDays = 7

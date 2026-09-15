@@ -55,7 +55,10 @@ type VerifyResult struct {
 	// and prints nothing, an unusable address is exit 2 or 1 depending on the
 	// address, an instance that does not answer is exit 1, and a database list
 	// that could not be built is a warning the listing survives.
-	CorpusErr     error
+	CorpusErr error
+	// ProfileErr is a refused profile or flag combination, found once the
+	// corpus is known. Check returns 2 with it before printing anything.
+	ProfileErr    error
 	OpenErr       error
 	ConnErr       error
 	CandidatesErr error
@@ -93,6 +96,10 @@ func VerifyLocal(o Options) (VerifyResult, error) {
 		if s.LintError != "" {
 			v.LintFailures++
 		}
+	}
+	if perr := CheckProfile(scripts, o.Profile, o.Flags); perr != nil {
+		v.ProfileErr = perr
+		return v, perr
 	}
 
 	// OutputWritable false is a finding the caller must be able to trust even
@@ -138,6 +145,16 @@ func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 
 	v.Blocking = blockingWithDeadline(ctx, conn, o.Config)
 
+	var plan []plannedScript
+	widen := membershipPurposes(v.Scripts, o.Profile, o.Flags)
+	if v.Probed {
+		denied := DeniedCapabilities(v.Checks)
+		// connect is not a per-script gate. Getting here means it answered.
+		delete(denied, "connect")
+		plan = planScripts(v.Scripts, o.Profile, denied, ParseVersion(si.Version), o.Flags)
+		widen = WideningPurposes(plan)
+	}
+
 	// The database list is the blast radius, and it is gathered even when it
 	// comes back empty: an empty list is itself the finding when VIEW ANY
 	// DEFINITION is missing.
@@ -146,7 +163,7 @@ func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 	case cerr != nil:
 		v.CandidatesErr = cerr
 	default:
-		sel, serr := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude)
+		sel, serr := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude, widen)
 		if serr != nil {
 			v.SelectErr = serr
 			break
@@ -165,10 +182,6 @@ func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 	// version-gated collector would be reported as running. Leaving Collectors
 	// at zero and letting the caller read Probed is the honest shape.
 	if v.Probed {
-		denied := DeniedCapabilities(v.Checks)
-		// connect is not a per-script gate. Getting here means it answered.
-		delete(denied, "connect")
-		plan := planScripts(v.Scripts, denied, ParseVersion(si.Version), o.Flags)
 		v.Collectors = countCollectors(plan)
 	}
 	return nil
@@ -189,6 +202,20 @@ func countCollectors(plan []plannedScript) int {
 		}
 	}
 	return n
+}
+
+// PlannedCollectors is VerifyResult.Collectors for another profile or another
+// set of flags: planScripts over v.Scripts, with the denied capabilities of
+// ProfileChecks(v.Checks, v.Scripts, profile) and the version of v.Server. It
+// is zero when v.Probed is false. Like countCollectors, it counts scripts that
+// would run at least once and does not look at which databases were selected.
+func PlannedCollectors(v VerifyResult, profile string, flags map[string]bool) int {
+	if !v.Probed {
+		return 0
+	}
+	denied := DeniedCapabilities(ProfileChecks(v.Checks, v.Scripts, profile))
+	delete(denied, "connect")
+	return countCollectors(planScripts(v.Scripts, profile, denied, ParseVersion(v.Server.Version), flags))
 }
 
 // blockingWithDeadline is the fourth of the bounded read-only calls this

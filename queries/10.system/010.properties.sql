@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, ple_per_node:array, schedulers_per_node:array, configuration:array, memory_clerks:array, waits:array
 -- @permissions: VIEW SERVER STATE
 -- @timeout:     60
+-- @profiles:    space
 --
 -- Instance identity, topology, memory and the cumulative waits that explain
 -- memory pressure. JSON is assembled client-side, so nothing here uses FOR

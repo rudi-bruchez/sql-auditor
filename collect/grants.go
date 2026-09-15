@@ -81,6 +81,10 @@ type GrantScriptInput struct {
 	// need to get in. A script that fixed only what the probes measured would
 	// leave the operator with six green lines and a third of an audit.
 	NoAccessDatabases []string
+	// Profile is the collection profile the script is for, "" for the whole
+	// corpus. Callers pass the members as Scripts and the checks after
+	// ProfileChecks, so a right the profile does not need is not granted.
+	Profile string
 	// Tool is the version string of the binary that produced the file.
 	Tool string
 }
@@ -457,7 +461,7 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 
 	// --- per-database access ------------------------------------------------
 
-	if len(in.NoAccessDatabases) > 0 {
+	if len(in.NoAccessDatabases) > 0 && (in.Profile == "" || anyDatabaseScoped(in.Scripts)) {
 		dbs := append([]string(nil), in.NoAccessDatabases...)
 		// Case-insensitive, because most instances are, and a byte sort puts
 		// every capitalised name before every lower-case one — which reads as
@@ -571,6 +575,17 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 	return b.String(), true
 }
 
+// anyDatabaseScoped reports whether a script runs inside each database, which
+// is the only reason to ask for access to one.
+func anyDatabaseScoped(scripts []Script) bool {
+	for _, s := range scripts {
+		if s.LintError == "" && s.Scope == ScopeDatabase {
+			return true
+		}
+	}
+	return false
+}
+
 // indentList renders the collector paths as comment lines, or says plainly
 // that none declared the capability. An empty list here means the corpus and
 // the preflight have drifted apart, and printing nothing would hide that.
@@ -587,6 +602,13 @@ func indentList(paths []string) []string {
 }
 
 func writeGrantHeader(b *strings.Builder, in GrantScriptInput, major int, denied, errored map[string]bool) {
+	profileLine, checkCommand, comeBack := "", "sql-auditor check", `"ok"`
+	if in.Profile != "" {
+		profileLine = "\n        profile    " + commentSafe(in.Profile)
+		checkCommand += " --profile " + commentSafe(in.Profile)
+		comeBack = `"ok" or "not needed"`
+	}
+
 	fmt.Fprintf(b, `/*  Permissions for the sql-auditor collector login
     ============================================================================
 
@@ -594,7 +616,7 @@ func writeGrantHeader(b *strings.Builder, in GrantScriptInput, major int, denied
 
         instance   %s
         version    %s  (%s)
-        login      %s
+        login      %s%s
 
     WHO RUNS THIS. Someone holding CONTROL SERVER or sysadmin. The collector
     login cannot: it has just been measured, and what it lacks is precisely
@@ -607,16 +629,16 @@ func writeGrantHeader(b *strings.Builder, in GrantScriptInput, major int, denied
 
     HOW TO CHECK IT WORKED. Re-run the probe with the same login:
 
-        sql-auditor check
+        %s
 
-    Every line should come back "ok". Nothing else needs to change.
+    Every line should come back %s. Nothing else needs to change.
 
     HOW TO UNDO IT. Replace GRANT with REVOKE, ALTER ROLE ... ADD MEMBER with
     DROP MEMBER, and DROP USER in msdb. The order does not matter.
 
 `, commentSafe(orUnknown(in.Tool)), commentSafe(orUnknown(in.Instance)),
 		commentSafe(orUnknown(in.Version)), commentSafe(orUnknown(in.Edition)),
-		commentSafe(in.Login))
+		commentSafe(in.Login), profileLine, checkCommand, comeBack)
 
 	b.WriteString("    WHAT THE PROBE FOUND\n\n")
 	for _, c := range in.Checks {
@@ -626,6 +648,8 @@ func writeGrantHeader(b *strings.Builder, in GrantScriptInput, major int, denied
 			mark = "MISSING "
 		case "error":
 			mark = "unknown "
+		case StatusNotNeeded:
+			mark = "not needed"
 		}
 		fmt.Fprintf(b, "        %s %-22s %s\n", mark, c.Name, c.Label)
 	}

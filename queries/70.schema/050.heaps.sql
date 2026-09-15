@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, heaps:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     300
+-- @profiles:    space
 --
 -- Tables with no clustered index, and how many of their rows have been
 -- forwarded out of place.

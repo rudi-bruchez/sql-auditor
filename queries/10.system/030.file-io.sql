@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, volumes:array, files:array
 -- @permissions: CONNECT, VIEW SERVER STATE, VIEW ANY DEFINITION
 -- @timeout:     60
+-- @profiles:    space
 --
 -- Per-file and per-volume I/O counters and latency, for every database.
 --

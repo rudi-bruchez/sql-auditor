@@ -112,8 +112,12 @@ func TestResolveDatabaseFoldersNoFoldedDuplicates(t *testing.T) {
 
 func TestRunFolderName(t *testing.T) {
 	ts := time.Date(2026, 8, 8, 9, 5, 0, 0, time.UTC)
-	if got := RunFolderName(`SRV01\INST`, ts); got != "SRV01_INST-2026-08-08" {
-		t.Errorf("RunFolderName = %q", got)
+	if got := RunFolderName(`SRV01\INST`, "", ts); got != "SRV01_INST-2026-08-08" {
+		t.Errorf("RunFolderName without a profile = %q", got)
+	}
+	// A full run and a space run on the same day must not replace each other.
+	if got := RunFolderName(`SRV01\INST`, "space", ts); got != "SRV01_INST-2026-08-08-space" {
+		t.Errorf("RunFolderName with a profile = %q", got)
 	}
 }
 

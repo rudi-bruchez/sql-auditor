@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -583,4 +584,138 @@ func TestInterruptCancelsTheRunAndHandsTheSignalBack(t *testing.T) {
 	if s := out.String(); !strings.Contains(s, "manifest") || !strings.Contains(s, "again") {
 		t.Errorf("the stop said nothing useful: %q", s)
 	}
+}
+
+func TestProfileIsParsedIntoOptions(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+	o, code, err := buildOptions("collect", []string{"--env", env, "--profile", "space"}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if o.Profile != "space" {
+		t.Errorf("Profile = %q, want space", o.Profile)
+	}
+}
+
+func TestProfileRefusals(t *testing.T) {
+	oldCorpus := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(oldCorpus, "10.system"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldCorpus, "10.system", "010.a.sql"),
+		[]byte("-- @resultsets: a:object\nSELECT 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"--all with --profile", []string{"--all", "--profile", "space"}, "--all and --profile cannot be combined"},
+		{"unknown profile", []string{"--profile", "spaec"}, `unknown profile "spaec"`},
+		{"an option with no member", []string{"--profile", "space", "--query-store-detail"},
+			"--query-store-detail has no collector in profile space"},
+		{"a corpus exported before profiles", []string{"--profile", "space", "--queries-dir", oldCorpus},
+			"a corpus exported before profiles existed declares none"},
+		{"an empty profile", []string{"--profile", ""}, "--profile was given an empty name"},
+		{"an empty profile beside --all", []string{"--all", "--profile", ""}, "--profile was given an empty name"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+			_, code, err := buildOptions("collect", append([]string{"--env", env}, c.args...), noEnv, noStdin)
+			if code != 2 || err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("code %d, err %v; want exit 2 with %q", code, err, c.want)
+			}
+		})
+	}
+}
+
+// optionsFrom reads the corpus only when a profile asks for it: a run without
+// one, and the wizard, must not pay for a second discovery.
+func TestOptionsFromReadsTheCorpusOnlyForAProfile(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		read bool
+	}{
+		{nil, false},
+		{[]string{"--profile", "space"}, true},
+	} {
+		env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+		var buf bytes.Buffer
+		_, code, err := buildOptionsWithDebug("collect", append([]string{"--env", env}, c.args...),
+			noEnv, noStdin, newDebugLog(&buf, time.Now))
+		if err != nil || code != 0 {
+			t.Fatalf("%v: code %d, err %v", c.args, code, err)
+		}
+		if got := strings.Contains(buf.String(), "checking profile"); got != c.read {
+			t.Errorf("%v: corpus read = %v, want %v; debug log:\n%s", c.args, got, c.read, buf.String())
+		}
+	}
+}
+
+// runCLI runs the real dispatch exactly as main() would. run() is not written
+// to take its arguments or its stderr as parameters: it reads os.Args and
+// writes os.Stderr directly, the way a CLI's entry point ordinarily does,
+// and refactoring it to take them just for a test would be a bigger change
+// than borrowing the two package-level variables it already uses. Safe
+// because this package runs its tests sequentially; a t.Parallel() test added
+// here later would race on both.
+func runCLI(t *testing.T, args ...string) (code int, stderr string) {
+	t.Helper()
+	oldArgs, oldStderr := os.Args, os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Args = append([]string{"sql-auditor"}, args...)
+	os.Stderr = w
+	code = run()
+	w.Close()
+	os.Args, os.Stderr = oldArgs, oldStderr
+	out, _ := io.ReadAll(r)
+	r.Close()
+	return code, string(out)
+}
+
+// --profile is a check and collect option; every other command must refuse
+// it rather than silently ignore it, the way `queries export` and `env init`
+// both did before this fix (see the comment above the refusal in run()).
+// Both cases assert the same three things a refusal owes: exit 2, a message
+// naming what the option belongs to, and nothing written to disk. An
+// operator who sees exit 2 must not also find a half-done export or a
+// freshly written .env behind it.
+func TestProfileIsRefusedOutsideCheckAndCollect(t *testing.T) {
+	t.Run("queries export", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "export")
+		code, stderr := runCLI(t, "queries", "export", "--profile", "space", "--to", dir)
+		if code != 2 {
+			t.Errorf("code = %d, want 2", code)
+		}
+		if !strings.Contains(stderr, "--profile belongs to check and collect") {
+			t.Errorf("stderr = %q, want it to say --profile belongs to check and collect", stderr)
+		}
+		if !strings.Contains(stderr, "queries export") {
+			t.Errorf("stderr = %q, want it to name the command typed", stderr)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("export directory exists at %s; the refusal must come before any file is written", dir)
+		}
+	})
+	t.Run("env init", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), ".env")
+		code, stderr := runCLI(t, "env", "init", "--profile", "bogus", "--to", dest)
+		if code != 2 {
+			t.Errorf("code = %d, want 2", code)
+		}
+		if !strings.Contains(stderr, "--profile belongs to check and collect") {
+			t.Errorf("stderr = %q, want it to say --profile belongs to check and collect", stderr)
+		}
+		if !strings.Contains(stderr, "env init") {
+			t.Errorf("stderr = %q, want it to name the command typed", stderr)
+		}
+		if _, err := os.Stat(dest); !os.IsNotExist(err) {
+			t.Errorf(".env exists at %s; the refusal must come before any file is written", dest)
+		}
+	})
 }

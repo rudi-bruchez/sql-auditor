@@ -63,6 +63,30 @@ func TestDiscoverParsesDirectives(t *testing.T) {
 	}
 }
 
+func TestDiscoverParsesProfiles(t *testing.T) {
+	body := "-- @scope:       instance\n-- @resultsets:  a:object\n-- @timeout:     60\n" +
+		"-- @profiles:    space, SPACE\n" + contractPreamble +
+		"SELECT 1 AS [x] OPTION (RECOMPILE, MAXDOP 1);\n"
+	fsys := fstest.MapFS{
+		"queries/10.system/010.a.sql": {Data: []byte(body)},
+		"queries/10.system/020.b.sql": {Data: []byte(goodSQL)},
+	}
+	got, err := Discover(fsys, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d scripts, want 2", len(got))
+	}
+	// A repeated name, whatever its case, is one membership.
+	if len(got[0].Profiles) != 1 || got[0].Profiles[0] != "space" {
+		t.Errorf("Profiles = %v, want [space]", got[0].Profiles)
+	}
+	if len(got[1].Profiles) != 0 {
+		t.Errorf("a script without the directive belongs to no profile, got %v", got[1].Profiles)
+	}
+}
+
 func TestDiscoverLintErrors(t *testing.T) {
 	tests := []struct {
 		name, path, body, want string
@@ -108,6 +132,12 @@ func TestDiscoverLintErrors(t *testing.T) {
 		// wanted.
 		{"the unknown-directive message lists widened", "queries/10.system/010.a.sql",
 			"-- @resultsets: a:object\n-- @widning: replication\nSELECT 1;", "widened"},
+		// A misspelt profile would silently leave the collector out of every
+		// profiled run, which is the failure a closed vocabulary exists for.
+		{"unknown profile", "queries/10.system/010.a.sql",
+			"-- @resultsets: a:object\n-- @profiles: spaec\nSELECT 1;", "spaec"},
+		{"a profiles directive naming nothing", "queries/10.system/010.a.sql",
+			"-- @resultsets: a:object\n-- @profiles: ,\nSELECT 1;", "no profile named"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

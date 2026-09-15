@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 
 	mssql "github.com/microsoft/go-mssqldb"
 )
@@ -217,6 +218,43 @@ func probeCapability(ctx context.Context, c *sql.Conn, query string) (int, error
 		n++
 	}
 	return n, rows.Err()
+}
+
+// StatusNotNeeded marks a capability the login was refused and that no member
+// of the requested profile declares. It exists so that a space run prepared
+// with exactly the rights it needs is not reported incomplete.
+const StatusNotNeeded = "not_needed"
+
+// ProfileChecks returns checks with the status of every capability that is
+// "denied", that no member of the profile declares in @permissions, and that
+// is neither "connect" nor "view_any_definition", set to "not_needed". Every
+// other status, "error" included, is left as it is. With an empty profile it
+// returns checks unchanged. The input is never modified.
+//
+// "error" is never rewritten: RunPreflight marks every probe after a lost
+// connection "error", and rewriting those would hide the loss. connect is
+// needed by every run, and view_any_definition by the database discovery,
+// whatever the collectors declare.
+func ProfileChecks(checks []CapabilityCheck, scripts []Script, profile string) []CapabilityCheck {
+	if profile == "" {
+		return checks
+	}
+	needed := map[string]bool{}
+	for _, s := range scripts {
+		if s.LintError == "" && slices.Contains(s.Profiles, profile) {
+			for _, p := range s.Permissions {
+				needed[p] = true
+			}
+		}
+	}
+	out := make([]CapabilityCheck, len(checks))
+	copy(out, checks)
+	for i, c := range out {
+		if c.Status == "denied" && !needed[c.Name] && c.Name != "connect" && c.Name != "view_any_definition" {
+			out[i].Status = StatusNotNeeded
+		}
+	}
+	return out
 }
 
 // DeniedCapabilities is the set of capability names that did not come back

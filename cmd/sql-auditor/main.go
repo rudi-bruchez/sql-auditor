@@ -89,7 +89,7 @@ type cliFlags struct {
 	fs *flag.FlagSet
 
 	server, user, envFile, queriesDir, outputDir string
-	to, grantScript                              string
+	to, grantScript, profile                     string
 	keep, force, all                             bool
 
 	passwordFile  string
@@ -99,6 +99,7 @@ type cliFlags struct {
 	deadlockGraphs, blockedProcessReports       bool
 	defaultTrace, planCachePlans                bool
 	estimateCompression                         bool
+	measurePageDensity                          bool
 	queryStoreDetail, queryStorePlanStats       bool
 	queryStoreDays, queryStoreTop               int
 	queryStoreFrom, queryStoreTo, queryStoreDBs string
@@ -132,17 +133,21 @@ func defineFlags(cmd string) *cliFlags {
 	_ = fs.Bool("debug", false,
 		"print a timeline of what the program is doing on stderr, stamped with the "+
 			"time since process start")
-	// A union of the nine opt-ins below, and deliberately not a mode: it
+	// A union of the ten opt-ins below, and deliberately not a mode: it
 	// turns them on and changes nothing else. Eight of them are disclosure
-	// decisions and one is a cost decision, so what this asks for is the
+	// decisions and two are cost decisions, so what this asks for is the
 	// widest archive the tool can produce — which is the right thing on an
 	// instance you have a mandate for, and the wrong thing everywhere else.
-	// MANIFEST.txt is unchanged by it: the archive keeps recording the nine
+	// MANIFEST.txt is unchanged by it: the archive keeps recording the ten
 	// individually, because what was collected is the fact worth keeping and
 	// how few words it took to ask is not.
 	fs.BoolVar(&c.all, "all", false,
 		"turn on every optional collector at once, including the ones off by default "+
-			"for disclosure and the one off for cost")
+			"for disclosure and the ones off for cost")
+	// A profile only removes collectors. It is refused beside --all, which
+	// asks for the opposite, and the refusal is in optionsFrom.
+	fs.StringVar(&c.profile, "profile", "",
+		"collect only the collectors of this profile: space")
 	fs.StringVar(&c.to, "to", "",
 		"destination: a directory for 'queries export', a file for 'env init' (default .env)")
 	fs.BoolVar(&c.force, "force", false, "replace existing files: the destination of 'env init', the corpus of 'queries export'")
@@ -196,6 +201,12 @@ func defineFlags(cmd string) *cliFlags {
 	fs.BoolVar(&c.estimateCompression, "estimate-compression", false,
 		"also estimate page-compression savings on the largest uncompressed objects — "+
 			"this samples data into tempdb and is slow on large tables")
+	// Off by default for cost, like --estimate-compression: the density scan
+	// reads pages, not metadata, and on a large database that is tens of
+	// gigabytes pulled into the buffer pool.
+	fs.BoolVar(&c.measurePageDensity, "measure-page-density", false,
+		"also measure how full the pages of the largest index partitions are: "+
+			"this reads 8 to 12 % of every large partition into the buffer pool, LOB included, and all of a small one")
 	// Off by default, and it has to stay that way: this is the option that
 	// puts the full text of production queries and their execution plans
 	// into the archive. A plan carries the compiled parameter values and
@@ -344,6 +355,27 @@ func readPassword(c *cliFlags, stdin io.Reader) (string, error) {
 // "unknown command" message — and parsing it a second time here would only
 // produce the same values.
 func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *debugLog) (collect.Options, int, error) {
+	// Before anything else, because it needs no corpus and no configuration,
+	// and before the --all refusal below: an explicitly empty --profile ""
+	// must be caught here too, not read as "no profile" and let through to
+	// widen the run --all was just refused for narrowing. Detected from the
+	// flag set, not the value, the same way --env is below: a wrapper script
+	// expanding an unset variable into --profile "" must not silently
+	// collect the whole corpus.
+	profileTyped := false
+	c.fs.Visit(func(f *flag.Flag) {
+		if f.Name == "profile" {
+			profileTyped = true
+		}
+	})
+	if profileTyped && c.profile == "" {
+		return collect.Options{}, 2, fmt.Errorf("--profile was given an empty name: " +
+			"name a profile, or drop the option to collect the whole corpus")
+	}
+	if c.all && c.profile != "" {
+		return collect.Options{}, 2, fmt.Errorf("--all and --profile cannot be combined: " +
+			"--all asks for the widest archive this tool can produce, and a profile for a narrow one")
+	}
 	// Before the .env is opened, because a password source the operator named
 	// and this program cannot read is their mistake to correct, and saying so
 	// first keeps the two refusals from arriving in an order that depends on
@@ -461,11 +493,25 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 			collect.FlagBlockedProcessReports: c.all || c.blockedProcessReports,
 			collect.FlagDefaultTrace:          c.all || c.defaultTrace,
 			collect.FlagPlanCachePlans:        c.all || c.planCachePlans,
+			collect.FlagMeasurePageDensity:    c.all || c.measurePageDensity,
 		},
 	}
 	if cfg.QueriesDir != "" {
 		opts.Corpus = os.DirFS(cfg.QueriesDir)
 		opts.Root = "."
+	}
+	opts.Profile = c.profile
+	// Only when a profile was asked for, so a run without one, and the wizard,
+	// which never receives one on its command line, do no extra work. A corpus
+	// that cannot be read is not judged here: Run and Check report that error
+	// as they always have.
+	if opts.Profile != "" {
+		dbg.printf("checking profile %s against the corpus", opts.Profile)
+		if scripts, derr := collect.Discover(opts.Corpus, opts.Root); derr == nil {
+			if perr := collect.CheckProfile(scripts, opts.Profile, opts.Flags); perr != nil {
+				return collect.Options{}, 2, perr
+			}
+		}
 	}
 	return opts, 0, nil
 }
@@ -688,6 +734,34 @@ func run() int {
 	// would change which of the two an operator sees.
 	c := defineFlags(cmd)
 	_ = c.fs.Parse(args)
+
+	// --profile is a check and collect option and the help says so, but
+	// nothing refused it anywhere else: `queries export --profile space`
+	// exported all 84 collectors, and `env init --profile bogus` wrote a
+	// file regardless, because the profile has no .env key for it to reach.
+	// An operator who typed the option believes the export or the file is
+	// narrowed, and it is not. Same trap as --grant-script below, refused
+	// here instead because queries export and env init return before ever
+	// reaching that check. Detected from the flag set, not the value, so a
+	// typed --profile "" is refused here too, the same way it is refused for
+	// check and collect in optionsFrom.
+	profileTyped := false
+	c.fs.Visit(func(f *flag.Flag) {
+		if f.Name == "profile" {
+			profileTyped = true
+		}
+	})
+	if profileTyped && cmd != "collect" && cmd != "check" {
+		typedCmd := cmd
+		if sub != "" {
+			typedCmd += " " + sub
+		}
+		fmt.Fprintf(os.Stderr,
+			"--profile belongs to check and collect: sql-auditor %s does not read it. "+
+				"Run sql-auditor check --profile %s or sql-auditor collect --profile %s instead.\n",
+			typedCmd, c.profile, c.profile)
+		return 2
+	}
 
 	if cmd == "version" {
 		fmt.Println(banner())
@@ -969,11 +1043,16 @@ Options (check, collect):
   --queries-dir DIR           run a corpus from disk instead of the embedded one
   --output-dir DIR            where to write results
   --keep                      keep an existing same-day run folder
-  --all                       turn on all nine options below at once: the eight
-                              that are off for disclosure and the one that is
+  --profile NAME              collect only the collectors of a profile. The one
+                              profile is space: what makes the databases on this
+                              instance larger than they need to be. It removes
+                              collectors and never adds one; an opt-in option
+                              still needs to be given. Refused beside --all.
+  --all                       turn on all ten options below at once: the eight
+                              that are off for disclosure and the two that are
                               off for cost. The widest archive this tool can
                               produce. It changes nothing else, and MANIFEST.txt
-                              still records the nine individually.
+                              still records the ten individually.
   --grant-script FILE         check only. After probing permissions, write the
                               T-SQL that grants exactly the ones found missing,
                               for the login the server reports, with the reason
@@ -1017,6 +1096,11 @@ Options (check, collect):
   --estimate-compression      also estimate page-compression savings on the largest
                               uncompressed objects. Off by default for cost: it
                               samples data into tempdb and is slow on big tables.
+  --measure-page-density      also measure how full the pages of the 50 largest
+                              index partitions are, which says what a rebuild
+                              would give back. Off for cost: SAMPLED reads 8 to
+                              12 % of every large partition into the buffer pool,
+                              LOB pages included, and all of a small one.
   --query-store-detail        also collect the full text and the execution plans of
                               the heaviest Query Store queries. Off by default: a
                               plan carries the compiled parameter values and the

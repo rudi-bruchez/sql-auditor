@@ -41,6 +41,11 @@ const FlagIncludeSessionText = "include_session_text"
 // I/O, and it needs the same deliberateness as session text.
 const FlagEstimateCompression = "estimate_compression"
 
+// FlagMeasurePageDensity turns on 70.schema/055.page-density.sql. Off for
+// cost, not for disclosure: SAMPLED brings 8 to 12 % of every large index
+// partition into the buffer pool, LOB pages included, and all of a small one.
+const FlagMeasurePageDensity = "measure_page_density"
+
 // FlagQueryStoreDetail gates the deep read of the Query Store: the full,
 // untruncated text of the heaviest queries and their execution plans.
 //
@@ -148,7 +153,10 @@ type Options struct {
 	Keep    bool
 	// Flags holds the opt-ins a script may name in @requires_flag. A flag
 	// absent from the map is off, so the default is always the narrow one.
-	Flags           map[string]bool
+	Flags map[string]bool
+	// Profile is the requested collection profile, "" for the whole corpus.
+	// It only removes collectors: see skipReason.
+	Profile         string
 	Version, Commit string
 	// GrantScript, when set, is where "check" writes the T-SQL that grants
 	// the permissions the probe found missing. Empty means write nothing.
@@ -371,8 +379,8 @@ func replacingRunWarning(path string) string {
 // everybody's output files. A run collected without --include-session-text
 // ended up shipping a zip containing session text under a MANIFEST.txt that
 // denied it.
-func RunFolderFor(outputDir, server string, now time.Time, keep bool) string {
-	base := filepath.Join(outputDir, RunFolderName(server, now))
+func RunFolderFor(outputDir, server, profile string, now time.Time, keep bool) string {
+	base := filepath.Join(outputDir, RunFolderName(server, profile, now))
 	if !keep {
 		return base
 	}
@@ -488,18 +496,23 @@ type plannedScript struct {
 	Skip   string
 }
 
-// skipReason applies the three gates that keep a script from running. None of
+// skipReason applies the four gates that keep a script from running. None of
 // them is an error: a degraded run is a success, so each returns an
 // explanation for the manifest and the run carries on.
 //
 // The operator's own choice is reported first, then the server's version, then
 // the login's rights — most actionable first, so a DBA reading the list starts
-// with the thing they can change without asking anyone.
+// with the thing they can change without asking anyone. The profile comes
+// first of all, because choosing it is the operator's choice and a later gate
+// would name an option that changes nothing for this run.
 //
 // denied must not contain "connect": an unreachable instance abandons the run
 // before any script is considered, and treating it as an ordinary skip would
 // emit an archive describing a server that was never reached.
-func skipReason(s Script, denied map[string]bool, serverVersion []int, enabled map[string]bool) (string, bool) {
+func skipReason(s Script, profile string, denied map[string]bool, serverVersion []int, enabled map[string]bool) (string, bool) {
+	if !inProfile(s, profile) {
+		return ProfileSkipReason(profile), true
+	}
 	if s.RequiresFlag != "" && !enabled[s.RequiresFlag] {
 		flag := KnownFlags[s.RequiresFlag]
 		if flag == "" {
@@ -575,14 +588,14 @@ func joinVersion(v []int) string {
 	return strings.Join(parts, ".")
 }
 
-func planScripts(scripts []Script, denied map[string]bool, serverVersion []int, enabled map[string]bool) []plannedScript {
+func planScripts(scripts []Script, profile string, denied map[string]bool, serverVersion []int, enabled map[string]bool) []plannedScript {
 	out := make([]plannedScript, 0, len(scripts))
 	for _, s := range scripts {
 		p := plannedScript{Script: s}
 		// A lint failure is an error rather than a skip, and Run reports it as
 		// one; the gates below would only bury it under a milder explanation.
 		if s.LintError == "" {
-			p.Skip, _ = skipReason(s, denied, serverVersion, enabled)
+			p.Skip, _ = skipReason(s, profile, denied, serverVersion, enabled)
 		}
 		out = append(out, p)
 	}
@@ -744,15 +757,10 @@ func Check(ctx context.Context, o Options) (int, error) {
 		// empty corpus where in fact none was found.
 		return 2, err
 	}
-	fmt.Printf("Queries (%d):\n", len(v.Scripts))
-	for _, s := range v.Scripts {
-		switch {
-		case s.LintError != "":
-			fmt.Printf("  !! %-42s %s\n", s.Path, s.LintError)
-		default:
-			fmt.Printf("  %-42s %s\n", s.Path, scriptNote(s, o.Flags))
-		}
+	if v.ProfileErr != nil {
+		return 2, v.ProfileErr
 	}
+	printQueries(o, v.Scripts)
 
 	// The window conflict is priced by the flags, so a collection that never
 	// reads the Query Store only warns about it. But check exists to say what
@@ -780,6 +788,10 @@ func Check(ctx context.Context, o Options) (int, error) {
 	err = VerifyServer(ctx, o, &v)
 	o.Debugf("the instance has been probed")
 
+	// VerifyServer returns the raw statuses; check reads them through the
+	// profile, for the listing, the grant script, the advice and the exit code.
+	checks := ProfileChecks(v.Checks, v.Scripts, o.Profile)
+
 	// The two failures that end the listing, in the order VerifyServer meets
 	// them.
 	// Both are handed back so the CLI can print them; the unreachable instance
@@ -796,9 +808,13 @@ func Check(ctx context.Context, o Options) (int, error) {
 	}
 
 	fmt.Println("\nPermissions:")
-	for _, c := range v.Checks {
+	for _, c := range checks {
 		if c.Status == "ok" {
 			fmt.Printf("  ok      %s\n", c.Name)
+			continue
+		}
+		if c.Status == StatusNotNeeded {
+			fmt.Printf("  not needed  %s\n", c.Name)
 			continue
 		}
 		fmt.Printf("  %-7s %s — %s\n", c.Status, c.Name, c.Impact)
@@ -873,16 +889,72 @@ func Check(ctx context.Context, o Options) (int, error) {
 	// cannot see, and the one that silently costs two thirds of the
 	// collectors.
 	if o.GrantScript != "" {
-		if werr := writeGrantScript(o, v.Scripts, v.Checks, v.Server, v.ServerErr, v.NoAccess); werr != nil {
+		if werr := writeGrantScript(o, ProfileMembers(v.Scripts, o.Profile), checks, v.Server, v.ServerErr, v.NoAccess); werr != nil {
 			fmt.Fprintf(o.progress(), "could not write %s: %v\n", o.GrantScript, werr)
 			return 2, nil
 		}
-	} else if anyDenied(v.Checks) || len(v.NoAccess) > 0 {
+	} else if anyDenied(checks) || len(v.NoAccess) > 0 {
 		fmt.Print("\nSomething is missing above. To generate the T-SQL that grants\n" +
 			"exactly what is missing, and nothing more, for a DBA to review:\n\n" +
-			"  sql-auditor check --grant-script grants.sql\n")
+			"  " + grantScriptAdvice(o.Profile) + "\n")
 	}
-	return PreflightExitCode(v.Checks, v.LintFailures, v.OutputWritable), nil
+	return PreflightExitCode(checks, v.LintFailures, v.OutputWritable), nil
+}
+
+// grantScriptAdvice is the command check suggests for writing the grant
+// script. It carries the profile, or the script it writes would ask for the
+// rights of the whole corpus and mark the ones the profile does not need as
+// missing.
+func grantScriptAdvice(profile string) string {
+	if profile == "" {
+		return "sql-auditor check --grant-script grants.sql"
+	}
+	return "sql-auditor check --profile " + profile + " --grant-script grants.sql"
+}
+
+// printQueries writes the Queries block of check. Under a profile it lists the
+// scripts that declare the profile, lint failures included, and gives the lint
+// failures of the other scripts a block of their own, so that each heading
+// counts the lines under it.
+func printQueries(o Options, scripts []Script) {
+	if o.Profile == "" {
+		fmt.Printf("Queries (%d):\n", len(scripts))
+		for _, s := range scripts {
+			printQueryLine(o, s)
+		}
+		return
+	}
+	members, corpus := profileCounts(scripts, o.Profile)
+	var declared, outsideLint []Script
+	for _, s := range scripts {
+		switch {
+		case slices.Contains(s.Profiles, o.Profile):
+			declared = append(declared, s)
+		case s.LintError != "":
+			outsideLint = append(outsideLint, s)
+		}
+	}
+	fmt.Printf("Profile: %s, %d of %d collectors\n", o.Profile, members, corpus)
+	fmt.Printf("Queries (%d):\n", len(declared))
+	for _, s := range declared {
+		printQueryLine(o, s)
+	}
+	fmt.Printf("Not in profile %s: %d collectors. Run check without --profile to list them.\n",
+		o.Profile, corpus-members)
+	if len(outsideLint) > 0 {
+		fmt.Printf("Lint failures outside profile %s (%d):\n", o.Profile, len(outsideLint))
+		for _, s := range outsideLint {
+			printQueryLine(o, s)
+		}
+	}
+}
+
+func printQueryLine(o Options, s Script) {
+	if s.LintError != "" {
+		fmt.Printf("  !! %-42s %s\n", s.Path, s.LintError)
+		return
+	}
+	fmt.Printf("  %-42s %s\n", s.Path, scriptNote(s, o.Flags))
 }
 
 // writeGrantScript builds the permission script and puts it on disk. It is
@@ -903,7 +975,7 @@ func writeGrantScript(o Options, scripts []Script, checks []CapabilityCheck, si 
 	}
 	body, hasStatements := BuildGrantScript(GrantScriptInput{
 		Login: si.Login, Instance: si.Name, Version: si.Version, Edition: si.Edition,
-		Checks: checks, Scripts: scripts, NoAccessDatabases: noAccess, Tool: o.Version,
+		Checks: checks, Scripts: scripts, NoAccessDatabases: noAccess, Profile: o.Profile, Tool: o.Version,
 	})
 	if err := os.WriteFile(o.GrantScript, []byte(body), 0o600); err != nil {
 		return err
@@ -1260,6 +1332,9 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// A nil Observer — every command-line run — makes all of them no-ops.
 	obs := observer{o: o.Observer}
 	m := NewManifest("sql-auditor", o.Version, o.Commit)
+	// Set before anything can fail, so every failed-run record says what was
+	// asked.
+	m.Profile.Name = o.Profile
 	// Recorded from the resolved configuration rather than from the connection
 	// string, so that what the archive claims and what the driver was told come
 	// from one value. See TransportBlock for why both halves are kept.
@@ -1279,6 +1354,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		"deadlock_graphs":          fmt.Sprint(o.Flags[FlagDeadlockGraphs]),
 		"default_trace":            fmt.Sprint(o.Flags[FlagDefaultTrace]),
 		"plan_cache_plans":         fmt.Sprint(o.Flags[FlagPlanCachePlans]),
+		"measure_page_density":     fmt.Sprint(o.Flags[FlagMeasurePageDensity]),
 
 		"query_store_detail":     fmt.Sprint(o.Flags[FlagQueryStoreDetail]),
 		"query_store_plan_stats": fmt.Sprint(o.Flags[FlagQueryStorePlanStats]),
@@ -1385,6 +1461,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)
 	}
+	m.Profile.Members, m.Profile.Corpus = profileCounts(scripts, o.Profile)
+	// The command line refuses this first; this guard is for a caller that
+	// builds Options itself. It leaves a failed-run record naming the request.
+	if err := CheckProfile(scripts, o.Profile, o.Flags); err != nil {
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", 2, err)
+	}
 
 	o.Debugf("%d script(s) in the corpus", len(scripts))
 
@@ -1429,6 +1512,10 @@ func Run(ctx context.Context, o Options) (int, error) {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 1, err)
 	}
+	// Once, here: coverage, the plan's denied set and the manifest all read
+	// the profiled statuses from now on. PreflightExitCode above has already
+	// seen the raw ones, and "error" is never rewritten anyway.
+	m.Preflight = ProfileChecks(m.Preflight, scripts, o.Profile)
 	denied := DeniedCapabilities(m.Preflight)
 	// connect is not a per-script gate. Reaching here means it answered.
 	delete(denied, "connect")
@@ -1481,13 +1568,14 @@ func Run(ctx context.Context, o Options) (int, error) {
 	}
 
 	o.Debugf("instance %s, %s, %s", si.Name, si.Edition, si.Version)
+	plan := planScripts(scripts, o.Profile, denied, ParseVersion(si.Version), o.Flags)
 	o.Debugf("listing the databases")
 	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 1, err)
 	}
-	sel, err := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude)
+	sel, err := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude, WideningPurposes(plan))
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 		return finishWith("", 2, err)
@@ -1502,7 +1590,6 @@ func Run(ctx context.Context, o Options) (int, error) {
 	folders := SelectedFolders(sel)
 	m.Targets = TargetBlock{Databases: folders, Skipped: sel.Skipped}
 
-	plan := planScripts(scripts, denied, ParseVersion(si.Version), o.Flags)
 	// The disclosure paragraph and the queries that run come from this one
 	// decision. Split them and the manifest eventually describes a different
 	// archive from the one beside it.
@@ -1544,7 +1631,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// collision, or a path the process may not create — so it exits 2 like the
 	// other configuration refusals rather than 1, which claims the instance was
 	// unreachable when it has in fact just been read successfully.
-	runFolder := RunFolderFor(o.Config.OutputDir, si.Name, o.Now, o.Keep)
+	runFolder := RunFolderFor(o.Config.OutputDir, si.Name, o.Profile, o.Now, o.Keep)
 	// Before prepareRunFolder, because prepareRunFolder is where the previous
 	// run gets renamed aside: two runs reaching that together is exactly the
 	// collision the lock exists to stop.

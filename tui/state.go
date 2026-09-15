@@ -12,6 +12,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 	"unicode/utf8"
 
@@ -86,10 +87,10 @@ const (
 	fieldCount
 )
 
-// flagOrder is the nine opt-ins in the order screen 3 lists them, which is
+// flagOrder is the ten opt-ins in the order screen 3 lists them, which is
 // the order the spec's mock-up fixes: the eight that widen what the archive
 // discloses first, with plan stats indented under its prerequisite, and the
-// one that only costs time last.
+// two that only cost time last.
 //
 // It was seven until the harm review of 4 September 2026. default_trace and
 // plan_cache_plans had been added to the command line and to --all without
@@ -112,6 +113,7 @@ var flagOrder = []string{
 	collect.FlagQueryStorePlanStats,
 	collect.FlagPlanCachePlans,
 	collect.FlagEstimateCompression,
+	collect.FlagMeasurePageDensity,
 }
 
 // State is the whole wizard. It is a value: every transition returns a new one
@@ -164,6 +166,10 @@ type State struct {
 	OutputDir string
 
 	// Screen 3.
+	// Profile is the collection profile chosen with [p], "" for the whole
+	// corpus. It changes the plan, the visible options, the run folder name and
+	// the grant script, and every one of those is recomputed when it changes.
+	Profile   string
 	Flags     map[string]bool
 	FlagIndex int
 	// Collision is the name an earlier run of the same day already occupies,
@@ -386,14 +392,16 @@ func (s State) keyVerification(k screen.Key) State {
 func (s State) keyOptions(k screen.Key) State {
 	switch {
 	case k.Named == screen.KeySpace:
-		if s.FlagIndex < len(flagOrder) {
-			s.Flags = toggleFlag(s.Flags, flagOrder[s.FlagIndex])
+		if visible := visibleFlags(s); s.FlagIndex < len(visible) {
+			s.Flags = toggleFlag(s.Flags, visible[s.FlagIndex])
 		}
 	case k.Named == screen.KeyTab:
 		// The arrow keys are decoded to KeyNone on purpose — letting a CSI
 		// sequence reach a text field would type "[A" into a server name — so
 		// tab is what moves the selection, as it does on screen 1.
-		s.FlagIndex = (s.FlagIndex + 1) % len(flagOrder)
+		if visible := visibleFlags(s); len(visible) > 0 {
+			s.FlagIndex = (s.FlagIndex + 1) % len(visible)
+		}
 	case k.Named == screen.KeyEnter:
 		if !s.canStart() {
 			return s
@@ -444,7 +452,88 @@ func (s State) canContinue() bool { return s.Verify.Probed }
 // a resolved plan in which nothing runs — every version gate closed on a 2012
 // instance, or a corpus that could not be read — and an archive containing
 // only its manifest is a round trip the wizard exists to save.
-func (s State) canStart() bool { return s.Verify.Probed && s.Verify.Collectors > 0 }
+func (s State) canStart() bool { return s.Verify.Probed && s.collectors() > 0 }
+
+// profilesWithMembers returns the known profiles with at least one member in
+// scripts, sorted. A profile with none is not offered: choosing it could only
+// make [enter] do nothing without saying why.
+func profilesWithMembers(scripts []collect.Script) []string {
+	var out []string
+	for name := range collect.KnownProfiles {
+		if len(collect.ProfileMembers(scripts, name)) > 0 {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// nextProfile is the profile [p] moves to: none, then each offered profile.
+func (s State) nextProfile() string {
+	cycle := append([]string{""}, profilesWithMembers(s.Verify.Scripts)...)
+	for i, p := range cycle {
+		if p == s.Profile {
+			return cycle[(i+1)%len(cycle)]
+		}
+	}
+	return ""
+}
+
+// visibleFlags is flagOrder narrowed to the flags that gate a member of the
+// profile, or flagOrder itself without a profile.
+func visibleFlags(s State) []string {
+	if s.Profile == "" {
+		return flagOrder
+	}
+	members := collect.ProfileMembers(s.Verify.Scripts, s.Profile)
+	var out []string
+	for _, f := range flagOrder {
+		for _, m := range members {
+			if m.RequiresFlag == f {
+				out = append(out, f)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// withProfile is the impure half of [p]: it needs the output directory to
+// probe the collision again, because the folder name carries the profile.
+func (s State) withProfile(profile string, o collect.Options) State {
+	s.Profile = profile
+	visible := map[string]bool{}
+	for _, f := range visibleFlags(s) {
+		visible[f] = true
+	}
+	flags := make(map[string]bool, len(s.Flags))
+	for k, v := range s.Flags {
+		if visible[k] {
+			flags[k] = v
+		}
+	}
+	s.Flags = flags
+	if s.FlagIndex >= len(visibleFlags(s)) {
+		s.FlagIndex = 0
+	}
+	before := s.Collision
+	s.Collision = collisionFor(s, o)
+	if s.Collision != before {
+		s.Keep = false
+	}
+	// The script on screen was written for the previous profile.
+	s.GrantPath, s.GrantError = "", nil
+	return s
+}
+
+// collectors is the figure screen 3 shows and canStart reads. Without a
+// profile it is the count made at verification, as before.
+func (s State) collectors() int {
+	if s.Profile == "" {
+		return s.Verify.Collectors
+	}
+	return collect.PlannedCollectors(s.Verify, s.Profile, s.Flags)
+}
 
 // writeGrantScript is the impure half of [g], kept out of Key so that the
 // state machine remains a pure function of keystrokes and the file writing
@@ -456,7 +545,7 @@ func (s State) canStart() bool { return s.Verify.Probed && s.Verify.Collectors >
 // in full, and they can still continue — a missing grant script does not stop
 // a degraded collection, which the repository counts as a success.
 func (s State) writeGrantScript(outputDir, tool string, now time.Time) State {
-	path, err := writeGrants(s.Verify, outputDir, tool, now)
+	path, err := writeGrants(s.Verify, s.Profile, outputDir, tool, now)
 	s.GrantPath, s.GrantError = path, err
 	if err != nil {
 		s.GrantPath = ""
@@ -480,7 +569,7 @@ func (s State) writeGrantScript(outputDir, tool string, now time.Time) State {
 // keep is taken from the resolved Options because RunFolderFor's answer
 // depends on it: under --keep it suffixes until it finds a free name.
 func runFolderFor(s State, o collect.Options) string {
-	return collect.RunFolderFor(o.Config.OutputDir, s.Verify.Server.Name, o.Now, o.Keep)
+	return collect.RunFolderFor(o.Config.OutputDir, s.Verify.Server.Name, s.Profile, o.Now, o.Keep)
 }
 
 // collisionFor names what an earlier run of the same day already occupies, or

@@ -209,7 +209,7 @@ func TestOptionsShowsTheSameDayCollisionAboveTheKeysItKeeps(t *testing.T) {
 		Collision: `C:\out\SQL01_PROD-2026-08-13.zip`}, testWidth, 0)
 	contains(t, lines, "A run of the same day already exists:")
 	contains(t, lines, `C:\out\SQL01_PROD-2026-08-13.zip`)
-	contains(t, lines, "[tab] next   [space] toggle   [enter] replace it   [k] keep both   [b] back   [q] quit")
+	contains(t, lines, "[tab] next   [space] toggle   [p] profile   [enter] replace it   [k] keep both   [b] back   [q] quit")
 	contains(t, lines, "[ ] session text")
 	absent(t, lines, "[enter] start collection")
 }
@@ -594,5 +594,26 @@ func TestNoFrameCarriesAnEscapeFromTheServer(t *testing.T) {
 				t.Errorf("step %v line %d carries a control character: %q", st, i, line)
 			}
 		}
+	}
+}
+
+func TestScreenTwoShowsARightTheProfileDoesNotNeed(t *testing.T) {
+	s := State{Step: StepVerification, Verify: spaceVerify(), Profile: "space"}
+	block := strings.Join(permissionBlock(s, 100), "\n")
+	if !strings.Contains(block, "not needed") || strings.Contains(block, "alerts not collected") {
+		t.Errorf("agent_alerts must read not needed, without its impact:\n%s", block)
+	}
+	s.Profile = ""
+	if block := strings.Join(permissionBlock(s, 100), "\n"); !strings.Contains(block, "denied") {
+		t.Errorf("without a profile the refusal is shown as today:\n%s", block)
+	}
+}
+
+func TestTheFinalScreenIgnoresRefusalsTheProfileDoesNotNeed(t *testing.T) {
+	if got := deniedPermissions(State{Verify: spaceVerify(), Profile: "space"}); got != 0 {
+		t.Errorf("deniedPermissions under space = %d, want 0: the manifest will say COMPLETE", got)
+	}
+	if got := deniedPermissions(State{Verify: spaceVerify()}); got != 1 {
+		t.Errorf("deniedPermissions without a profile = %d, want 1", got)
 	}
 }

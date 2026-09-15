@@ -220,8 +220,13 @@ type pressEvent struct {
 }
 
 func (e pressEvent) apply(s State) State {
-	if e.key.Rune == 'g' && s.Step == StepVerification {
+	// Screen 3 shows [g] only under a profile; without one, screen 2 writes
+	// the full script.
+	if e.key.Rune == 'g' && (s.Step == StepVerification || (s.Step == StepOptions && s.Profile != "")) {
 		return s.writeGrantScript(e.opts.Config.OutputDir, e.opts.Version, time.Now())
+	}
+	if e.key.Rune == 'p' && s.Step == StepOptions {
+		return s.withProfile(s.nextProfile(), e.opts)
 	}
 	return s.Key(e.key)
 }
@@ -515,7 +520,7 @@ func (r *runner) connect(ctx context.Context, s State) {
 }
 
 func (r *runner) verify(ctx context.Context, s State) {
-	o := applyState(s, r.opts)
+	o := verifyOptions(s, r.opts)
 	// The two halves in order: the local one cannot fail on the network, and
 	// the server one is where the minutes go. The wizard has no listing to
 	// print between them — its spinner is already saying the same thing — but
@@ -606,6 +611,18 @@ func applyState(s State, o collect.Options) collect.Options {
 	}
 	o.Flags = flags
 	o.Keep = s.Keep
+	o.Profile = s.Profile
+	return o
+}
+
+// verifyOptions is applyState for the verification. The profile is cleared:
+// what VerifyServer stores in State.Verify describes the whole corpus, raw
+// statuses and all, and the screens apply the profile where they read it, so
+// choosing another profile after a verification never reads a count or a
+// status planned for the previous one.
+func verifyOptions(s State, o collect.Options) collect.Options {
+	o = applyState(s, o)
+	o.Profile = ""
 	return o
 }
 
