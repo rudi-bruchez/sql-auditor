@@ -28,6 +28,11 @@ release workflow refuses a tag that disagrees with either this file or
 - A collection stopped with `ctrl-c` or `SIGTERM` on the command line exited
   `0`, so a scheduler or a CI job that stopped it recorded a success. It exits
   `2`, the code for a partial run, and its summary line says `cancelled`.
+- On `ctrl-c`, the command line printed `stopping: finishing what is in flight`
+  and the README said the same, but the collector running at that moment is
+  abandoned and its output lost. The message and the README now say so, and
+  the README says what a second `ctrl-c` leaves behind: the files written so
+  far, no manifest, no archive, and a `.lock` file to delete.
 - `check --grant-script FILE` replaced an existing `FILE` without a word, a
   reviewed script or a mistyped path alike. It now refuses, before connecting,
   unless `--force` is given, as `env init` and `queries export` already did.

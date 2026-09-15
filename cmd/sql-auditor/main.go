@@ -1192,7 +1192,7 @@ func interruptibleOn(parent context.Context, sig <-chan os.Signal, handBack func
 			return
 		}
 		fmt.Fprintln(out,
-			"\nstopping: finishing what is in flight, then writing the manifest and the archive")
+			"\nstopping: abandoning the collector in progress, then writing the manifest and the archive of what was collected before it")
 		fmt.Fprintln(out,
 			"press ctrl-c again to abandon the run instead")
 		// Before the cancel, so the window in which a second signal is still

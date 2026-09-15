@@ -217,8 +217,9 @@ they differ: every printable character there belongs to the field being edited,
 so an instance named `QUALIF` and a password with a `q` in it have to stay
 typeable.
 
-Cancelling a collection with `ctrl-c` still writes its manifest and its archive,
-and the final screen says that what you are holding is partial.
+Cancelling a collection with `ctrl-c` abandons the collector in progress, whose
+output is lost, and still writes the manifest and the archive of everything
+collected before it; the final screen says that what you are holding is partial.
 
 ### What the wizard will not do
 
@@ -345,10 +346,14 @@ from before the wizard.
 - `check` in particular is meant to be run without a human present, since its
   whole output is a verdict something else can read.
 - `ctrl-c` and `SIGTERM` behave the same here as in the wizard: the collection
-  finishes what is in flight and still writes its manifest and its archive,
-  marked as cancelled. On the command line a stopped collection exits `2`, and
-  its last line but one ends with `cancelled`. A second `ctrl-c` abandons the
-  run instead, so a collection that will not wind down can still be stopped.
+  abandons the collector in progress, whose output is lost, and still writes
+  the manifest and the archive of everything collected before it, marked as
+  cancelled. On the command line a stopped collection exits `2`, and its last
+  line but one ends with `cancelled`. A second `ctrl-c` abandons the run
+  instead, so a collection that will not wind down can still be stopped: the
+  files already written stay in the run folder, but there is no manifest and no
+  archive, and the `.lock` file left beside the folder has to be deleted before
+  the next collection of that server and day can start.
 - A run that did not complete, because it was stopped or a collector failed,
   never deletes the earlier run of the same server and day that it replaces:
   that run stays beside it, named `.superseded-HHMMSS`, and the collection says
