@@ -133,7 +133,7 @@ go build ./cmd/sql-auditor
 go install github.com/rudi-bruchez/sql-auditor/cmd/sql-auditor@latest
 ```
 
-`@latest` resolves to the highest published tag. Name one, `@v0.22.0`, to get
+`@latest` resolves to the highest published tag. Name one, `@v0.23.0`, to get
 the version this file describes rather than whatever has been tagged since. A
 build made this way carries no attestation: the module proxy hands you source,
 and the binary is compiled on your machine.
@@ -294,7 +294,7 @@ take time, stamped with the time since the process started.
 
 ```
 $ sql-auditor --debug check
-debug   +0.0ms  start, sql-auditor 0.22.0 (2edb1455), windows/amd64, go1.26.7
+debug   +0.0ms  start, sql-auditor 0.23.0 (2edb1455), windows/amd64, go1.26.7
 debug   +0.0ms  working directory C:\audits\sql01
 debug   +0.0ms  stdin tty=false, stdout tty=false, SQL_AUDITOR_NO_TUI="", args=1 → subcommand
 debug   +0.0ms  .env read, 2 setting(s)

@@ -17,7 +17,12 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.23.0] - 2026-09-15
+
+A question about disk space can now be asked on its own: `--profile space` runs
+the collectors that answer it and nothing else. The wizard also asks for the
+connection when a double-clicked binary finds no `.env`, and the statement lint
+applied to a `--queries-dir` corpus refuses five more ways to change the server.
 
 ### Added
 
@@ -29,6 +34,16 @@ release workflow refuses a tag that disagrees with either this file or
 - `70.schema/055.page-density.sql`, behind `--measure-page-density`: page
   fullness of the 50 largest rowstore index partitions, indexed views included.
   84 collectors.
+- `--profile` is refused, with exit code 2 and before anything is collected,
+  wherever it would not narrow what it was asked to narrow: beside `--all`,
+  with an empty name, with an option that has no collector in the profile, on
+  a `--queries-dir` corpus that declares no profile, and on any command other
+  than `check` and `collect`.
+- The first screen of the wizard asks for the server and the login when no
+  `.env` provides them, and can save both to `.env`. The password is never
+  saved. A binary started without arguments, by a double-click for instance,
+  keeps its console open when it stops before the wizard starts, so the
+  message can be read.
 
 ### Changed
 
@@ -39,12 +54,29 @@ release workflow refuses a tag that disagrees with either this file or
   only when a collector that will run reads it. On an instance where the
   replication collectors are gated off, it is no longer listed as covered.
 - `--all` turns on ten options.
+- An empty `SQL_SERVER`, or a login with no password, is refused by `check` and
+  `collect` once the configuration is resolved, with the same message and exit
+  code 2 as before; the wizard refuses them when its first screen is submitted.
+- `ci.yml` pins its actions to full commit SHAs, as `release.yml` already did.
 
 ### Fixed
 
 - `docs/dba-guide.md` stated that the heap scan reads about 1 % of the pages.
   Measured, it brings 8 to 12 % of a large heap into the buffer pool and all of
   a small one.
+- The README says to unpack the Windows archive with `tar`, not through
+  Explorer, whose extractor copies the zip's download mark onto the binary and
+  gets it stopped by SmartScreen.
+
+### Security
+
+- The statement lint applied to a `--queries-dir` corpus refuses
+  `sp_msforeachdb`, `sp_msforeachtable` and `sp_MSforeach_worker`, which run a
+  string against every database; `DBCC SQLPERF` with `CLEAR`, which resets the
+  wait statistics this tool exists to collect; and `sp_updatestats`,
+  `sp_recompile`, `sp_cycle_errorlog`, `sp_trace_setstatus` and `CHECKPOINT`.
+  The embedded corpus was not affected. The guard stops an accident, not an
+  author.
 
 ## [0.22.0] - 2026-09-06
 
