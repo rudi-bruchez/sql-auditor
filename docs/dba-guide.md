@@ -1022,8 +1022,13 @@ all result sets inside that single file, and all of them walk every object in
 the database.
 
 It runs once per database, so its 300 seconds is per database rather than for
-the run. A database with tens of thousands of objects, or a heavily fragmented
-one, can pass even that mark.
+the run. A database with tens of thousands of objects can pass even that mark.
+The fragmentation read, which was the part that did on databases of a few
+hundred GB, measures the 100 largest partitions one at a time and starts no new
+one after 150 seconds; `fragmentation_sample` in the archive says how many it
+measured out of how many were eligible. One call on a single very large
+partition can still run past the limit, and a collector that times out returns
+none of its seven result sets.
 
 **`70.schema/041.compression-savings.sql`** has the corpus's longest timeout at
 1800 seconds, which it shares with 70.schema/055.page-density.sql, and is the

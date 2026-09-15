@@ -43,6 +43,15 @@ release workflow refuses a tag that disagrees with either this file or
   as if they ran once for the instance. Both run in every collected database,
   each with an 1800-second timeout, and nothing bounds the run as a whole; the
   table now says so, as `docs/dba-guide.md` already did.
+- `20.databases/020.properties.sql` ran out of its 300 seconds on databases of
+  a few hundred GB and up, and a timeout returns none of its seven result sets:
+  the files, the space and the creation date were lost with the fragmentation
+  read that caused it. That read now measures the 100 largest partitions one at
+  a time and starts no new one after 150 seconds. The root object gains
+  `fragmentation_sample.eligible_partitions`, `.measured_partitions` and
+  `.budget_sec`, so a list cut short is not read as complete. The
+  `fragmentation` array keeps its shape and its 25 rows, now the most
+  fragmented of the partitions measured rather than of every partition.
 
 ## [0.23.0] - 2026-09-15
 
