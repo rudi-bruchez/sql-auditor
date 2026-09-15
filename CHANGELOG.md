@@ -17,6 +17,18 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Fixed
+
+- A same-day rerun that was stopped, or that ended with a collector failing,
+  deleted the complete archive of the run it replaced and left a partial one in
+  its place. The earlier run is now deleted only after a run that exits `0`;
+  otherwise it stays beside the new one, and the collection says where.
+- A collection stopped with `ctrl-c` or `SIGTERM` on the command line exited
+  `0`, so a scheduler or a CI job that stopped it recorded a success. It exits
+  `2`, the code for a partial run, and its summary line says `cancelled`.
+
 ## [0.23.0] - 2026-09-15
 
 A question about disk space can now be asked on its own: `--profile space` runs

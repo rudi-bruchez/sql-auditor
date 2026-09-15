@@ -346,8 +346,13 @@ from before the wizard.
   whole output is a verdict something else can read.
 - `ctrl-c` and `SIGTERM` behave the same here as in the wizard: the collection
   finishes what is in flight and still writes its manifest and its archive,
-  marked as cancelled. A second `ctrl-c` abandons the run instead, so a
-  collection that will not wind down can still be stopped.
+  marked as cancelled. On the command line a stopped collection exits `2`, and
+  its last line but one ends with `cancelled`. A second `ctrl-c` abandons the
+  run instead, so a collection that will not wind down can still be stopped.
+- A run that did not complete, because it was stopped or a collector failed,
+  never deletes the earlier run of the same server and day that it replaces:
+  that run stays beside it, named `.superseded-HHMMSS`, and the collection says
+  where. Only a run that exits `0` removes it.
 
 An argument therefore wins over everything else: `sql-auditor collect` does the
 same work whatever terminal it finds itself attached to, and no invocation that
@@ -657,11 +662,15 @@ what the collector does.
 | Code | Meaning |
 | --- | --- |
 | `0` | success, possibly degraded if a permission was refused |
-| `2` | partial failure, or a configuration the tool will not act on |
+| `2` | partial: a collector failed or the collection was stopped; or a configuration the tool will not act on |
 | `1` | fatal: the instance could not be reached, so nothing was collected |
 
 A refused permission exits `0`. It reduces what is collected, and the omission
 is recorded in the archive, but it is not a failure of the run.
+
+The wizard is the exception for a stop: an operator who stops the collection
+from the wizard has read the screen that calls the archive partial, and the
+wizard exits `0`.
 
 ## Supported versions
 

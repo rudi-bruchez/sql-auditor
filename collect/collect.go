@@ -317,12 +317,47 @@ func supersededNameTaken(dest string) bool {
 }
 
 // discardSuperseded deletes what prepareRunFolder set aside. It is called at
-// one place only — after the new archive exists — and it is best effort: a run
-// that produced its archive must not be reported as failed because the folder
-// it replaced could not be removed. What is left behind is named and inert.
+// one place only — after the new archive exists, and only when the run that
+// produced it completed — and it is best effort: a run that produced its
+// archive must not be reported as failed because the folder it replaced could
+// not be removed. What is left behind is named and inert.
 func discardSuperseded(paths []string) {
 	for _, p := range paths {
 		os.RemoveAll(p)
+	}
+}
+
+// settleRun turns the loop's exit code into the run's, once the loop is over,
+// and says whether the run this one replaced may now be deleted.
+//
+// A stopped run exits 2. It used to exit 0, on the reasoning that a deliberate
+// stop is neither an unreachable instance nor a refused configuration; but the
+// archive it leaves is partial, 2 is the code the README gives a partial run,
+// and 0 told every scheduler, runbook and CI job that stopped a collection at
+// its time limit that the collection had succeeded.
+//
+// The previous run is deleted only after a run that exits 0. Until 0.23.0 it
+// was deleted as soon as the new archive existed, so a same-day rerun stopped a
+// few seconds in, or ending with a collector that timed out, replaced a
+// complete archive with a partial one: measured, 73 results became 53 and the
+// morning's archive was gone. The snapshot of a given day cannot be collected
+// again, so a partial run keeps it.
+func settleRun(exit int, cancelled bool) (code int, discardPrevious bool) {
+	if cancelled && exit == 0 {
+		exit = 2
+	}
+	return exit, exit == 0
+}
+
+// keepSuperseded tells the operator where the run this one replaced still is,
+// and why it was not deleted.
+func keepSuperseded(paths []string, progress io.Writer) {
+	if len(paths) == 0 {
+		return
+	}
+	fmt.Fprintln(progress, "this run is partial, so the run it replaced was kept:")
+	for _, p := range paths {
+		fmt.Fprintf(progress, "  %s\n", p)
 	}
 }
 
@@ -1721,8 +1756,8 @@ func Run(ctx context.Context, o Options) (int, error) {
 			// the archive are still written below. A DBA who stopped after
 			// three minutes keeps what those three minutes collected, and the
 			// manifest's cancelled flag is what says the archive is partial.
-			// exit is left as it stands — 0 for the ordinary stop, still 2 if
-			// a lint error had already failed the run on its own.
+			// exit is left as it stands here; settleRun turns an ordinary stop
+			// into 2 once the loop is over.
 			break
 		}
 		exit = code
@@ -1766,6 +1801,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// run folder is being zipped.
 	obs.Phase("writing manifest")
 	o.Debugf("all units done; writing the manifest")
+	exit, discardPrevious := settleRun(exit, m.Run.Cancelled)
 	code, ferr := finish(runFolder, exit)
 	if ferr != nil {
 		return code, ferr
@@ -1780,10 +1816,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return 2, err
 	}
 	o.Debugf("archive written")
-	// Only now. The run this one replaced has been on disk the whole time, so
-	// a rerun that died anywhere above leaves it there rather than leaving the
-	// operator with neither run.
-	discardSuperseded(superseded)
+	// Only now, and only for a run that completed. The run this one replaced
+	// has been on disk the whole time, so a rerun that died anywhere above, was
+	// stopped, or lost a collector leaves it there rather than leaving the
+	// operator with a partial run in place of a complete one.
+	if discardPrevious {
+		discardSuperseded(superseded)
+	} else {
+		keepSuperseded(superseded, o.progress())
+	}
 	// Silenced for a caller that owns the screen, not redirected.
 	// `sql-auditor collect | tail -1` is how a script picks up the archive path,
 	// so on the command line these two lines must keep going to stdout exactly
@@ -1803,6 +1844,11 @@ func Run(ctx context.Context, o Options) (int, error) {
 		partial := ""
 		if m.PartialUnits > 0 {
 			partial = fmt.Sprintf(", %d partial", m.PartialUnits)
+		}
+		// Said on the line a script reads, because the exit code alone does
+		// not tell a stopped run from a failed collector.
+		if m.Run.Cancelled {
+			partial += ", cancelled"
 		}
 		fmt.Printf("%d result(s), %d skipped, %d error(s)%s\n%s\n",
 			len(m.Results), len(m.Skipped), len(m.Errors), partial, zipPath)

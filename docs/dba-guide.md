@@ -448,7 +448,7 @@ So read the two independently:
 | --- | --- |
 | `0` | usable, possibly degraded |
 | `1` | the instance did not answer, so nothing can be collected |
-| `2` | the configuration is unusable, or the run was partial: a `SQL_SERVER` that cannot be parsed, a `--queries-dir` that cannot be read, a query corpus that fails its lint, an output directory that cannot be written, or, for `collect`, a collector that failed |
+| `2` | the configuration is unusable, or the run was partial: a `SQL_SERVER` that cannot be parsed, a `--queries-dir` that cannot be read, a query corpus that fails its lint, an output directory that cannot be written, or, for `collect`, a collector that failed or a collection stopped with `ctrl-c` or `SIGTERM` |
 
 A mistyped address is `2`, not `1`. `HOST\` with no instance name, or a bare
 `::1,1433` missing its brackets, is refused before a socket is opened. Nothing
