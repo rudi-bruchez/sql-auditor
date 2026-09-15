@@ -34,6 +34,11 @@ release workflow refuses a tag that disagrees with either this file or
 - The `config` block of `_run.json` did not record `estimate_compression` or
   `blocked_process_reports`, so an archive taken with either option did not say
   so. It now records every opt-in, on or off.
+- Saving the server and the login from the wizard rewrote `.env` in place, and
+  a write that failed after the truncation (a full disk, a quota) left it empty,
+  password and hand-written settings included. The original is now copied to
+  `.env.sql-auditor-backup` first and stays there if the rewrite fails; the
+  error names it. A backup left by an earlier failure is never replaced.
 
 ## [0.23.0] - 2026-09-15
 
