@@ -39,6 +39,10 @@ release workflow refuses a tag that disagrees with either this file or
   password and hand-written settings included. The original is now copied to
   `.env.sql-auditor-backup` first and stays there if the rewrite fails; the
   error names it. A backup left by an earlier failure is never replaced.
+- The README described `--measure-page-density` and `--estimate-compression`
+  as if they ran once for the instance. Both run in every collected database,
+  each with an 1800-second timeout, and nothing bounds the run as a whole; the
+  table now says so, as `docs/dba-guide.md` already did.
 
 ## [0.23.0] - 2026-09-15
 

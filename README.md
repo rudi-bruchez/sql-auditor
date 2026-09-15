@@ -406,8 +406,8 @@ Exactly three cases.
 | `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
 | `--include-deadlock-graphs` | also collect the deadlock reports `system_health` still holds, one `.xdl` file each |
 | `--include-blocked-process-reports` | also collect the blocked process reports an Extended Events session captured, one `.xml` file each |
-| `--estimate-compression` | also estimate page-compression savings on the largest uncompressed objects. Off for cost, not for disclosure: it samples real data into tempdb and is slow on large tables |
-| `--measure-page-density` | also measure how full the pages of the 50 largest index partitions are, which says what a rebuild would give back. Off for cost, not for disclosure: `SAMPLED` reads 8 to 12 % of every large partition into the buffer pool, LOB pages included, and all of a small one |
+| `--estimate-compression` | also estimate page-compression savings on the 20 largest uncompressed objects, per database. Off for cost, not for disclosure: it samples real data into tempdb and is slow on large tables. Each database may take up to its 1800-second timeout, and nothing bounds the run as a whole |
+| `--measure-page-density` | also measure how full the pages of the 50 largest index partitions are, per database, which says what a rebuild would give back. Off for cost, not for disclosure: `SAMPLED` reads 8 to 12 % of every large partition into the buffer pool, LOB pages included, and all of a small one. Each database may take up to its 1800-second timeout, and nothing bounds the run as a whole: narrow it with `DB_INCLUDE` on an instance with many large databases |
 | `--query-store-detail` | also collect the full text and the execution plans of the heaviest Query Store queries, per database |
 | `--query-store-plan-stats` | also look for the last profiled plan of each query the option above extracted. Does nothing on its own |
 
