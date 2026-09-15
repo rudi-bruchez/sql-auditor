@@ -28,6 +28,9 @@ release workflow refuses a tag that disagrees with either this file or
 - A collection stopped with `ctrl-c` or `SIGTERM` on the command line exited
   `0`, so a scheduler or a CI job that stopped it recorded a success. It exits
   `2`, the code for a partial run, and its summary line says `cancelled`.
+- `check --grant-script FILE` replaced an existing `FILE` without a word, a
+  reviewed script or a mistyped path alike. It now refuses, before connecting,
+  unless `--force` is given, as `env init` and `queries export` already did.
 
 ## [0.23.0] - 2026-09-15
 

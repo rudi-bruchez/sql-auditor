@@ -150,7 +150,7 @@ func defineFlags(cmd string) *cliFlags {
 		"collect only the collectors of this profile: space")
 	fs.StringVar(&c.to, "to", "",
 		"destination: a directory for 'queries export', a file for 'env init' (default .env)")
-	fs.BoolVar(&c.force, "force", false, "replace existing files: the destination of 'env init', the corpus of 'queries export'")
+	fs.BoolVar(&c.force, "force", false, "replace existing files: the destination of 'env init', the corpus of 'queries export', the file of 'check --grant-script'")
 	// Writes a file, never a permission. The collector connects with the
 	// login being measured, which by construction cannot grant anything —
 	// so the output is a script for a DBA to read and run, and the tool
@@ -483,6 +483,7 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 		EnvFile: c.envFile,
 		Now:     time.Now(), Keep: c.keep, Version: version, Commit: buildStamp(),
 		GrantScript: c.grantScript,
+		Force:       c.force,
 		Flags: map[string]bool{
 			collect.FlagIncludeSessionText:    c.all || c.sessionText,
 			collect.FlagEstimateCompression:   c.all || c.estimateCompression,
@@ -874,6 +875,15 @@ func run() int {
 			"--grant-script belongs to check, which probes permissions: sql-auditor check --grant-script "+opts.GrantScript)
 		return 2
 	}
+	// Before the instance is probed, because the script is written after the
+	// probes and a refusal there would come minutes late. The write itself also
+	// refuses an existing file, for a file created in between.
+	if cmd == "check" && opts.GrantScript != "" && !opts.Force {
+		if _, err := os.Stat(opts.GrantScript); err == nil {
+			fmt.Fprintf(os.Stderr, "%s already exists; move it aside, or pass --force to replace it\n", opts.GrantScript)
+			return 2
+		}
+	}
 
 	ctx, stopSignals := interruptible(context.Background())
 	defer stopSignals()
@@ -1058,7 +1068,8 @@ Options (check, collect):
                               for the login the server reports, with the reason
                               for each. The tool never runs it: the login being
                               measured cannot grant anything. Give the file to
-                              a DBA.
+                              a DBA. An existing FILE is refused unless --force
+                              is given.
   --include-session-text      also collect the SQL text of running sessions and
                               the login, host and program names behind them.
                               Off by default: that text can contain application

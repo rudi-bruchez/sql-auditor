@@ -161,6 +161,9 @@ type Options struct {
 	// GrantScript, when set, is where "check" writes the T-SQL that grants
 	// the permissions the probe found missing. Empty means write nothing.
 	GrantScript string
+	// Force lets check replace a file already at GrantScript. Without it an
+	// existing file is refused, as env init and queries export refuse theirs.
+	Force bool
 	// QueryStore carries the resolved collection window and the selection made
 	// by 021 for 022 to read. Run creates it; a caller that leaves it nil gets
 	// one rather than a panic, because the two @writer scripts are the only
@@ -992,6 +995,40 @@ func printQueryLine(o Options, s Script) {
 	fmt.Printf("  %-42s %s\n", s.Path, scriptNote(s, o.Flags))
 }
 
+// writeNewFile writes body to a file the operator named, refusing one that is
+// already there unless force is set.
+//
+// The grant script used os.WriteFile, which truncates whatever the path names:
+// a rerun of check in the folder where yesterday's script was reviewed and
+// signed off replaced it, and a typo naming the neighbouring runbook replaced
+// that. env init, queries export and the wizard's own grant script already
+// refused an existing file; this is the same rule, with O_EXCL doing the
+// refusing so that the check and the write are one operation.
+func writeNewFile(path string, body []byte, force bool) error {
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if force {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	f, err := os.OpenFile(path, flags, filePerm)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%s already exists; move it aside, or pass --force to replace it", path)
+		}
+		return err
+	}
+	// The mode above applies only to a file created here; a replaced one keeps
+	// whatever it had, so it is set again.
+	if err := f.Chmod(filePerm); err != nil && !errors.Is(err, os.ErrInvalid) {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 // writeGrantScript builds the permission script and puts it on disk. It is
 // a function rather than four lines inline because it has one judgement to
 // make: what to do when the probe that yields the login and the version
@@ -1012,7 +1049,7 @@ func writeGrantScript(o Options, scripts []Script, checks []CapabilityCheck, si 
 		Login: si.Login, Instance: si.Name, Version: si.Version, Edition: si.Edition,
 		Checks: checks, Scripts: scripts, NoAccessDatabases: noAccess, Profile: o.Profile, Tool: o.Version,
 	})
-	if err := os.WriteFile(o.GrantScript, []byte(body), 0o600); err != nil {
+	if err := writeNewFile(o.GrantScript, []byte(body), o.Force); err != nil {
 		return err
 	}
 	if hasStatements {

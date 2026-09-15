@@ -652,11 +652,12 @@ why the default was changed and why `MANIFEST.txt` now records whether it
 happened. Use `--keep`, or a different `OUTPUT_DIR`, when two instances
 legitimately share a name.
 
-One deliberate inconsistency belongs beside them: `--grant-script` overwrites
-its destination, where `env init` and `queries export` refuse and want
-`--force`. The grant script is this tool's deterministic output on a path the
-operator has just named, and `check --grant-script` is meant to be re-run until
-every line comes back `ok`; `env init` writes a file that will hold a password.
+`check --grant-script` refuses a file that is already there, as `env init` and
+`queries export` do, and says so before connecting. Until 0.23.0 it replaced
+the file: a rerun in the folder where the previous script had been reviewed and
+annotated lost that work, and a mistyped path replaced whatever it named. The
+script is still meant to be re-run until every line comes back `ok`; pass
+`--force` on those reruns, or give each one its own name.
 
 ### Where you leave it matters as much as where you send it
 
