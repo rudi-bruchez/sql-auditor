@@ -31,6 +31,9 @@ release workflow refuses a tag that disagrees with either this file or
 - `check --grant-script FILE` replaced an existing `FILE` without a word, a
   reviewed script or a mistyped path alike. It now refuses, before connecting,
   unless `--force` is given, as `env init` and `queries export` already did.
+- The `config` block of `_run.json` did not record `estimate_compression` or
+  `blocked_process_reports`, so an archive taken with either option did not say
+  so. It now records every opt-in, on or off.
 
 ## [0.23.0] - 2026-09-15
 

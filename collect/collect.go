@@ -995,6 +995,31 @@ func printQueryLine(o Options, s Script) {
 	fmt.Printf("  %-42s %s\n", s.Path, scriptNote(s, o.Flags))
 }
 
+// runConfig is the settings a run records in _run.json. Every opt-in in
+// KnownFlags goes in by name, off as well as on: the list was written out by
+// hand and had fallen behind it, so an archive taken with
+// --estimate-compression or --include-blocked-process-reports did not say so,
+// and a reader had to infer it from which files were there.
+func runConfig(o Options) map[string]string {
+	c := map[string]string{
+		"queries_dir":              o.Config.QueriesDir,
+		"encrypt":                  fmt.Sprint(o.Config.Encrypt),
+		"trust_server_certificate": fmt.Sprint(o.Config.TrustCert),
+		"output_dir":               o.Config.OutputDir,
+		"db_include":               o.Config.DBInclude,
+		"db_exclude":               o.Config.DBExclude,
+		"query_store_days":         fmt.Sprint(o.Config.QueryStoreDays),
+		"query_store_top":          fmt.Sprint(o.Config.QueryStoreTop),
+		// A setting that changed which databases were read and is absent from
+		// the record is the one that will be argued about later.
+		"query_store_db_include": o.Config.QueryStoreDBInclude,
+	}
+	for name := range KnownFlags {
+		c[name] = fmt.Sprint(o.Flags[name])
+	}
+	return c
+}
+
 // writeNewFile writes body to a file the operator named, refusing one that is
 // already there unless force is set.
 //
@@ -1414,28 +1439,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		Encrypted:            o.Config.Encrypt,
 		CertificateValidated: o.Config.Encrypt && !o.Config.TrustCert,
 	}
-	m.Config = map[string]string{
-		"queries_dir":              o.Config.QueriesDir,
-		"encrypt":                  fmt.Sprint(o.Config.Encrypt),
-		"trust_server_certificate": fmt.Sprint(o.Config.TrustCert),
-		"output_dir":               o.Config.OutputDir,
-		"db_include":               o.Config.DBInclude,
-		"db_exclude":               o.Config.DBExclude,
-		"include_session_text":     fmt.Sprint(o.Flags[FlagIncludeSessionText]),
-		"object_definitions":       fmt.Sprint(o.Flags[FlagObjectDefinitions]),
-		"deadlock_graphs":          fmt.Sprint(o.Flags[FlagDeadlockGraphs]),
-		"default_trace":            fmt.Sprint(o.Flags[FlagDefaultTrace]),
-		"plan_cache_plans":         fmt.Sprint(o.Flags[FlagPlanCachePlans]),
-		"measure_page_density":     fmt.Sprint(o.Flags[FlagMeasurePageDensity]),
-
-		"query_store_detail":     fmt.Sprint(o.Flags[FlagQueryStoreDetail]),
-		"query_store_plan_stats": fmt.Sprint(o.Flags[FlagQueryStorePlanStats]),
-		"query_store_days":       fmt.Sprint(o.Config.QueryStoreDays),
-		"query_store_top":        fmt.Sprint(o.Config.QueryStoreTop),
-		// A setting that changed which databases were read and is absent from
-		// the record is the one that will be argued about later.
-		"query_store_db_include": o.Config.QueryStoreDBInclude,
-	}
+	m.Config = runConfig(o)
 	// The bounds as typed, beside the bounds as resolved further down. It is
 	// having the pair side by side that makes a timezone mistake visible after
 	// the run rather than never: "14:00" and "2026-07-26T12:00:00Z" together
