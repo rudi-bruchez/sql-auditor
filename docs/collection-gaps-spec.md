@@ -1,7 +1,7 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis, 18 and 22, which are open.
+**Status:** implemented, except sections 10 bis and 18, which are open.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1669,7 +1669,7 @@ What is deliberately not collected: the filegroup of `041`'s `not_estimated`
 list, whose job is to say what was left unmeasured rather than to size
 anything.
 
-### 22. The list that publishes a bound is itself bounded
+### 22. The list that publishes a bound is itself bounded — closed
 
 slug: not-estimated-cap
 
@@ -1707,3 +1707,11 @@ of objects the bounds excluded, as a scalar on the root object of `041`,
 independent of how many of them the array carries. The list can stay capped,
 which is right, as long as the number it stands for is exact. One scalar closes
 it.
+
+Closed on 16 September 2026 as `not_estimated_objects`, and measured rather
+than reasoned about, since the section above says plainly that it was found by
+reading and never run against a database large enough to exceed the cap. Built
+one: a database of 130 small uncompressed tables, with the size bound raised so
+that every one of them is excluded. The root reports 130, the array carries
+100. The gap was real, the fix is exact, and the two numbers now disagree out
+loud instead of silently.

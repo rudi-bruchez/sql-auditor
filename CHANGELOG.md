@@ -52,6 +52,15 @@ release workflow refuses a tag that disagrees with either this file or
   a quiet database. The new result set is bounded by the number of databases
   instead. A missing row still proves nothing, since `msdb` history is prunable.
   This closes gap 20, and takes the space profile from 21 collectors to 22.
+- The root of `70.schema/041.compression-savings` now carries
+  `not_estimated_objects`, the exact number of uncompressed objects its bounds
+  excluded. The file publishes that exclusion as a list so that "we estimated
+  the savings" cannot quietly mean "we estimated some", but the list itself
+  stopped at a hundred rows and said nothing about stopping. A consumer that
+  derived the eligible population from the array understated it on any database
+  with more than about a hundred and twenty large uncompressed objects, and so
+  reported better coverage than it had. The list stays capped, which is right;
+  the number it stands for is now exact. This closes gap 22.
 
 ### Fixed
 
