@@ -315,7 +315,7 @@ type ProfileBlock struct {
 }
 ```
 
-serialised as `"profile": {"name": "space", "members": 21, "corpus": 84}`.
+serialised as `"profile": {"name": "space", "members": 22, "corpus": 85}`.
 `Name` is set from `Options` when the manifest is created, before the first
 thing that can fail, so every `failed-run-*` record says what was asked.
 `Members` and `Corpus` are set after `Discover`.
@@ -335,7 +335,7 @@ One header line, printed unconditionally, after `Contents`:
 
 ```
 Profile      : none, the whole corpus
-Profile      : space, 21 of the 84 collectors in the corpus belong to it
+Profile      : space, 22 of the 85 collectors in the corpus belong to it
 Profile      : space, requested; the corpus was not read
 ```
 
@@ -382,7 +382,7 @@ replaces the other.
 ## `check`
 
 ```
-Profile: space, 21 of 84 collectors
+Profile: space, 22 of 85 collectors
 Queries (22):
   10.system/010.properties.sql               ...
   !! 70.schema/099.custom.sql                <the lint error>

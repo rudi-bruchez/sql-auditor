@@ -1,7 +1,8 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis and 18, which are open.
+**Status:** implemented, except section 10 bis, which is open. Section 18 is
+closed for instances at or above its build floor, and unreachable below it.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1473,7 +1474,7 @@ second reason: the two instances that raised this section run 13.0.4451 and
 13.0.4457, so unlike section 15 this gate does not exclude them — the collector
 would have answered the question that was asked.
 
-### 18. A spill is invisible to the archive, and the floor for seeing one is 13.0.5026
+### 18. A spill is invisible to the archive, and the floor for seeing one is 13.0.5026 — closed above the floor
 
 An audit that names a slow procedure is expected to say where its time went. On
 one instance the answer turned out to be a hash aggregate spilling to `tempdb`,
@@ -1506,6 +1507,30 @@ report should say so in the same breath as it asks for the plan, which is a
 Note the floor is the same 13.0.5026 that section 15 was written against. The
 conclusion is the opposite one: there the gate was ours to remove because the
 data had another source, here it is Microsoft's and there is no second source.
+
+Collected on 16 September 2026 as `80.workload/060.spills.sql`, gated at
+13.0.5026, with the spills, the three grant totals and the two ratios they
+make. Three things were learned building it, and none of them by reading.
+
+The corpus guard refused the first draft, and it was right. That draft reached
+the database and the object through `sys.dm_exec_sql_text`, projecting neither
+its text nor anything derived from it, and the rule is that reading the text is
+the disclosure. `sys.dm_exec_plan_attributes` answers with no text at all, and
+the object name is resolved only when the cached plan says `objtype = 'Proc'` —
+for an ad hoc plan that attribute holds a hash of the statement rather than an
+object id, and resolving it would eventually name an unrelated object that
+happens to carry the same number.
+
+The lint also refused `[grant.used_mb]` as an alias, since it strips comments
+and blanks string literals before it looks but a bracketed identifier is
+neither. The prefix is `memory_grant`.
+
+And a caution the section did not have: a low ratio is not a spill. Four
+statements capped by `MAX_GRANT_PERCENT` ran on SQL Server 2025 with between
+1.6 and 4.9 percent of their ideal grant and spilled nothing at all. The spill
+columns are the finding; the ratios only say which kind of conversation it is.
+Verified against a genuinely spilling statement in the cache, 24 pages, granted
+27.8 MB of an identical ideal and using 53.4 percent of it.
 
 ## Gaps recorded on 16 September 2026
 

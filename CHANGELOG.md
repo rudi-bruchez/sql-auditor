@@ -61,6 +61,18 @@ release workflow refuses a tag that disagrees with either this file or
   with more than about a hundred and twenty large uncompressed objects, and so
   reported better coverage than it had. The list stays capped, which is right;
   the number it stands for is now exact. This closes gap 22.
+- `80.workload/060.spills.sql`, a new collector gated at build 13.0.5026, names
+  the statements that spilled to `tempdb` with the pages they spilled and the
+  memory they were granted, used and ideally wanted. An audit that names a slow
+  procedure is expected to say where its time went, and a hash aggregate
+  spilling twice for ten seconds each was invisible to every archive: the
+  diagnosis needed a post-execution plan the client had to be asked for. It
+  reads no statement text, taking the database and the object from
+  `sys.dm_exec_plan_attributes` and resolving the object name only for a
+  compiled module. Below the floor the columns do not exist and there is still
+  no path to a spill except a plan, which is a fact about the build rather than
+  a gap in this corpus. This closes gap 18 above that floor, and takes the
+  corpus from 84 collectors to 85.
 
 ### Fixed
 
