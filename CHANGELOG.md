@@ -33,6 +33,14 @@ release workflow refuses a tag that disagrees with either this file or
   name only when there is exactly one and `filegroup_count` says so; the rows
   that are one partition carry the name outright. This closes gap 21 of
   `docs/collection-gaps-spec.md`.
+- `70.schema/050.heaps` now carries `partition_count` per heap. The list is the
+  fifty largest heaps and, within those, only the partitions that passed its
+  page-count filter, so a single row used to mean either a heap with one
+  partition or one whose siblings did not make the cut, and nothing told them
+  apart. It decides whether a rebuild may be written without a `PARTITION`
+  clause, where the two mistakes are not symmetrical: naming a partition on a
+  heap that has one fails loudly and changes nothing, omitting it on a heap
+  that has forty rebuilds all forty in silence. This closes gap 19.
 
 ### Fixed
 

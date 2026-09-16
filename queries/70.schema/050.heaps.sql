@@ -96,6 +96,19 @@ SELECT
     -- row locator, so their size is part of the decision.
     (SELECT COUNT(*) FROM sys.indexes AS ni
       WHERE ni.object_id = h.object_id AND ni.index_id > 0)     AS [nonclustered_indexes],
+    -- How many partitions the heap has, which decides whether a rebuild may be
+    -- written without a PARTITION clause. The two mistakes are not
+    -- symmetrical: PARTITION = n on a heap that has one fails loudly and
+    -- changes nothing, while omitting it on a heap that has forty rebuilds all
+    -- forty in silence.
+    --
+    -- It cannot be deduced from the rows of this result set. The list is the
+    -- fifty largest heaps, and within those only the partitions that passed
+    -- the page-count filter, so a single row means either one partition or
+    -- siblings that did not make the cut. This reads metadata, so neither the
+    -- cap nor the SAMPLED scan reaches it.
+    (SELECT COUNT(*) FROM sys.partitions AS pc
+      WHERE pc.object_id = h.object_id AND pc.index_id = 0)     AS [partition_count],
     -- The filegroup this partition of the heap sits on, which is the one a
     -- rebuild has to find room in. Read through the allocation units: on a
     -- partitioned heap sys.indexes carries a partition scheme id, which names

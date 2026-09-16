@@ -1,7 +1,7 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis, 18, 19, 20 and 22, which are open.
+**Status:** implemented, except sections 10 bis, 18, 20 and 22, which are open.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1513,7 +1513,7 @@ Both came out of building the private analysis that turns a `space` archive
 into a list of space actions. Neither is a defect in a collector: each is a
 question the corpus was never asked, found by an analysis that had to answer it.
 
-### 19. A heap's partitioning cannot be read from any archive
+### 19. A heap's partitioning cannot be read from any archive — closed
 
 slug: heap-partition-count
 
@@ -1551,6 +1551,12 @@ Worth stating plainly, because it is what makes the column worth adding: the
 two errors are not symmetrical. Writing `PARTITION = n` on a heap that has one
 partition fails loudly and changes nothing. Omitting it on a heap that has
 forty rebuilds all forty in silence.
+
+Added as `partition_count` on 16 September 2026, exactly as written above.
+Measured against SQL Server 2025 on a heap spanning a two-filegroup partition
+scheme: the collector lists one of its two partitions, the one that passed the
+page-count filter, and the row says `partition_count` 2. That is the ambiguity
+this gap describes, seen and resolved on the same row.
 
 ### 20. Nothing says when a database was last restored
 
