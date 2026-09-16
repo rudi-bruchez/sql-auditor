@@ -47,7 +47,7 @@
 50.agent/030.alerts.sql
 50.agent/040.maintenance-plans.sql @profiles: space
 60.backup/010.history.sql @profiles: space
-60.backup/020.restore-history.sql
+60.backup/020.restore-history.sql @profiles: space
 70.schema/010.objects.sql @profiles: space
 70.schema/020.index-usage.sql @profiles: space
 70.schema/030.index-operational.sql

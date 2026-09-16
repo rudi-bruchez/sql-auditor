@@ -1,7 +1,7 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis, 18, 20 and 22, which are open.
+**Status:** implemented, except sections 10 bis, 18 and 22, which are open.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1558,7 +1558,7 @@ scheme: the collector lists one of its two partitions, the one that passed the
 page-count filter, and the row says `partition_count` 2. That is the ambiguity
 this gap describes, seen and resolved on the same row.
 
-### 20. Nothing says when a database was last restored
+### 20. Nothing says when a database was last restored — closed
 
 slug: restore-date
 
@@ -1583,6 +1583,22 @@ One caveat belongs in the same breath. That history is prunable, and a
 maintenance job that trims `msdb` removes it, so a missing row does not prove
 no restore happened. The value of the column is the date when it is there, and
 an analysis that finds none is back where it is today rather than worse off.
+
+Closed on 16 September 2026, and the gap was two gaps rather than one.
+`60.backup/020.restore-history.sql` already existed and already read
+`msdb.dbo.restorehistory`; what was missing was that it belonged to no profile,
+so no `space` archive carried it, and that its only listing is the 200 most
+recent restores of the whole instance. On an instance that restores nightly
+that cap drops the last restore of a quiet database, which is exactly the
+database whose usage counters an analysis is trying to date. A `per_database`
+result set now gives one row per destination with the last and first restore
+recorded and how many there are, bounded by the number of databases rather than
+by a cap, and the collector carries `@profiles: space` because
+`70.schema/020.index-usage` does.
+
+Measured against SQL Server 2025 on an instance carrying five restores across
+two databases, four of them onto the same one: the new result set returns two
+rows, the detailed list still returns five.
 
 ### 21. No file row carries its filegroup, so an object's own filegroup cannot be sized — closed
 

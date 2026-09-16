@@ -1,7 +1,8 @@
 -- @scope:       instance
--- @resultsets:  root:object, restores:array
+-- @resultsets:  root:object, per_database:array, restores:array
 -- @permissions: CONNECT, MSDB READ
 -- @timeout:     60
+-- @profiles:    space
 --
 -- What has been restored onto this instance, as msdb recorded it.
 --
@@ -30,6 +31,26 @@
 -- by nature. The rows are capped at 200 for the same reason as everywhere else
 -- in this corpus — an archive nobody can read is not evidence.
 --
+-- THE CAP IS WHY per_database EXISTS. The detailed list is the 200 most recent
+-- restores of the whole instance, so on an instance that restores nightly the
+-- last restore of a quiet database falls off it, and the one question the
+-- analysis has to answer — when were this database's usage counters last reset
+-- — has no answer for exactly the databases it matters most for. per_database
+-- is one row per destination, bounded by the number of databases and not by a
+-- cap, and it is the row an analysis reads. The detailed list stays for the
+-- reading a human does.
+--
+-- IT IS IN THE SPACE PROFILE because 70.schema/020.index-usage is, and an
+-- unread index is a finding only over a stated period. A restore resets
+-- sys.dm_db_index_usage_stats exactly as a restart does, and without this the
+-- window a space archive can compute is a ceiling that can be months off,
+-- stated as though it were a measurement.
+--
+-- A MISSING ROW PROVES NOTHING. The history is prunable and a maintenance job
+-- that trims msdb removes it, so no row means no record rather than no
+-- restore. The column is worth having for the date when it is there; an
+-- analysis that finds none is where it is today, not worse off.
+--
 -- SQL Server 2012 is the floor; restorehistory predates it entirely.
 
 SET NOCOUNT ON;
@@ -46,6 +67,16 @@ SELECT
        FROM msdb.dbo.restorehistory)                            AS [counts.most_recent],
     (SELECT CONVERT(varchar(19), MIN(restore_date), 126)
        FROM msdb.dbo.restorehistory)                            AS [counts.oldest_record]
+OPTION (RECOMPILE, MAXDOP 1);
+
+SELECT
+    rh.destination_database_name                                AS [database],
+    CONVERT(varchar(19), MAX(rh.restore_date), 126)             AS [last_restore_at],
+    COUNT(*)                                                    AS [restores_recorded],
+    CONVERT(varchar(19), MIN(rh.restore_date), 126)             AS [first_restore_at]
+FROM msdb.dbo.restorehistory AS rh
+GROUP BY rh.destination_database_name
+ORDER BY MAX(rh.restore_date) DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT TOP (200)

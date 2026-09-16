@@ -41,6 +41,17 @@ release workflow refuses a tag that disagrees with either this file or
   clause, where the two mistakes are not symmetrical: naming a partition on a
   heap that has one fails loudly and changes nothing, omitting it on a heap
   that has forty rebuilds all forty in silence. This closes gap 19.
+- `60.backup/020.restore-history` gains a `per_database` result set, one row per
+  destination database with the last and first restore recorded and how many
+  there are, and joins the `space` profile. A restore resets
+  `sys.dm_db_index_usage_stats` exactly as a restart does, so calling an index
+  unread means naming the period it was not read over, and a `space` archive
+  carried nothing to date that period. The collector existed but belonged to no
+  profile, and its only listing is the 200 most recent restores of the whole
+  instance, which on an instance that restores nightly drops the last restore of
+  a quiet database. The new result set is bounded by the number of databases
+  instead. A missing row still proves nothing, since `msdb` history is prunable.
+  This closes gap 20, and takes the space profile from 21 collectors to 22.
 
 ### Fixed
 
