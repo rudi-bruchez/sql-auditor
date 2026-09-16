@@ -1,7 +1,7 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis and 18, which are open.
+**Status:** implemented, except sections 10 bis, 18, 19 and 20, which are open.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1506,3 +1506,74 @@ report should say so in the same breath as it asks for the plan, which is a
 Note the floor is the same 13.0.5026 that section 15 was written against. The
 conclusion is the opposite one: there the gate was ours to remove because the
 data had another source, here it is Microsoft's and there is no second source.
+
+## Gaps recorded on 16 September 2026
+
+Both came out of building the private analysis that turns a `space` archive
+into a list of space actions. Neither is a defect in a collector: each is a
+question the corpus was never asked, found by an analysis that had to answer it.
+
+### 19. A heap's partitioning cannot be read from any archive
+
+slug: heap-partition-count
+
+Two of the space actions act on a heap: rebuilding it to reclaim forwarded
+records, and compressing it. Both are written as `ALTER TABLE ... REBUILD`,
+and both must know whether the heap is partitioned, because the statement
+without a `PARTITION` clause rebuilds every partition of the table in one
+operation. On a large partitioned heap that is the difference between a
+maintenance window and an outage.
+
+No file in a `space` archive answers it. `70.schema/070.index-columns.sql`
+excludes heaps, and correctly so: `index_id = 0` has no `sys.index_columns`
+rows to report, and the collector's own header says as much. `70.schema/050.heaps.sql`
+does project one row per heap partition, but only for the fifty largest heaps
+of the database, and within those only for the partitions its metadata
+pre-filter kept. So a single row for a heap means either that the heap has one
+partition or that the others did not make the cut, and nothing distinguishes
+the two. Deducing "not partitioned" from the row count is the inference that a
+review panel measured wrong in September 2026.
+
+The consequence is not a wrong answer but an empty one. The analysis refuses to
+decide, every heap goes to the list a human must examine, and the note proposes
+no heap action at all. That is the safe direction, and it costs the whole heap
+half of the analysis. The arithmetic that sizes a heap rebuild is exercised in
+its tests only through an archive shaped by hand, because no real archive can
+reach it.
+
+What is collectable, and where. A partition count per heap, in
+`050.heaps.sql`, as `(SELECT COUNT(*) FROM sys.partitions WHERE object_id =
+h.object_id AND index_id = 0)`. It reads metadata, so it is unaffected by the
+`SAMPLED` scan and by the fifty-heap cap, and it answers the question for the
+heaps the file already lists. One column closes the gap.
+
+Worth stating plainly, because it is what makes the column worth adding: the
+two errors are not symmetrical. Writing `PARTITION = n` on a heap that has one
+partition fails loudly and changes nothing. Omitting it on a heap that has
+forty rebuilds all forty in silence.
+
+### 20. Nothing says when a database was last restored
+
+slug: restore-date
+
+An analysis that calls an index unread has to say over what period it was not
+read. The window it can compute is the time since the instance started or since
+the database was created, whichever is shorter, because
+`sys.dm_db_index_usage_stats` is reset by a restart. A restore resets those
+counters just as surely, and no file in the archive carries the date of the
+last one: neither `20.databases/010.all-databases` nor `60.backup/010.history`
+has it, checked on a `space` archive during the third review panel.
+
+So the window is a ceiling rather than a measurement, and on a database
+restored last week it can be off by months. The analysis has no way to know,
+and says a period that is true of the instance and false of the database.
+
+What is collectable, and where. `msdb.dbo.restorehistory` carries
+`restore_date` per `destination_database_name`; the maximum per database is one
+row each, at instance scope, from a database the backup collector already
+reads.
+
+One caveat belongs in the same breath. That history is prunable, and a
+maintenance job that trims `msdb` removes it, so a missing row does not prove
+no restore happened. The value of the column is the date when it is there, and
+an analysis that finds none is back where it is today rather than worse off.
