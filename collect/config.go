@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -251,21 +252,63 @@ func UpdateDotEnv(path string, set map[string]string) error {
 	if missing {
 		result = "# Run sql-auditor env init for the annotated template.\n" + result
 	}
+	// The rewrite truncates in place, which is what keeps the ACL, and so a
+	// write that fails after the truncation (a full disk, a quota, a killed
+	// process) would leave an empty file where the password and every
+	// hand-written setting were. The original goes to a sibling first, and stays
+	// there unless the rewrite completes. O_EXCL keeps a backup left by an
+	// earlier failure: it may be the only copy.
+	backup := path + ".sql-auditor-backup"
+	if !missing {
+		bf, err := os.OpenFile(backup, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("%s is left from an earlier save that failed; check %s against it, then remove it", backup, path)
+			}
+			return fmt.Errorf("could not back up %s before rewriting it, so it was left unchanged: %w", path, err)
+		}
+		if _, err = bf.Write(b); err == nil {
+			err = bf.Sync()
+		}
+		if cerr := bf.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			_ = os.Remove(backup)
+			return fmt.Errorf("could not back up %s before rewriting it, so it was left unchanged: %w", path, err)
+		}
+	}
 	flags := os.O_WRONLY | os.O_TRUNC
 	if missing {
 		flags |= os.O_CREATE
 	}
 	f, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
+		if !missing {
+			_ = os.Remove(backup)
+		}
 		return err
 	}
-	if _, err = io.WriteString(f, result); err == nil {
+	if _, err = writeDotEnvContent(f, result); err == nil {
 		err = f.Close()
 	} else {
 		_ = f.Close()
 	}
-	return err
+	if err != nil {
+		if !missing {
+			return fmt.Errorf("%w; the previous %s is in %s", err, filepath.Base(path), backup)
+		}
+		return err
+	}
+	if !missing {
+		_ = os.Remove(backup)
+	}
+	return nil
 }
+
+// writeDotEnvContent is the write UpdateDotEnv makes after truncating, a
+// variable so that a test can make it fail.
+var writeDotEnvContent = io.WriteString
 
 // flagNameFor turns a setting key into the command-line flag that carries it,
 // for the provenance line. Only the keys the CLI actually exposes as flags need

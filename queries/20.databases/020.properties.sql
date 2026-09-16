@@ -30,9 +30,18 @@
 -- silent failure this whole design exists to prevent.
 --
 -- The fragmentation block is the one most likely to time out rather than
--- block: LIMITED mode still walks index metadata, and on a very large database
--- it is the expensive part of this file. It is last for that reason — the six
--- cheap areas are already buffered by the time it starts.
+-- block: LIMITED mode still reads the level above the leaf of every index, and
+-- on a very large database it is the expensive part of this file. Being last
+-- does not protect the six cheap areas: @timeout is enforced by the client,
+-- which cancels the batch, and a cancelled batch returns none of the seven
+-- result sets however well the areas were buffered. Measured in the field in
+-- September 2026, a single call over a whole database of a few hundred GB and
+-- up ran into the 300 seconds and cost the files, the space and the creation
+-- date along with it. So it measures one partition at a time, the largest
+-- first, stops starting new ones once @frag_budget_sec have passed since the
+-- batch began, and says in fragmentation_sample how many it measured out of how
+-- many were eligible. One call on a single enormous partition can still outlast
+-- the remainder; the budget bounds the number of calls, not the length of one.
 --
 -- SQL Server 2012 is the floor. Removed for that reason:
 --   sys.database_scoped_configurations   (2016) — whole result set
@@ -69,6 +78,17 @@ DECLARE @data_allocated_mb decimal(14,1), @data_used_mb decimal(14,1),
         @log_used_pct decimal(5,2);
 
 DECLARE @last_full datetime, @last_differential datetime, @last_log datetime;
+
+DECLARE @batch_started datetime2 = SYSDATETIME(), @frag_budget_sec int = 150,
+        @frag_eligible int = NULL, @frag_measured int = 0, @frag_i int = 1,
+        @frag_object int, @frag_index int, @frag_partition int;
+
+/* The partitions the fragmentation read will visit, largest first. */
+DECLARE @frag_candidates TABLE (
+    [n]                 int IDENTITY(1,1) PRIMARY KEY,
+    [object_id]         int,
+    [index_id]          int,
+    [partition_number]  int);
 
 DECLARE @files TABLE (
     [file_type]      tinyint,
@@ -308,22 +328,50 @@ BEGIN CATCH
 END CATCH
 
 /* ───────── fragmentation: LIMITED mode, page_count > 1000 ─────────
-   COSTLY on very large databases — remove this block if needed. */
+   One partition per call, the 100 largest by used pages, until the budget runs
+   out. The candidates come from sys.dm_db_partition_stats, which is metadata;
+   used_page_count covers every allocation unit, so no partition the page_count
+   filter below would keep is left out for being too small. */
 BEGIN TRY
-    INSERT INTO @fragmentation
-    SELECT TOP (25)
-           ips.avg_fragmentation_in_percent,
-           OBJECT_SCHEMA_NAME(ips.object_id) + '.' + OBJECT_NAME(ips.object_id),
-           i.name,
-           ips.index_type_desc,
-           ips.partition_number,
-           ips.page_count,
-           CAST(ips.avg_fragmentation_in_percent AS DECIMAL(5,2))
-    FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, 'LIMITED') AS ips
-    JOIN sys.indexes AS i ON i.object_id = ips.object_id AND i.index_id = ips.index_id
-    WHERE ips.page_count > 1000 AND ips.avg_fragmentation_in_percent > 10
-    ORDER BY ips.avg_fragmentation_in_percent DESC
+    SELECT @frag_eligible = COUNT(*)
+    FROM sys.dm_db_partition_stats AS ps
+    JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
+    WHERE ps.used_page_count > 1000
     OPTION (RECOMPILE, MAXDOP 1);
+
+    INSERT INTO @frag_candidates ([object_id], [index_id], [partition_number])
+    SELECT TOP (100) ps.object_id, ps.index_id, ps.partition_number
+    FROM sys.dm_db_partition_stats AS ps
+    JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
+    WHERE ps.used_page_count > 1000
+    ORDER BY ps.used_page_count DESC, ps.object_id, ps.index_id, ps.partition_number
+    OPTION (RECOMPILE, MAXDOP 1);
+
+    WHILE EXISTS (SELECT 1 FROM @frag_candidates WHERE [n] = @frag_i)
+          AND DATEDIFF(second, @batch_started, SYSDATETIME()) < @frag_budget_sec
+    BEGIN
+        SELECT @frag_object = [object_id], @frag_index = [index_id],
+               @frag_partition = [partition_number]
+        FROM @frag_candidates
+        WHERE [n] = @frag_i;
+
+        INSERT INTO @fragmentation
+        SELECT ips.avg_fragmentation_in_percent,
+               OBJECT_SCHEMA_NAME(ips.object_id) + '.' + OBJECT_NAME(ips.object_id),
+               i.name,
+               ips.index_type_desc,
+               ips.partition_number,
+               ips.page_count,
+               CAST(ips.avg_fragmentation_in_percent AS DECIMAL(5,2))
+        FROM sys.dm_db_index_physical_stats(DB_ID(), @frag_object, @frag_index,
+                                            @frag_partition, 'LIMITED') AS ips
+        JOIN sys.indexes AS i ON i.object_id = ips.object_id AND i.index_id = ips.index_id
+        WHERE ips.page_count > 1000 AND ips.avg_fragmentation_in_percent > 10
+        OPTION (RECOMPILE, MAXDOP 1);
+
+        SET @frag_measured += 1;
+        SET @frag_i += 1;
+    END
 END TRY
 BEGIN CATCH
     SELECT @err_fragmentation = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
@@ -359,6 +407,9 @@ SELECT @db_name                     AS [database.name],
        @log_size_mb                 AS [space.log_size_mb],
        @log_used_mb                 AS [space.log_used_mb],
        @log_used_pct                AS [space.log_used_pct],
+       @frag_eligible               AS [fragmentation_sample.eligible_partitions],
+       @frag_measured               AS [fragmentation_sample.measured_partitions],
+       @frag_budget_sec             AS [fragmentation_sample.budget_sec],
        CASE WHEN @err_database      = 0 THEN 1 ELSE 0 END AS [collected.database],
        CASE WHEN @err_backups       = 0 THEN 1 ELSE 0 END AS [collected.backups],
        CASE WHEN @err_files         = 0 THEN 1 ELSE 0 END AS [collected.files],
@@ -404,7 +455,7 @@ FROM @missing AS m
 ORDER BY m.[sort_impact] DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
-SELECT g.[table], g.[index_name], g.[index_type], g.[partition_number],
+SELECT TOP (25) g.[table], g.[index_name], g.[index_type], g.[partition_number],
        g.[page_count], g.[fragmentation_pct]
 FROM @fragmentation AS g
 ORDER BY g.[sort_frag] DESC

@@ -719,3 +719,27 @@ func TestProfileIsRefusedOutsideCheckAndCollect(t *testing.T) {
 		}
 	})
 }
+
+// check writes its grant script after minutes of probing, so an existing file
+// has to be refused before the instance is touched, and left as it was.
+func TestCheckRefusesToReplaceAnExistingGrantScript(t *testing.T) {
+	dir := t.TempDir()
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\nSQL_CONNECT_TIMEOUT_SEC=1\n")
+	script := filepath.Join(dir, "grants.sql")
+	if err := os.WriteFile(script, []byte("reviewed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stderr := runCLI(t, "check", "--env", env, "--output-dir", dir, "--grant-script", script)
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "already exists") || !strings.Contains(stderr, "--force") {
+		t.Errorf("stderr = %q, want the already-exists refusal naming --force", stderr)
+	}
+	if strings.Contains(stderr, "cannot reach the instance") {
+		t.Errorf("the instance was contacted before the refusal: %q", stderr)
+	}
+	if b, _ := os.ReadFile(script); string(b) != "reviewed\n" {
+		t.Errorf("the existing grant script was changed: %q", b)
+	}
+}

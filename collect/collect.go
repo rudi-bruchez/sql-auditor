@@ -161,6 +161,9 @@ type Options struct {
 	// GrantScript, when set, is where "check" writes the T-SQL that grants
 	// the permissions the probe found missing. Empty means write nothing.
 	GrantScript string
+	// Force lets check replace a file already at GrantScript. Without it an
+	// existing file is refused, as env init and queries export refuse theirs.
+	Force bool
 	// QueryStore carries the resolved collection window and the selection made
 	// by 021 for 022 to read. Run creates it; a caller that leaves it nil gets
 	// one rather than a panic, because the two @writer scripts are the only
@@ -317,12 +320,47 @@ func supersededNameTaken(dest string) bool {
 }
 
 // discardSuperseded deletes what prepareRunFolder set aside. It is called at
-// one place only — after the new archive exists — and it is best effort: a run
-// that produced its archive must not be reported as failed because the folder
-// it replaced could not be removed. What is left behind is named and inert.
+// one place only — after the new archive exists, and only when the run that
+// produced it completed — and it is best effort: a run that produced its
+// archive must not be reported as failed because the folder it replaced could
+// not be removed. What is left behind is named and inert.
 func discardSuperseded(paths []string) {
 	for _, p := range paths {
 		os.RemoveAll(p)
+	}
+}
+
+// settleRun turns the loop's exit code into the run's, once the loop is over,
+// and says whether the run this one replaced may now be deleted.
+//
+// A stopped run exits 2. It used to exit 0, on the reasoning that a deliberate
+// stop is neither an unreachable instance nor a refused configuration; but the
+// archive it leaves is partial, 2 is the code the README gives a partial run,
+// and 0 told every scheduler, runbook and CI job that stopped a collection at
+// its time limit that the collection had succeeded.
+//
+// The previous run is deleted only after a run that exits 0. Until 0.23.0 it
+// was deleted as soon as the new archive existed, so a same-day rerun stopped a
+// few seconds in, or ending with a collector that timed out, replaced a
+// complete archive with a partial one: measured, 73 results became 53 and the
+// morning's archive was gone. The snapshot of a given day cannot be collected
+// again, so a partial run keeps it.
+func settleRun(exit int, cancelled bool) (code int, discardPrevious bool) {
+	if cancelled && exit == 0 {
+		exit = 2
+	}
+	return exit, exit == 0
+}
+
+// keepSuperseded tells the operator where the run this one replaced still is,
+// and why it was not deleted.
+func keepSuperseded(paths []string, progress io.Writer) {
+	if len(paths) == 0 {
+		return
+	}
+	fmt.Fprintln(progress, "this run is partial, so the run it replaced was kept:")
+	for _, p := range paths {
+		fmt.Fprintf(progress, "  %s\n", p)
 	}
 }
 
@@ -957,6 +995,65 @@ func printQueryLine(o Options, s Script) {
 	fmt.Printf("  %-42s %s\n", s.Path, scriptNote(s, o.Flags))
 }
 
+// runConfig is the settings a run records in _run.json. Every opt-in in
+// KnownFlags goes in by name, off as well as on: the list was written out by
+// hand and had fallen behind it, so an archive taken with
+// --estimate-compression or --include-blocked-process-reports did not say so,
+// and a reader had to infer it from which files were there.
+func runConfig(o Options) map[string]string {
+	c := map[string]string{
+		"queries_dir":              o.Config.QueriesDir,
+		"encrypt":                  fmt.Sprint(o.Config.Encrypt),
+		"trust_server_certificate": fmt.Sprint(o.Config.TrustCert),
+		"output_dir":               o.Config.OutputDir,
+		"db_include":               o.Config.DBInclude,
+		"db_exclude":               o.Config.DBExclude,
+		"query_store_days":         fmt.Sprint(o.Config.QueryStoreDays),
+		"query_store_top":          fmt.Sprint(o.Config.QueryStoreTop),
+		// A setting that changed which databases were read and is absent from
+		// the record is the one that will be argued about later.
+		"query_store_db_include": o.Config.QueryStoreDBInclude,
+	}
+	for name := range KnownFlags {
+		c[name] = fmt.Sprint(o.Flags[name])
+	}
+	return c
+}
+
+// writeNewFile writes body to a file the operator named, refusing one that is
+// already there unless force is set.
+//
+// The grant script used os.WriteFile, which truncates whatever the path names:
+// a rerun of check in the folder where yesterday's script was reviewed and
+// signed off replaced it, and a typo naming the neighbouring runbook replaced
+// that. env init, queries export and the wizard's own grant script already
+// refused an existing file; this is the same rule, with O_EXCL doing the
+// refusing so that the check and the write are one operation.
+func writeNewFile(path string, body []byte, force bool) error {
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if force {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	f, err := os.OpenFile(path, flags, filePerm)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%s already exists; move it aside, or pass --force to replace it", path)
+		}
+		return err
+	}
+	// The mode above applies only to a file created here; a replaced one keeps
+	// whatever it had, so it is set again.
+	if err := f.Chmod(filePerm); err != nil && !errors.Is(err, os.ErrInvalid) {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 // writeGrantScript builds the permission script and puts it on disk. It is
 // a function rather than four lines inline because it has one judgement to
 // make: what to do when the probe that yields the login and the version
@@ -977,7 +1074,7 @@ func writeGrantScript(o Options, scripts []Script, checks []CapabilityCheck, si 
 		Login: si.Login, Instance: si.Name, Version: si.Version, Edition: si.Edition,
 		Checks: checks, Scripts: scripts, NoAccessDatabases: noAccess, Profile: o.Profile, Tool: o.Version,
 	})
-	if err := os.WriteFile(o.GrantScript, []byte(body), 0o600); err != nil {
+	if err := writeNewFile(o.GrantScript, []byte(body), o.Force); err != nil {
 		return err
 	}
 	if hasStatements {
@@ -1342,28 +1439,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		Encrypted:            o.Config.Encrypt,
 		CertificateValidated: o.Config.Encrypt && !o.Config.TrustCert,
 	}
-	m.Config = map[string]string{
-		"queries_dir":              o.Config.QueriesDir,
-		"encrypt":                  fmt.Sprint(o.Config.Encrypt),
-		"trust_server_certificate": fmt.Sprint(o.Config.TrustCert),
-		"output_dir":               o.Config.OutputDir,
-		"db_include":               o.Config.DBInclude,
-		"db_exclude":               o.Config.DBExclude,
-		"include_session_text":     fmt.Sprint(o.Flags[FlagIncludeSessionText]),
-		"object_definitions":       fmt.Sprint(o.Flags[FlagObjectDefinitions]),
-		"deadlock_graphs":          fmt.Sprint(o.Flags[FlagDeadlockGraphs]),
-		"default_trace":            fmt.Sprint(o.Flags[FlagDefaultTrace]),
-		"plan_cache_plans":         fmt.Sprint(o.Flags[FlagPlanCachePlans]),
-		"measure_page_density":     fmt.Sprint(o.Flags[FlagMeasurePageDensity]),
-
-		"query_store_detail":     fmt.Sprint(o.Flags[FlagQueryStoreDetail]),
-		"query_store_plan_stats": fmt.Sprint(o.Flags[FlagQueryStorePlanStats]),
-		"query_store_days":       fmt.Sprint(o.Config.QueryStoreDays),
-		"query_store_top":        fmt.Sprint(o.Config.QueryStoreTop),
-		// A setting that changed which databases were read and is absent from
-		// the record is the one that will be argued about later.
-		"query_store_db_include": o.Config.QueryStoreDBInclude,
-	}
+	m.Config = runConfig(o)
 	// The bounds as typed, beside the bounds as resolved further down. It is
 	// having the pair side by side that makes a timezone mistake visible after
 	// the run rather than never: "14:00" and "2026-07-26T12:00:00Z" together
@@ -1427,6 +1503,22 @@ func Run(ctx context.Context, o Options) (int, error) {
 			return c, werr
 		}
 		return c, cause
+	}
+
+	// stoppedOr is finishWith for the steps between the connection and the
+	// first collector, all of which wait on ctx. A ctrl-c there fails whichever
+	// of them is waiting with "context canceled", and following that error
+	// filed the operator's stop as exit 1, "the instance could not be reached",
+	// with no cancelled flag, in a manifest a scheduler reads as a network
+	// fault. It is recordUnitFailure's defect one step earlier, and the rule is
+	// the same: a dead context outranks the error, which describes the stopping
+	// and is dropped. Exit 2 is what settleRun gives a stop inside the loop.
+	stoppedOr := func(code int, err error) (int, error) {
+		if stopRequested(ctx, m) {
+			return finishWith("", 2, errors.New("stopped before the first collector: nothing was collected"))
+		}
+		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+		return finishWith("", code, err)
 	}
 
 	o.Debugf("probing the output directory %s for writability", o.Config.OutputDir)
@@ -1498,8 +1590,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		} else {
 			err = fmt.Errorf("cannot reach the instance: %w", err)
 		}
-		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finishWith("", 1, err)
+		return stoppedOr(1, err)
 	}
 	defer func() { conn.Close() }()
 
@@ -1509,8 +1600,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	m.Preflight = runPreflightWithDeadline(ctx, conn, o.Config)
 	if PreflightExitCode(m.Preflight, 0, true) == 1 {
 		err := errors.New("the instance did not answer the preflight; nothing was collected")
-		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finishWith("", 1, err)
+		return stoppedOr(1, err)
 	}
 	// Once, here: coverage, the plan's denied set and the manifest all read
 	// the profiled statuses from now on. PreflightExitCode above has already
@@ -1523,8 +1613,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	o.Debugf("asking the instance its name, version and UTC offset")
 	si, err := probeWithDeadline(ctx, conn, o.Config)
 	if err != nil {
-		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finishWith("", 1, err)
+		return stoppedOr(1, err)
 	}
 	m.Server = ServerBlock{Name: si.Name, Version: si.Version, Edition: si.Edition,
 		UTCOffsetMinutes: si.UTCOffsetMinutes, Auth: AuthLabel(o.Config)}
@@ -1572,8 +1661,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	o.Debugf("listing the databases")
 	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
 	if err != nil {
-		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
-		return finishWith("", 1, err)
+		return stoppedOr(1, err)
 	}
 	sel, err := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude, WideningPurposes(plan))
 	if err != nil {
@@ -1721,8 +1809,8 @@ func Run(ctx context.Context, o Options) (int, error) {
 			// the archive are still written below. A DBA who stopped after
 			// three minutes keeps what those three minutes collected, and the
 			// manifest's cancelled flag is what says the archive is partial.
-			// exit is left as it stands — 0 for the ordinary stop, still 2 if
-			// a lint error had already failed the run on its own.
+			// exit is left as it stands here; settleRun turns an ordinary stop
+			// into 2 once the loop is over.
 			break
 		}
 		exit = code
@@ -1766,6 +1854,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// run folder is being zipped.
 	obs.Phase("writing manifest")
 	o.Debugf("all units done; writing the manifest")
+	exit, discardPrevious := settleRun(exit, m.Run.Cancelled)
 	code, ferr := finish(runFolder, exit)
 	if ferr != nil {
 		return code, ferr
@@ -1780,10 +1869,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return 2, err
 	}
 	o.Debugf("archive written")
-	// Only now. The run this one replaced has been on disk the whole time, so
-	// a rerun that died anywhere above leaves it there rather than leaving the
-	// operator with neither run.
-	discardSuperseded(superseded)
+	// Only now, and only for a run that completed. The run this one replaced
+	// has been on disk the whole time, so a rerun that died anywhere above, was
+	// stopped, or lost a collector leaves it there rather than leaving the
+	// operator with a partial run in place of a complete one.
+	if discardPrevious {
+		discardSuperseded(superseded)
+	} else {
+		keepSuperseded(superseded, o.progress())
+	}
 	// Silenced for a caller that owns the screen, not redirected.
 	// `sql-auditor collect | tail -1` is how a script picks up the archive path,
 	// so on the command line these two lines must keep going to stdout exactly
@@ -1803,6 +1897,11 @@ func Run(ctx context.Context, o Options) (int, error) {
 		partial := ""
 		if m.PartialUnits > 0 {
 			partial = fmt.Sprintf(", %d partial", m.PartialUnits)
+		}
+		// Said on the line a script reads, because the exit code alone does
+		// not tell a stopped run from a failed collector.
+		if m.Run.Cancelled {
+			partial += ", cancelled"
 		}
 		fmt.Printf("%d result(s), %d skipped, %d error(s)%s\n%s\n",
 			len(m.Results), len(m.Skipped), len(m.Errors), partial, zipPath)

@@ -217,8 +217,9 @@ they differ: every printable character there belongs to the field being edited,
 so an instance named `QUALIF` and a password with a `q` in it have to stay
 typeable.
 
-Cancelling a collection with `ctrl-c` still writes its manifest and its archive,
-and the final screen says that what you are holding is partial.
+Cancelling a collection with `ctrl-c` abandons the collector in progress, whose
+output is lost, and still writes the manifest and the archive of everything
+collected before it; the final screen says that what you are holding is partial.
 
 ### What the wizard will not do
 
@@ -345,9 +346,18 @@ from before the wizard.
 - `check` in particular is meant to be run without a human present, since its
   whole output is a verdict something else can read.
 - `ctrl-c` and `SIGTERM` behave the same here as in the wizard: the collection
-  finishes what is in flight and still writes its manifest and its archive,
-  marked as cancelled. A second `ctrl-c` abandons the run instead, so a
-  collection that will not wind down can still be stopped.
+  abandons the collector in progress, whose output is lost, and still writes
+  the manifest and the archive of everything collected before it, marked as
+  cancelled. On the command line a stopped collection exits `2`, and its last
+  line but one ends with `cancelled`. A second `ctrl-c` abandons the run
+  instead, so a collection that will not wind down can still be stopped: the
+  files already written stay in the run folder, but there is no manifest and no
+  archive, and the `.lock` file left beside the folder has to be deleted before
+  the next collection of that server and day can start.
+- A run that did not complete, because it was stopped or a collector failed,
+  never deletes the earlier run of the same server and day that it replaces:
+  that run stays beside it, named `.superseded-HHMMSS`, and the collection says
+  where. Only a run that exits `0` removes it.
 
 An argument therefore wins over everything else: `sql-auditor collect` does the
 same work whatever terminal it finds itself attached to, and no invocation that
@@ -390,7 +400,7 @@ Exactly three cases.
 | `--output-dir DIR` | where to write results |
 | `--keep` | keep an existing same-day run folder, suffixing this run |
 | `--profile NAME` | collect only the collectors of a profile. The one profile is `space`. Refused beside `--all`. See [Collecting for one question](#collecting-for-one-question) |
-| `--grant-script FILE` | `check` only. Write the T-SQL that grants the permissions found missing, for the login the server reports, with the reason for each. Never executed. |
+| `--grant-script FILE` | `check` only. Write the T-SQL that grants the permissions found missing, for the login the server reports, with the reason for each. Never executed. Refuses an existing `FILE` unless `--force` is given. |
 
 ### Collecting more than the default
 
@@ -401,8 +411,8 @@ Exactly three cases.
 | `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
 | `--include-deadlock-graphs` | also collect the deadlock reports `system_health` still holds, one `.xdl` file each |
 | `--include-blocked-process-reports` | also collect the blocked process reports an Extended Events session captured, one `.xml` file each |
-| `--estimate-compression` | also estimate page-compression savings on the largest uncompressed objects. Off for cost, not for disclosure: it samples real data into tempdb and is slow on large tables |
-| `--measure-page-density` | also measure how full the pages of the 50 largest index partitions are, which says what a rebuild would give back. Off for cost, not for disclosure: `SAMPLED` reads 8 to 12 % of every large partition into the buffer pool, LOB pages included, and all of a small one |
+| `--estimate-compression` | also estimate page-compression savings on the 20 largest uncompressed objects, per database. Off for cost, not for disclosure: it samples real data into tempdb and is slow on large tables. Each database may take up to its 1800-second timeout, and nothing bounds the run as a whole |
+| `--measure-page-density` | also measure how full the pages of the 50 largest index partitions are, per database, which says what a rebuild would give back. Off for cost, not for disclosure: `SAMPLED` reads 8 to 12 % of every large partition into the buffer pool, LOB pages included, and all of a small one. Each database may take up to its 1800-second timeout, and nothing bounds the run as a whole: narrow it with `DB_INCLUDE` on an instance with many large databases |
 | `--query-store-detail` | also collect the full text and the execution plans of the heaviest Query Store queries, per database |
 | `--query-store-plan-stats` | also look for the last profiled plan of each query the option above extracted. Does nothing on its own |
 
@@ -657,11 +667,15 @@ what the collector does.
 | Code | Meaning |
 | --- | --- |
 | `0` | success, possibly degraded if a permission was refused |
-| `2` | partial failure, or a configuration the tool will not act on |
+| `2` | partial: a collector failed or the collection was stopped; or a configuration the tool will not act on |
 | `1` | fatal: the instance could not be reached, so nothing was collected |
 
 A refused permission exits `0`. It reduces what is collected, and the omission
 is recorded in the archive, but it is not a failure of the run.
+
+The wizard is the exception for a stop: an operator who stops the collection
+from the wizard has read the screen that calls the archive partial, and the
+wizard exits `0`.
 
 ## Supported versions
 

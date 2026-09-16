@@ -17,6 +17,52 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Fixed
+
+- A same-day rerun that was stopped, or that ended with a collector failing,
+  deleted the complete archive of the run it replaced and left a partial one in
+  its place. The earlier run is now deleted only after a run that exits `0`;
+  otherwise it stays beside the new one, and the collection says where.
+- A collection stopped with `ctrl-c` or `SIGTERM` on the command line exited
+  `0`, so a scheduler or a CI job that stopped it recorded a success. It exits
+  `2`, the code for a partial run, and its summary line says `cancelled`.
+- On `ctrl-c`, the command line printed `stopping: finishing what is in flight`
+  and the README said the same, but the collector running at that moment is
+  abandoned and its output lost. The message and the README now say so, and
+  the README says what a second `ctrl-c` leaves behind: the files written so
+  far, no manifest, no archive, and a `.lock` file to delete.
+- A collection stopped with `ctrl-c` while it was connecting, before its first
+  collector, exited `1`, the code for an instance that could not be reached,
+  and its manifest carried `context canceled` as an error with no `cancelled`
+  flag. It now exits `2`, the manifest says `cancelled` with no error, and the
+  command line says nothing was collected.
+- `check --grant-script FILE` replaced an existing `FILE` without a word, a
+  reviewed script or a mistyped path alike. It now refuses, before connecting,
+  unless `--force` is given, as `env init` and `queries export` already did.
+- The `config` block of `_run.json` did not record `estimate_compression` or
+  `blocked_process_reports`, so an archive taken with either option did not say
+  so. It now records every opt-in, on or off.
+- Saving the server and the login from the wizard rewrote `.env` in place, and
+  a write that failed after the truncation (a full disk, a quota) left it empty,
+  password and hand-written settings included. The original is now copied to
+  `.env.sql-auditor-backup` first and stays there if the rewrite fails; the
+  error names it. A backup left by an earlier failure is never replaced.
+- The README described `--measure-page-density` and `--estimate-compression`
+  as if they ran once for the instance. Both run in every collected database,
+  each with an 1800-second timeout, and nothing bounds the run as a whole; the
+  table now says so, as `docs/dba-guide.md` already did.
+- `20.databases/020.properties.sql` ran out of its 300 seconds on databases of
+  a few hundred GB and up, and a timeout returns none of its seven result sets:
+  the files, the space and the creation date were lost with the fragmentation
+  read that caused it. That read now measures the 100 largest partitions one at
+  a time and starts no new one after 150 seconds. The root object gains
+  `fragmentation_sample.eligible_partitions`, `.measured_partitions` and
+  `.budget_sec`, so a list cut short is not read as complete. The
+  `fragmentation` array keeps its shape and its 25 rows, now the most
+  fragmented of the partitions measured rather than of every partition.
+
 ## [0.23.0] - 2026-09-15
 
 A question about disk space can now be asked on its own: `--profile space` runs

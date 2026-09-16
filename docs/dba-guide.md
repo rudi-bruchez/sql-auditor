@@ -448,7 +448,7 @@ So read the two independently:
 | --- | --- |
 | `0` | usable, possibly degraded |
 | `1` | the instance did not answer, so nothing can be collected |
-| `2` | the configuration is unusable, or the run was partial: a `SQL_SERVER` that cannot be parsed, a `--queries-dir` that cannot be read, a query corpus that fails its lint, an output directory that cannot be written, or, for `collect`, a collector that failed |
+| `2` | the configuration is unusable, or the run was partial: a `SQL_SERVER` that cannot be parsed, a `--queries-dir` that cannot be read, a query corpus that fails its lint, an output directory that cannot be written, or, for `collect`, a collector that failed or a collection stopped with `ctrl-c` or `SIGTERM` |
 
 A mistyped address is `2`, not `1`. `HOST\` with no instance name, or a bare
 `::1,1433` missing its brackets, is refused before a socket is opened. Nothing
@@ -652,11 +652,12 @@ why the default was changed and why `MANIFEST.txt` now records whether it
 happened. Use `--keep`, or a different `OUTPUT_DIR`, when two instances
 legitimately share a name.
 
-One deliberate inconsistency belongs beside them: `--grant-script` overwrites
-its destination, where `env init` and `queries export` refuse and want
-`--force`. The grant script is this tool's deterministic output on a path the
-operator has just named, and `check --grant-script` is meant to be re-run until
-every line comes back `ok`; `env init` writes a file that will hold a password.
+`check --grant-script` refuses a file that is already there, as `env init` and
+`queries export` do, and says so before connecting. Until 0.23.0 it replaced
+the file: a rerun in the folder where the previous script had been reviewed and
+annotated lost that work, and a mistyped path replaced whatever it named. The
+script is still meant to be re-run until every line comes back `ok`; pass
+`--force` on those reruns, or give each one its own name.
 
 ### Where you leave it matters as much as where you send it
 
@@ -1021,8 +1022,13 @@ all result sets inside that single file, and all of them walk every object in
 the database.
 
 It runs once per database, so its 300 seconds is per database rather than for
-the run. A database with tens of thousands of objects, or a heavily fragmented
-one, can pass even that mark.
+the run. A database with tens of thousands of objects can pass even that mark.
+The fragmentation read, which was the part that did on databases of a few
+hundred GB, measures the 100 largest partitions one at a time and starts no new
+one after 150 seconds; `fragmentation_sample` in the archive says how many it
+measured out of how many were eligible. One call on a single very large
+partition can still run past the limit, and a collector that times out returns
+none of its seven result sets.
 
 **`70.schema/041.compression-savings.sql`** has the corpus's longest timeout at
 1800 seconds, which it shares with 70.schema/055.page-density.sql, and is the

@@ -1,7 +1,7 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis and 18, which are open.
+**Status:** implemented, except sections 10 bis, 18, 19, 20, 21 and 22, which are open.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1506,3 +1506,156 @@ report should say so in the same breath as it asks for the plan, which is a
 Note the floor is the same 13.0.5026 that section 15 was written against. The
 conclusion is the opposite one: there the gate was ours to remove because the
 data had another source, here it is Microsoft's and there is no second source.
+
+## Gaps recorded on 16 September 2026
+
+Both came out of building the private analysis that turns a `space` archive
+into a list of space actions. Neither is a defect in a collector: each is a
+question the corpus was never asked, found by an analysis that had to answer it.
+
+### 19. A heap's partitioning cannot be read from any archive
+
+slug: heap-partition-count
+
+Two of the space actions act on a heap: rebuilding it to reclaim forwarded
+records, and compressing it. Both are written as `ALTER TABLE ... REBUILD`,
+and both must know whether the heap is partitioned, because the statement
+without a `PARTITION` clause rebuilds every partition of the table in one
+operation. On a large partitioned heap that is the difference between a
+maintenance window and an outage.
+
+No file in a `space` archive answers it. `70.schema/070.index-columns.sql`
+excludes heaps, and correctly so: `index_id = 0` has no `sys.index_columns`
+rows to report, and the collector's own header says as much. `70.schema/050.heaps.sql`
+does project one row per heap partition, but only for the fifty largest heaps
+of the database, and within those only for the partitions its metadata
+pre-filter kept. So a single row for a heap means either that the heap has one
+partition or that the others did not make the cut, and nothing distinguishes
+the two. Deducing "not partitioned" from the row count is the inference that a
+review panel measured wrong in September 2026.
+
+The consequence is not a wrong answer but an empty one. The analysis refuses to
+decide, every heap goes to the list a human must examine, and the note proposes
+no heap action at all. That is the safe direction, and it costs the whole heap
+half of the analysis. The arithmetic that sizes a heap rebuild is exercised in
+its tests only through an archive shaped by hand, because no real archive can
+reach it.
+
+What is collectable, and where. A partition count per heap, in
+`050.heaps.sql`, as `(SELECT COUNT(*) FROM sys.partitions WHERE object_id =
+h.object_id AND index_id = 0)`. It reads metadata, so it is unaffected by the
+`SAMPLED` scan and by the fifty-heap cap, and it answers the question for the
+heaps the file already lists. One column closes the gap.
+
+Worth stating plainly, because it is what makes the column worth adding: the
+two errors are not symmetrical. Writing `PARTITION = n` on a heap that has one
+partition fails loudly and changes nothing. Omitting it on a heap that has
+forty rebuilds all forty in silence.
+
+### 20. Nothing says when a database was last restored
+
+slug: restore-date
+
+An analysis that calls an index unread has to say over what period it was not
+read. The window it can compute is the time since the instance started or since
+the database was created, whichever is shorter, because
+`sys.dm_db_index_usage_stats` is reset by a restart. A restore resets those
+counters just as surely, and no file in the archive carries the date of the
+last one: neither `20.databases/010.all-databases` nor `60.backup/010.history`
+has it, checked on a `space` archive during the third review panel.
+
+So the window is a ceiling rather than a measurement, and on a database
+restored last week it can be off by months. The analysis has no way to know,
+and says a period that is true of the instance and false of the database.
+
+What is collectable, and where. `msdb.dbo.restorehistory` carries
+`restore_date` per `destination_database_name`; the maximum per database is one
+row each, at instance scope, from a database the backup collector already
+reads.
+
+One caveat belongs in the same breath. That history is prunable, and a
+maintenance job that trims `msdb` removes it, so a missing row does not prove
+no restore happened. The value of the column is the date when it is there, and
+an analysis that finds none is back where it is today rather than worse off.
+
+### 21. No file row carries its filegroup, so an object's own filegroup cannot be sized
+
+slug: file-filegroup
+
+The space analysis simulates, per database, whether a compression or a rebuild
+has room to run. Its reserve for data is the sum of the database's data files.
+SQL Server does not allocate that way: it allocates per filegroup, and an
+object sitting in a filegroup capped by `MAXSIZE` borrows nothing from a
+neighbouring filegroup that can still grow.
+
+The archive cannot make that distinction, and the reason is one missing column
+rather than a missing file. `70.schema/070.index-columns.sql` does project the
+data space an index sits on, as `ds.name` and `ds.type_desc`;
+`70.schema/040.compression.sql`, `70.schema/041.compression-savings.sql` and
+`70.schema/050.heaps.sql` project none. But no file row anywhere carries its
+filegroup: the file table of `20.databases/020.properties.sql` projects `name`,
+`physical_name`, `size_mb`, the maximum size and the growth, and neither
+`data_space_id` nor a filegroup name. So even where an object's filegroup is
+known by name, nothing maps that name to the files that back it, and therefore
+to what it can still grow. Sizing a filegroup is impossible from any archive.
+
+Measured on 16 September 2026, on a synthetic database built for the space
+analysis acceptance run: `PRIMARY` unbounded, plus a second filegroup capped by
+`MAXSIZE` at 480 MB holding a table that needed about 267 MB to compress
+against 72 MB of free space of its own. The offline simulation answered
+sufficient, having pooled 246.7 MB of free space in `PRIMARY` with the 72 MB of
+the capped filegroup. The script generated from that same simulation refused
+the operation at run time, because the control at the head of each batch reads
+the object's own files through `sys.partitions` and `sys.allocation_units`. The
+note and the script disagreed about the same operation.
+
+The direction of the error is worth stating, because it decides how urgent the
+column is. The offline answer is optimistic and the run-time control is
+correct, so nothing is destroyed and nothing runs that should not: the cost is
+a maintenance plan that a human accepted as workable and that stops partway
+through, on the step the plan was written for.
+
+What is collectable, and where. `FILEGROUP_NAME(data_space_id)` on each row of
+the file table in `020.properties`, and the object's filegroup in `040`, `041`
+and `050`, reached from `sys.indexes` or `sys.partitions` through
+`sys.data_spaces`. Neither half is worth much alone: sizing a filegroup needs
+both the filegroup an object lives in and the files that back that filegroup.
+
+### 22. The list that publishes a bound is itself bounded
+
+slug: not-estimated-cap
+
+`70.schema/041.compression-savings.sql` estimates page-compression savings on
+the largest uncompressed objects, and deliberately bounds that work: at least
+100 MB reserved, and the twenty largest. It then publishes `not_estimated`, the
+list of what those bounds excluded, and its own header says why, at lines 30 to
+32: a bounded measurement that does not publish its bound reads as a complete
+one, and "we estimated the savings" would quietly mean "we estimated some".
+
+That list is capped at `SELECT TOP (100)`, line 180, and nothing reports how
+many rows the cap dropped. The principle the header states is defeated one
+level down: the publication of the bound is itself bounded, silently.
+
+It matters now because an analysis consumes it. The private space analysis
+publishes a `plafonds` field per collector, whose purpose is to let a note say
+how much of the ground a measurement actually covered, and for `041` it derives
+the eligible population from `not_estimated`. On a database with more than
+about 120 large uncompressed objects, twenty estimated plus one hundred listed,
+the eligible count silently understates the ground. The note then reports
+better coverage than it had.
+
+The direction of the error is the uncomfortable one. It does not destroy
+anything and it does not propose a wrong action: it understates an uncertainty
+that the field exists precisely to state. A reader who checks coverage before
+trusting a recommendation is given an optimistic number by the very mechanism
+built to keep them honest.
+
+Found by reading on 16 September 2026, during the review of the space analysis,
+and not measured against a database large enough to exceed the cap. The cap
+itself is read from the collector.
+
+What is collectable, and where. A count beside the truncated list: the number
+of objects the bounds excluded, as a scalar on the root object of `041`,
+independent of how many of them the array carries. The list can stay capped,
+which is right, as long as the number it stands for is exact. One scalar closes
+it.

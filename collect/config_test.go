@@ -2,6 +2,7 @@ package collect
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -505,5 +506,49 @@ func TestServerProvenanceNamesWhereTheValueCameFrom(t *testing.T) {
 				t.Errorf("ServerFrom = %q, want it to name %q", cfg.ServerFrom, tc.wantProvenance)
 			}
 		})
+	}
+}
+
+// Measured on 0.23.0 under ulimit -f 0: a 115-byte .env holding the password
+// was 0 bytes after the wizard saved the server and the login.
+func TestUpdateDotEnvKeepsTheOriginalWhenTheRewriteFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	original := "SQL_SERVER=old\nSQL_PASSWORD=hunter2\nOUTPUT_DIR=D:\\\\audits\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failing := func(io.Writer, string) (int, error) { return 0, errors.New("no space left on device") }
+	defer func(w func(io.Writer, string) (int, error)) { writeDotEnvContent = w }(writeDotEnvContent)
+	writeDotEnvContent = failing
+
+	err := UpdateDotEnv(path, map[string]string{"SQL_SERVER": "new"})
+	backup := path + ".sql-auditor-backup"
+	if err == nil || !strings.Contains(err.Error(), backup) {
+		t.Fatalf("err = %v, want the write error naming %s", err, backup)
+	}
+	if b, rerr := os.ReadFile(backup); rerr != nil || string(b) != original {
+		t.Fatalf("backup = %q, %v; want the original content", b, rerr)
+	}
+
+	// A second attempt must not replace the only good copy.
+	writeDotEnvContent = io.WriteString
+	if err := UpdateDotEnv(path, map[string]string{"SQL_SERVER": "new"}); err == nil || !strings.Contains(err.Error(), "earlier save") {
+		t.Fatalf("second save with a backup present = %v, want a refusal", err)
+	}
+	if b, _ := os.ReadFile(backup); string(b) != original {
+		t.Errorf("the backup was changed by the second attempt: %q", b)
+	}
+}
+
+func TestUpdateDotEnvRemovesItsBackupAfterASuccessfulSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("SQL_SERVER=old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateDotEnv(path, map[string]string{"SQL_SERVER": "new"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + ".sql-auditor-backup"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("backup still present after a successful save: %v", err)
 	}
 }
