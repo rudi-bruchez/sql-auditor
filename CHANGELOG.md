@@ -19,6 +19,21 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Added
+
+- Every data file row of `20.databases/020.properties` now carries the
+  filegroup it backs, and the object rows of `70.schema/040.compression`,
+  `70.schema/041.compression-savings` and `70.schema/050.heaps` carry the
+  filegroup the object sits on. Neither half was worth much alone: SQL Server
+  allocates per filegroup, so an object in a filegroup capped by `MAXSIZE`
+  borrows nothing from a neighbour that can still grow, and a space simulation
+  that pooled every data file answered "enough room" for operations the engine
+  then refused at run time. A log file's filegroup is NULL, which is the fact
+  and not a gap. Where a row aggregates several partitions, `filegroup` is the
+  name only when there is exactly one and `filegroup_count` says so; the rows
+  that are one partition carry the name outright. This closes gap 21 of
+  `docs/collection-gaps-spec.md`.
+
 ### Fixed
 
 - A same-day rerun that was stopped, or that ended with a collector failing,

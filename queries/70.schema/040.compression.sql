@@ -91,23 +91,54 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 /* Ordered by size, because that is the only order in which this list is
    actionable: the candidates are the big ones. */
+/* THE FILEGROUP IS READ THROUGH THE ALLOCATION UNITS, not through
+   sys.indexes. FILEGROUP_NAME(i.data_space_id) is the obvious route and it is
+   wrong twice over: on a partitioned index data_space_id is a partition scheme
+   id, so the name comes back NULL, and the id itself overflows the smallint
+   FILEGROUP_NAME takes. Measured on SQL Server 2025 against a table on a two
+   filegroup scheme: "Arithmetic overflow error for data type smallint, value =
+   65601", which in this file would have cost every result set of the batch and
+   not just this one.
+
+   A row here aggregates every partition of an index, so the answer can be
+   several filegroups. filegroup names the one when there is exactly one, and
+   is NULL otherwise; filegroup_count says which case it is. A consumer sizing
+   the room an operation has must refuse to conclude on a count above one
+   rather than pick a filegroup, because a partitioned object rebuilds
+   partition by partition and each partition answers to its own. */
 SELECT TOP (200)
-       SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
-       ISNULL(i.name, '(heap)')                                   AS [index_name],
-       p.index_id                                                 AS [index_id],
-       i.type_desc                                                AS [index_type],
-       COUNT(*)                                                   AS [storage_units],
-       SUM(p.rows)                                                AS [rows],
-       CAST(SUM(ps.reserved_page_count) * 8.0 / 1024 AS DECIMAL(18,1)) AS [reserved_mb]
-FROM       sys.partitions AS p
-JOIN       sys.tables     AS t  ON t.object_id = p.object_id AND t.is_ms_shipped = 0
-LEFT JOIN  sys.indexes    AS i  ON i.object_id = p.object_id AND i.index_id = p.index_id
-LEFT JOIN  sys.dm_db_partition_stats AS ps
-        ON ps.object_id = p.object_id AND ps.index_id = p.index_id
-       AND ps.partition_number = p.partition_number
-WHERE p.data_compression = 0
-GROUP BY t.schema_id, t.name, i.name, p.index_id, i.type_desc
-ORDER BY SUM(ps.reserved_page_count) DESC
+       u.[table], u.[index_name], u.[index_id], u.[index_type],
+       u.[storage_units], u.[rows], u.[reserved_mb],
+       CASE WHEN fg.[count] = 1 THEN fg.[one] END                 AS [filegroup],
+       fg.[count]                                                 AS [filegroup_count]
+FROM (
+    SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                AS [table],
+           ISNULL(i.name, '(heap)')                               AS [index_name],
+           p.index_id                                             AS [index_id],
+           i.type_desc                                            AS [index_type],
+           COUNT(*)                                               AS [storage_units],
+           SUM(p.rows)                                            AS [rows],
+           CAST(SUM(ps.reserved_page_count) * 8.0 / 1024 AS DECIMAL(18,1)) AS [reserved_mb],
+           SUM(ps.reserved_page_count)                            AS [reserved_pages],
+           t.object_id                                            AS [object_id]
+    FROM       sys.partitions AS p
+    JOIN       sys.tables     AS t  ON t.object_id = p.object_id AND t.is_ms_shipped = 0
+    LEFT JOIN  sys.indexes    AS i  ON i.object_id = p.object_id AND i.index_id = p.index_id
+    LEFT JOIN  sys.dm_db_partition_stats AS ps
+            ON ps.object_id = p.object_id AND ps.index_id = p.index_id
+           AND ps.partition_number = p.partition_number
+    WHERE p.data_compression = 0
+    GROUP BY t.schema_id, t.name, t.object_id, i.name, p.index_id, i.type_desc) AS u
+OUTER APPLY (
+    SELECT COUNT(*) AS [count], MIN(d.nom) AS [one]
+    FROM (SELECT DISTINCT ds.name AS nom
+          FROM sys.partitions AS pp
+          JOIN sys.allocation_units AS au
+            ON (au.type IN (1,3) AND au.container_id = pp.partition_id)
+            OR (au.type = 2        AND au.container_id = pp.hobt_id)
+          JOIN sys.data_spaces AS ds ON ds.data_space_id = au.data_space_id
+          WHERE pp.object_id = u.[object_id] AND pp.index_id = u.[index_id]) AS d) AS fg
+ORDER BY u.[reserved_pages] DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* A table whose partitions disagree. Empty is the expected result; a row here

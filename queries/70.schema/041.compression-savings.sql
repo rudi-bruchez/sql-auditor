@@ -167,7 +167,22 @@ SELECT sv.schema_name + '.' + sv.object_name                      AS [table],
        CAST(100.0 - (100.0 * sv.size_requested_kb)
             / NULLIF(sv.size_current_kb, 0) AS decimal(5,2))      AS [saved_pct],
        CAST(sv.sample_current_kb   / 1024.0 AS decimal(18,1))     AS [sample.current_mb],
-       CAST(sv.sample_requested_kb / 1024.0 AS decimal(18,1))     AS [sample.estimated_mb]
+       CAST(sv.sample_requested_kb / 1024.0 AS decimal(18,1))     AS [sample.estimated_mb],
+       -- The filegroup this PARTITION sits on, which is the one that has to
+       -- hold the rebuild. A row here is one partition, so the answer is a
+       -- single name and needs no count, unlike the aggregated rows of 040.
+       -- Read through the allocation units rather than sys.indexes:
+       -- data_space_id on a partitioned index is a partition scheme id, which
+       -- both names no filegroup and overflows the smallint FILEGROUP_NAME
+       -- takes.
+       (SELECT TOP (1) ds.name
+          FROM sys.partitions      AS pp
+          JOIN sys.allocation_units AS au ON au.container_id = pp.partition_id
+          JOIN sys.data_spaces     AS ds ON ds.data_space_id = au.data_space_id
+         WHERE pp.object_id = OBJECT_ID(QUOTENAME(sv.schema_name) + '.' + QUOTENAME(sv.object_name))
+           AND pp.index_id  = sv.index_id
+           AND pp.partition_number = sv.partition_number
+           AND au.type = 1)                                       AS [filegroup]
 FROM       #savings AS sv
 LEFT JOIN  sys.indexes AS i
         ON i.object_id = OBJECT_ID(QUOTENAME(sv.schema_name) + '.' + QUOTENAME(sv.object_name))

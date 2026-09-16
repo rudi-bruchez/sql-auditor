@@ -95,6 +95,7 @@ DECLARE @files TABLE (
     [file_id]        int,
     [name]           sysname,
     [type]           nvarchar(60),
+    [filegroup]      sysname NULL,
     [physical_name]  nvarchar(260),
     [state]          nvarchar(60),
     [size_mb]        decimal(14,1) NULL,
@@ -226,6 +227,20 @@ BEGIN TRY
            df.file_id,
            df.name,
            df.type_desc,
+           -- The filegroup a data file backs. NULL on a log file, which
+           -- belongs to no filegroup, and that NULL is the fact rather than a
+           -- gap. Without this column an object's filegroup, where it is
+           -- known, maps to no files and therefore to no room to grow: a
+           -- filegroup capped by MAXSIZE borrows nothing from a neighbour
+           -- that can still grow, and an offline simulation that pools every
+           -- data file answers "enough room" for an operation the engine
+           -- refuses.
+           --
+           -- FILEGROUP_NAME takes a smallint. data_space_id on a FILE is a
+           -- filegroup id and stays small; the overflow that bites elsewhere
+           -- is on sys.indexes, where a partitioned index carries a partition
+           -- scheme id above 32767.
+           FILEGROUP_NAME(df.data_space_id),
            df.physical_name,
            df.state_desc,
            CAST(CAST(df.size AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)),
@@ -432,7 +447,7 @@ SELECT @last_full         AS last_full,
        @last_log          AS last_log
 OPTION (RECOMPILE, MAXDOP 1);
 
-SELECT f.[name], f.[type], f.[physical_name], f.[state], f.[size_mb],
+SELECT f.[name], f.[type], f.[filegroup], f.[physical_name], f.[state], f.[size_mb],
        f.[used_mb], f.[max_mb], f.[percent_growth], f.[is_sparse], f.[growth]
 FROM @files AS f
 ORDER BY f.[file_type], f.[file_id]

@@ -1,7 +1,7 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis, 18, 19, 20, 21 and 22, which are open.
+**Status:** implemented, except sections 10 bis, 18, 19, 20 and 22, which are open.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1578,7 +1578,7 @@ maintenance job that trims `msdb` removes it, so a missing row does not prove
 no restore happened. The value of the column is the date when it is there, and
 an analysis that finds none is back where it is today rather than worse off.
 
-### 21. No file row carries its filegroup, so an object's own filegroup cannot be sized
+### 21. No file row carries its filegroup, so an object's own filegroup cannot be sized — closed
 
 slug: file-filegroup
 
@@ -1620,6 +1620,32 @@ the file table in `020.properties`, and the object's filegroup in `040`, `041`
 and `050`, reached from `sys.indexes` or `sys.partitions` through
 `sys.data_spaces`. Neither half is worth much alone: sizing a filegroup needs
 both the filegroup an object lives in and the files that back that filegroup.
+
+Both halves were collected on 16 September 2026, and one sentence above is
+wrong in a way that matters. The object's filegroup must NOT be reached from
+`sys.indexes`. `FILEGROUP_NAME(i.data_space_id)` fails twice on a partitioned
+object: `data_space_id` is then a partition scheme id, which names no
+filegroup, and the id itself overflows the `smallint` `FILEGROUP_NAME` takes.
+Measured against a table on a two-filegroup scheme: `Arithmetic overflow error
+for data type smallint, value = 65601`. In `020.properties` that would have
+cost all seven result sets of the batch, since a statement that fails mid-batch
+takes the rest of the batch's output with it. The route that answers correctly
+is `sys.partitions` to `sys.allocation_units` to `sys.data_spaces`, which is
+also the route the run-time control uses, and it is what the four collectors
+now do.
+
+The shape of the answer follows the shape of the row. A row that is one
+partition carries a single `filegroup` name: that is `041`'s estimates and
+`050`'s heaps. A row that aggregates every partition of an index carries
+`filegroup`, the name when there is exactly one, and `filegroup_count`, which
+says whether that name can be trusted: that is `040`'s largest uncompressed
+list. A consumer sizing the room an operation has must refuse to conclude on a
+count above one rather than pick a filegroup, because a partitioned object
+rebuilds partition by partition and each partition answers to its own.
+
+What is deliberately not collected: the filegroup of `041`'s `not_estimated`
+list, whose job is to say what was left unmeasured rather than to size
+anything.
 
 ### 22. The list that publishes a bound is itself bounded
 
