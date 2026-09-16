@@ -1,7 +1,7 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis, 18, 19, 20 and 21, which are open.
+**Status:** implemented, except sections 10 bis, 18, 19, 20, 21 and 22, which are open.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1620,3 +1620,42 @@ the file table in `020.properties`, and the object's filegroup in `040`, `041`
 and `050`, reached from `sys.indexes` or `sys.partitions` through
 `sys.data_spaces`. Neither half is worth much alone: sizing a filegroup needs
 both the filegroup an object lives in and the files that back that filegroup.
+
+### 22. The list that publishes a bound is itself bounded
+
+slug: not-estimated-cap
+
+`70.schema/041.compression-savings.sql` estimates page-compression savings on
+the largest uncompressed objects, and deliberately bounds that work: at least
+100 MB reserved, and the twenty largest. It then publishes `not_estimated`, the
+list of what those bounds excluded, and its own header says why, at lines 30 to
+32: a bounded measurement that does not publish its bound reads as a complete
+one, and "we estimated the savings" would quietly mean "we estimated some".
+
+That list is capped at `SELECT TOP (100)`, line 180, and nothing reports how
+many rows the cap dropped. The principle the header states is defeated one
+level down: the publication of the bound is itself bounded, silently.
+
+It matters now because an analysis consumes it. The private space analysis
+publishes a `plafonds` field per collector, whose purpose is to let a note say
+how much of the ground a measurement actually covered, and for `041` it derives
+the eligible population from `not_estimated`. On a database with more than
+about 120 large uncompressed objects, twenty estimated plus one hundred listed,
+the eligible count silently understates the ground. The note then reports
+better coverage than it had.
+
+The direction of the error is the uncomfortable one. It does not destroy
+anything and it does not propose a wrong action: it understates an uncertainty
+that the field exists precisely to state. A reader who checks coverage before
+trusting a recommendation is given an optimistic number by the very mechanism
+built to keep them honest.
+
+Found by reading on 16 September 2026, during the review of the space analysis,
+and not measured against a database large enough to exceed the cap. The cap
+itself is read from the collector.
+
+What is collectable, and where. A count beside the truncated list: the number
+of objects the bounds excluded, as a scalar on the root object of `041`,
+independent of how many of them the array carries. The list can stay capped,
+which is right, as long as the number it stands for is exact. One scalar closes
+it.
