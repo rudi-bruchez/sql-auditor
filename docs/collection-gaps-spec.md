@@ -1,7 +1,7 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis, 18, 19 and 20, which are open.
+**Status:** implemented, except sections 10 bis, 18, 19, 20 and 21, which are open.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1577,3 +1577,46 @@ One caveat belongs in the same breath. That history is prunable, and a
 maintenance job that trims `msdb` removes it, so a missing row does not prove
 no restore happened. The value of the column is the date when it is there, and
 an analysis that finds none is back where it is today rather than worse off.
+
+### 21. No file row carries its filegroup, so an object's own filegroup cannot be sized
+
+slug: file-filegroup
+
+The space analysis simulates, per database, whether a compression or a rebuild
+has room to run. Its reserve for data is the sum of the database's data files.
+SQL Server does not allocate that way: it allocates per filegroup, and an
+object sitting in a filegroup capped by `MAXSIZE` borrows nothing from a
+neighbouring filegroup that can still grow.
+
+The archive cannot make that distinction, and the reason is one missing column
+rather than a missing file. `70.schema/070.index-columns.sql` does project the
+data space an index sits on, as `ds.name` and `ds.type_desc`;
+`70.schema/040.compression.sql`, `70.schema/041.compression-savings.sql` and
+`70.schema/050.heaps.sql` project none. But no file row anywhere carries its
+filegroup: the file table of `20.databases/020.properties.sql` projects `name`,
+`physical_name`, `size_mb`, the maximum size and the growth, and neither
+`data_space_id` nor a filegroup name. So even where an object's filegroup is
+known by name, nothing maps that name to the files that back it, and therefore
+to what it can still grow. Sizing a filegroup is impossible from any archive.
+
+Measured on 16 September 2026, on a synthetic database built for the space
+analysis acceptance run: `PRIMARY` unbounded, plus a second filegroup capped by
+`MAXSIZE` at 480 MB holding a table that needed about 267 MB to compress
+against 72 MB of free space of its own. The offline simulation answered
+sufficient, having pooled 246.7 MB of free space in `PRIMARY` with the 72 MB of
+the capped filegroup. The script generated from that same simulation refused
+the operation at run time, because the control at the head of each batch reads
+the object's own files through `sys.partitions` and `sys.allocation_units`. The
+note and the script disagreed about the same operation.
+
+The direction of the error is worth stating, because it decides how urgent the
+column is. The offline answer is optimistic and the run-time control is
+correct, so nothing is destroyed and nothing runs that should not: the cost is
+a maintenance plan that a human accepted as workable and that stops partway
+through, on the step the plan was written for.
+
+What is collectable, and where. `FILEGROUP_NAME(data_space_id)` on each row of
+the file table in `020.properties`, and the object's filegroup in `040`, `041`
+and `050`, reached from `sys.indexes` or `sys.partitions` through
+`sys.data_spaces`. Neither half is worth much alone: sizing a filegroup needs
+both the filegroup an object lives in and the files that back that filegroup.
