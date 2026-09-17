@@ -17,7 +17,19 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.24.0] - 2026-09-17
+
+Nine corrections, of which three change what the tool does rather than what it
+says, and those three are why the minor version moves. A stopped or failed
+rerun no longer deletes the complete archive it was replacing. A collection
+stopped with `ctrl-c` exits `2` instead of `0`, so a scheduler that recorded a
+success now records a partial run. And `check --grant-script` refuses to
+overwrite an existing file without `--force`, as `env init` and
+`queries export` already did.
+
+The rest close ways the tool could mislead in silence: a `.env` that could be
+left empty by a failed save, opt-ins missing from the run's own record of
+itself, and three messages that described behaviour the code did not have.
 
 ### Fixed
 
