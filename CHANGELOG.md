@@ -17,6 +17,74 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Added
+
+- Every data file row of `20.databases/020.properties` now carries the
+  filegroup it backs, and the object rows of `70.schema/040.compression`,
+  `70.schema/041.compression-savings` and `70.schema/050.heaps` carry the
+  filegroup the object sits on. Neither half was worth much alone: SQL Server
+  allocates per filegroup, so an object in a filegroup capped by `MAXSIZE`
+  borrows nothing from a neighbour that can still grow, and a space simulation
+  that pooled every data file answered "enough room" for operations the engine
+  then refused at run time. A log file's filegroup is NULL, which is the fact
+  and not a gap. Where a row aggregates several partitions, `filegroup` is the
+  name only when there is exactly one and `filegroup_count` says so; the rows
+  that are one partition carry the name outright. This closes gap 21 of
+  `docs/collection-gaps-spec.md`.
+- `70.schema/050.heaps` now carries `partition_count` per heap. The list is the
+  fifty largest heaps and, within those, only the partitions that passed its
+  page-count filter, so a single row used to mean either a heap with one
+  partition or one whose siblings did not make the cut, and nothing told them
+  apart. It decides whether a rebuild may be written without a `PARTITION`
+  clause, where the two mistakes are not symmetrical: naming a partition on a
+  heap that has one fails loudly and changes nothing, omitting it on a heap
+  that has forty rebuilds all forty in silence. This closes gap 19.
+- `60.backup/020.restore-history` gains a `per_database` result set, one row per
+  destination database with the last and first restore recorded and how many
+  there are, and joins the `space` profile. A restore resets
+  `sys.dm_db_index_usage_stats` exactly as a restart does, so calling an index
+  unread means naming the period it was not read over, and a `space` archive
+  carried nothing to date that period. The collector existed but belonged to no
+  profile, and its only listing is the 200 most recent restores of the whole
+  instance, which on an instance that restores nightly drops the last restore of
+  a quiet database. The new result set is bounded by the number of databases
+  instead. A missing row still proves nothing, since `msdb` history is prunable.
+  This closes gap 20, and takes the space profile from 21 collectors to 22.
+- The root of `70.schema/041.compression-savings` now carries
+  `not_estimated_objects`, the exact number of uncompressed objects its bounds
+  excluded. The file publishes that exclusion as a list so that "we estimated
+  the savings" cannot quietly mean "we estimated some", but the list itself
+  stopped at a hundred rows and said nothing about stopping. A consumer that
+  derived the eligible population from the array understated it on any database
+  with more than about a hundred and twenty large uncompressed objects, and so
+  reported better coverage than it had. The list stays capped, which is right;
+  the number it stands for is now exact. This closes gap 22.
+- `80.workload/060.spills.sql`, a new collector gated at build 13.0.5026, names
+  the statements that spilled to `tempdb` with the pages they spilled and the
+  memory they were granted, used and ideally wanted. An audit that names a slow
+  procedure is expected to say where its time went, and a hash aggregate
+  spilling twice for ten seconds each was invisible to every archive: the
+  diagnosis needed a post-execution plan the client had to be asked for. It
+  reads no statement text, taking the database and the object from
+  `sys.dm_exec_plan_attributes` and resolving the object name only for a
+  compiled module. Below the floor the columns do not exist and there is still
+  no path to a spill except a plan, which is a fact about the build rather than
+  a gap in this corpus. This closes gap 18 above that floor, and takes the
+  corpus from 84 collectors to 85.
+- The root of `70.schema/020.index-usage` now carries
+  `missing_suggestions_instance` beside the database's own count. The engine
+  gathers missing-index suggestions for at most 600 groups across the whole
+  instance and then stops, so a database whose suggestions were crowded out by a
+  busy neighbour came back with an empty list, a count of zero, every collected
+  flag at 1 and no error: indistinguishable from a database with nothing to
+  suggest. Measured on SQL Server 2025, two databases driven with three hundred
+  query shapes each recorded 138 and zero while the instance stood at exactly
+  600. The collector reports the number and applies no threshold, because the
+  documented limit belongs to the builds it has been checked against and a
+  constant in the corpus would need a corpus change the day it moves.
+
 ## [0.24.0] - 2026-09-17
 
 Nine corrections, of which three change what the tool does rather than what it

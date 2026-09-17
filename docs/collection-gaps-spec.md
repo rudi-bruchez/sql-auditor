@@ -1,7 +1,10 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except sections 10 bis, 18, 19, 20, 21 and 22, which are open.
+**Status:** implemented. Section 10 bis is superseded by
+`missing-index-suggestions-spec.md` and its opening claim is corrected in place.
+Section 18 is closed for instances at or above its build floor, and unreachable
+below it.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1160,9 +1163,29 @@ when someone reads a quiet afternoon as a quiet server.
 
 ---
 
-## 10 bis. One gap the review named that this document does not close
+## 10 bis. One gap the review named that this document did not close, and one sentence it got wrong
 
 slug: review-unclosed-gap
+
+**Corrected on 17 September 2026.** The paragraph below opened on "the
+missing-index DMVs ... are absent from the corpus and from this specification",
+and that was false when it was written. `20.databases/020.properties.sql` has
+read all three since 8 August 2026 as a top-25 triage list, and
+`70.schema/020.index-usage.sql` since 10 August 2026 in full, both in the
+`space` profile, while this section was written on 4 September. The original
+sentence is kept below, struck through in meaning if not in markup, because a
+document that silently repairs its own claims teaches nobody anything: writing
+the absence of a thing is an assertion, and it is the most expensive kind.
+
+What remained genuinely open was never the collection. It is what a report may
+do with suggestions that are not measurements, and that contract now has its own
+document, [missing-index-suggestions-spec.md](missing-index-suggestions-spec.md),
+reviewed by a panel of five. That review also found what the corpus really
+cannot say here, which is not a column but a bound: the 600-group limit is
+per INSTANCE, so a database whose suggestions were suppressed by a neighbour's
+saturation is today indistinguishable from a database with nothing to suggest.
+
+The original paragraph follows, unedited.
 
 **The missing-index DMVs.** `sys.dm_db_missing_index_group_stats` and its
 siblings are absent from the corpus and from this specification, and a reviewer
@@ -1180,6 +1203,9 @@ its own section rather than a line here.
 
 The honest position: it is a real gap, it is deliberate, and it is the next one
 to write.
+
+(End of the original paragraph. The design question it names is the right one;
+the premise it rests on was not.)
 
 ## 11. Two things the review found in the repository — both now fixed
 
@@ -1473,7 +1499,7 @@ second reason: the two instances that raised this section run 13.0.4451 and
 13.0.4457, so unlike section 15 this gate does not exclude them — the collector
 would have answered the question that was asked.
 
-### 18. A spill is invisible to the archive, and the floor for seeing one is 13.0.5026
+### 18. A spill is invisible to the archive, and the floor for seeing one is 13.0.5026 — closed above the floor
 
 An audit that names a slow procedure is expected to say where its time went. On
 one instance the answer turned out to be a hash aggregate spilling to `tempdb`,
@@ -1507,13 +1533,37 @@ Note the floor is the same 13.0.5026 that section 15 was written against. The
 conclusion is the opposite one: there the gate was ours to remove because the
 data had another source, here it is Microsoft's and there is no second source.
 
+Collected on 16 September 2026 as `80.workload/060.spills.sql`, gated at
+13.0.5026, with the spills, the three grant totals and the two ratios they
+make. Three things were learned building it, and none of them by reading.
+
+The corpus guard refused the first draft, and it was right. That draft reached
+the database and the object through `sys.dm_exec_sql_text`, projecting neither
+its text nor anything derived from it, and the rule is that reading the text is
+the disclosure. `sys.dm_exec_plan_attributes` answers with no text at all, and
+the object name is resolved only when the cached plan says `objtype = 'Proc'` —
+for an ad hoc plan that attribute holds a hash of the statement rather than an
+object id, and resolving it would eventually name an unrelated object that
+happens to carry the same number.
+
+The lint also refused `[grant.used_mb]` as an alias, since it strips comments
+and blanks string literals before it looks but a bracketed identifier is
+neither. The prefix is `memory_grant`.
+
+And a caution the section did not have: a low ratio is not a spill. Four
+statements capped by `MAX_GRANT_PERCENT` ran on SQL Server 2025 with between
+1.6 and 4.9 percent of their ideal grant and spilled nothing at all. The spill
+columns are the finding; the ratios only say which kind of conversation it is.
+Verified against a genuinely spilling statement in the cache, 24 pages, granted
+27.8 MB of an identical ideal and using 53.4 percent of it.
+
 ## Gaps recorded on 16 September 2026
 
 Both came out of building the private analysis that turns a `space` archive
 into a list of space actions. Neither is a defect in a collector: each is a
 question the corpus was never asked, found by an analysis that had to answer it.
 
-### 19. A heap's partitioning cannot be read from any archive
+### 19. A heap's partitioning cannot be read from any archive — closed
 
 slug: heap-partition-count
 
@@ -1552,7 +1602,13 @@ two errors are not symmetrical. Writing `PARTITION = n` on a heap that has one
 partition fails loudly and changes nothing. Omitting it on a heap that has
 forty rebuilds all forty in silence.
 
-### 20. Nothing says when a database was last restored
+Added as `partition_count` on 16 September 2026, exactly as written above.
+Measured against SQL Server 2025 on a heap spanning a two-filegroup partition
+scheme: the collector lists one of its two partitions, the one that passed the
+page-count filter, and the row says `partition_count` 2. That is the ambiguity
+this gap describes, seen and resolved on the same row.
+
+### 20. Nothing says when a database was last restored — closed
 
 slug: restore-date
 
@@ -1578,7 +1634,23 @@ maintenance job that trims `msdb` removes it, so a missing row does not prove
 no restore happened. The value of the column is the date when it is there, and
 an analysis that finds none is back where it is today rather than worse off.
 
-### 21. No file row carries its filegroup, so an object's own filegroup cannot be sized
+Closed on 16 September 2026, and the gap was two gaps rather than one.
+`60.backup/020.restore-history.sql` already existed and already read
+`msdb.dbo.restorehistory`; what was missing was that it belonged to no profile,
+so no `space` archive carried it, and that its only listing is the 200 most
+recent restores of the whole instance. On an instance that restores nightly
+that cap drops the last restore of a quiet database, which is exactly the
+database whose usage counters an analysis is trying to date. A `per_database`
+result set now gives one row per destination with the last and first restore
+recorded and how many there are, bounded by the number of databases rather than
+by a cap, and the collector carries `@profiles: space` because
+`70.schema/020.index-usage` does.
+
+Measured against SQL Server 2025 on an instance carrying five restores across
+two databases, four of them onto the same one: the new result set returns two
+rows, the detailed list still returns five.
+
+### 21. No file row carries its filegroup, so an object's own filegroup cannot be sized — closed
 
 slug: file-filegroup
 
@@ -1621,7 +1693,33 @@ and `050`, reached from `sys.indexes` or `sys.partitions` through
 `sys.data_spaces`. Neither half is worth much alone: sizing a filegroup needs
 both the filegroup an object lives in and the files that back that filegroup.
 
-### 22. The list that publishes a bound is itself bounded
+Both halves were collected on 16 September 2026, and one sentence above is
+wrong in a way that matters. The object's filegroup must NOT be reached from
+`sys.indexes`. `FILEGROUP_NAME(i.data_space_id)` fails twice on a partitioned
+object: `data_space_id` is then a partition scheme id, which names no
+filegroup, and the id itself overflows the `smallint` `FILEGROUP_NAME` takes.
+Measured against a table on a two-filegroup scheme: `Arithmetic overflow error
+for data type smallint, value = 65601`. In `020.properties` that would have
+cost all seven result sets of the batch, since a statement that fails mid-batch
+takes the rest of the batch's output with it. The route that answers correctly
+is `sys.partitions` to `sys.allocation_units` to `sys.data_spaces`, which is
+also the route the run-time control uses, and it is what the four collectors
+now do.
+
+The shape of the answer follows the shape of the row. A row that is one
+partition carries a single `filegroup` name: that is `041`'s estimates and
+`050`'s heaps. A row that aggregates every partition of an index carries
+`filegroup`, the name when there is exactly one, and `filegroup_count`, which
+says whether that name can be trusted: that is `040`'s largest uncompressed
+list. A consumer sizing the room an operation has must refuse to conclude on a
+count above one rather than pick a filegroup, because a partitioned object
+rebuilds partition by partition and each partition answers to its own.
+
+What is deliberately not collected: the filegroup of `041`'s `not_estimated`
+list, whose job is to say what was left unmeasured rather than to size
+anything.
+
+### 22. The list that publishes a bound is itself bounded — closed
 
 slug: not-estimated-cap
 
@@ -1659,3 +1757,11 @@ of objects the bounds excluded, as a scalar on the root object of `041`,
 independent of how many of them the array carries. The list can stay capped,
 which is right, as long as the number it stands for is exact. One scalar closes
 it.
+
+Closed on 16 September 2026 as `not_estimated_objects`, and measured rather
+than reasoned about, since the section above says plainly that it was found by
+reading and never run against a database large enough to exceed the cap. Built
+one: a database of 130 small uncompressed tables, with the size bound raised so
+that every one of them is excluded. The root reports 130, the array carries
+100. The gap was real, the fix is exact, and the two numbers now disagree out
+loud instead of silently.

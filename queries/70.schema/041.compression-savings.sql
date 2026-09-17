@@ -147,6 +147,25 @@ SELECT DB_NAME()                                                  AS [database],
        NULLIF(@first_msg, N'')                                    AS [first_failure.message],
        @first_obj                                                 AS [first_failure.object],
        (SELECT COUNT(*) FROM #savings)                            AS [estimate_rows],
+       -- How many uncompressed objects the bounds above excluded, EXACT and
+       -- independent of the hundred the not_estimated array carries. Without
+       -- it the publication of a bound was itself bounded, silently: this file
+       -- exists so that "we estimated the savings" cannot quietly mean "we
+       -- estimated some", and the list that says what was left out stopped at
+       -- a hundred rows without saying so. A consumer deriving the eligible
+       -- population from the array understated the ground on any database with
+       -- more than about a hundred and twenty large uncompressed objects, and
+       -- therefore reported better coverage than it had.
+       (SELECT COUNT(*) FROM (
+            SELECT t.object_id
+            FROM       sys.tables AS t
+            JOIN       sys.partitions AS p  ON p.object_id = t.object_id
+            JOIN       sys.dm_db_partition_stats AS ps
+                    ON ps.object_id = p.object_id AND ps.index_id = p.index_id
+                   AND ps.partition_number = p.partition_number
+            WHERE t.is_ms_shipped = 0 AND p.data_compression = 0
+              AND t.object_id NOT IN (SELECT object_id FROM #candidates)
+            GROUP BY t.object_id) AS x)                           AS [not_estimated_objects],
        CAST((SELECT SUM(size_current_kb)   FROM #savings) / 1024.0 AS decimal(18,1)) AS [totals.current_mb],
        CAST((SELECT SUM(size_requested_kb) FROM #savings) / 1024.0 AS decimal(18,1)) AS [totals.estimated_mb],
        CAST((SELECT SUM(size_current_kb - size_requested_kb) FROM #savings) / 1024.0 AS decimal(18,1)) AS [totals.saved_mb]
@@ -167,7 +186,22 @@ SELECT sv.schema_name + '.' + sv.object_name                      AS [table],
        CAST(100.0 - (100.0 * sv.size_requested_kb)
             / NULLIF(sv.size_current_kb, 0) AS decimal(5,2))      AS [saved_pct],
        CAST(sv.sample_current_kb   / 1024.0 AS decimal(18,1))     AS [sample.current_mb],
-       CAST(sv.sample_requested_kb / 1024.0 AS decimal(18,1))     AS [sample.estimated_mb]
+       CAST(sv.sample_requested_kb / 1024.0 AS decimal(18,1))     AS [sample.estimated_mb],
+       -- The filegroup this PARTITION sits on, which is the one that has to
+       -- hold the rebuild. A row here is one partition, so the answer is a
+       -- single name and needs no count, unlike the aggregated rows of 040.
+       -- Read through the allocation units rather than sys.indexes:
+       -- data_space_id on a partitioned index is a partition scheme id, which
+       -- both names no filegroup and overflows the smallint FILEGROUP_NAME
+       -- takes.
+       (SELECT TOP (1) ds.name
+          FROM sys.partitions      AS pp
+          JOIN sys.allocation_units AS au ON au.container_id = pp.partition_id
+          JOIN sys.data_spaces     AS ds ON ds.data_space_id = au.data_space_id
+         WHERE pp.object_id = OBJECT_ID(QUOTENAME(sv.schema_name) + '.' + QUOTENAME(sv.object_name))
+           AND pp.index_id  = sv.index_id
+           AND pp.partition_number = sv.partition_number
+           AND au.type = 1)                                       AS [filegroup]
 FROM       #savings AS sv
 LEFT JOIN  sys.indexes AS i
         ON i.object_id = OBJECT_ID(QUOTENAME(sv.schema_name) + '.' + QUOTENAME(sv.object_name))
@@ -176,7 +210,12 @@ ORDER BY sv.size_current_kb - sv.size_requested_kb DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* What the bounds excluded. Ordered by size, so the first row answers "how
-   much did we leave unmeasured, and was it worth measuring". */
+   much did we leave unmeasured, and was it worth measuring".
+
+   THE LIST STAYS CAPPED AND THAT IS RIGHT, an archive nobody can read being no
+   evidence. What was wrong is that the cap was silent: read
+   not_estimated_objects on the root for the exact count, and this array for the
+   hundred worth naming. */
 SELECT TOP (100)
        SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
        CAST(SUM(ps.reserved_page_count) * 8.0 / 1024 AS decimal(18,2)) AS [reserved_mb],

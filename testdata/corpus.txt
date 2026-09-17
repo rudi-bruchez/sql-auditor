@@ -47,7 +47,7 @@
 50.agent/030.alerts.sql
 50.agent/040.maintenance-plans.sql @profiles: space
 60.backup/010.history.sql @profiles: space
-60.backup/020.restore-history.sql
+60.backup/020.restore-history.sql @profiles: space
 70.schema/010.objects.sql @profiles: space
 70.schema/020.index-usage.sql @profiles: space
 70.schema/030.index-operational.sql
@@ -73,6 +73,7 @@
 80.workload/050.procedure-stats.sql
 80.workload/051.function-stats.sql
 80.workload/052.optimizer-hints.sql
+80.workload/060.spills.sql
 90.availability/010.topology.sql
 90.availability/020.always-on.sql
 90.availability/021.always-on-2016.sql

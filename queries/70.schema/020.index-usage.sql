@@ -18,6 +18,14 @@
 -- Consequently there is no TOP and no threshold here. Every index of every
 -- user table is emitted, used or not.
 --
+-- THE MISSING ARRAY IS BOUNDED ANYWAY, AND NOT BY THIS FILE. The engine
+-- gathers suggestions for at most 600 missing index groups across the whole
+-- INSTANCE and then stops gathering. So "no TOP and no threshold" is true of
+-- this collector and false of the data underneath it, and a database can come
+-- back with nothing to say because its neighbours filled the quota.
+-- missing_suggestions_instance on the root is what makes that visible; the
+-- comment beside it has the measurement.
+--
 -- THE READS ARE BUFFERED THROUGH TABLE VARIABLES, AND THE THREE RESULT SETS
 -- ARE EMITTED WHATEVER HAPPENED. This file names user objects — sys.indexes,
 -- sys.objects — so it needs a schema stability lock on each, and READ
@@ -77,7 +85,8 @@ DECLARE @err_counts int = 0, @err_usage int = 0, @err_missing int = 0,
         @msg nvarchar(2048) = N'';
 
 DECLARE @instance_start datetime, @seconds_since int,
-        @indexes_total int, @indexes_with_usage_row int, @missing_suggestions int;
+        @indexes_total int, @indexes_with_usage_row int, @missing_suggestions int,
+        @missing_suggestions_instance int;
 
 /* schema_id is buffered although it is never emitted: the ORDER BY below is
    by schema_id and not by schema NAME, and the two differ. Sorting the
@@ -141,6 +150,33 @@ BEGIN TRY
     SELECT @missing_suggestions = COUNT(*)
     FROM sys.dm_db_missing_index_details AS mid
     WHERE mid.database_id = DB_ID()
+    OPTION (RECOMPILE, MAXDOP 1);
+
+    -- THE SAME COUNT WITHOUT THE DATABASE FILTER, and it is not redundant.
+    -- The engine gathers suggestions for at most 600 missing index groups
+    -- ACROSS THE INSTANCE, and stops gathering once it is there. So a database
+    -- whose suggestions were crowded out by a busy neighbour returns an empty
+    -- `missing` array and a `missing_suggestions` of zero, with every collected
+    -- flag at 1 and every error at 0: indistinguishable, in the archive, from a
+    -- database that has nothing to suggest.
+    --
+    -- Measured on SQL Server 2025 during the review of
+    -- docs/missing-index-suggestions-spec.md. Two databases were each driven
+    -- with three hundred distinct qualifying query shapes; they recorded 138
+    -- and zero while this count stood at exactly 600, and the whole instance
+    -- was distributed 225, 222, 138, 7, 5, 3. No database was anywhere near the
+    -- limit and every database was truncated.
+    --
+    -- The threshold is deliberately NOT applied here. The collector reports the
+    -- number and an analysis decides what it means, because the documented 600
+    -- is a property of the builds it has been checked against, and a limit
+    -- hardcoded in the corpus would need a corpus change the day it moves.
+    --
+    -- Read once per database, which repeats the same instance-wide count on a
+    -- multi-database run. That is the price of not adding an instance-scope
+    -- collector for a single scalar, and it is one cheap metadata count.
+    SELECT @missing_suggestions_instance = COUNT(*)
+    FROM sys.dm_db_missing_index_details AS mid
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
@@ -223,6 +259,7 @@ SELECT DB_NAME()                                            AS [database],
        @indexes_total                                       AS [indexes_total],
        @indexes_with_usage_row                              AS [indexes_with_usage_row],
        @missing_suggestions                                 AS [missing_suggestions],
+       @missing_suggestions_instance                        AS [missing_suggestions_instance],
        CASE WHEN @err_counts  = 0 THEN 1 ELSE 0 END         AS [collected.counts],
        CASE WHEN @err_usage   = 0 THEN 1 ELSE 0 END         AS [collected.usage],
        CASE WHEN @err_missing = 0 THEN 1 ELSE 0 END         AS [collected.missing],
