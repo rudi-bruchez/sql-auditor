@@ -21,6 +21,15 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Fixed
 
+- `80.workload/060.spills.sql` was gated at 13.0.5026 and aborted the batch on
+  SQL Server 2017 RTM with `Invalid column name 'total_spills'`. `total_spills`
+  and `last_spills` arrived in 2016 SP2 and in 2017 CU3, which is two floors on
+  two branches rather than a range, and every 2017 build below 14.0.3015 clears
+  the 2016 one. The gate now carries the later floor, as
+  `10.system/013.memory-model.sql` already did for the same shape of problem:
+  2016 SP2 and SP3 instances no longer run this collector although they have
+  the columns, which is the safe direction to be wrong in.
+
 - `70.schema/055.page-density.sql` read its 50 partitions in one statement, so
   running out of its 1800 seconds lost the whole document, summary included.
   Measured on a collection taken in the field under the space profile: the two

@@ -376,6 +376,56 @@ func TestSkipReasonForMaxVersionGate(t *testing.T) {
 	}
 }
 
+// A feature Microsoft shipped in a service pack on one branch and a cumulative
+// update on the next has two floors, not a range, and @min_version holds one
+// number. Gated on the LOWER of the two, every build of the higher branch below
+// its own floor passes the gate and the batch then fails on a column that is
+// not there. Measured in the field on 17 September 2026: 80.workload/060.spills
+// was gated at 13.0.5026 and ran on a 2017 RTM (14.0.1000.169), which returned
+// "Invalid column name 'total_spills'". The rule the corpus follows, written out
+// in 10.system/013.memory-model.sql, is to carry the later floor and lose the
+// earlier branch; this test pins the consequence for the one file that got it
+// wrong, so the gate cannot drift back down unnoticed.
+func TestSpillsGateClearsTheWholeHoleBetweenTwoBranchFloors(t *testing.T) {
+	scripts, err := Discover(os.DirFS(".."), "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	var spills *Script
+	for i := range scripts {
+		if scripts[i].Path == "80.workload/060.spills.sql" {
+			spills = &scripts[i]
+			break
+		}
+	}
+	if spills == nil {
+		t.Fatal("80.workload/060.spills.sql is not in the corpus")
+	}
+	// 14.0.1000 is 2017 RTM and 14.0.3014 is the build before CU3: both are
+	// above the 2016 SP2 floor and below the one that applies to them, and both
+	// would abort the batch.
+	for _, build := range [][]int{{14, 0, 1000}, {14, 0, 3014}} {
+		if _, skip := skipReason(*spills, "", nil, build, nil); !skip {
+			t.Errorf("build %v has no total_spills column; the script must be skipped", build)
+		}
+	}
+	// These two DO have the column, and are given up on purpose: one gate
+	// cannot hold two floors, and the corpus keeps the higher one. If someone
+	// later teaches @min_version to carry a floor per branch, this is the loop
+	// that should change, and it should move to the block above.
+	for _, build := range [][]int{{13, 0, 5026}, {13, 0, 6300}} {
+		if _, skip := skipReason(*spills, "", nil, build, nil); !skip {
+			t.Errorf("build %v is deliberately given up by the higher gate; "+
+				"the script must be skipped", build)
+		}
+	}
+	for _, build := range [][]int{{14, 0, 3015}, {15, 0, 4000}, {16, 0, 1000}} {
+		if _, skip := skipReason(*spills, "", nil, build, nil); skip {
+			t.Errorf("build %v has the column; the script must run", build)
+		}
+	}
+}
+
 const sessionTextDisclosure = "SQL text of statements running during collection"
 
 // The disclosure paragraph and the decision to run the session-text collector
