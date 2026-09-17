@@ -255,17 +255,33 @@ OPTION (RECOMPILE, MAXDOP 1);
 /* ───────── waits: relevant cumulative waits ─────────
    The list names wait types that do not exist before SQL Server 2017
    (CXCONSUMER, CXSYNC_*). They are string literals in an IN list, so an
-   older instance simply matches nothing. */
+   older instance simply matches nothing.
+
+   Lock waits are matched as a FAMILY and never by name. Which lock mode
+   dominates depends on the workload, so naming two or three of them encodes a
+   guess about the instance instead of measuring it. Found in September 2026 on
+   a client instance: this block named LCK_M_S and LCK_M_X, while LCK_M_U had
+   accumulated twenty times the wait time of LCK_M_S and was the fourth wait of
+   the instance. It was absent here, and a reader who stops at this summary
+   concludes the instance has no locking problem. collect/blocking.go already
+   matches the family this way, for the same reason.
+
+   Measured on a local test instance: the family predicate matches 72 wait
+   types in the catalogue, and the existing waiting_tasks_count filter left
+   five of them. One was LCK_M_SCH_S, the largest single wait on that instance,
+   which the old list did not name either. The rows stay bounded because the
+   modes that never waited are dropped, not because the list is short. */
 SELECT wait_type,
        waiting_tasks_count                                                    AS tasks,
        wait_time_ms / 1000                                                    AS wait_sec,
        CAST(wait_time_ms * 1.0 / NULLIF(waiting_tasks_count,0) AS DECIMAL(10,1)) AS avg_ms,
        signal_wait_time_ms / 1000                                             AS signal_sec
 FROM sys.dm_os_wait_stats
-WHERE wait_type IN ('RESOURCE_SEMAPHORE','RESOURCE_SEMAPHORE_QUERY_COMPILE',
-                    'CMEMTHREAD','PAGEIOLATCH_SH','PAGEIOLATCH_EX',
-                    'CXPACKET','CXCONSUMER','CXSYNC_PORT','CXSYNC_CONSUMER',
-                    'SOS_SCHEDULER_YIELD','THREADPOOL','LCK_M_S','LCK_M_X')
+WHERE (wait_type IN ('RESOURCE_SEMAPHORE','RESOURCE_SEMAPHORE_QUERY_COMPILE',
+                     'CMEMTHREAD','PAGEIOLATCH_SH','PAGEIOLATCH_EX',
+                     'CXPACKET','CXCONSUMER','CXSYNC_PORT','CXSYNC_CONSUMER',
+                     'SOS_SCHEDULER_YIELD','THREADPOOL')
+       OR wait_type LIKE 'LCK[_]M[_]%')
   AND waiting_tasks_count > 0
 ORDER BY wait_time_ms DESC
 OPTION (RECOMPILE, MAXDOP 1);
