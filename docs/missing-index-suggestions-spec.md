@@ -71,8 +71,9 @@ ordering that made the triage list, and must say what it is.
 
 ## What the archive already lets an analysis decide, offline
 
-None of the following needs a new read. Each is computable from files a `space`
-archive already carries, and specifying it here is the point of the document.
+None of the following needs a new read. Three of the four are computable from
+files a `space` archive already carries; the fourth is not, and the difference
+is stated where it falls rather than glossed over here.
 
 **Whether an existing index already covers the suggestion.**
 `70.schema/070.index-columns.sql` projects, per index, the ordered key list and
@@ -89,12 +90,25 @@ suggestions should be combined when possible with one another, and with
 existing indexes in the current database". How much it reduces a real list is
 not stated here, because it has not been measured on one.
 
-**What key order a real index would want.** Section 17 of the gaps
-specification was closed by `70.schema/091.statistics-density.sql`, which
-carries `all_density_estimate` and `distinct_pct_estimate` per statistic, with
-its four caveats attached. The DMV's `equality_columns` is not an ordering
-recommendation; the density estimates are what an author uses to choose one,
-and they are in the archive.
+**What key order a real index would want — and here the archive does not
+answer.** Section 17 of the gaps specification was closed by
+`70.schema/091.statistics-density.sql`, which carries `all_density_estimate`
+and `distinct_pct_estimate` per statistic with its four caveats attached, and
+Microsoft's guidance is to order equality columns by selectivity, most
+selective first. But that collector is NOT in the `space` profile: checked in
+`testdata/corpus.txt` on 17 September 2026, where `070.index-columns` and
+`020.index-usage` carry `@profiles: space` and `091.statistics-density` carries
+nothing.
+
+So a full archive can reason about key order and a `space` archive cannot. The
+consequence is a rule rather than a collection change: a report built from a
+`space` archive names the columns a suggestion involves and does not order
+them, and says why. Adding `091` to the profile is a separate decision, with
+its own cost, and this document does not make it in passing.
+
+The DMV's own `equality_columns` must not be used as the ordering either way.
+It is a comma-separated list in no meaningful order, and reading it as a key
+order is the mistake the pasted DDL makes.
 
 **Over what period the seeks and scans accumulated.** The suggestions are not
 persisted. Microsoft states that they are cleared by instance restarts,
@@ -241,6 +255,10 @@ ordering key. If a number must be shown, show `avg_user_impact` with the words
 - Should the report's window sentence be refused outright when
   `60.backup/020.restore-history` is missing from the archive, or stated with
   the instance start alone and a named uncertainty?
+- Is adding `70.schema/091.statistics-density.sql` to the `space` profile the
+  right answer to the key-order paragraph, rather than the rule this document
+  writes instead? The density collector reads statistics histograms, which is
+  not free, and a space question is not a query-tuning question.
 - Is the 600-row limit per database or per instance? The documentation quoted
   here does not say, and the specification works around the question rather
   than answering it. Someone should settle it by measurement before the
