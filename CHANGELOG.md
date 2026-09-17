@@ -17,7 +17,27 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.25.0] - 2026-09-17
+
+Six things an archive could not say, and did not say it could not say. An
+object's own room can now be sized, because the file rows carry their filegroup
+and the object rows carry theirs: a space simulation that pooled free space
+across filegroups which do not lend to each other was answering "enough room"
+for operations the engine then refused. A heap says how many partitions it has,
+which decides whether a rebuild may be written without a `PARTITION` clause,
+where omitting it on a heap of forty rebuilds all forty in silence. The restore
+history joins the `space` profile and gains a per-database row, so an index
+called unread has a period to be unread over. The compression estimate publishes
+the exact number of objects its bounds excluded rather than the hundred it
+lists. A new collector names the statements that spilled to `tempdb` and whether
+the grant or the estimate was to blame. And the index usage collector counts the
+missing-index suggestions of the whole instance, because the engine's limit is
+per instance and a database crowded out by its neighbours was indistinguishable
+from a database with nothing to suggest.
+
+Every one of them was executed against a real SQL Server before it was
+committed, on databases built for the case in question; the measurements are in
+the collector headers.
 
 ### Added
 
