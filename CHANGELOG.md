@@ -73,6 +73,17 @@ release workflow refuses a tag that disagrees with either this file or
   no path to a spill except a plan, which is a fact about the build rather than
   a gap in this corpus. This closes gap 18 above that floor, and takes the
   corpus from 84 collectors to 85.
+- The root of `70.schema/020.index-usage` now carries
+  `missing_suggestions_instance` beside the database's own count. The engine
+  gathers missing-index suggestions for at most 600 groups across the whole
+  instance and then stops, so a database whose suggestions were crowded out by a
+  busy neighbour came back with an empty list, a count of zero, every collected
+  flag at 1 and no error: indistinguishable from a database with nothing to
+  suggest. Measured on SQL Server 2025, two databases driven with three hundred
+  query shapes each recorded 138 and zero while the instance stood at exactly
+  600. The collector reports the number and applies no threshold, because the
+  documented limit belongs to the builds it has been checked against and a
+  constant in the corpus would need a corpus change the day it moves.
 
 ### Fixed
 

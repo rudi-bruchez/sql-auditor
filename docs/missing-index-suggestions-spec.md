@@ -1,6 +1,7 @@
 # Missing index suggestions — specification
 
-Status: draft, not implemented. Written 17 September 2026 to answer section
+Status: the collector half is implemented; the analysis half is not. Written
+17 September 2026 to answer section
 10 bis of [collection-gaps-spec.md](collection-gaps-spec.md), which reserved
 this question for a document of its own. Revised the same day after a panel of
 five independent readers ran it against a live SQL Server 2025. What the panel
@@ -28,7 +29,8 @@ was written in September:
   threshold, projecting the table, the three column lists, `user_seeks`,
   `user_scans`, `avg_total_user_cost`, `avg_user_impact_pct`, `last_user_seek`
   and `last_user_scan`. Its root carries `missing_suggestions`,
-  `instance_start` and `seconds_since_instance_start`.
+  `instance_start` and `seconds_since_instance_start`, and since
+  17 September 2026 `missing_suggestions_instance`, which this document added.
 
 Both are in the `space` profile. The overlap is deliberate and the second file's
 header says why: the first is a triage view at 25 rows, the second a baseline
@@ -339,25 +341,35 @@ The analysis and the report do not live in this repository: `CLAUDE.md` places
 derived analysis outside it and `README.md` says this tool collects and does not
 judge. The criteria split accordingly, and saying so is part of the contract.
 
-In this repository:
+In this repository, and DONE on 17 September 2026 except where said:
 
 1. `70.schema/020.index-usage.sql` projects the instance-wide count of
    `sys.dm_db_missing_index_details` on its root, inside the existing `TRY`
-   block, and `go test ./...` stays green.
+   block, and `go test ./...` stays green. Verified against SQL Server 2025 on
+   two databases of one instance: the one with suggestions reported 2 and 2, the
+   one without reported 0 and 2, which is the pair that tells an empty database
+   from a crowded-out one.
 2. A collector test asserts that the new scalar is present and is not the
-   database-filtered count. The corpus inventory will NOT change: `inventoryLine`
+   database-filtered count. `TestIndexUsageCountsMissingSuggestionsInstanceWide`
+   cuts the file at the assignment rather than searching it, because the same
+   DMV is counted with a database filter three lines above and a laxer test
+   would pass on either. Both mutations were posed and seen to fail it: adding
+   `WHERE mid.database_id = DB_ID()` to the instance count, and removing the
+   projection. The corpus inventory will NOT change: `inventoryLine`
    emits the path and the sorted profiles and nothing else, which a reader
    verified by running the guard with `-update` and finding the file's checksum
    unmoved. The first draft asked the golden file for something it does not
    represent, and told an implementer to run `refresh-corpus.ps1` for a change
    it cannot record.
 3. The grammar tool parses the changed file and its result-set count is
-   unchanged at three. Noted with its limit: a parser checks syntax, never that
+   unchanged at three. Checked: it parses under the SQL Server 2012 grammar and
+   still declares three result sets. Noted with its limit: a parser checks syntax, never that
    a catalog column exists on a version, so it is not evidence for the 2012
    floor. The documentation is.
 4. Section 10 bis of the gaps specification is rewritten to say what is in the
    tree, keeps its original sentence quoted as the error it was, and points
-   here. Its status line at the head of that document changes with it.
+   here. Its status line at the head of that document changes with it. Done on
+   17 September 2026, before the collector change.
 5. No collector GENERATES index DDL. Already true and already enforced twice,
    by the absence of any `CREATE INDEX` in `queries/` and by
    `collect/statementlint.go`, which refuses a `CREATE` that is not scoped to a

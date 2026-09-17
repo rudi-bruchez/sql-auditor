@@ -517,6 +517,54 @@ func TestEmbeddedCorpusGatesSessionTextBehindTheFlag(t *testing.T) {
 	}
 }
 
+// The missing-index DMVs stop gathering at 600 groups for the whole INSTANCE,
+// so a database can come back empty because its neighbours filled the quota.
+// 020.index-usage carries both counts to tell that apart, and this test exists
+// because the two are one word different: an instance count that quietly grew a
+// database filter would still compile, still run, still report a number, and
+// silently stop detecting the condition it was added for.
+//
+// Measured on SQL Server 2025 while this was written: two databases on one
+// instance, one with two suggestions and one with none, returned
+// missing_suggestions 2 and 0 with missing_suggestions_instance 2 in both.
+func TestIndexUsageCountsMissingSuggestionsInstanceWide(t *testing.T) {
+	scripts, err := Discover(os.DirFS(filepath.Join("..", "queries")), ".")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	const path = "70.schema/020.index-usage.sql"
+	var body string
+	for _, s := range scripts {
+		if s.Path == path {
+			body = StripSQLComments(s.SQL)
+		}
+	}
+	if body == "" {
+		t.Fatalf("%s is not in the corpus", path)
+	}
+	// The projection must exist, or the archive carries nothing to read.
+	if !strings.Contains(body, "[missing_suggestions_instance]") {
+		t.Errorf("%s does not project missing_suggestions_instance", path)
+	}
+	// And the assignment must be the unfiltered one. Splitting on the
+	// assignment rather than searching the whole file is what makes this test
+	// specific: the file contains a database-filtered count of the same DMV
+	// three lines above, and a test that merely found "dm_db_missing_index_details"
+	// near the variable would pass on either.
+	_, after, found := strings.Cut(body, "@missing_suggestions_instance = COUNT(*)")
+	if !found {
+		t.Fatalf("%s does not assign @missing_suggestions_instance from a COUNT(*)", path)
+	}
+	stmt, _, _ := strings.Cut(after, ";")
+	if !strings.Contains(stmt, "sys.dm_db_missing_index_details") {
+		t.Errorf("the instance count does not read sys.dm_db_missing_index_details: %q", stmt)
+	}
+	if strings.Contains(stmt, "DB_ID()") {
+		t.Errorf("the instance-wide count is filtered by database, which is the "+
+			"defect it exists to detect: %q", stmt)
+	}
+}
+
 func TestRunFolderForSuffixesOnlyWhenKeeping(t *testing.T) {
 	dir := t.TempDir()
 	now, err := time.Parse(time.RFC3339, "2026-08-08T13:45:00Z")
