@@ -1,6 +1,8 @@
 # Collection profiles: specification
 
-Status: draft, not implemented. Written 14 September 2026, and revised twice the
+Status: implemented, and shipped in `c3b0d50`: `--profile space`, the
+`055.page-density.sql` collector, and the refusal of `--profile` outside
+`check` and `collect`. Written 14 September 2026, and revised twice the
 same day after two reviews by five independent readers; what each review changed
 is recorded at the end.
 
