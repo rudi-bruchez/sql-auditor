@@ -1,8 +1,10 @@
 # Collection gaps — specification
 
 **Date:** September 2026, after an audit of two SQL Server 2016 SP1 instances.
-**Status:** implemented, except section 10 bis, which is open. Section 18 is
-closed for instances at or above its build floor, and unreachable below it.
+**Status:** implemented. Section 10 bis is superseded by
+`missing-index-suggestions-spec.md` and its opening claim is corrected in place.
+Section 18 is closed for instances at or above its build floor, and unreachable
+below it.
 Sections 1 to 8, 10 and 12 to 17 are built and in the corpus; each closed
 section keeps its argument, because what a gap cost is the only thing that
 stops it being rebuilt or its guard being chosen wrongly a second time.
@@ -1161,9 +1163,29 @@ when someone reads a quiet afternoon as a quiet server.
 
 ---
 
-## 10 bis. One gap the review named that this document does not close
+## 10 bis. One gap the review named that this document did not close, and one sentence it got wrong
 
 slug: review-unclosed-gap
+
+**Corrected on 17 September 2026.** The paragraph below opened on "the
+missing-index DMVs ... are absent from the corpus and from this specification",
+and that was false when it was written. `20.databases/020.properties.sql` has
+read all three since 8 August 2026 as a top-25 triage list, and
+`70.schema/020.index-usage.sql` since 10 August 2026 in full, both in the
+`space` profile, while this section was written on 4 September. The original
+sentence is kept below, struck through in meaning if not in markup, because a
+document that silently repairs its own claims teaches nobody anything: writing
+the absence of a thing is an assertion, and it is the most expensive kind.
+
+What remained genuinely open was never the collection. It is what a report may
+do with suggestions that are not measurements, and that contract now has its own
+document, [missing-index-suggestions-spec.md](missing-index-suggestions-spec.md),
+reviewed by a panel of five. That review also found what the corpus really
+cannot say here, which is not a column but a bound: the 600-group limit is
+per INSTANCE, so a database whose suggestions were suppressed by a neighbour's
+saturation is today indistinguishable from a database with nothing to suggest.
+
+The original paragraph follows, unedited.
 
 **The missing-index DMVs.** `sys.dm_db_missing_index_group_stats` and its
 siblings are absent from the corpus and from this specification, and a reviewer
@@ -1181,6 +1203,9 @@ its own section rather than a line here.
 
 The honest position: it is a real gap, it is deliberate, and it is the next one
 to write.
+
+(End of the original paragraph. The design question it names is the right one;
+the premise it rests on was not.)
 
 ## 11. Two things the review found in the repository — both now fixed
 

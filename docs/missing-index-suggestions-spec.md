@@ -2,7 +2,11 @@
 
 Status: draft, not implemented. Written 17 September 2026 to answer section
 10 bis of [collection-gaps-spec.md](collection-gaps-spec.md), which reserved
-this question for a document of its own.
+this question for a document of its own. Revised the same day after a panel of
+five independent readers ran it against a live SQL Server 2025. What the panel
+changed is recorded at the end rather than quietly folded in, because the
+document's own conclusion moved: it proposed a column and no new read, and it
+now proposes a read and no column.
 
 ## What section 10 bis says, and what is actually in the tree
 
@@ -13,253 +17,413 @@ close", and its first sentence is:
 > are absent from the corpus and from this specification.
 
 That sentence is false, and it was false when it was written. The three DMVs are
-read by two collectors today, and have been since the corpus was reworked for
-client-side JSON:
+read by two collectors, and have been since August 2026, while section 10 bis
+was written in September:
 
 - `20.databases/020.properties.sql`, result set `missing_indexes`: `TOP (25)`
   ordered by `avg_total_user_cost * avg_user_impact * (user_seeks + user_scans)`,
-  projecting that product as `impact_score`, the table, the uses, the average
-  impact, and the three column lists.
+  projecting that product as `impact_score`, the table, `uses`,
+  `avg_impact_pct`, and the three column lists.
 - `70.schema/020.index-usage.sql`, result set `missing`: no `TOP` and no
-  threshold, projecting the table, the three column lists, seeks, scans, average
-  cost, average impact, and `last_user_seek` and `last_user_scan`. Its root also
-  carries `missing_suggestions`, the count of rows in
-  `sys.dm_db_missing_index_details` for the database.
+  threshold, projecting the table, the three column lists, `user_seeks`,
+  `user_scans`, `avg_total_user_cost`, `avg_user_impact_pct`, `last_user_seek`
+  and `last_user_scan`. Its root carries `missing_suggestions`,
+  `instance_start` and `seconds_since_instance_start`.
 
-Both are in the `space` profile. The overlap between them is deliberate and the
-second file's header states why: the first is a triage view at 25 rows, the
-second a baseline that cannot be re-expanded after a restart. That is a
-documented decision and this specification does not reopen it.
+Both are in the `space` profile. The overlap is deliberate and the second file's
+header says why: the first is a triage view at 25 rows, the second a baseline
+that cannot be re-expanded after a restart. That decision is not reopened here.
+All five readers checked this inventory independently and all five agreed.
 
-So the work this document describes is not collection. Everything the optimiser
-has to say is already in the archive, twice. What is missing is a contract for
-reading it, and one column.
+Note for anything built on top: the two collectors name the same underlying
+quantities differently, `avg_impact_pct` against `avg_user_impact_pct`, `uses`
+against `user_seeks` and `user_scans`. A report must name which of the two it
+reads, because an archive can carry the 25-row triage list for a database whose
+baseline read was blocked and came back empty.
 
 The mistake is worth naming rather than quietly correcting, because it is the
 second time this practice has paid for it: the private repository's maintenance
 notes record a whole task that shrank to a paragraph when "the notice does not
 exist anywhere" turned out to be false. Writing the absence of a thing is an
-assertion, and it is the most expensive kind, because nothing in a review
-catches it except someone opening the tree.
+assertion, and it is the most expensive kind, because nothing catches it except
+someone opening the tree.
 
-## Why this needs a contract rather than a collector
+## Why a suggestion is not a measurement
 
-A missing index suggestion is not a measurement, and the archive currently
-presents it beside measurements without saying so. Four properties make it
-different, and all four are why a report must never paste the DDL:
+The engine's own documentation lists the limits, and they decide how a report
+may speak.
 
-1. **It is per query shape, not per workload.** Each suggestion comes from one
-   or more compilations that would have used it. Nothing in it knows what the
-   other queries against that table do, so two suggestions on one table are
-   routinely near-duplicates differing by a single included column.
-2. **It ignores write cost entirely.** The optimiser proposes the index it
-   wishes it had for a read. The cost of maintaining it on every insert, update
-   and delete is not in `avg_user_impact`, not in the cost, and not anywhere in
-   the DMV.
-3. **It ignores the indexes that already exist.** A suggestion is emitted even
-   when an existing index leads on the same column and would serve the query
-   with a different key order or one more included column.
-4. **`avg_user_impact` is a percentage of estimated query cost, not of time.**
-   An impact of 98 means the optimiser's cost model believed the plan would cost
-   two percent of what it did. It does not mean the query will run fifty times
-   faster.
+1. **It is per query shape, not per workload.** Microsoft: requests "might offer
+   similar variations of indexes on the same table and column(s) across
+   queries", and should be combined where possible.
+2. **It ignores write cost entirely.** The cost of maintaining the proposed
+   index on every insert, update and delete is nowhere in the DMV. A `space`
+   archive does carry `user_updates` per EXISTING index, which is activity on
+   what exists, not the maintenance cost of what does not; a report must not
+   conflate them.
+3. **It ignores the indexes that already exist**, never suggests a unique or a
+   filtered index, and says nothing at all for a trivial plan.
+4. **`avg_user_impact` is a percentage of estimated query cost, not of time**,
+   estimated before execution and never revised after it. Microsoft adds that
+   cost information "is less accurate for queries involving only inequality
+   predicates", which is exactly the shape the first draft's coverage rule
+   dismissed.
+5. **Key order is not suggested.** The documentation states that key columns are
+   suggested but their order is not, and that an author orders them by
+   selectivity. The list must never be read as a proposed key order.
 
-`impact_score` in `020.properties` compounds the problem: it is a product of
-three numbers with different units, published as a single figure that sorts
-well and means nothing on its own. The archive must keep it, because it is the
-ordering that made the triage list, and must say what it is.
+`impact_score` in `020.properties` is a product of an estimated cost, a
+percentage and an operator count, published as one figure that sorts well. It is
+an ordering key. Calling it meaningless, as the first draft did, is too strong
+and a reader was right to object: it is a rough accumulated benefit proxy of the
+kind Microsoft's own example query uses. What it is not is a percentage, a
+duration or a cost, and a report must never print it as one of the three.
 
-## What the archive already lets an analysis decide, offline
+## The instance-wide cap, and the one new read
 
-None of the following needs a new read. Three of the four are computable from
-files a `space` archive already carries; the fourth is not, and the difference
-is stated where it falls rather than glossed over here.
+The three DMVs each carry the same note, that the result set is limited to 600
+rows. The limitations page says where that limit lives: "Suggestions are
+gathered for a maximum of 600 missing index groups. After this threshold is
+reached, no more missing index group data is gathered."
 
-**Whether an existing index already covers the suggestion.**
-`70.schema/070.index-columns.sql` projects, per index, the ordered key list and
-the included list. A suggestion whose equality columns are a prefix of an
-existing index's keys is not a missing index: it is at most an included-column
-change on an index that exists. This comparison is a string one, on data already
-side by side in the archive.
+**The cap is on the instance, not on the database, and three readers measured
+it independently.** The clearest run: two databases were each driven with three
+hundred distinct qualifying query shapes. The first recorded 138 suggestions,
+the second recorded zero, and the instance count stood at exactly 600 both
+times. The distribution across the whole box at that moment was
+`225, 222, 138, 7, 5, 3`: no database anywhere near 600, every database
+truncated. Another reader reproduced the shape from the other end, freeing
+capacity by dropping tables and watching a previously silent query start
+recording suggestions again as the instance fell to 481.
 
-**Which suggestions overlap each other.** Two suggestions on the same table
-whose equality sets are equal, and whose inequality and included sets differ
-only by containment, are one suggestion. Collapsing them is arithmetic on the
-three column lists, and Microsoft's own guidance says to do it: "missing index
-suggestions should be combined when possible with one another, and with
-existing indexes in the current database". How much it reduces a real list is
-not stated here, because it has not been measured on one.
+Running the unchanged collector against a saturated database returns
+`missing_suggestions = 0`, every `collected` flag at 1 and every error number at
+0. A clean, complete-looking, entirely empty answer, indistinguishable from a
+database that has nothing to suggest.
 
-**What key order a real index would want — and here the archive does not
-answer.** Section 17 of the gaps specification was closed by
-`70.schema/091.statistics-density.sql`, which carries `all_density_estimate`
-and `distinct_pct_estimate` per statistic with its four caveats attached, and
-Microsoft's guidance is to order equality columns by selectivity, most
-selective first. But that collector is NOT in the `space` profile: checked in
-`testdata/corpus.txt` on 17 September 2026, where `070.index-columns` and
-`020.index-usage` carry `@profiles: space` and `091.statistics-density` carries
-nothing.
+So the first draft was wrong twice: a per-database count cannot detect the
+condition, and the claim that the fix needed no new read does not survive. The
+read that closes it is the same `COUNT(*)` the collector already issues, with
+its `WHERE mid.database_id = DB_ID()` removed. Same DMV, same permission, same
+`TRY` block, one more scalar on the root of `70.schema/020.index-usage.sql`:
 
-So a full archive can reason about key order and a `space` archive cannot. The
-consequence is a rule rather than a collection change: a report built from a
-`space` archive names the columns a suggestion involves and does not order
-them, and says why. Adding `091` to the profile is a separate decision, with
-its own cost, and this document does not make it in passing.
+    SELECT @missing_suggestions_instance = COUNT(*)
+    FROM sys.dm_db_missing_index_details
+    OPTION (RECOMPILE, MAXDOP 1);
 
-The DMV's own `equality_columns` must not be used as the ordering either way.
-It is a comma-separated list in no meaningful order, and reading it as a key
-order is the mistake the pasted DDL makes.
+It is read once per database rather than once per instance, which is redundant
+on a multi-database run and is the price of not inventing a collector for one
+scalar. The rule it enables is blunt: when that count is at the engine's
+threshold, no statement about missing indexes on any database of that instance
+can claim to be complete, and the report says so instead of listing.
 
-**Over what period the seeks and scans accumulated.** The suggestions are not
-persisted. Microsoft states that they are cleared by instance restarts,
-failovers and setting a database offline, and that any metadata change on a
-table deletes every suggestion for that table — adding or dropping a column,
-creating an index on one, and an `ALTER INDEX` on any index of the table. The
-archive can name the first bound exactly: `60.backup/020.restore-history.sql`
-carries the last restore per database and is in the `space` profile since
-16 September 2026, and `70.schema/020.index-usage.sql` already projects the
-instance start time and the seconds since. The second bound, a metadata change
-on the table, is not datable from the archive and must be stated as a limit
-rather than guessed.
+One claim that arrived with the panel is NOT adopted: that the limit was 500
+rather than 600 before SQL Server 2019. No source was offered and no measurement
+was made, and the only instance available here is a 2025. Hardcoding an
+unverified threshold would silently stop detecting the very condition this
+section exists for, so the collected count is reported raw and the threshold
+lives in the analysis, where it can be corrected without a corpus change.
 
-## The engine's own cap, which nothing reports
+## What the archive lets an analysis decide, and what it does not
 
-`sys.dm_db_missing_index_details` and `sys.dm_db_missing_index_groups` are
-documented as limited to 600 rows: "If you have more than 600 missing indexes,
-you should address the existing missing indexes so you can then view the newer
-ones."
+**Coverage: the existing-index test establishes possible overlap, never
+coverage.** The first draft said a suggestion whose equality columns are a
+prefix of an existing index's keys "is not a missing index: it is at most an
+included-column change". The panel broke that four ways, three of them measured.
 
-So `70.schema/020.index-usage.sql` has a cap after all. Its header calls it a
-baseline with no `TOP` and no threshold, and that is true of the collector and
-false of the data: at 600 rows the engine has stopped recording new suggestions,
-and neither the collector nor the archive says which case a given run is in.
-This is the same shape as section 22 of the gaps specification, one level
-further out, and it is the second time a bound has been found hiding under a
-sentence that said there was none.
+A suggestion carrying an inequality column needs that column IN THE KEY.
+Measured against an index on `(A, C) INCLUDE (B)` with a predicate
+`A = 1 AND B > 900`: the plan seeks on `A` and applies a residual predicate on
+`B` across every row that matches. The index the suggestion wants is `(A, B)`,
+and no included column substitutes for it.
 
-The remedy needs no new read. `70.schema/020.index-usage.sql` already projects
-`missing_suggestions` on its root, the count of rows in
-`sys.dm_db_missing_index_details` for the database. What is missing is the
-reading of it:
+An index that matches may be unusable. A disabled index was created, the prefix
+held, the suggestion was still emitted, and forcing that index returned
+`Msg 315: Index ... is disabled`. The archive already carries what is needed to
+see this: `070.index-columns.sql` projects `is_disabled` and `filter_definition`,
+`020.index-usage.sql` projects `hypothetical`. A coverage rule that does not
+consult all three is wrong on data it already has.
 
-- the analysis treats `missing_suggestions` at or above 600 as a truncated
-  list, not a complete one;
-- the report says so in the same sentence as the finding, because on such an
-  instance the suggestions shown are not the most important ones but the ones
-  the engine happened to still be holding;
-- and the collector's header stops calling itself unbounded, naming the
-  engine's limit instead.
+It is not a prefix test at all. `equality_columns` is an unordered set delivered
+as a string; the index keys are ordered. The correct test is set containment
+against the leading *k* keys, and writing it as a prefix would miss every
+covered suggestion whose columns the DMV happened to list in a different order
+from the index. The two orderings genuinely differ: the DMV emits columns in
+physical `column_id` order, measured by three readers, and an index's key order
+is whatever its author chose.
 
-Whether 600 is per database or per instance is not settled by the documentation
-quoted above, and the difference matters for a server with forty databases. The
-analysis must therefore compare against the count it has, per database, and say
-"at or above the engine's limit" rather than compute a percentage of it.
+And the comparison cannot be a naive string one, because the two sides are in
+different notations. `070.index-columns.sql` concatenates bare names with `", "`
+and glues a `" DESC"` suffix into the same string, while the DMV emits
+bracket-quoted identifiers: `[x]` against `y, x DESC` matches nothing. Worse,
+the collector does not escape, so a table carrying a column literally named
+`a, b` alongside columns `a` and `b` produced two indexes with different leading
+columns, different key counts and the identical `keys` string. The rule is
+therefore: parse both sides into lists of identifiers, drop the direction marker
+for equality columns and keep it for inequality ones, and where the collector's
+string cannot be parsed unambiguously, ABSTAIN and say so rather than compare
+and be silently wrong.
 
-## The one column this specification adds
+One more asymmetry, cheap to state and cheap to fix later:
+`070.index-columns.sql` filters `is_ms_shipped = 0` and the `missing` result set
+filters nothing, so a suggestion on a shipped table has no counterpart to
+compare against. The abstain rule covers it.
 
-`sys.dm_db_missing_index_group_stats.unique_compiles`, projected by
-`70.schema/020.index-usage.sql` in its `missing` result set, beside the seeks
-and scans it already carries.
+**Families: group by equality set, keep every maximal element.** Two suggestions
+belong to the same family when their equality sets are equal. Within a family,
+an entry whose inequality and included sets are contained in another's is
+absorbed by it. Pairwise containment is not transitive, so the rule cannot be
+"two suggestions are one": with inequality sets `{x}`, `{x,y}` and `{y}`, the
+first absorbs into the second and the third into nothing, and a greedy
+implementation would answer differently depending on read order. Group, keep
+maximal elements, and report how many suggestions each stands for. A table
+carries as many families as it has distinct equality sets; the first draft's
+"a table carries one entry" was wrong, since two suggestions on one table need
+not share a single equality column.
 
-It is the count of compilations and recompilations that produced this
-suggestion, and it separates two situations the archive currently cannot tell
-apart: a query shape compiled once, whose suggestion may be a report run by one
-person last March, and a shape recompiling thousands of times, where the
-suggestion is a standing property of the workload. A suggestion with a high
-impact and a single compile is the classic false lead, and today nothing in the
-archive marks it as one.
+The equality set may be compared on the DMV's own string, and this was measured
+rather than assumed. A table with columns declared `z`, `y`, `x` was queried as
+`WHERE x = 42 AND y = 42` and as `WHERE y = 7 AND x = 7`; both produced the
+single entry `[y], [x]`, the physical order. Two readers and the author measured
+this independently. The one reader who claimed the opposite offered no output.
 
-It is one column on a view already read, inside a `TRY/CATCH` that already
-exists, in a collector that already has no `TOP`. It adds no permission, no
-timeout risk and no new object.
+**Key order: the archive usually cannot say.** `70.schema/091.statistics-density.sql`
+carries `all_density_estimate` and `distinct_pct_estimate`, and Microsoft's
+guidance is to order equality columns by selectivity. But it is not in the
+`space` profile, it is gated at `@min_version: 13.0.4422`, it describes only the
+FIRST column of a statistic, and it selects only the largest 200 tables. So no
+`space` archive can order columns, no archive of a 2012 or 2014 instance can,
+and a full archive of a modern one can only when a separate applicable statistic
+exists for each column it would order. The rule follows the evidence and not the
+profile: order only when applicable density rows exist for every column
+concerned, otherwise name the columns without ordering them and say why.
 
-It is deliberately not added to `020.properties`'s triage list, whose 25 rows
-are ordered by a score and read by a human deciding what to look at next. A
-sixth column there buys less than the width costs.
+**Window: a ceiling, never a measurement.** The suggestions are not persisted.
+They are cleared by instance restarts, failovers and setting a database offline,
+and any metadata change on a table deletes every suggestion for that table.
+Three refinements, all measured:
+
+- Taking a database offline and back online cleared its suggestions, 225 to 0,
+  with no restore and no metadata change. The collector then reported an
+  instance start nearly three days earlier for counters seconds old.
+- `ALTER INDEX ... REORGANIZE` did NOT clear a table's suggestions and
+  `ALTER INDEX ... REBUILD` did. Microsoft's wording covers any `ALTER INDEX`;
+  on the tested build only the rebuild behaves that way. Measured by a reader
+  and reproduced by the author.
+- Creating an index on the table did clear them, as documented.
+
+So the sentence is a ceiling: the counters cover at most the period since the
+latest of the instance start, the last recorded restore, the last time the
+database came online, and the last metadata change on the table. The archive can
+date only the first two, and the second only when `msdb` history survives.
+
+That last caveat has a detectable failure the first draft missed. The common
+case is not a missing collector but a present collector with no row for the
+database, because `sp_delete_backuphistory` is in every stock maintenance plan:
+"restored last week, history pruned on Sunday" and "never restored" are the same
+absence, and the fallback to instance start then overstates the window in the
+direction that flatters the finding. The root of `60.backup/020.restore-history`
+carries `counts.total`, `counts.last_30_days` and `counts.oldest_record`; an
+analysis that finds no row for its database and an `oldest_record` more recent
+than the instance start is looking at a pruned history and must say so.
+
+**Query identity: possible from SQL Server 2019, and nothing reads it.** Two
+readers objected, correctly, that the `missing` result set has no statement
+identity: `user_seeks` counts operators that could have used the proposed index,
+across queries the archive cannot name, so a report saying "these queries are
+scanning" asserts more than the evidence carries. Pushing one question past
+where the panel stopped: the engine answers it above 15.x.
+`sys.dm_db_missing_index_group_stats_query` returns the queries that needed a
+missing index, joined on the group handle, and no collector reads it. Collecting
+it reaches query identity and therefore carries a disclosure question, which the
+spills collector's history shows is not a formality. It is an open question
+below, not a decision here. Below 2019 the objection stands with no remedy, and
+the report language is written for that case.
+
+## The column this document proposed, and why it is withdrawn
+
+The first draft added `sys.dm_db_missing_index_group_stats.unique_compiles`,
+claiming it separates "a query shape compiled once, whose suggestion may be a
+report run by one person last March" from "a shape recompiling thousands of
+times".
+
+It does the opposite, and that was measured on a table with statistics
+pre-created and auto-creation off, so that nothing recompiled by accident:
+
+| workload | `unique_compiles` | `user_seeks` |
+|---|---|---|
+| one procedure, one cached plan, 81 executions | 2 | 81 |
+| fifteen one-off ad hoc statements differing only by a literal | 15 | 15 |
+
+The fifteen one-off statements are precisely the false lead the column was meant
+to mark, and they score higher than the standing workload. Microsoft's own
+description says why: it is the "number of compilations and recompilations that
+would benefit from this missing index group", and on any workload that is not
+fully parameterised an unparameterised family produces one compilation per
+literal. Two other readers reached the same conclusion from the other side, each
+measuring a cached plan at one compile against a hundred seeks.
+
+The first draft's own open question asked whether `user_seeks + user_scans`
+already separates the two cases. On that measurement it does, 81 against 15,
+and `unique_compiles` gets it backwards.
+
+So the column is withdrawn. It would have carried a real quantity, compilation
+pressure attributable to a suggestion, but this document has no use for that
+quantity that survives measurement, and a column added without a rule that
+survives is a column someone will invent a rule for later. If a future document
+needs compilation pressure, it can argue for it on its own evidence.
+
+The withdrawal also removes an acceptance criterion the panel showed was not
+reproducible: the first draft asked an implementer to see `unique_compiles = 1`
+for a shape compiled once, and a stored procedure compiled exactly once and
+executed forty times reported 2, still 2 after eighty-one executions, with
+`sys.dm_exec_procedure_stats` confirming a single plan. The value 1 appeared only
+for a single ad hoc statement after clearing the procedure cache. An implementer
+handed that criterion would have reported the brief as wrong, or quietly
+reshaped the test until it agreed.
 
 ## What a report may say, and what it may never do
 
-This section is the reason the gaps specification refused to settle the matter
-in a line. It binds the analysis and the report, not the collector.
+This section binds the analysis and the report, not the collector.
 
-**Never emit `CREATE INDEX` text derived from a suggestion.** Not in an
-appendix, not commented out, not "as an illustration". A statement that can be
-copied will be copied, and the four properties above are not visible in the
-statement once it exists.
+**Never generate `CREATE INDEX` text from a suggestion.** Not in an appendix,
+not commented out, not as an illustration. A statement that can be copied will
+be copied, and none of the limits above is visible in the statement once it
+exists.
 
-**Name the table and the columns, not the index.** The finding is "queries
-against `dbo.Commandes` filtered on `ClientID` and `DateCommande` are scanning,
-and the optimiser has asked for an index on those columns 40 000 times since the
-instance started on 2 September". That sentence is defensible from the archive.
-"Create this index" is not.
+The prohibition is on GENERATING a recommendation, and must be worded that way,
+because the corpus legitimately preserves index DDL as collected evidence:
+`70.schema/080.modules.sql` returns module definitions verbatim, so a procedure
+whose body contains a `CREATE INDEX` string arrives in the archive with that
+string intact. A reader demonstrated it. Preserving what exists on the server is
+what this tool is for; proposing what does not is what this rule forbids.
 
-**Report a family, not its members.** After the collapse described above, a
-table carries one entry with the columns its suggestions agree on, and the
-number of distinct suggestions it stands for. A list of eleven near-identical
-proposals tells a reader the tool cannot count.
+**Name the table and the columns, and do not claim an access method.** Without
+the query identity the archive lacks below 2019, the defensible sentence is of
+the form: "the optimiser recorded 40 000 opportunities to use an index on
+`ClientID` and `DateCommande` of `dbo.Commandes`, over at most the period since
+2 September". The first draft's example said those queries "are scanning", which
+the evidence does not support.
 
-**State the window, every time, with its two bounds.** Since the instance
-started or the database was restored, whichever is later; and with the caveat
-that creating any index on the table resets the counters for it, which the
-archive cannot date.
+**Report a family, not its members**, with the count it stands for, and allow a
+table to carry several families.
 
-**Say what an existing index already covers, where one does.** A finding that
-does not mention the index leading on the same column will be answered by the
-DBA who knows it exists, and correctly.
+**State the window as a ceiling**, with what can and cannot be dated, and say
+when the restore history looks pruned.
 
-**Never present `impact_score` as a percentage, a time or a cost.** It is an
-ordering key. If a number must be shown, show `avg_user_impact` with the words
-"of the optimiser's estimated query cost" attached to it.
+**Say what an existing index already covers, where one does**, and where the
+coverage test abstained, say that too rather than omitting the finding or
+implying coverage.
+
+**Name which collector the numbers came from**, since the two spell the same
+quantities differently and one can be empty while the other is not.
+
+**Never present `impact_score` as a percentage, a duration or a cost.** If a
+number must be shown, show `avg_user_impact_pct` with the words "of the
+optimiser's estimated query cost" attached.
 
 ## What this deliberately does not do
 
-- **It does not deduplicate inside the collector.** The collapse belongs to the
-  analysis. A collector that emitted families would make the raw list
-  unrecoverable from the archive, and the raw list is exactly what a second
-  opinion needs.
-- **It does not add a judgement column.** Neither the collector nor the archive
-  says whether a suggestion is worth acting on. That decision needs the write
-  volume of the table, which no `space` archive carries.
+- **It does not deduplicate inside the collector.** Family formation belongs to
+  the analysis; a collector that emitted families would make the raw list
+  unrecoverable, and the raw list is what a second opinion needs.
+- **It does not add a judgement column**, and no longer adds a column at all.
 - **It does not raise `020.properties` above 25 rows**, and does not touch the
-  overlap between the two collectors.
-- **It does not propose an index at all.** The deliverable of this work is a
-  paragraph a DBA can act on, and the index that DBA writes is theirs.
+  deliberate overlap between the two collectors.
+- **It does not propose an index.** The deliverable is a paragraph a DBA can act
+  on, and the index that DBA writes is theirs.
 
-## Acceptance criteria
+## Where each part is accepted, and how
 
-1. `70.schema/020.index-usage.sql` projects `unique_compiles` in `missing`, the
-   corpus inventory records the change, and the file still parses under the
-   SQL Server 2012 grammar with its result-set count unchanged.
-2. Run against an instance where a query shape has compiled more than once, the
-   column is greater than one; against a shape compiled once, it is one. Both
-   measured, not reasoned about.
-3. Section 10 bis of the gaps specification is rewritten to say what is in the
+The analysis and the report do not live in this repository: `CLAUDE.md` places
+derived analysis outside it and `README.md` says this tool collects and does not
+judge. The criteria split accordingly, and saying so is part of the contract.
+
+In this repository:
+
+1. `70.schema/020.index-usage.sql` projects the instance-wide count of
+   `sys.dm_db_missing_index_details` on its root, inside the existing `TRY`
+   block, and `go test ./...` stays green.
+2. A collector test asserts that the new scalar is present and is not the
+   database-filtered count. The corpus inventory will NOT change: `inventoryLine`
+   emits the path and the sorted profiles and nothing else, which a reader
+   verified by running the guard with `-update` and finding the file's checksum
+   unmoved. The first draft asked the golden file for something it does not
+   represent, and told an implementer to run `refresh-corpus.ps1` for a change
+   it cannot record.
+3. The grammar tool parses the changed file and its result-set count is
+   unchanged at three. Noted with its limit: a parser checks syntax, never that
+   a catalog column exists on a version, so it is not evidence for the 2012
+   floor. The documentation is.
+4. Section 10 bis of the gaps specification is rewritten to say what is in the
    tree, keeps its original sentence quoted as the error it was, and points
-   here.
-4. No file in `queries/` emits index DDL, which is already true and stays true.
-5. The header of `70.schema/020.index-usage.sql` no longer describes its
-   `missing` result set as unbounded, and names the engine's 600-row limit.
-6. The analysis marks a database whose `missing_suggestions` is at or above 600
-   as truncated, and a report about such a database carries that sentence.
+   here. Its status line at the head of that document changes with it.
+5. No collector GENERATES index DDL. Already true and already enforced twice,
+   by the absence of any `CREATE INDEX` in `queries/` and by
+   `collect/statementlint.go`, which refuses a `CREATE` that is not scoped to a
+   variable or a temporary object. It is a regression guard, not work, and it is
+   worded to exclude collected module text.
 
-## Open questions for review
+Outside this repository, in the analysis that consumes the archive: saturation
+handling driven by the instance-wide count; family formation with several
+families per table and maximal elements preserved; the coverage test consulting
+`is_disabled`, `filter_definition` and `hypothetical`, testing set containment
+rather than a prefix, and abstaining on ambiguous key strings; ordering only on
+applicable density rows; the window stated as a ceiling with pruned-history
+detection; and the report language above. Each needs a fixture and a named owner
+there, and this document does not pretend they can be accepted here.
 
-- Is `unique_compiles` worth the column, or does `user_seeks + user_scans`
-  already separate the one-off report from the standing workload? The claim
-  above is that it does not, because a single compile can accumulate many seeks
-  across executions of the same cached plan. That claim should be attacked.
-- The collapse rule treats two suggestions as one when their equality sets are
-  equal and their inequality and included sets differ only by containment. Is
-  equality on the equality set too strict, given that `equality_columns` is
-  unordered in meaning but delivered as an ordered string?
-- Should the report's window sentence be refused outright when
-  `60.backup/020.restore-history` is missing from the archive, or stated with
-  the instance start alone and a named uncertainty?
-- Is adding `70.schema/091.statistics-density.sql` to the `space` profile the
-  right answer to the key-order paragraph, rather than the rule this document
-  writes instead? The density collector reads statistics histograms, which is
-  not free, and a space question is not a query-tuning question.
-- Is the 600-row limit per database or per instance? The documentation quoted
-  here does not say, and the specification works around the question rather
-  than answering it. Someone should settle it by measurement before the
-  work-around becomes the contract.
+## Open questions
+
+- Was the limit 500 on builds before SQL Server 2019? Claimed by one reader
+  without a source or a measurement, and not adopted. Someone should settle it
+  against a 2016 or 2017 instance before any threshold is hardcoded anywhere.
+- Should `070.index-columns.sql` emit escaped identifiers, so the coverage test
+  stops abstaining on tables whose column names contain a comma? A corpus change
+  and a golden diff, against a case that is rare and that the abstain rule
+  already handles safely.
+- Should `sys.dm_db_missing_index_group_stats_query` be collected above 15.x, so
+  a report can name the queries a suggestion came from? It reaches query
+  identity and carries a disclosure question.
+- Is adding `70.schema/091.statistics-density.sql` to the `space` profile worth
+  its cost, given that the ordering rule now depends on applicable density rows
+  rather than on the profile, and that its own single-leading-column limit means
+  the profile change would often still not deliver an ordering?
+
+## What the panel changed
+
+Five readers, two prompts, on commit `1d6ef59` against a live SQL Server 2025:
+agy twice, codex twice, one Claude subagent. The union was large and the overlap
+between any two readers was small, as the method predicts. Every reader found at
+least one thing no other found.
+
+Withdrawn: `unique_compiles`, the document's only proposed column, measured to
+classify workloads in the opposite direction from the claim that justified it.
+
+Refuted by measurement and rewritten: the per-database truncation check, which
+cannot see an instance-wide cap; the equality-prefix coverage rule, which fails
+on inequality columns, on disabled indexes, on the unordered nature of
+`equality_columns` and on ambiguous key strings; the blanket claim that any
+`ALTER INDEX` clears suggestions; and the acceptance criteria, of which one was
+a no-op, one was not reproducible, and one asked for a guard that already
+exists.
+
+Corrected from the documentation: `impact_score` called meaningless, where it is
+a benefit proxy that must simply never be printed as a percentage; and the
+window sentence, which omitted offline resets and pruned restore history.
+
+Rejected: that `equality_columns` can arrive in query order. Two readers and the
+author measured the opposite, and the reader who claimed it offered no output.
+
+Not adopted pending evidence: the 500-row limit before 2019.
+
+Added by the author after the panel:
+`sys.dm_db_missing_index_group_stats_query`, which answers above SQL Server 2019
+the query-identity objection two readers raised and neither resolved.
+
+And two facts about running panels rather than about this document. Three of the
+five readers reported that they had cleaned up after themselves; thirteen
+`mireview_*` databases and eight scripts were still on the container afterwards.
+One reader implemented the proposed column in the live working tree despite
+having its own worktree. Both were cleaned up by hand, and both are exactly what
+the review skill warns about.
