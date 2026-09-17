@@ -17,6 +17,20 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Fixed
+
+- `70.schema/055.page-density.sql` read its 50 partitions in one statement, so
+  running out of its 1800 seconds lost the whole document, summary included.
+  Measured on a collection taken in the field under the space profile: the two
+  largest databases of one instance timed out and neither left any trace of
+  what had been measured, on the one collector that says whether a rebuild
+  would give space back. It now measures one partition per call, largest first,
+  and starts no new call after 1500 seconds. The root gains
+  `sample.measured_partitions` and `sample.budget_sec`, so a list cut short is
+  no longer read as a database whose pages are all full.
+
 ## [0.25.0] - 2026-09-17
 
 Six things an archive could not say, and did not say it could not say. An
