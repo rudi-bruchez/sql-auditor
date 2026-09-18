@@ -17,7 +17,31 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.26.0] - 2026-09-18
+
+Three collectors said less than they appeared to. Two of them failed in the
+field on real instances during the week, and the third was answering a question
+with a guess. The shape they share is worth naming: none of the three reported
+an error, and each left a reader with a document that looked complete. A batch
+cancelled on timeout returns nothing at all, a version gate set one branch too
+low aborts on a column that is not there, and a hand-written list of wait types
+returns rows for every name in it and stays silent about the one that mattered.
+
+### Changed
+
+- `10.system/010.properties.sql` matches lock waits as a family, `LCK[_]M[_]%`,
+  rather than by naming two of them. Which lock mode dominates is a property of
+  the workload, so a list of names encodes a guess about the instance instead
+  of measuring it. Found in the field: the block named `LCK_M_S` and `LCK_M_X`
+  while `LCK_M_U` had accumulated twenty times the wait time of `LCK_M_S` and
+  was the fourth wait of the instance, absent from this summary entirely, so a
+  reader who stopped here concluded the instance had no locking problem. The
+  family predicate matches 72 wait types in the catalogue and the existing
+  `waiting_tasks_count` filter left five of them on a test instance, one being
+  `LCK_M_SCH_S`, its largest single wait, which the old list did not name
+  either. The rows stay bounded because modes that never waited are dropped,
+  not because the list is short. `collect/blocking.go` already matched the
+  family this way.
 
 ### Fixed
 
