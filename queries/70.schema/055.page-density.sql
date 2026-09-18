@@ -26,7 +26,19 @@
 --
 -- THE TIMEOUT IS 1800 SECONDS, LIKE 041. A batch cancelled on timeout loses the whole
 -- document: TRY/CATCH does not catch a client cancel, so the summary row goes
--- with the detail rows, after the buffer pool was already evicted.
+-- with the detail rows, after the buffer pool was already evicted. Measured in
+-- the field in September 2026, on a collection taken under the space profile,
+-- that is what happened: the 1800 seconds ran out on the two largest databases
+-- of one instance and both lost the whole file, summary included, so nothing
+-- said which partitions had been measured or that anything had been.
+--
+-- So it measures ONE PARTITION PER CALL, largest first, and starts no new call
+-- once @budget_sec have passed since the batch began, the way
+-- 20.databases/020.properties bounds its own fragmentation read. The root says
+-- in sample.measured_partitions how many were measured against
+-- counts.eligible_partitions, so a list cut short is not read as complete. The
+-- budget bounds the NUMBER of calls, not the length of one: a single enormous
+-- partition can still outlast the remainder, and nothing here can prevent that.
 --
 -- THE UNIT IS THE PARTITION, NOT THE INDEX. sys.dm_db_partition_stats has one
 -- row per partition, and a rebuild can be run per partition, so the cap of 50
@@ -63,6 +75,21 @@ SET LOCK_TIMEOUT 10000;
 DECLARE @top int = 50;
 DECLARE @eligible int = NULL, @indexes_covered int = NULL;
 DECLARE @err int = 0, @msg nvarchar(2048) = N'';
+DECLARE @batch_started datetime2 = SYSDATETIME(), @budget_sec int = 1500,
+        @measured int = 0, @i int = 1;
+DECLARE @obj int, @idx int, @part int;
+DECLARE @candidates TABLE (
+    [n]                int IDENTITY(1,1) PRIMARY KEY,
+    [object_id]        int    NOT NULL,
+    [index_id]         int    NOT NULL,
+    [partition_number] int    NOT NULL,
+    [index_name]       sysname NULL,
+    [index_type]       nvarchar(60) NOT NULL,
+    [fill_factor]      tinyint NOT NULL,
+    [reserved_pages]   bigint NOT NULL,
+    [in_row_reserved_pages] bigint NOT NULL,
+    [lob_reserved_pages]    bigint NOT NULL
+);
 DECLARE @density TABLE (
     [table]           nvarchar(300) NOT NULL,
     index_name        sysname       NULL,
@@ -93,41 +120,59 @@ BEGIN TRY
       AND ps.in_row_used_page_count > 128
     OPTION (RECOMPILE, MAXDOP 1);
 
-    INSERT INTO @density
-    SELECT OBJECT_SCHEMA_NAME(c.object_id) + N'.' + OBJECT_NAME(c.object_id),
-           c.index_name,
-           c.index_id,
-           c.index_type,
-           c.partition_number,
-           c.fill_factor,
-           CAST(c.reserved_pages * 8 / 1024.0 AS decimal(18,1)),
-           CAST(c.in_row_reserved_pages * 8 / 1024.0 AS decimal(18,1)),
-           CAST(c.lob_reserved_pages * 8 / 1024.0 AS decimal(18,1)),
-           ips.page_count,
-           CAST(ips.avg_page_space_used_in_percent AS decimal(5,2)),
-           CAST(ips.avg_fragmentation_in_percent AS decimal(5,2)),
-           ips.record_count
-    FROM (
-        SELECT TOP (@top)
-               ps.object_id, ps.index_id, ps.partition_number,
-               i.name                 AS index_name,
-               i.type_desc            AS index_type,
-               i.fill_factor,
-               ps.reserved_page_count        AS reserved_pages,
-               ps.in_row_reserved_page_count AS in_row_reserved_pages,
-               ps.lob_reserved_page_count    AS lob_reserved_pages
-        FROM sys.dm_db_partition_stats AS ps
-        JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
-        JOIN sys.objects AS o ON o.object_id = ps.object_id
-        WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0
-          AND i.type IN (1, 2) AND i.is_disabled = 0 AND i.is_hypothetical = 0
-          AND ps.in_row_used_page_count > 128
-        ORDER BY ps.in_row_reserved_page_count DESC, ps.object_id, ps.index_id, ps.partition_number
-    ) AS c
-    CROSS APPLY sys.dm_db_index_physical_stats(DB_ID(), c.object_id, c.index_id, c.partition_number, 'SAMPLED') AS ips
-    WHERE ips.index_level = 0
-      AND ips.alloc_unit_type_desc = N'IN_ROW_DATA'
+    INSERT INTO @candidates ([object_id], [index_id], [partition_number],
+                             [index_name], [index_type], [fill_factor],
+                             [reserved_pages], [in_row_reserved_pages], [lob_reserved_pages])
+    SELECT TOP (@top)
+           ps.object_id, ps.index_id, ps.partition_number,
+           i.name, i.type_desc, i.fill_factor,
+           ps.reserved_page_count,
+           ps.in_row_reserved_page_count,
+           ps.lob_reserved_page_count
+    FROM sys.dm_db_partition_stats AS ps
+    JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
+    JOIN sys.objects AS o ON o.object_id = ps.object_id
+    WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0
+      AND i.type IN (1, 2) AND i.is_disabled = 0 AND i.is_hypothetical = 0
+      AND ps.in_row_used_page_count > 128
+    ORDER BY ps.in_row_reserved_page_count DESC, ps.object_id, ps.index_id, ps.partition_number
     OPTION (RECOMPILE, MAXDOP 1);
+
+    WHILE EXISTS (SELECT 1 FROM @candidates WHERE [n] = @i)
+          AND DATEDIFF(second, @batch_started, SYSDATETIME()) < @budget_sec
+    BEGIN
+        SELECT @obj = [object_id], @idx = [index_id], @part = [partition_number]
+        FROM @candidates
+        WHERE [n] = @i;
+
+        /* The DMV is called with scalars, not through a CROSS APPLY filtered on
+           [n]: an APPLY over the candidate table would leave the optimiser free
+           to invoke the function for every row and filter afterwards, which is
+           50 scans per iteration instead of one. 20.databases/020.properties
+           reads its own fragmentation the same way, for the same reason. */
+        INSERT INTO @density
+        SELECT OBJECT_SCHEMA_NAME(@obj) + N'.' + OBJECT_NAME(@obj),
+               c.index_name,
+               c.index_id,
+               c.index_type,
+               c.partition_number,
+               c.fill_factor,
+               CAST(c.reserved_pages * 8 / 1024.0 AS decimal(18,1)),
+               CAST(c.in_row_reserved_pages * 8 / 1024.0 AS decimal(18,1)),
+               CAST(c.lob_reserved_pages * 8 / 1024.0 AS decimal(18,1)),
+               ips.page_count,
+               CAST(ips.avg_page_space_used_in_percent AS decimal(5,2)),
+               CAST(ips.avg_fragmentation_in_percent AS decimal(5,2)),
+               ips.record_count
+        FROM sys.dm_db_index_physical_stats(DB_ID(), @obj, @idx, @part, 'SAMPLED') AS ips
+        JOIN @candidates AS c ON c.[n] = @i
+        WHERE ips.index_level = 0
+          AND ips.alloc_unit_type_desc = N'IN_ROW_DATA'
+        OPTION (RECOMPILE, MAXDOP 1);
+
+        SET @measured += 1;
+        SET @i += 1;
+    END
 END TRY
 BEGIN CATCH
     SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
@@ -139,6 +184,8 @@ FROM (SELECT DISTINCT [table], index_id FROM @density) AS d;
 SELECT DB_NAME()                                   AS [database],
        CONVERT(varchar(23), SYSDATETIME(), 126)    AS [collected_at],
        @top                                        AS [sample.largest_partitions_scanned],
+       @measured                                   AS [sample.measured_partitions],
+       @budget_sec                                 AS [sample.budget_sec],
        'SAMPLED'                                   AS [sample.mode],
        @eligible                                   AS [counts.eligible_partitions],
        @indexes_covered                            AS [counts.indexes_covered],

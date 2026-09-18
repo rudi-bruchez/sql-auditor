@@ -2,7 +2,7 @@
 -- @resultsets:  root:object, top_spills:array
 -- @permissions: CONNECT, VIEW SERVER STATE
 -- @timeout:     120
--- @min_version: 13.0.5026
+-- @min_version: 14.0.3015
 --
 -- Which statements spilled to tempdb, and whether the grant or the estimate
 -- was to blame.
@@ -14,13 +14,29 @@
 -- diagnosis needed an actual post-execution plan, which only the client can
 -- produce, so the report had to ask for one and wait for a second exchange.
 --
--- THE FLOOR IS MICROSOFT'S, NOT OURS. total_spills and last_spills arrived in
--- SQL Server 2016 SP2 (13.0.5026) and 2017 CU3. Below that build there is no
--- path to a spill except an actual plan: Query Store under 2019 stores
--- estimated plans only, which is why 022.query-store-profiled is gated at 15.0,
--- and query_store_runtime_stats gained no spill column until 2017. An instance
--- below the floor is not a gap in this corpus, and a report that asks for a
--- plan there should say which of the two it is.
+-- THE FLOOR IS MICROSOFT'S, NOT OURS, AND IT IS THE HIGHER OF TWO. total_spills
+-- and last_spills arrived in SQL Server 2016 SP2 (13.0.5026) and in SQL Server
+-- 2017 CU3 (14.0.3015). That is not a version range, it is two floors on two
+-- branches with a hole between them: 14.0.1000 through 14.0.3014 are above the
+-- 2016 floor and below their own. A @min_version gate is a numeric floor and
+-- cannot express a hole, so it carries the later of the two, exactly as
+-- 10.system/013.memory-model.sql does for sql_memory_model.
+--
+-- Measured, and this is why the gate moved: gated at 13.0.5026 this file ran on
+-- a SQL Server 2017 RTM (14.0.1000.169) and the batch failed with "Invalid
+-- column name 'total_spills'", because 14 is greater than 13 and the gate never
+-- looked further. The cost of the correction is that 2016 SP2 and SP3
+-- instances, which do have the columns, no longer run this collector. That is
+-- the deliberate trade: a gate set too low aborts a batch on an engine it had
+-- no business running on, and a gate set too high collects nothing, which is
+-- the safe direction.
+--
+-- Below the floor there is no path to a spill except an actual plan: Query
+-- Store under 2019 stores estimated plans only, which is why
+-- 022.query-store-profiled is gated at 15.0, and query_store_runtime_stats
+-- gained no spill column until 2017. An instance below the floor is not a gap
+-- in this corpus, and a report that asks for a plan there should say which of
+-- the two it is.
 --
 -- THE SAME SP2 CHANGED WHAT THE COLUMN COUNTS. From SP2 the spills columns of
 -- sys.dm_exec_query_stats also include pages spilled by parallelism operators,
