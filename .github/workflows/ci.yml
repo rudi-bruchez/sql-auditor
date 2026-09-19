@@ -125,7 +125,7 @@ jobs:
         run: go run ./cmd/sql-auditor collect --env /dev/null --output-dir "$RUNNER_TEMP/out"
       # collect exits 0 on a clean run, but an empty run also exits 0 if the
       # corpus somehow produced nothing. Assert on the artefacts instead: the
-      # four per-database results are the ones a missing fixture would drop.
+      # five per-database results are the ones a missing fixture would drop.
       - name: assert the run is complete
         run: |
           run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
@@ -133,7 +133,7 @@ jobs:
           find "$run_dir" -name '*.json' | sort
           test -f "$run_dir/_run.json"
           test "$(find "$RUNNER_TEMP/out" -maxdepth 1 -name '*.zip' | wc -l)" -eq 1
-          for f in 020.properties 021.properties-2014 022.query-store 023.log-vlf; do
+          for f in 020.properties 021.properties-2014 022.query-store 023.log-vlf 025.fragmentation; do
             test -f "$run_dir/20.databases/ci_probe/$f.json"
           done
           # The run must have produced something, and _run.json must describe

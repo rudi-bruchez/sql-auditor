@@ -348,6 +348,7 @@ Queries (38):
   20.databases/022.query-store.sql           per database, SQL Server 13+
   20.databases/023.log-vlf.sql               per database, SQL Server 13.0.5026+
   20.databases/024.log-stats.sql             per database, SQL Server 13.0.5026+
+  20.databases/025.fragmentation.sql         per database
   40.security/010.principals.sql
   50.agent/010.jobs.sql
   50.agent/020.job-steps.sql
@@ -497,6 +498,7 @@ output/
         021.properties-2014.json
         022.query-store.json
         023.log-vlf.json
+        025.fragmentation.json
     70.schema/
       AppDb/
         010.objects.json
@@ -1003,9 +1005,9 @@ one, across seven tiers:
 | --- | --- |
 | 30 s | 6 |
 | 60 s | 41 |
-| 120 s | 21 |
+| 120 s | 22 |
 | 180 s | 2 |
-| 300 s | 11 |
+| 300 s | 12 |
 | 600 s | 1 |
 | 1800 s | 2 |
 
@@ -1016,19 +1018,21 @@ finish.
 
 They do so for different reasons.
 
-**`20.databases/020.properties.sql`** has 300 seconds and is the schema-heavy
-one: index fragmentation, largest objects, and missing and unused indexes are
-all result sets inside that single file, and all of them walk every object in
-the database.
+**`20.databases/025.fragmentation.sql`** has 300 seconds and runs once per
+database, so its limit is per database rather than for the run. It reads
+logical fragmentation with `sys.dm_db_index_physical_stats`, which walks the
+index pages themselves rather than metadata. It measures the 100 largest
+partitions one at a time and starts no new one after 150 seconds;
+`fragmentation_sample` in the archive says how many it measured out of how many
+were eligible. One call on a single very large partition can still run past the
+limit, and a collector that times out returns nothing.
 
-It runs once per database, so its 300 seconds is per database rather than for
-the run. A database with tens of thousands of objects can pass even that mark.
-The fragmentation read, which was the part that did on databases of a few
-hundred GB, measures the 100 largest partitions one at a time and starts no new
-one after 150 seconds; `fragmentation_sample` in the archive says how many it
-measured out of how many were eligible. One call on a single very large
-partition can still run past the limit, and a collector that times out returns
-none of its seven result sets.
+It used to be a result set of `20.databases/020.properties.sql`, and a timeout
+there cost the files, their autogrowth settings and the largest objects along
+with the fragmentation. It has its own file so that it no longer can: what is
+left in `020.properties` is catalog reads. An archive collected before the split
+carries `fragmentation` and `fragmentation_sample` in `020.properties.json`
+instead.
 
 **`70.schema/041.compression-savings.sql`** has the corpus's longest timeout at
 1800 seconds, which it shares with 70.schema/055.page-density.sql, and is the

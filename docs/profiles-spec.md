@@ -475,6 +475,7 @@ them are behind flags.
 | `20.databases/022.query-store.sql` | current and maximum Query Store storage |
 | `20.databases/023.log-vlf.sql` | VLF layout |
 | `20.databases/024.log-stats.sql` | what holds the log back from truncating, and how much of it is active |
+| `20.databases/025.fragmentation.sql` | logical fragmentation of the largest index partitions, split out of `020.properties` so that its timeout no longer costs the files |
 | `50.agent/010.jobs.sql` | the jobs a scheduled shrink runs in |
 | `50.agent/020.job-steps.sql` | the step text, where a `DBCC SHRINKFILE` in a T-SQL job shows |
 | `50.agent/040.maintenance-plans.sql` | shrink tasks in maintenance plans |
@@ -527,7 +528,7 @@ much of the step text.
 ### Why it is needed
 
 Whether rebuilding an index returns space depends on how full its leaf pages
-are. `20.databases/020.properties.sql` reads
+are. `20.databases/025.fragmentation.sql` reads
 `sys.dm_db_index_physical_stats` in `LIMITED` mode, where
 `avg_page_space_used_in_percent` is NULL, and keeps only indexes with more than
 10 % logical fragmentation. Logical fragmentation measures page order, not page
@@ -632,7 +633,7 @@ sqlcmd, which ignores comments, could not show it.
 --
 -- Why this collector exists: whether rebuilding an index gives space back
 -- depends on how full its pages are, and nothing else in the corpus says.
--- 20.databases/020.properties reads sys.dm_db_index_physical_stats in LIMITED
+-- 20.databases/025.fragmentation reads sys.dm_db_index_physical_stats in LIMITED
 -- mode, where avg_page_space_used_in_percent is NULL, and keeps only indexes
 -- above 10 % logical fragmentation. Logical fragmentation is page ORDER, not
 -- page FULLNESS: a table can be perfectly ordered and half empty, and it is

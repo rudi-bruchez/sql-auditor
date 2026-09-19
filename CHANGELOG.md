@@ -17,6 +17,24 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Changed
+
+- The fragmentation read has left `20.databases/020.properties.sql` for a
+  collector of its own, `20.databases/025.fragmentation.sql`. It was the only
+  expensive area of that file, and a timeout cancels the whole batch: on a
+  2.4 TB database the files, their autogrowth settings and the largest objects
+  were lost with it, although they are catalog reads that answer in
+  milliseconds. The per-partition budget of 0.24.0 made that rarer but could
+  not rule it out, since it bounds the number of calls and not the length of
+  one. `025.fragmentation.json` carries the same `fragmentation` array and the
+  same `fragmentation_sample`, `collected.fragmentation` and
+  `errors.fragmentation` fields that `020.properties.json` did, and is in the
+  `space` profile like its parent. `020.properties.json` no longer carries
+  them, so a reader has to look in the new file, and fall back to the old one
+  for an archive collected before this change.
+
 ## [0.26.0] - 2026-09-18
 
 Three collectors said less than they appeared to. Two of them failed in the
