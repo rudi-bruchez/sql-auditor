@@ -393,8 +393,12 @@ header, and the same place for the judgement: outside this repository.
   the day of collection is refused in Go, since the day is not over; a past
   date excludes that whole day.
 - Cost, measured before merging: the collector on a store of at least a
-  hundred thousand `runtime_stats` rows, with its duration reported in the
-  commit.
+  hundred thousand `runtime_stats` rows. Measured on SQL Server 2025 with
+  100,892 rows (10,002 queries, one-minute intervals), through the binary with
+  the default cap of 50: 757 ms. The same store also showed why the interval
+  counts are reported rather than trusted: under load it went `READ_ONLY`
+  (`readonly_reason` 262144, in-memory limit) and captured one minute in two,
+  so the after side held 5 intervals for 6 minutes of time.
 - CI: a run with `--query-store-compare-at` against the CI instance, asserting
   the collector ran and its root carries both sides.
 
