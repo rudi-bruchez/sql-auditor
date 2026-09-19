@@ -17,7 +17,13 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.28.0] - 2026-09-19
+
+A collection could hold up the server it was auditing: `READ UNCOMMITTED` keeps
+a collector from waiting on the workload, not the workload from waiting on the
+collector. A blocking watch now cancels a collector someone has waited on for
+5 seconds. The release also adds a way to compare the Query Store on either
+side of a change, and two collectors.
 
 ### Added
 
