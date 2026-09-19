@@ -64,6 +64,7 @@
 70.schema/090.statistics.sql
 70.schema/091.statistics-density.sql
 80.workload/010.wait-stats.sql
+80.workload/011.batch-response-times.sql
 80.workload/020.query-store.sql
 80.workload/021.query-store-detail.sql
 80.workload/022.query-store-profiled.sql

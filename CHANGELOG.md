@@ -21,6 +21,12 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Added
 
+- `80.workload/011.batch-response-times.sql` collects the 'Batch Resp
+  Statistics' counters as a histogram of batch durations since the last
+  restart, one row per bucket with elapsed and CPU counts and totals, and in
+  the root how many batches took a second or more, and ten seconds or more.
+  The elapsed and CPU histograms are independent: a batch is filed once by
+  each, so the two columns of one row do not describe the same batches.
 - `20.databases/027.resumable-operations.sql` lists the resumable index
   operations each database holds, running or paused, from SQL Server 2017 on:
   table, index, state, progress, the pages already written, and how long a
