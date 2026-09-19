@@ -17,7 +17,12 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.27.0] - 2026-09-19
+
+One collector held a cheap question and an expensive one in the same batch, and
+a timeout on the second cost the answer to the first. Fragmentation now has a
+file of its own, so a large database that runs out of time loses fragmentation
+and nothing else.
 
 ### Changed
 
