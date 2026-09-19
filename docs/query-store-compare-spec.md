@@ -1,8 +1,10 @@
 # Query Store before and after a change
 
-Status: draft, not implemented. Written on 19 September 2026, and revised the
-same day after a panel of five independent readers ran it against a live SQL
-Server 2025. What the panel changed is listed at the end.
+Status: implemented on 19 September 2026
+(`queries/80.workload/025.query-store-compare.sql`). Written the same day,
+revised after a panel of five independent readers ran it against a live SQL
+Server 2025, and revised again after a sixth reader ran the revision. What the
+readers changed is listed at the end.
 
 ## The question
 
@@ -90,11 +92,21 @@ server's `SYSDATETIMEOFFSET()`:
    No row overlapping C means nothing was captured during it, so nothing mixed
    can be kept by accident, and the fallbacks put both bounds on the edge of a
    real interval rather than in the middle of an absent one.
-2. L = the time from `excluded_to` to N, capped at seven days, rounded down to
-   a whole multiple of m.
+2. L = the shortest of: the time from `excluded_to` to N; the time from the
+   oldest interval the store holds to `excluded_from`; seven days. Rounded
+   down to a whole multiple of m, and zero when `excluded_to` is after N (the
+   interval overlapping C is still open) or the store holds nothing older than
+   `excluded_from`.
 3. before = the intervals with `start_time >= excluded_from - L` and
    `end_time <= excluded_from`; after = the intervals with
    `start_time >= excluded_to` and `end_time <= excluded_to + L`.
+
+The retention bound matters as much as the other two. Without it, a store
+enabled or cleared shortly before a migration, which is the documented way to
+prepare one, would compare a few hours of before with a week of after, and the
+total ranking below would measure retention rather than the change. A reviewer
+showed it on the lab: a nominal 31 minutes on each side held 6 intervals
+before and 12 after, and an unchanged query ranked first on total CPU.
 
 Both sides have the same length, L, and both are made of whole, closed
 intervals: the interval still open at collection time is never on a side,
@@ -120,6 +132,11 @@ The only refusal is in Go, before anything runs: C must end before the
 collection starts (the probe's `serverNow`). Otherwise there is no after at
 all, and a C in the future is almost always a time typed in the wrong zone,
 the same reasoning as the window's future-bound refusal.
+
+On a daily store, a date typed on a server whose offset is not zero can
+overlap two daily intervals, and both are excluded: the store's days and the
+server's local days do not have to coincide. The root's excluded bounds show
+it; the containers used here run at UTC, so it was not measured.
 
 Known limit, shared with the existing window: the server's UTC offset is the
 one the probe reported at collection time. A T on the other side of a daylight
@@ -190,9 +207,11 @@ So it goes into a second map, `ValueFlags`, beside `KnownFlags`: flags that an
 option carrying a value sets, true exactly when the value was given.
 `@requires_flag` accepts a name from either map; the skip reason and `check`
 look the option up in either. `--all` and the wizard keep iterating
-`KnownFlags` only, and both tests stay as they are. A test checks that the two
-maps are disjoint, and that every entry of `ValueFlags` is decided by
-`buildOptions`.
+`KnownFlags` only. The wizard test stays as it is; `TestAllTurnsOnEveryOptIn`
+reads the `Flags` map `buildOptions` returns, which carries this flag too, so
+it learns that a `ValueFlags` entry is decided but must stay off under `--all`.
+A test checks that the two maps are disjoint, and that every entry of
+`ValueFlags` is decided by `buildOptions`.
 
 A run with `--all` and no `--query-store-compare-at` reports the collector as
 skipped with the reason naming the option, as every other gated collector
@@ -210,11 +229,14 @@ off still produces a row saying so:
 - `database`, `collected_at`, `state.actual`, `state.desired`,
   `state.readonly_reason`, `state.capture_mode`, `interval_minutes`;
 - `change.from`, `change.to` (C, as received);
-- `excluded.from`, `excluded.to`, `excluded.intervals`,
+- `excluded.from`, `excluded.to`, `excluded.still_open` (the interval
+  overlapping C had not closed at collection time, so its executions are
+  partial and there is no after side yet), `excluded.intervals`,
   `excluded.executions`;
+- `oldest_interval`, the start of the store's retained history;
 - `side_minutes` (L);
 - `before.from`, `before.to`, `before.intervals`, and the same for `after`;
-- `selection.cap`.
+- `selection.cap`, `selection.statements`, `selection.queries`.
 
 ### The unit of comparison
 
@@ -237,10 +259,21 @@ independently that two stored procedures holding the same statement share one
 statement under other settings" is (`query_text_id`, `object_id`), with a
 different `context_settings_id`.
 
-So the row is one `query_id`, as everywhere else in the corpus, and it carries
-`query_text_id`, `object_id`, `context_settings_id`, and the `set_options` of
-its context settings rendered as hex. The collector does not merge the pair:
-two settings can give two plans, and that difference may be the finding.
+So the unit of SELECTION is the statement, (`query_text_id`, `object_id`), and
+the unit of the ROWS stays the `query_id`, as everywhere else in the corpus.
+Ranked by `query_id`, a statement split by a driver change would sit on one
+side per `query_id`; the per-execution rankings accept only queries present on
+both sides, so neither half could rank there, and a split statement that
+regressed would lose its place to unchanged heavy ones. A reviewer built that
+case (three statements, two of them switched to other SET options when an
+index was dropped) and the split regression was not selected. Ranked as a
+statement, it is: measured with a cap of three, the split regression came
+second on per-execution CPU, both of its `query_id`s returned.
+
+Each row carries `query_text_id`, `object_id`, `context_settings_id`, and the
+`set_options` of its context settings rendered as hex. The collector does not
+merge the `query_id`s of a statement: two settings can give two plans, and
+that difference may be the finding.
 
 A plan's `compatibility_level` in `sys.query_store_plan` is that of its last
 compilation. Measured: after the level went from 170 to 130, a plan compiled
@@ -250,36 +283,40 @@ at 170 and recompiled to the same shape reported 130. The plan rows name it
 
 ### Selection
 
-Candidates: every query with at least one execution on either side.
+Candidates: every statement with at least one execution on either side, all
+its `query_id`s summed.
 
-Three rankings:
+Three rankings over statements:
 
-1. `cpu_per_execution`: queries on both sides only, by
+1. `cpu_per_execution`: statements on both sides only, by
    `|avg_cpu_after - avg_cpu_before| * executions_after`. The change in
    per-execution cost, at the after side's volume.
 2. `duration_per_execution`: the same with duration.
-3. `cpu_total`: every candidate, by `|total_cpu_after - total_cpu_before|`,
+3. `cpu_total`: every statement, by `|total_cpu_after - total_cpu_before|`,
    a missing side counting as zero.
 
-The sides now have the same length and are made of whole intervals, so the
-totals can be compared directly. The third ranking is what catches a query
-that appeared, disappeared, or changed volume. The first draft ranked a
+The sides have the same length, are made of whole intervals, and the before
+side is never longer than the history behind it, so the totals can be compared
+directly. The third ranking is what catches a statement that appeared,
+disappeared, or changed volume. The first draft ranked a
 one-side query by its total and a two-side query by its per-execution change,
 which a reviewer showed was discontinuous: a query falling to zero executions
 ranked first, the same query falling to one execution ranked near last.
 
 The selection is a round robin over the three rankings, deduplicated, up to
-`@qs_top`, the same shape as 021's round robin. Then, outside the cap:
+`@qs_top` statements, the same shape as 021's round robin; ties break on the
+statement's lowest `query_id`, so two collections of an unchanged store select
+the same statements. Then, outside the cap, the statement of every query that
+executed on either side and has a plan with `is_forced_plan = 1` or
+`force_failure_count > 0`, as in 020, since a forcing that fails is the case
+that goes unnoticed.
 
-- every query sharing `query_text_id` and `object_id` with a selected query
-  under another `context_settings_id`. Its size is bounded by the number of
-  distinct SET combinations the application uses, not by how often a
-  statement is repeated across procedures;
-- every query that executed on either side and has a plan with
-  `is_forced_plan = 1` or `force_failure_count > 0`, as in 020, since a
-  forcing that fails is the case that goes unnoticed.
+Every `query_id` of a selected statement that executed on either side gets a
+row. How many there are is bounded by the SET combinations, parameterization
+types and batches the statement ran under, not by how often its text is
+repeated across procedures, since `object_id` is part of the key.
 
-Each row gives `selected_by` and its rank in each ranking it appears in.
+Each row gives its statement's `selected_by` and ranks.
 
 ### Rows
 
@@ -349,10 +386,12 @@ header, and the same place for the judgement: outside this repository.
 - The manifest records the typed and the resolved value.
 - The corpus inventory gains one entry (`testdata/corpus.txt`, regenerated).
 - On the lab, all of: the change typed on its minute excludes the 15:50
-  interval and nothing else; typed as a date excludes the whole day and gives
-  L = 0 on the same day; both statements of the scenario are selected, the
-  dropped index shows as a plan change on the first, and the SET pair is
-  returned together.
+  interval and nothing else; the dropped index shows as a plan change; a
+  statement split by a SET change across the change is ranked as one and both
+  its `query_id`s are returned; a store whose history starts shortly before
+  the change gives two sides of the same number of intervals. A date typed on
+  the day of collection is refused in Go, since the day is not over; a past
+  date excludes that whole day.
 - Cost, measured before merging: the collector on a store of at least a
   hundred thousand `runtime_stats` rows, with its duration reported in the
   commit.
@@ -380,3 +419,15 @@ Claude subagent) ran the first draft against SQL Server 2025.
   value; the `query_hash` row of the table was corrected.
 - The claim that the interval count tells an idle side from an unrecorded one
   was withdrawn.
+
+A sixth reader ran the revision, and changed it again:
+
+- L is also bounded by the store's retained history, so a before side cut
+  short by retention no longer passes for a week of data.
+- Selection is by statement rather than by `query_id`, which replaces the
+  sibling rule: a statement split by a SET change ranks as one.
+- The root says when the excluded interval is still open, and gives the
+  store's oldest interval.
+- The date test contradicted the Go refusal and was rewritten; the option
+  names come from one helper, which also corrected the grant script's
+  `(only with ...)` notes that spelled some options wrongly.

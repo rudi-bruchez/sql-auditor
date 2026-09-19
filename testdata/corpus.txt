@@ -70,6 +70,7 @@
 80.workload/022.query-store-profiled.sql
 80.workload/023.query-store-most-executed.sql
 80.workload/024.query-store-rowcount.sql
+80.workload/025.query-store-compare.sql
 80.workload/030.implicit-conversions.sql
 80.workload/040.plan-cache.sql
 80.workload/041.plan-cache-plans.sql

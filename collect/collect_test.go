@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"io/fs"
@@ -1317,5 +1318,77 @@ func TestExportQueriesRefusesToOverwriteWithoutForce(t *testing.T) {
 	b, _ = os.ReadFile(edited)
 	if string(b) != "SELECT 1" {
 		t.Errorf("--force did not replace the file: %q", b)
+	}
+}
+
+// --query-store-compare-at names the span the change happened in. A minute
+// typed is that minute, a date is that day, both in the server's zone, and a
+// span not yet over at collection time is refused: there is no after.
+func TestChangeSpanReadsAMinuteOrADay(t *testing.T) {
+	loc := time.FixedZone("server", 2*3600)
+	now := time.Date(2026, 9, 19, 18, 0, 0, 0, loc)
+	from, to, err := changeSpan("2026-09-19T15:50", now, loc)
+	if err != nil || !from.Equal(time.Date(2026, 9, 19, 13, 50, 0, 0, time.UTC)) || to.Sub(from) != time.Minute {
+		t.Errorf("minute: %s to %s, %v; want 13:50Z plus one minute", from, to, err)
+	}
+	from, to, err = changeSpan("2026-09-18", now, loc)
+	if err != nil || !from.Equal(time.Date(2026, 9, 18, 0, 0, 0, 0, loc)) || to.Sub(from) != 24*time.Hour {
+		t.Errorf("day: %s to %s, %v; want the whole day in the server's zone", from, to, err)
+	}
+	// Today is not over, and neither is the current minute.
+	for _, raw := range []string{"2026-09-19", "2026-09-19T18:00", "2026-09-19T17:59"} {
+		_, _, err := changeSpan(raw, now.Add(30*time.Second), loc)
+		if raw == "2026-09-19T17:59" {
+			if err != nil {
+				t.Errorf("%s ended 30 s before collection and was refused: %v", raw, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), "no after") {
+			t.Errorf("%s: err = %v, want the refusal", raw, err)
+		}
+	}
+	if _, _, err := changeSpan("19/09/2026", now, loc); err == nil {
+		t.Errorf("a malformed value was accepted")
+	}
+}
+
+// 025 takes its three parameters from the span and the cap, is narrowed by
+// QUERY_STORE_DB_INCLUDE like the writers, and names its option when skipped.
+func TestTheCompareCollectorIsWiredByItsFlag(t *testing.T) {
+	cmp := Script{Path: "80.workload/025.query-store-compare.sql", RequiresFlag: FlagQueryStoreCompare}
+	o := Options{Config: &Config{QueryStoreTop: 7}, QueryStore: NewQueryStoreState()}
+	o.QueryStore.ChangeFrom = time.Date(2026, 9, 19, 15, 50, 0, 0, time.UTC)
+	o.QueryStore.ChangeTo = o.QueryStore.ChangeFrom.Add(time.Minute)
+	args, note := queryStoreArgs(o, cmp, DatabaseFolder{Name: "Sales"})
+	if note != "" || len(args) != 3 {
+		t.Fatalf("args = %v, note = %q; want three parameters", args, note)
+	}
+	names := map[string]any{}
+	for _, a := range args {
+		n := a.(sql.NamedArg)
+		names[n.Name] = n.Value
+	}
+	if names["qs_change_from"] != o.QueryStore.ChangeFrom || names["qs_change_to"] != o.QueryStore.ChangeTo || names["qs_top"] != 7 {
+		t.Errorf("parameters = %v", names)
+	}
+	// An ordinary gated collector still gets nothing.
+	if args, _ := queryStoreArgs(o, Script{RequiresFlag: FlagQueryStoreDetail}, DatabaseFolder{}); args != nil {
+		t.Errorf("a non-writer gated on another flag got %v", args)
+	}
+
+	folders := []DatabaseFolder{{Name: "Sales"}, {Name: "Archive"}}
+	kept, skipped := queryStoreUnits(&Config{QueryStoreDBInclude: "sal*"}, cmp, folders)
+	if len(kept) != 1 || len(skipped) != 1 {
+		t.Errorf("QUERY_STORE_DB_INCLUDE did not narrow 025: kept %v", kept)
+	}
+	kept, _ = queryStoreUnits(&Config{QueryStoreDBInclude: "sal*"},
+		Script{RequiresFlag: FlagQueryStoreDetail}, folders)
+	if len(kept) != 2 {
+		t.Errorf("a non-writer gated on another flag was narrowed: %v", kept)
+	}
+
+	if r, ok := skipReason(cmp, "", nil, nil, map[string]bool{}); !ok || !strings.Contains(r, "--query-store-compare-at") {
+		t.Errorf("skip reason = %q", r)
 	}
 }

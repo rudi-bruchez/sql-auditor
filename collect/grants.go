@@ -170,7 +170,7 @@ func collectorsFor(scripts []Script, capability string) []string {
 			}
 			line := s.Path
 			if s.RequiresFlag != "" {
-				line += "   (only with --" + strings.ReplaceAll(s.RequiresFlag, "_", "-") + ")"
+				line += "   (only with " + flagOption(s.RequiresFlag) + ")"
 			}
 			out = append(out, line)
 			break

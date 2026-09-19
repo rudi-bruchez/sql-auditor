@@ -1650,6 +1650,78 @@ each with its text, its statistics and one file per plan, is a larger archive
 than a metadata-only run, and the plans are what makes it a document to handle
 carefully rather than a big one.
 
+## `--query-store-compare-at`
+
+After a migration, an upgrade, a release, a compatibility level change or an
+index dropped, the question is which queries changed. `--query-store-compare-at`
+names when the change happened, and
+`80.workload/025.query-store-compare.sql` returns, for the queries whose cost
+moved most across it, the same measures on both sides. The design, and what it
+was measured against, is in `docs/query-store-compare-spec.md`.
+
+```
+sql-auditor collect --query-store-compare-at 2026-09-12T22:00
+sql-auditor collect --query-store-compare-at 2026-09-12
+```
+
+### What the value means
+
+It is the server's local time, like the window bounds, and it names a span
+rather than an instant: a minute typed means "during that minute", a date
+"some time that day". Every Query Store interval overlapping the span is left
+out of both sides, because its averages mix the old behaviour and the new. On
+an hourly store, a change at 22:00 therefore loses the 22:00 to 23:00 hour; a
+date loses the whole day. When you do not know the minute, type the date.
+
+The span has to be over when the collection starts, or there is no after to
+read, and the run stops on it. It is a command line option only, with no
+`.env` key: a value left in a file would follow every later collection.
+
+`--all` does not turn it on. It needs a moment, and `--all` has none to give;
+with `--all` alone the collector is listed as skipped, naming the option.
+
+### The two sides
+
+Both sides are computed per database, from that store's intervals: the same
+length, a whole number of intervals, at most seven days, never longer than
+the history the store still holds before the change, and only closed
+intervals, so a total on one side can be set against the total on the other.
+The length can be zero (a daily store and a change six hours ago); the root
+says so in `side_minutes` rather than the run refusing, because another
+database may have a store fine enough to compare.
+
+The root gives the excluded span with its execution count, and each side's
+bounds and interval count. An interval count proves little about the workload:
+the store writes an interval only when it captured something, and the
+instance's own background queries fill intervals in an idle database.
+
+### What is selected
+
+Statements are selected, not `query_id`s: the same text in the same module
+is one statement, however many `query_id`s it has. A new driver often brings
+new SET options, and with them a new `query_id` for every statement, one
+before the change and one after; ranked by `query_id`, such a statement could
+never show a per-execution change. Each `query_id` of a selected statement
+still gets its own row.
+
+Three rankings, filled in turn up to `--query-store-top` statements (default
+50): the change in per-execution CPU and in per-execution duration, each at
+the after side's volume, for statements present on both sides; and the change
+in total CPU for every statement, which is what sees one appear, disappear or
+change volume. Then, outside the cap, any statement with a forced plan or a
+failed forcing.
+
+Nothing is labelled a regression. A query slower after the change may be
+slower for reasons that have nothing to do with it; telling which needs the
+deployment calendar.
+
+### What it discloses
+
+The first 500 characters of each query's text, as `020.query-store.sql`
+already does, and no plan XML: the plans are `--query-store-detail`'s
+disclosure. `--query-store-databases` narrows it as it narrows the detail
+extraction.
+
 ## `--include-object-definitions`
 
 The fourth option that changes what the archive holds, and the only one whose

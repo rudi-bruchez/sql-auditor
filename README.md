@@ -424,6 +424,7 @@ Exactly three cases.
 | `--query-store-from T` | start of the window, `YYYY-MM-DDTHH:MM` or `YYYY-MM-DD`, in the **server's** local time |
 | `--query-store-to T` | end of the window, same format and same clock (default: the moment of collection). Given on its own it implies a seven-day window ending at that bound |
 | `--query-store-top N` | how many queries to extract per database, across the four rankings once deduplicated (default 50). Queries with a forced plan are added on top of this |
+| `--query-store-compare-at T` | compare the Query Store on either side of a change: `YYYY-MM-DDTHH:MM` (that minute) or `YYYY-MM-DD` (that day), in the server's local time. Command line only; `--all` does not turn it on. See `docs/dba-guide.md` |
 | `--query-store-databases P` | comma-separated `*`/`?` patterns narrowing which of the collected databases the Query Store extraction reads. It narrows the selection; it never widens it |
 
 ### `--all` asks for the widest archive this tool can produce

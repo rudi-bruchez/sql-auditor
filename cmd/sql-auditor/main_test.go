@@ -371,15 +371,62 @@ func TestAllTurnsOnEveryOptIn(t *testing.T) {
 		}
 	}
 	for name := range o.Flags {
+		if _, ok := collect.ValueFlags[name]; ok {
+			continue
+		}
 		if _, ok := collect.KnownFlags[name]; !ok {
 			t.Errorf("--all decides %s, which is not in collect.KnownFlags: no collector "+
 				"can ever be gated on it", name)
 		}
 	}
 	for name, on := range o.Flags {
-		if !on {
+		_, valued := collect.ValueFlags[name]
+		if valued && on {
+			t.Errorf("--all turned on %s, which needs a value --all cannot give", name)
+		}
+		if !valued && !on {
 			t.Errorf("--all left %s off", name)
 		}
+	}
+}
+
+// A ValueFlag is decided by its option's value and by nothing else, and every
+// one of them is decided: a collector gated on one that no option sets could
+// never run.
+func TestValueFlagsFollowTheirOption(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+	for name := range collect.KnownFlags {
+		if _, ok := collect.ValueFlags[name]; ok {
+			t.Errorf("%s is in both KnownFlags and ValueFlags", name)
+		}
+	}
+	o, code, err := buildOptions("collect", []string{"--env", env,
+		"--query-store-compare-at", "2026-09-19T15:50"}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	for name := range collect.ValueFlags {
+		if !o.Flags[name] {
+			t.Errorf("%s is off with its option given", name)
+		}
+	}
+	if o.QueryStoreCompareAt != "2026-09-19T15:50" {
+		t.Errorf("QueryStoreCompareAt = %q", o.QueryStoreCompareAt)
+	}
+	if o, _, _ := buildOptions("collect", []string{"--env", env,
+		"--query-store-compare-at", "2026-09-19"}, noEnv, noStdin); !o.Flags[collect.FlagQueryStoreCompare] {
+		t.Errorf("a date alone was not accepted")
+	}
+	for _, bad := range []string{"19/09/2026", "2026-09-19 15:50", "2026-09-19T15:50:13"} {
+		if _, code, err := buildOptions("collect", []string{"--env", env,
+			"--query-store-compare-at", bad}, noEnv, noStdin); err == nil || code != 2 {
+			t.Errorf("%q: code %d, err %v; want a refusal with exit 2", bad, code, err)
+		}
+	}
+	// And .env cannot set it: the key does not exist.
+	env2 := writeDotEnv(t, "SQL_SERVER=invalid.invalid\nQUERY_STORE_COMPARE_AT=2026-09-19\n")
+	if _, _, err := buildOptions("collect", []string{"--env", env2}, noEnv, noStdin); err == nil {
+		t.Errorf("QUERY_STORE_COMPARE_AT was accepted from .env")
 	}
 }
 

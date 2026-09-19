@@ -130,6 +130,27 @@ var KnownFlags = map[string]string{
 	"measure_page_density":    "--measure-page-density",
 }
 
+// ValueFlags are flags set by an option that carries a value, true exactly
+// when the value was given. @requires_flag accepts them like KnownFlags, but
+// they are not opt-ins: --all and the wizard's third screen iterate
+// KnownFlags only, because neither has a value to give. The two maps are
+// disjoint.
+var ValueFlags = map[string]string{
+	"query_store_compare": "--query-store-compare-at",
+}
+
+// flagOption names the option that sets a flag, from either map, or the flag
+// itself when neither knows it.
+func flagOption(name string) string {
+	if o, ok := KnownFlags[name]; ok {
+		return o
+	}
+	if o, ok := ValueFlags[name]; ok {
+		return o
+	}
+	return name
+}
+
 // KnownWriters is the closed set of names @writer accepts, mapped to the
 // one-line description `check` prints. scriptNote reads it; a description no
 // command ever shows would be a comment pretending to be data.
@@ -355,7 +376,9 @@ func parseScript(rel, sql string) Script {
 			s.MaxVersion = v
 		case "requires_flag":
 			name := strings.ToLower(strings.TrimSpace(val))
-			if _, ok := KnownFlags[name]; !ok {
+			_, known := KnownFlags[name]
+			_, valued := ValueFlags[name]
+			if !known && !valued {
 				setLint(fmt.Sprintf("@requires_flag: unknown flag %q; expected one of %s",
 					val, strings.Join(knownFlagNames(), ", ")))
 				continue
@@ -493,8 +516,11 @@ func parseScript(rel, sql string) Script {
 }
 
 func knownFlagNames() []string {
-	names := make([]string, 0, len(KnownFlags))
+	names := make([]string, 0, len(KnownFlags)+len(ValueFlags))
 	for n := range KnownFlags {
+		names = append(names, n)
+	}
+	for n := range ValueFlags {
 		names = append(names, n)
 	}
 	sort.Strings(names)
