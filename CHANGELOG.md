@@ -17,6 +17,20 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Added
+
+- `20.databases/027.resumable-operations.sql` lists the resumable index
+  operations each database holds, running or paused, from SQL Server 2017 on:
+  table, index, state, progress, the pages already written, and how long a
+  paused one has been waiting. A paused operation blocks other index DDL on its
+  table (Msg 10637), and a paused `CREATE INDEX` has no row in `sys.indexes`,
+  so no other collector could see it. `index_exists` tells a rebuild from a
+  creation. The statement text is not collected. Without `VIEW ANY
+  DEFINITION` the view comes back empty rather than failing, which reads like a
+  database with nothing paused.
+
 ## [0.27.0] - 2026-09-19
 
 One collector held a cheap question and an expensive one in the same batch, and

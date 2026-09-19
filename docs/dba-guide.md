@@ -349,6 +349,8 @@ Queries (38):
   20.databases/023.log-vlf.sql               per database, SQL Server 13.0.5026+
   20.databases/024.log-stats.sql             per database, SQL Server 13.0.5026+
   20.databases/025.fragmentation.sql         per database
+  20.databases/026.persisted-sku-features.sql per database
+  20.databases/027.resumable-operations.sql  per database, SQL Server 14+
   40.security/010.principals.sql
   50.agent/010.jobs.sql
   50.agent/020.job-steps.sql
@@ -499,6 +501,8 @@ output/
         022.query-store.json
         023.log-vlf.json
         025.fragmentation.json
+        026.persisted-sku-features.json
+        027.resumable-operations.json
     70.schema/
       AppDb/
         010.objects.json
@@ -1003,7 +1007,7 @@ one, across seven tiers:
 
 | `@timeout` | Files |
 | --- | --- |
-| 30 s | 6 |
+| 30 s | 7 |
 | 60 s | 41 |
 | 120 s | 22 |
 | 180 s | 2 |
