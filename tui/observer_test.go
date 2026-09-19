@@ -176,3 +176,19 @@ func TestObserverEventsDoNotShareTheNoteSlice(t *testing.T) {
 		t.Errorf("two states share a slice: left = %q, right = %q", left.Notes, right.Notes)
 	}
 }
+
+// A unit skipped once running, after the blocking watch cancelled a collector
+// on its database, finishes the unit for the gauge and counts as a skip.
+func TestObserverCountsAUnitSkippedMidRunAsASkip(t *testing.T) {
+	ch := make(chan event, 4)
+	observer{ch: ch}.UnitDone("20.databases/002.b.sql", "SALESDB", 0, 0,
+		&collect.UnitSkipped{Reason: "the blocking watch cancelled 20.databases/001.a.sql on this database"})
+	got := fold(t, State{}, ch)
+	if got.DoneUnits != 1 || got.SkippedCount != 1 || got.ErrorCount != 0 {
+		t.Errorf("DoneUnits %d, SkippedCount %d, ErrorCount %d; want 1, 1, 0",
+			got.DoneUnits, got.SkippedCount, got.ErrorCount)
+	}
+	if len(got.Notes) != 1 || !strings.Contains(got.Notes[0], "blocking watch cancelled") {
+		t.Errorf("Notes = %q", got.Notes)
+	}
+}

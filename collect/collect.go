@@ -1462,7 +1462,11 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// the two documents would sit beside the run folders of every later run
 	// and be read as belonging to one of them. WriteManifestWithFallback falls
 	// back again to a temp directory and finally to stderr.
+	// Declared before finish so that every way out records whether the watch
+	// was still running; it is nil until the first unit is about to start.
+	var watch *blockingWatch
 	finish := func(runFolder string, code int) (int, error) {
+		m.BlockingWatch.Stopped = watch.stoppedReason()
 		m.Run.FinishedUTC = nowUTC()
 		m.Run.DurationSec = int(time.Since(started).Seconds())
 		m.Run.ExitCode = code
@@ -1769,14 +1773,54 @@ func Run(ctx context.Context, o Options) (int, error) {
 	}
 	o.Debugf("%d unit(s) to run over %d database(s), into %s", len(units), len(folders), runFolder)
 
+	// The blocking watch starts last, when nothing is left between it and the
+	// first unit. It needs the collection session's id, which a reconnect
+	// changes, so the id is read here and again after every reconnect.
+	spid, spidErr := sessionID(ctx, conn, o.Config)
+	var stopWatch func()
+	reason := ""
+	if spidErr != nil {
+		reason = "the collection session's id could not be read: " + spidErr.Error()
+	} else {
+		watch, stopWatch, reason = startBlockingWatch(ctx, o.Config, denied, spid)
+		defer stopWatch()
+	}
+	m.BlockingWatch.Enabled, m.BlockingWatch.Reason = watch != nil, reason
+	if watch == nil {
+		m.Warnings = append(m.Warnings, "the blocking watch is off, "+reason+
+			": nothing will cancel a collector that other sessions are waiting on")
+		fmt.Fprintf(o.progress(), "note: the blocking watch is off, %s\n", reason)
+	}
+	// Databases where the watch cancelled a collector. The 5-second bound is
+	// per wait, and a deployment is many statements: the next collector on the
+	// same database could hold up the next one. Instance-scope units carry on,
+	// each bounded by the watch on its own.
+	cancelledOn := map[string]string{}
+	watchNoted := false
+
 	for _, u := range units {
 		s, target := u.Script, u.Target
+		if reason, ok := heldBack(cancelledOn, target.Name); ok {
+			m.Skipped = append(m.Skipped, SkippedScript{Script: s.Path, Target: target.Name, Reason: reason})
+			// UnitDone and not ScriptSkipped: this unit was planned, and one
+			// UnitDone per planned unit is what brings the gauge to its total.
+			obs.UnitDone(s.Path, target.Name, 0, 0, &UnitSkipped{Reason: reason})
+			continue
+		}
 		obs.UnitStarted(s.Path, target.Name)
 		before, started := rw.Spent(), time.Now()
 		// Before the unit, not after it: a run that hangs prints no "done"
 		// line, and the last name printed is the one to look at.
 		o.Debugf("running %s on %s", s.Path, target.Name)
-		err := runUnit(ctx, conn, o, m, rw, s, target)
+		err := runUnit(ctx, conn, o, m, rw, s, target, watch, spid)
+		var be *blockedError
+		if errors.As(err, &be) && target.Name != "" {
+			cancelledOn[target.Name] = s.Path
+		}
+		if !watchNoted && watch.stoppedReason() != "" {
+			watchNoted = true
+			fmt.Fprintf(o.progress(), "note: the blocking watch stopped: %s\n", watch.stoppedReason())
+		}
 		// The context is consulted before a single word is written down —
 		// before the ErrorEntry, and before the observer is told. Were this
 		// after the entry, a stopped run would carry the phantom "context
@@ -1845,6 +1889,9 @@ func Run(ctx context.Context, o Options) (int, error) {
 				m.Errors = append(m.Errors, ErrorEntry{Message: rerr.Error()})
 				return finishWith(runFolder, 1, rerr)
 			}
+			// A new connection is a new session: watching the old id would
+			// watch nothing. Zero, if it cannot be read, matches no waiter.
+			spid, _ = sessionID(ctx, conn, o.Config)
 		}
 	}
 
@@ -1952,20 +1999,63 @@ func outOfTime(parent, unit context.Context, limit time.Duration, knob string, e
 }
 
 func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
-	rw *runWriter, s Script, u DatabaseFolder) error {
+	rw *runWriter, s Script, u DatabaseFolder, watch *blockingWatch, spid int) (err error) {
 
 	if err := resetWithDeadline(ctx, conn, o.Config); err != nil {
 		return err
 	}
+
+	// The unit's own context, which the blocking watch cancels with a
+	// *blockedError as the cause. The run's context stays untouched, so
+	// recordUnitFailure files a watch cancellation as a failed unit and never
+	// as an operator stop.
+	unitCtx, unitCancel := context.WithCancelCause(ctx)
+	defer unitCancel(nil)
+
+	// A session whose context is a user database holds a shared lock on it,
+	// and an ALTER DATABASE waits on that lock with nothing running at all.
+	// So the session goes back to the default database the moment the rows
+	// are in memory, before the document is written, and on every other way
+	// out. On the run's context: the unit's may be the one just cancelled.
+	left := false
+	leave := func() {
+		if left {
+			return
+		}
+		left = true
+		if rerr := resetWithDeadline(ctx, conn, o.Config); rerr != nil {
+			o.Debugf("  leaving %s after %s failed: %v", u.Name, s.Path, rerr)
+		}
+	}
+	watch.arm(spid, unitCancel)
+	defer func() {
+		worst, fired := watch.disarm()
+		leave()
+		var be *blockedError
+		switch {
+		case errors.As(err, &be):
+			m.BlockingWatch.CancelledUnits++
+		case fired:
+			m.Warnings = append(m.Warnings, fmt.Sprintf(
+				"%s on %s: %s; the collector had already read its rows, and the waiter was released when the session left the database",
+				s.Path, orInstance(u.Name), worst))
+		case worst.seen():
+			m.Warnings = append(m.Warnings, fmt.Sprintf(
+				"%s on %s: %s, under the blocking watch's %s limit",
+				s.Path, orInstance(u.Name), worst, watchCancelAfter))
+		}
+	}()
+	blocked := func(err error) error { return blockedOr(unitCtx, err) }
+
 	if u.Name != "" {
 		// USE is not free: it takes a lock on the target database and blocks
 		// behind a session holding it in single-user or restoring mode. On a
 		// bare context that is a collect that never returns.
-		uctx, ucancel := deadline(ctx, o.Config)
+		uctx, ucancel := deadline(unitCtx, o.Config)
 		_, err := conn.ExecContext(uctx, "USE "+quoteName(u.Name)+";")
 		ucancel()
 		if err != nil {
-			return err
+			return blocked(err)
 		}
 	}
 	timeout := o.Config.QueryTimeout
@@ -1974,7 +2064,7 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 		timeout = time.Duration(s.TimeoutSec) * time.Second
 		knob = "@timeout"
 	}
-	qctx, cancel := context.WithTimeout(ctx, timeout)
+	qctx, cancel := context.WithTimeout(unitCtx, timeout)
 	defer cancel()
 
 	args, note := queryStoreArgs(o, s, u)
@@ -1985,14 +2075,16 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	start := time.Now()
 	rows, err := conn.QueryContext(qctx, s.SQL, args...)
 	if err != nil {
-		return outOfTime(ctx, qctx, timeout, knob, err)
+		return blocked(outOfTime(ctx, qctx, timeout, knob, err))
 	}
 	defer rows.Close()
 
 	sets, err := ReadResultSets(rows, s.Results)
 	if err != nil {
-		return outOfTime(ctx, qctx, timeout, knob, err)
+		return blocked(outOfTime(ctx, qctx, timeout, knob, err))
 	}
+	rows.Close()
+	leave()
 
 	// Read before the document is written, and recorded whether or not the
 	// write then succeeds: a collector that guarded its own reads reports the
@@ -2122,6 +2214,15 @@ func AuthLabel(c *Config) string {
 		return "sql:" + c.User
 	}
 	return "windows"
+}
+
+// sessionID reads @@SPID of the collection connection, for the blocking watch.
+func sessionID(ctx context.Context, c *sql.Conn, cfg *Config) (int, error) {
+	dctx, cancel := deadline(ctx, cfg)
+	defer cancel()
+	var id int
+	err := c.QueryRowContext(dctx, "SELECT @@SPID;").Scan(&id)
+	return id, err
 }
 
 func resetWithDeadline(ctx context.Context, c *sql.Conn, cfg *Config) error {

@@ -1,8 +1,8 @@
 # Blocking watch: a collection must not hold anybody up
 
-Status: draft, not implemented. Written 19 September 2026, revised the same day
-after a panel of five independent readers ran it against a live SQL Server
-2025. What the panel changed is listed at the end.
+Status: implemented on 19 September 2026 (`collect/watch.go`). Written the same
+day, and revised after a panel of five independent readers ran it against a
+live SQL Server 2025. What the panel changed is listed at the end.
 
 ## The problem
 

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/rudi-bruchez/sql-auditor/collect"
 )
 
 func TestElapsedIsWrittenAtTheScaleItHasReached(t *testing.T) {
@@ -307,5 +309,24 @@ func TestNothingIsPaintedBeforeTheClockHasStarted(t *testing.T) {
 	o.Planned(4)
 	if !strings.Contains(b.String(), "0/4") {
 		t.Errorf("the gauge never appeared after Planned:\n%q", b.String())
+	}
+}
+
+// A unit the run skipped once running, after the blocking watch cancelled a
+// collector on its database, is reported as a skip, not as a unit that ran and
+// wrote nothing.
+func TestAUnitSkippedMidRunSaysSo(t *testing.T) {
+	var b strings.Builder
+	o := newProgress(&b, false, func() int { return 80 }, fixedClock())
+	o.Planned(1)
+	o.UnitStarted("20.databases/002.b.sql", "SALESDB")
+	o.UnitDone("20.databases/002.b.sql", "SALESDB", 0, 0,
+		&collect.UnitSkipped{Reason: "the blocking watch cancelled 20.databases/001.a.sql on this database"})
+	out := b.String()
+	if !strings.Contains(out, "-- 20.databases/002.b.sql (SALESDB): skipped: the blocking watch cancelled") {
+		t.Errorf("no skip line:\n%s", out)
+	}
+	if strings.Contains(out, "!!") || strings.Contains(out, "0 bytes") {
+		t.Errorf("the skip reads as a failure or as a unit that ran:\n%s", out)
 	}
 }

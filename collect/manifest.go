@@ -234,12 +234,40 @@ type Manifest struct {
 	// can say so without reparsing what it has just written, and so that a
 	// degraded collection is visible from the command line and not only from
 	// inside a JSON file nobody opens until the analysis stage.
-	PartialUnits int             `json:"partial_units"`
-	Targets      TargetBlock     `json:"targets"`
-	Results      []ResultEntry   `json:"results"`
-	Skipped      []SkippedScript `json:"skipped_scripts"`
-	Warnings     []string        `json:"warnings"`
-	Errors       []ErrorEntry    `json:"errors"`
+	PartialUnits int `json:"partial_units"`
+	// BlockingWatch says whether anything was watching for sessions held up by
+	// the collection. Without it, a manifest with no cancellation cannot tell
+	// "nobody was blocked" from "nobody was looking".
+	BlockingWatch BlockingWatchBlock `json:"blocking_watch"`
+	Targets       TargetBlock        `json:"targets"`
+	Results       []ResultEntry      `json:"results"`
+	Skipped       []SkippedScript    `json:"skipped_scripts"`
+	Warnings      []string           `json:"warnings"`
+	Errors        []ErrorEntry       `json:"errors"`
+}
+
+// BlockingWatchBlock is the manifest's account of the blocking watch.
+// Enabled with a non-empty Stopped means the units before that time were
+// watched and the ones after were not.
+type BlockingWatchBlock struct {
+	Enabled        bool   `json:"enabled"`
+	Reason         string `json:"reason,omitempty"`
+	PollMS         int    `json:"poll_ms"`
+	CancelAfterMS  int    `json:"cancel_after_ms"`
+	CancelledUnits int    `json:"cancelled_units"`
+	Stopped        string `json:"stopped"`
+}
+
+func (w BlockingWatchBlock) line() string {
+	switch {
+	case !w.Enabled:
+		return "off, " + w.Reason
+	case w.Stopped != "":
+		return fmt.Sprintf("on until it stopped at %s; %d collector(s) cancelled", w.Stopped, w.CancelledUnits)
+	default:
+		return fmt.Sprintf("on, cancels a collector someone has waited on for %d s; %d cancelled",
+			w.CancelAfterMS/1000, w.CancelledUnits)
+	}
 }
 
 // NewManifest starts a manifest with the tool identity and a start timestamp
@@ -249,6 +277,9 @@ func NewManifest(name, version, commit string) *Manifest {
 	return &Manifest{
 		Tool: ToolInfo{Name: name, Version: version, Commit: commit},
 		Run:  RunInfo{StartedUTC: nowUTC()},
+		BlockingWatch: BlockingWatchBlock{
+			PollMS: int(watchPollEvery / time.Millisecond), CancelAfterMS: int(watchCancelAfter / time.Millisecond),
+			Reason: "the run ended before the first collector"},
 	}
 }
 
@@ -485,6 +516,7 @@ func (m *Manifest) Human() string {
 	files, bytes := m.contents()
 	fmt.Fprintf(&b, "Contents     : %d data files, %s\n", files, HumanBytes(bytes))
 	fmt.Fprintf(&b, "Profile      : %s\n", m.profileLine())
+	fmt.Fprintf(&b, "Block watch  : %s\n", m.BlockingWatch.line())
 
 	m.writeDataNature(&b)
 	m.writeCoverage(&b)

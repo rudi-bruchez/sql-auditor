@@ -21,6 +21,15 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Added
 
+- A blocking watch. `collect` opens a second connection that reads
+  `sys.dm_os_waiting_tasks` once a second while each collector runs, and
+  cancels a collector that another session has waited on for 5 seconds; the
+  remaining collectors on that database are skipped. `READ UNCOMMITTED` keeps
+  the collection from waiting on the workload but not the workload from
+  waiting on the collection: a collector's Sch-S held a schema change, and
+  every reader behind it, for as long as the collector ran. The manifest
+  records the watch in a `blocking_watch` block and a `Block watch` line,
+  including when it was off and why. Design in `docs/blocking-watch-spec.md`.
 - `80.workload/011.batch-response-times.sql` collects the 'Batch Resp
   Statistics' counters as a histogram of batch durations since the last
   restart, one row per bucket with elapsed and CPU counts and totals, and in
@@ -36,6 +45,14 @@ release workflow refuses a tag that disagrees with either this file or
   creation. The statement text is not collected. Without `VIEW ANY
   DEFINITION` the view comes back empty rather than failing, which reads like a
   database with nothing paused.
+
+### Changed
+
+- The collection session goes back to the default database as soon as a
+  collector's rows are read, instead of when the next collector starts. A
+  session left in a user database holds a lock on it that an `ALTER DATABASE`
+  waits on, and after the last collector it used to stay there through the
+  writing of the manifest and the archive.
 
 ## [0.27.0] - 2026-09-19
 

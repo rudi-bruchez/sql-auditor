@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -208,7 +209,13 @@ func (p *progress) UnitDone(script, database string, bytes int64, d time.Duratio
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.done++
-	if err != nil {
+	var skip *collect.UnitSkipped
+	if errors.As(err, &skip) {
+		// Kept on screen like a failure, because it is news: the run chose,
+		// while running, not to run something the plan announced.
+		p.clear()
+		fmt.Fprintf(p.out, "-- %s: %v\n", unitLabel(script, database), err)
+	} else if err != nil {
 		// The one thing that must outlive the next repaint. Everything else the
 		// gauge says is replaced a second later; a failure is a fact about this
 		// run, and the manifest recording it too is no help to somebody watching
