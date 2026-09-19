@@ -18,7 +18,7 @@ each with its interpretation written beside it:
 
 | Collector | Counters read |
 | --- | --- |
-| `10.system/010.properties.sql` | memory manager totals and grants, buffer cache hit ratio, batch requests, compilations, recompilations, `Transactions/sec` and `Log Flushes/sec` for `_Total`, and from `General Statistics` `User Connections`, `Logins/sec`, `Logouts/sec`, `Connection Reset/sec` |
+| `10.system/010.properties.sql` | memory manager totals and grants, buffer cache hit ratio, batch requests, compilations, recompilations, `Transactions/sec` and `Log Flushes/sec` for `_Total`, `Checkpoint pages/sec`, page life expectancy per `Buffer Node`, and from `General Statistics` `User Connections`, `Logins/sec`, `Logouts/sec`, `Connection Reset/sec` |
 | `10.system/015.buffer-pool.sql` | database cache, stolen and free memory, page life expectancy (minimum over NUMA nodes) |
 | `10.system/050.tempdb.sql` | version store and tempdb counters of `Transactions` and `General Statistics` |
 | `10.system/075.deprecated-features.sql` | `Deprecated Features`, above zero only |
@@ -51,10 +51,18 @@ view, `mssqlsystemresource` and the Linux model copies included):
   `Database Replica` counters, about 24 more (not measured);
 - the rest does not scale with databases, but it is not fixed either.
   `SQLPAL` objects (Linux 2025 only, absent from the 2017 and 2022 Linux
-  images) were 1,177 rows and 193 KB of a 571 KB document, and
+  images) were 1,177 rows and 193 KB of a document of about 520 KB, and
   `SQLPAL:Scheduler` grows with the scheduler count;
-- sizes of the drafted collector's output: 571 KB on 2025 (3,590 rows), 1,283
-  rows on 2017, 1,549 on 2022.
+- the collector's output on the lab: 3,230 rows and 515 KB on 2025; 1,283 to
+  1,356 rows on 2017 and 1,549 to 1,640 on 2022, depending on the databases
+  present.
+
+At scale: a reviewer added 100 databases on 2022 and measured 87 rows and
+14.4 KB per database, three quarters of them zeros. At 2,000 databases the
+file is about 29 MB. Every collector of a run shares one budget of 256 MiB
+uncompressed (`maxRunBytes`), and a write that would exceed it is refused
+whole; 078 would reach that alone past about 18,000 databases. The file
+compresses about 37 to 1, so the zip barely notices it.
 
 The names are `nchar` and padded. The object names carry a prefix:
 `SQLServer:` on a default instance, `MSSQL$<name>:` on a named one, `SQLPAL:`
@@ -95,8 +103,8 @@ not pretend it does. Measured on 2025:
   `base`, `BASE` and `BS`; `FileTable` names `Avg time delete FileTable item`
   against `Time delete FileTable item BASE`; `Avg Dist From EOL/LP Request`
   goes with `Log Pool Requests Base`; `Tiered Buffer cache hit ratio` has no
-  base. In `(object, counter, instance)` order, 21 of 154 fraction and average
-  rows are followed by their base.
+  base. In `(object, counter, instance)` order, a reviewer found only 21 of
+  about 150 fraction and average rows followed by their base.
 
 So `type_name` is projected as what the engine declares, and the reading of a
 counter is the reader's, counter by counter.
@@ -134,8 +142,14 @@ root describes the array it sits beside.
   `sys.dm_os_sys_info`, which no clock change or UTC offset can skew;
 - `counts.rows` and `counts.objects`, from the table variable.
 
-`uptime_s` is the window of the instance-wide counters that accumulate. It is
-not the window of a per-database row: those start when the database starts,
+`uptime_s` is the longest window any accumulating counter can have, and
+the actual window of many instance-wide ones. Two families have a shorter
+one. `Resource Pool Stats` and `Workload Group Stats` go back to zero on
+`ALTER RESOURCE GOVERNOR RESET STATISTICS`, with no restart (measured on
+2022: `Query optimizations/sec` for the default group from 30 to 0); their
+start is the `statistics_since` that `10.system/072.resource-governor.sql`
+projects per pool and per group. And the per-database rows start when the
+database starts,
 and reset on `OFFLINE`/`ONLINE`, on a restore or an attach, and when an
 `AUTO_CLOSE` database reopens. A reviewer measured `Transactions/sec` for one
 database at 3,083 before an `OFFLINE`/`ONLINE` and 11 after. The collector
@@ -190,10 +204,14 @@ give; and the declared type would not say which rows to compute for.
     `PERF_COUNTER_LARGE_RAWCOUNT`;
   - no row whose `object` contains `Deprecated Features`, and no NULL
     `type_name`;
-  - `counts.rows` equal to the length of the array. With one read this is
-    what the file promises, and it is the only check here that a mistaken
-    second read could break.
-  A collector narrowed to a few rows fails the first line.
+  - at least one row at zero, so a filter copied from 075 (`cntr_value > 0`)
+    fails: a reviewer showed it passed every other line, with 361 rows on
+    2017;
+  - `counts.rows` equal to the length of the array. That is what the file
+    promises; CI cannot prove it comes from one read, since nothing changes
+    on its instance between two.
+  The object checks need one matching row each, so they catch a collector
+  that lost whole objects, not one that lost rows within them.
 - On the lab: the size against the figures above.
 
 ## What the panel changed
@@ -223,6 +241,11 @@ a Claude subagent) ran the first draft against SQL Server 2025, 2022 and
   neutral). The draft used local time on both sides, which a daylight-saving
   change would still skew.
 - CI would have passed a collector narrowed to one row (codex directive).
+- A sixth reader, on the revision and the code: the resource governor
+  counters reset without a restart, which the revision's claim about
+  `uptime_s` had missed; a `cntr_value > 0` filter passed the CI check, which
+  now requires a zero; the size at scale had been dropped from the revision
+  and is back, with the run budget it spends.
 - Rejected: including the `Deprecated Features` zeros so the array is the
   whole view (codex neutral). 075 removed them on purpose; the spec now says
   the array is not the whole view instead.

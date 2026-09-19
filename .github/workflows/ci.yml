@@ -158,10 +158,12 @@ jobs:
           jq -e 'has("side_minutes") and has("before") and has("after")' \
             "$run_dir/80.workload/ci_probe/025.query-store-compare.json"
           jq -e '.config.query_store_compare_at | test("/")' "$run_dir/_run.json"
-          # 078 carries the counters no other collector reads, not a handful:
-          # a file narrowed to a few rows fails the object checks. Its root
+          # 078 carries the counters no other collector reads: a file that
+          # lost whole objects fails the object checks, and one that dropped
+          # its zeros, as 075 does on purpose, fails the zero check. Its root
           # and array come from one read of the view, so they must agree.
           jq -e '(.counters | length) == .counts.rows
+                 and any(.counters[]; .value == 0)
                  and any(.counters[]; .counter == "Page Splits/sec")
                  and any(.counters[]; .object | test(":Locks$"))
                  and any(.counters[]; .object | test(":SQL Errors$"))

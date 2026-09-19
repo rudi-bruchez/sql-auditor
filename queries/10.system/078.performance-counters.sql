@@ -27,9 +27,11 @@
 -- by name or by order. So NO RATE, RATIO OR AVERAGE IS COMPUTED here.
 --
 -- THE WINDOW. uptime_s is from ticks, which no clock change skews, and it is
--- the window of the instance-wide counters that accumulate. A per-database
--- row starts with its database and resets on OFFLINE/ONLINE, restore,
--- attach, or an AUTO_CLOSE reopening; nothing here dates that.
+-- the longest window an accumulating counter can have. Two families have a
+-- shorter one: Resource Pool Stats and Workload Group Stats reset on ALTER
+-- RESOURCE GOVERNOR RESET STATISTICS (072 projects statistics_since), and a
+-- per-database row starts with its database and resets on OFFLINE/ONLINE,
+-- restore, attach, or an AUTO_CLOSE reopening; nothing here dates that.
 --
 -- object keeps its prefix (SQLServer:, MSSQL$<name>:, SQLPAL:, or a product
 -- name with a year and no colon for XTP): match with LIKE, as 010 does.
