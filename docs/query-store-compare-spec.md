@@ -322,8 +322,8 @@ Each row gives its statement's `selected_by` and ranks.
 
 `queries`, one row per selected `query_id`:
 
-- `query_id`, `query_text_id`, `object_id`, `object` (schema.name, null for
-  ad hoc), `query_hash`, `context_settings_id`, `set_options`,
+- `query_id`, `query_text_id`, `object_id`, `object` (labelled as in 023:
+  `(ad hoc)`, `(dropped object, object_id N)` or schema.name), `query_hash`, `context_settings_id`, `set_options`,
   `selected_by`, `rank.cpu_per_execution`, `rank.duration_per_execution`,
   `rank.cpu_total`;
 - for each side, `before.*` and `after.*`: `executions`, `plans` (distinct

@@ -113,6 +113,19 @@ jobs:
           echo "SQL Server did not become reachable" >&2
           docker ps -a
           exit 1
+      # 80.workload/026 classifies interrupted executions from the Query Store,
+      # and an empty store proves nothing about that: every total is zero
+      # whatever the collector filters on. So the store is switched on for
+      # ci_probe, capture mode ALL (under AUTO a first execution may not be
+      # captured), and one statement is stopped by a one-second client
+      # timeout while another fails. Both sqlcmd calls are expected to fail.
+      - name: plant an aborted and a failed execution
+        run: |
+          tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe "$@"; }
+          tools -Q "ALTER DATABASE ci_probe SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE, QUERY_CAPTURE_MODE = ALL);"
+          tools -t 1 -Q "SELECT COUNT_BIG(*) FROM sys.all_columns AS a CROSS JOIN sys.all_columns AS b CROSS JOIN sys.all_columns AS c OPTION (MAXDOP 1);" || true
+          tools -Q "SELECT 1 / (object_id - object_id) FROM sys.objects;" || true
       # --env /dev/null is not decoration. Configuration precedence is
       # flag > .env > process environment, so a .env file appearing in the
       # workspace — generated, or committed by accident — would outrank the
@@ -145,6 +158,11 @@ jobs:
           jq -e 'has("side_minutes") and has("before") and has("after")' \
             "$run_dir/80.workload/ci_probe/025.query-store-compare.json"
           jq -e '.config.query_store_compare_at | test("/")' "$run_dir/_run.json"
+          # 026 counted the planted timeout as Aborted and the division by
+          # zero as Exception.
+          jq -e '.executions.aborted >= 1 and .executions.exception >= 1' \
+            "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json" \
+            || { jq 'del(.aborted, .exceptions)' "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json"; exit 1; }
           # The run must have produced something, and _run.json must describe
           # what is actually on disk. That is the property worth guarding — an
           # archive whose record disagrees with its contents is the one failure

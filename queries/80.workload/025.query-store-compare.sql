@@ -325,8 +325,15 @@ WITH perQuerySide AS (
 SELECT q.query_id                                                 AS [query_id],
        q.query_text_id                                            AS [query_text_id],
        q.object_id                                                AS [object_id],
-       OBJECT_SCHEMA_NAME(NULLIF(q.object_id, 0))
-         + '.' + OBJECT_NAME(NULLIF(q.object_id, 0))              AS [object],
+       /* 023's label: ad hoc and a dropped object must not both be NULL
+          when the before side can hold objects dropped since. */
+       CASE
+           WHEN q.object_id IS NULL OR q.object_id = 0
+               THEN '(ad hoc)'
+           WHEN OBJECT_SCHEMA_NAME(q.object_id) IS NULL
+               THEN '(dropped object, object_id ' + CAST(q.object_id AS VARCHAR(20)) + ')'
+           ELSE OBJECT_SCHEMA_NAME(q.object_id) + '.' + OBJECT_NAME(q.object_id)
+       END                                                        AS [object],
        CONVERT(varchar(18), q.query_hash, 1)                      AS [query_hash],
        q.context_settings_id                                      AS [context_settings_id],
        CONVERT(varchar(18), cs.set_options, 1)                    AS [set_options],

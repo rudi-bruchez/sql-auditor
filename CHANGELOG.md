@@ -17,6 +17,26 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Added
+
+- `80.workload/026.query-store-interrupted.sql` lists, per database, the
+  queries whose executions did not finish: stopped by the client (`Aborted`,
+  where query timeouts land) or by an error (`Exception`), with the
+  duration and CPU of those executions beside the query's finished ones. A
+  timeout leaves no error on the server and `sys.dm_exec_query_stats` does not
+  count it; the Query Store is the only after-the-fact record. Under the
+  default capture mode `AUTO`, a rarely run query that times out while blocked
+  is never captured, so the listing is a lower bound there; the root gives the
+  capture mode. Design in `docs/query-store-interrupted-spec.md`.
+
+### Fixed
+
+- `80.workload/025.query-store-compare.sql` labelled a dropped object and an
+  ad hoc batch both as `null`; it now uses 023's labels, `(ad hoc)` and
+  `(dropped object, object_id N)`.
+
 ## [0.28.0] - 2026-09-19
 
 A collection could hold up the server it was auditing: `READ UNCOMMITTED` keeps
