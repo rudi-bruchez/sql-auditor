@@ -41,6 +41,7 @@
 20.databases/024.log-stats.sql @profiles: space
 20.databases/025.fragmentation.sql @profiles: space
 20.databases/026.persisted-sku-features.sql
+20.databases/027.resumable-operations.sql
 40.security/010.principals.sql
 40.security/020.database-principals.sql
 50.agent/010.jobs.sql @profiles: space
