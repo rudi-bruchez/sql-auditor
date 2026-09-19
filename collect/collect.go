@@ -57,6 +57,12 @@ const FlagMeasurePageDensity = "measure_page_density"
 // and every object name the statement touched.
 const FlagQueryStoreDetail = "query_store_detail"
 
+// FlagQueryStoreCompare gates 80.workload/025.query-store-compare.sql, the
+// Query Store read across a change. It is a ValueFlag, not an opt-in: it is on
+// exactly when --query-store-compare-at named the change, and --all cannot
+// turn it on, having no moment to give. docs/query-store-compare-spec.md.
+const FlagQueryStoreCompare = "query_store_compare"
+
 // FlagObjectDefinitions gates the export of module source: the body of every
 // view, stored procedure, function and trigger.
 //
@@ -169,6 +175,11 @@ type Options struct {
 	// one rather than a panic, because the two @writer scripts are the only
 	// things that consult it and a run without them must behave as before.
 	QueryStore *QueryStoreState
+	// QueryStoreCompareAt is --query-store-compare-at as typed, in the
+	// server's local time; buildOptions checked its shape. Command line only,
+	// never .env: it names one event, and a value left in a file would follow
+	// every later collection.
+	QueryStoreCompareAt string
 	// OwnsScreen says the caller is painting the terminal itself and that this
 	// package must write nothing to stdout. Only the wizard sets it. It is a
 	// field of its own rather than an inference from Observer being non-nil,
@@ -552,11 +563,7 @@ func skipReason(s Script, profile string, denied map[string]bool, serverVersion 
 		return ProfileSkipReason(profile), true
 	}
 	if s.RequiresFlag != "" && !enabled[s.RequiresFlag] {
-		flag := KnownFlags[s.RequiresFlag]
-		if flag == "" {
-			flag = s.RequiresFlag
-		}
-		return fmt.Sprintf("not collected by default; pass %s to include it", flag), true
+		return fmt.Sprintf("not collected by default; pass %s to include it", flagOption(s.RequiresFlag)), true
 	}
 	// An unparseable or absent ProductVersion is not evidence that the server
 	// is old. Gating on it would silently drop every version-gated collector
@@ -1017,6 +1024,9 @@ func runConfig(o Options) map[string]string {
 	for name := range KnownFlags {
 		c[name] = fmt.Sprint(o.Flags[name])
 	}
+	for name := range ValueFlags {
+		c[name] = fmt.Sprint(o.Flags[name])
+	}
 	return c
 }
 
@@ -1140,7 +1150,7 @@ func scriptNote(s Script, enabled map[string]bool) string {
 		if enabled[s.RequiresFlag] {
 			state = "on"
 		}
-		notes = append(notes, KnownFlags[s.RequiresFlag]+" ("+state+")")
+		notes = append(notes, flagOption(s.RequiresFlag)+" ("+state+")")
 	}
 	// A writer script produces a directory, not a document, and `check` is what
 	// a DBA reads before authorising one. "one directory per database: query
@@ -1269,6 +1279,34 @@ func windowForRun(cfg *Config, flags map[string]bool, now time.Time, loc *time.L
 		err, KnownFlags[FlagQueryStoreDetail], KnownFlags[FlagQueryStorePlanStats]), nil
 }
 
+// changeSpan reads --query-store-compare-at as the span the change happened
+// in: a minute typed means that minute, a date that whole day. The operator
+// never knows the second, and every Query Store interval overlapping the span
+// is excluded from both sides, so the span is what decides which interval is
+// mixed. The one refusal: the span must be over before the collection starts,
+// or there is no after to read, and a change in the future is almost always a
+// time typed in the wrong zone.
+func changeSpan(raw string, now time.Time, loc *time.Location) (time.Time, time.Time, error) {
+	var from, to time.Time
+	if t, err := time.ParseInLocation("2006-01-02T15:04", raw, loc); err == nil {
+		from, to = t, t.Add(time.Minute)
+	} else if t, err := time.ParseInLocation("2006-01-02", raw, loc); err == nil {
+		from, to = t, t.AddDate(0, 0, 1)
+	} else {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"--query-store-compare-at: invalid value %q, want 2006-01-02T15:04 or 2006-01-02", raw)
+	}
+	if to.After(now) {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"--query-store-compare-at: the change span %s to %s is not over at %s (all in the "+
+				"server's local time), so there is no after to compare; check the time against "+
+				"the server's clock, not the collecting machine's",
+			from.In(loc).Format(time.RFC3339), to.In(loc).Format(time.RFC3339),
+			now.In(loc).Format(time.RFC3339))
+	}
+	return from, to, nil
+}
+
 func latest(a, b time.Time) time.Time {
 	if a.After(b) {
 		return a
@@ -1317,7 +1355,7 @@ func joinInt64(ids []int64) string {
 // with its name — N identical lines naming no database is the gap this
 // setting's argument would later be had over.
 func queryStoreUnits(cfg *Config, s Script, folders []DatabaseFolder) ([]DatabaseFolder, []SkippedScript) {
-	if s.Writer == "" || cfg.QueryStoreDBInclude == "" {
+	if (s.Writer == "" && s.RequiresFlag != FlagQueryStoreCompare) || cfg.QueryStoreDBInclude == "" {
 		return folders, nil
 	}
 	patterns := splitPatterns(cfg.QueryStoreDBInclude)
@@ -1449,6 +1487,9 @@ func Run(ctx context.Context, o Options) (int, error) {
 	}
 	if o.Config.QueryStoreTo != "" {
 		m.Config["query_store_to_requested"] = o.Config.QueryStoreTo
+	}
+	if o.QueryStoreCompareAt != "" {
+		m.Config["query_store_compare_at_requested"] = o.QueryStoreCompareAt
 	}
 	m.Sources = map[string]SourceInfo{}
 	started := time.Now()
@@ -1647,6 +1688,16 @@ func Run(ctx context.Context, o Options) (int, error) {
 		m.Warnings = append(m.Warnings, windowNote)
 	}
 	o.QueryStore.From, o.QueryStore.To = windowFrom, windowTo
+	if o.QueryStoreCompareAt != "" {
+		cFrom, cTo, err := changeSpan(o.QueryStoreCompareAt, serverNow(si, o.Now), loc)
+		if err != nil {
+			m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+			return finishWith("", 2, err)
+		}
+		o.QueryStore.ChangeFrom, o.QueryStore.ChangeTo = cFrom, cTo
+		m.Config["query_store_compare_at"] = cFrom.In(loc).Format(time.RFC3339) +
+			"/" + cTo.In(loc).Format(time.RFC3339)
+	}
 	// Rendered in the server's zone, so the offset that was applied is on the
 	// page: "14:00" typed and "2026-07-26T14:00:00+02:00" resolved is a reader's
 	// proof that the bound was not read as the collecting machine's local time.
@@ -2182,6 +2233,14 @@ func scopeName(s Script) string {
 // which its own index already records; NO entry means 021 delivered nothing at
 // all, and only this warning says so.
 func queryStoreArgs(o Options, s Script, u DatabaseFolder) ([]any, string) {
+	// 025 is no writer; its flag is what names it.
+	if s.RequiresFlag == FlagQueryStoreCompare {
+		return []any{
+			sql.Named("qs_change_from", o.QueryStore.ChangeFrom),
+			sql.Named("qs_change_to", o.QueryStore.ChangeTo),
+			sql.Named("qs_top", o.Config.QueryStoreTop),
+		}, ""
+	}
 	switch s.Writer {
 	case "query-store-detail":
 		return []any{

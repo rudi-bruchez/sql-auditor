@@ -21,6 +21,20 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Added
 
+- `--query-store-compare-at` and `80.workload/025.query-store-compare.sql`
+  compare the Query Store on either side of a change (a migration, a release,
+  a compatibility level, an index dropped). The value names the minute or the
+  day the change happened, in the server's local time, and every interval
+  overlapping it is left out of both sides, since its averages mix the two
+  behaviours. The sides are computed per database, of equal length in whole
+  intervals, up to seven days. Statements (the same text in the same
+  module) are selected by the change in their per-execution CPU and duration
+  and in their total CPU, so a statement split into two `query_id`s by a
+  change of SET options still ranks as one; each `query_id` keeps its own row.
+  Forced plans are added outside the cap, and nothing is labelled a
+  regression. The before side is never longer than the history the store
+  still holds. Command line only, and `--all` does not
+  turn it on. Design in `docs/query-store-compare-spec.md`.
 - A blocking watch. `collect` opens a second connection that reads
   `sys.dm_os_waiting_tasks` once a second while each collector runs, and
   cancels a collector that another session has waited on for 5 seconds; the

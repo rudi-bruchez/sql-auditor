@@ -161,6 +161,9 @@ type QueryStoreState struct {
 	// to the server, and a local timestamp resolved with the collecting
 	// machine's zone is wrong in a way nothing downstream can detect.
 	From, To time.Time
+	// ChangeFrom and ChangeTo are the span --query-store-compare-at named,
+	// resolved the same way; zero when the option was not given.
+	ChangeFrom, ChangeTo time.Time
 }
 
 func NewQueryStoreState() *QueryStoreState {

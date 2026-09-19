@@ -103,6 +103,7 @@ type cliFlags struct {
 	queryStoreDetail, queryStorePlanStats       bool
 	queryStoreDays, queryStoreTop               int
 	queryStoreFrom, queryStoreTo, queryStoreDBs string
+	queryStoreCompareAt                         string
 }
 
 func defineFlags(cmd string) *cliFlags {
@@ -240,6 +241,12 @@ func defineFlags(cmd string) *cliFlags {
 		"how many queries to extract per database, across all four rankings "+
 			"once deduplicated (default 50); queries with a forced plan are added "+
 			"on top of this")
+	// Command line only, with no .env key: it names one event, and a value
+	// left in a file would run a comparison around a stale moment on every
+	// later collection. docs/query-store-compare-spec.md.
+	fs.StringVar(&c.queryStoreCompareAt, "query-store-compare-at", "",
+		"when a change happened, YYYY-MM-DDTHH:MM (that minute) or YYYY-MM-DD (that day), "+
+			"in the SERVER's local time: compares the Query Store on either side of it")
 	fs.StringVar(&c.queryStoreDBs, "query-store-databases", "",
 		"comma-separated wildcards narrowing which of the collected databases the "+
 			"Query Store extraction reads")
@@ -459,6 +466,16 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 	if err != nil {
 		return collect.Options{}, 2, err
 	}
+	// The shape only: the instant needs the server's offset, which Run learns
+	// from the probe.
+	if v := c.queryStoreCompareAt; v != "" {
+		_, e1 := time.Parse("2006-01-02T15:04", v)
+		_, e2 := time.Parse("2006-01-02", v)
+		if e1 != nil && e2 != nil {
+			return collect.Options{}, 2, fmt.Errorf(
+				"--query-store-compare-at: invalid value %q, want 2006-01-02T15:04 or 2006-01-02", v)
+		}
+	}
 	// The resolved connection, minus the secret. Which server, which login and
 	// which timeouts were actually settled is the first thing to check when a
 	// run hangs, and precedence between a flag, a file and an exported variable
@@ -484,6 +501,8 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 		Now:     time.Now(), Keep: c.keep, Version: version, Commit: buildStamp(),
 		GrantScript: c.grantScript,
 		Force:       c.force,
+
+		QueryStoreCompareAt: c.queryStoreCompareAt,
 		Flags: map[string]bool{
 			collect.FlagIncludeSessionText:    c.all || c.sessionText,
 			collect.FlagEstimateCompression:   c.all || c.estimateCompression,
@@ -495,6 +514,8 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 			collect.FlagDefaultTrace:          c.all || c.defaultTrace,
 			collect.FlagPlanCachePlans:        c.all || c.planCachePlans,
 			collect.FlagMeasurePageDensity:    c.all || c.measurePageDensity,
+			// Not c.all: a ValueFlag, on exactly when the moment was given.
+			collect.FlagQueryStoreCompare: c.queryStoreCompareAt != "",
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -1133,6 +1154,11 @@ Options (check, collect):
   --query-store-top N         how many queries per database, across the four
                               rankings once deduplicated (default 50). Queries with
                               a forced plan are added on top of this.
+  --query-store-compare-at T  compare the Query Store on either side of a change,
+                              YYYY-MM-DDTHH:MM (during that minute) or YYYY-MM-DD
+                              (some time that day), in the SERVER's local time.
+                              Intervals overlapping it are left out of both sides.
+                              Command line only; --all does not turn it on.
   --query-store-databases P   comma-separated wildcards narrowing which of the
                               collected databases the extraction reads. It narrows
                               the selection; it never widens it.

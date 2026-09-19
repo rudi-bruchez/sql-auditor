@@ -108,10 +108,7 @@ func CheckProfile(scripts []Script, profile string, flags map[string]bool) error
 		if slices.ContainsFunc(members, func(s Script) bool { return s.RequiresFlag == name }) {
 			continue
 		}
-		option := KnownFlags[name]
-		if option == "" {
-			option = name
-		}
+		option := flagOption(name)
 		var gatedFailed []Script
 		for _, s := range failed {
 			if s.RequiresFlag == name {
