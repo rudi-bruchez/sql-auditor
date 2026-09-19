@@ -1,6 +1,8 @@
 # Query Store before and after a change
 
-Status: draft, not implemented. Written on 19 September 2026.
+Status: draft, not implemented. Written on 19 September 2026, and revised the
+same day after a panel of five independent readers ran it against a live SQL
+Server 2025. What the panel changed is listed at the end.
 
 ## The question
 
@@ -19,7 +21,7 @@ plan, but nothing in `collect` reads it that way today.
   the comparison has nothing to compare it with.
 
 What is missing is one reading that selects queries by how much they changed
-across a given instant, and returns both sides for each of them.
+across a given moment, and returns both sides for each of them.
 
 ## What is added
 
@@ -28,82 +30,126 @@ One command line option, one collector, no writer.
 ### The option
 
 ```
---query-store-compare-at T    the instant of the change, YYYY-MM-DDTHH:MM or
-                              YYYY-MM-DD, in the SERVER's local time
+--query-store-compare-at T    when the change happened, in the SERVER's local
+                              time: YYYY-MM-DDTHH:MM for "during that minute",
+                              YYYY-MM-DD for "some time that day"
 ```
 
-Environment key `QUERY_STORE_COMPARE_AT`, with the same precedence as every
-other key (flag, then `.env`, then the process environment). The value is
-checked for shape in `Resolve`, with the `dateShapeOf` helper the window bounds
-already use, and turned into an instant after the probe with `parseServerLocal`
-and the same fixed zone as the window. Same reason as the window: the operator
-types what the client said, which is the server's wall clock.
+Command line only. There is no `.env` or environment key. The window keys live
+in `.env` because a window is a standing choice; this value names one event,
+and left in a `.env` it would run a comparison around a stale instant on every
+later collection, or, typed ahead of a planned migration, make every ordinary
+`collect` fail on a moment in the future.
 
-The option sets an internal flag, `query_store_compare`, true exactly when the
-value is not empty. The collector is gated on that flag with `@requires_flag`.
-`--all` does not set it: `--all` turns on opt-ins that need nothing else, and
-this one needs an instant nobody can default. A run with `--all` and no instant
-reports the collector as skipped, with the reason naming the option, as every
-other gated collector does.
+The shape is checked in `buildOptions` (the same two layouts `dateShapeOf`
+accepts, refused with exit 2 otherwise). It is turned into an instant after
+the probe, with `parseServerLocal` and the same fixed zone as the window,
+because the operator types what the client said, which is the server's wall
+clock.
 
-`KnownFlags["query_store_compare"]` is `--query-store-compare-at`, so the
-skip reason and `check` name the option to type.
+### What the typed value means: a span, not an instant
 
-### The two sides
+The operator never knows the second. "We deployed at 14:00" means the change
+landed at some moment in that minute, or in the next few; a date alone means
+some time that day. The typed value is therefore read as a span C:
 
-Let P be the instant, and N the moment of collection (the server's clock, as
-`serverNow` already gives it). Each side has length
+- `YYYY-MM-DDTHH:MM`: C is `[T, T + 1 minute)`;
+- `YYYY-MM-DD`: C is `[T 00:00, T + 1 day)`.
 
-```
-L = min(N - P, 7 days)
-```
+Every Query Store interval that overlaps C is excluded from both sides. It is
+the interval in which the change may have happened, and its averages mix the
+two behaviours. Measured on SQL Server 2025, with a one-minute interval, an
+index dropped at 15:50:13 and a workload running across it: the interval 15:50
+to 15:51 held 585 executions of the old plan and 2943 of the new one.
 
-- before: `[P - L, P)`
-- after: `[P, P + L)`
+This replaces the first draft's rule, which excluded only an interval strictly
+straddling an instant. A reviewer showed that rule failed on the spec's own
+example: the option takes minutes, so on a one-minute store the typed instant
+always falls on a boundary, nothing straddles it, and the mixed interval went
+whole into one side.
 
-The sides have the same requested length, so a count of executions on one side
-can be set against the other without a correction. Seven days is the cap
-because a week covers the weekly cycle of most workloads (month-end jobs
-excepted, which no default can cover), and it is also the default of
-`QUERY_STORE_DAYS`. There is no option to change it. If one is needed later,
-it is a second key, not a reason to delay this one.
+An operator unsure of the minute types the date. The price is a day of data
+excluded, and the root says so.
 
-Refusals, fatal only when the flag is on, in the same function that prices the
-window's refusals (`windowForRun`, or a sibling of it):
+### The two sides, computed per database in SQL
 
-- P not before N: nothing is after it yet;
-- `N - P` under one hour: most stores aggregate by the hour, and the interval
-  that contains P is excluded (below), so the after side would hold nothing.
+The Go side passes two instants, `@qs_change_from` and `@qs_change_to` (the
+bounds of C), and `@qs_top`. Everything else is computed by the collector, per
+database, because it depends on that database's interval length and on which
+intervals exist, which Go cannot know.
 
-With the flag off, a malformed `QUERY_STORE_COMPARE_AT` is already refused by
-`Resolve` for shape, like the window bounds; nothing else reads it.
+In the collector, with m the store's `interval_length_minutes` and N the
+server's `SYSDATETIMEOFFSET()`:
+
+1. `excluded_from` = the earliest `start_time` of an interval overlapping C
+   (`start_time < @qs_change_to AND end_time > @qs_change_from`); when none
+   does, the latest `end_time` at or before `@qs_change_from`; when there is
+   none either, `@qs_change_from`. Symmetrically, `excluded_to` = the latest
+   `end_time` of an interval overlapping C; when none does, the earliest
+   `start_time` at or after `@qs_change_to`; failing that, `@qs_change_to`.
+   No row overlapping C means nothing was captured during it, so nothing mixed
+   can be kept by accident, and the fallbacks put both bounds on the edge of a
+   real interval rather than in the middle of an absent one.
+2. L = the time from `excluded_to` to N, capped at seven days, rounded down to
+   a whole multiple of m.
+3. before = the intervals with `start_time >= excluded_from - L` and
+   `end_time <= excluded_from`; after = the intervals with
+   `start_time >= excluded_to` and `end_time <= excluded_to + L`.
+
+Both sides have the same length, L, and both are made of whole, closed
+intervals: the interval still open at collection time is never on a side,
+since it ends after N and `excluded_to + L <= N`. The first draft's sides had
+asymmetric bounds (the before side dropped the interval containing its start,
+the after side kept the one containing its end); measured by a reviewer, 59
+intervals against 60 on a one-hour comparison.
+
+Seven days is the cap because a week covers the weekly cycle of most workloads
+(month-end jobs excepted, which no default covers) and matches the default of
+`QUERY_STORE_DAYS`. It is a multiple of every interval length the Query Store
+accepts (1, 5, 10, 15, 30, 60 and 1440 minutes), so the rounding never
+shortens it.
+
+L can be zero: a daily store and a change six hours ago, or an hourly store
+and a change forty minutes ago. That is a per-database fact, reported in the
+root, not a refusal: another database of the same run may have a one-minute
+store and a usable comparison. The first draft refused anything under an hour
+in Go, which a reviewer showed let a daily store through with both sides
+empty, and refused a one-minute store that had enough data.
+
+The only refusal is in Go, before anything runs: C must end before the
+collection starts (the probe's `serverNow`). Otherwise there is no after at
+all, and a C in the future is almost always a time typed in the wrong zone,
+the same reasoning as the window's future-bound refusal.
 
 Known limit, shared with the existing window: the server's UTC offset is the
-one the probe reported at collection time. A P on the other side of a
-daylight saving change is off by one hour. The Query Store's own interval
-bounds carry their offset, so this is a limit of how P is typed, not of the
-data.
+one the probe reported at collection time. A T on the other side of a daylight
+saving change is one hour off. A reviewer confirmed that the driver sends a
+`time.Time` as `datetimeoffset(7)`, so the comparisons themselves are made on
+the UTC instant; the limit is only in how T is typed.
 
-### Assigning intervals to a side
+The bounds come from the interval rows rather than from arithmetic on m,
+because interval boundaries are not something the collector can compute
+reliably. Measured on SQL Server 2025: a store at 15 minutes had an interval
+16:15 to 16:30; after `INTERVAL_LENGTH_MINUTES = 1440`, that same interval
+became 16:15 to 00:00. Boundaries follow the clock of the current length, and
+the interval open at the change straddles both.
 
-Measured on SQL Server 2025 with a one-minute interval, an index dropped at
-15:50:13 and a workload running across it: the interval 15:50 to 15:51 held 585
-executions of the old plan and 2943 of the new one. Its average is neither
-side.
+When the store's interval length changed within the compared range, older
+intervals are not aligned on the current m. They still belong to a side only
+when they lie entirely within it, so nothing is mixed; a side may then hold
+fewer intervals than L / m, and the root's counts show it.
 
-So an interval belongs to a side only if it lies entirely within it:
+### What the counts do and do not say
 
-- before: `start_time >= P - L AND end_time <= P`
-- after: `start_time >= P AND start_time < P + L`
-
-The after condition tests the start only, so the interval open at collection
-time is kept; its statistics are partial, which is true of any live reading.
-An interval with `start_time < P AND end_time > P` belongs to neither side. It
-is reported in the root (bounds and execution count), never merged.
-
-Because intervals are aligned on the hour by default, P = 14:20 loses the whole
-14:00 to 15:00 hour. That is the price of not mixing the two sides, and the
-root says so by giving the excluded interval's bounds.
+Interval rows exist only for periods in which the store captured something.
+Measured by a reviewer: the lab database has no interval rows between 15:54
+and 16:05 with the store in READ_WRITE, and an idle scratch database had
+intervals filled by the instance's own background queries. So the number of
+intervals on a side proves neither that the workload ran nor that it did not.
+The root reports it, beside L and the state, and the spec does not claim it
+separates "the store could not speak" from "nothing ran". The state
+(`actual`, `readonly_reason`) is what says whether the store was recording at
+collection time.
 
 ### The collector
 
@@ -119,152 +165,218 @@ root says so by giving the excluded interval's bounds.
 -- @discloses:     query_text
 ```
 
-It is not a writer: its output is a JSON file like any other collector's. It
-receives four named parameters, `@qs_pivot`, `@qs_before_from`,
-`@qs_after_to` and `@qs_top`. `queryStoreArgs` today switches on `s.Writer`;
-it gains a case for this collector keyed on its flag, so no other collector
-moves to `sp_executesql`. `QUERY_STORE_DB_INCLUDE` applies to it as it applies
-to 021: `queryStoreUnits` tests `s.Writer == ""` and has to test the flag too.
+It is not a writer: its output is one JSON file like any other collector's.
+`runUnit` already passes arguments to a collector without a writer; only
+`queryStoreArgs` has to learn this one. It switches on `s.Writer` today and
+gains a case keyed on `s.RequiresFlag == FlagQueryStoreCompare`, so no other
+collector moves to `sp_executesql`.
+
+`QUERY_STORE_DB_INCLUDE` applies to it as it applies to 021.
+`queryStoreUnits` returns early on `s.Writer == ""`; that condition becomes
+"neither a writer nor this collector", and a test checks that ordinary
+collectors are still not narrowed.
 
 `@qs_top` is `QUERY_STORE_TOP` (default 50). One setting for "how many queries
-per database" is enough; the two collectors answer different questions but
-cost the same kind of thing.
+per database" is enough.
 
-The root, like 021's, is a `LEFT JOIN` from `sys.databases`, so a database
-with the store off still produces a row saying so. It carries:
+### The flag is not an opt-in
+
+`--all` and the wizard's third screen turn on every entry of `KnownFlags`, and
+two tests hold them to it (`TestAllTurnsOnEveryOptIn` and
+`TestTheWizardOffersEveryOptInTheCommandLineHas`). This flag cannot be one of
+them: `--all` has no instant to give, and screen 3 holds boolean toggles.
+
+So it goes into a second map, `ValueFlags`, beside `KnownFlags`: flags that an
+option carrying a value sets, true exactly when the value was given.
+`@requires_flag` accepts a name from either map; the skip reason and `check`
+look the option up in either. `--all` and the wizard keep iterating
+`KnownFlags` only, and both tests stay as they are. A test checks that the two
+maps are disjoint, and that every entry of `ValueFlags` is decided by
+`buildOptions`.
+
+A run with `--all` and no `--query-store-compare-at` reports the collector as
+skipped with the reason naming the option, as every other gated collector
+does.
+
+The manifest records the value as typed (`query_store_compare_at_requested`)
+and as resolved in the server's zone (`query_store_compare_at`), like the
+window's pair.
+
+### The root
+
+A `LEFT JOIN` from `sys.databases`, as in 021, so a database with the store
+off still produces a row saying so:
 
 - `database`, `collected_at`, `state.actual`, `state.desired`,
-  `state.readonly_reason`, `state.capture_mode`;
-- `pivot`, and `excluded_interval.start`, `excluded_interval.end`,
-  `excluded_interval.executions` (null when P falls on a boundary);
-- for each side, `before.*` and `after.*`: `requested_from`, `requested_to`,
-  `effective_from`, `effective_to` (clamped to what the store holds, as in
-  021), `intervals` (the count of intervals assigned to that side);
-- `interval_minutes`, `selection.cap`.
-
-A side with zero intervals is a side the store cannot speak for, and it looks
-exactly like a side where nothing ran. The count is what tells them apart,
-and it is the first thing the reader checks.
+  `state.readonly_reason`, `state.capture_mode`, `interval_minutes`;
+- `change.from`, `change.to` (C, as received);
+- `excluded.from`, `excluded.to`, `excluded.intervals`,
+  `excluded.executions`;
+- `side_minutes` (L);
+- `before.from`, `before.to`, `before.intervals`, and the same for `after`;
+- `selection.cap`.
 
 ### The unit of comparison
 
-Measured on the same lab database:
+Measured on the lab database, with one reviewer's refinement:
 
 | Change between the sides | `query_id` | `query_hash` | `query_text_id` |
 | --- | --- | --- | --- |
 | an index dropped | same | same | same |
 | compatibility level 170 to 130 | same | same | same |
-| `SET ANSI_NULLS OFF`, `DATEFORMAT dmy` | new | new | same |
+| `SET ARITHABORT OFF` or `DATEFORMAT dmy` | new | same | same |
+| `SET ANSI_NULLS OFF` | new | new | same |
 
-A change of SET options, which is what a new driver or a new connection
-library brings with it, and a migration often brings a new driver, splits one
-statement into two `query_id`s, one on each side. `query_hash` does not bridge
-them either. `query_text_id` does.
+A change of SET options, which a new driver or connection library brings with
+it, and a migration often brings a new driver, splits one statement into two
+`query_id`s, one on each side.
+
+`query_text_id` alone does not identify that statement. Two reviewers showed
+independently that two stored procedures holding the same statement share one
+`query_text_id` under two `query_id`s. The pair that identifies "the same
+statement under other settings" is (`query_text_id`, `object_id`), with a
+different `context_settings_id`.
 
 So the row is one `query_id`, as everywhere else in the corpus, and it carries
-`query_text_id`, `context_settings_id` and the `set_options` of its context
-settings, rendered as hex. A query present only after P whose text is shared
-by a query present only before P is the same statement under other settings,
-and the reader can see it by joining on `query_text_id`. The collector does
-not merge them: two settings can give two plans, and that difference may be
-the finding.
+`query_text_id`, `object_id`, `context_settings_id`, and the `set_options` of
+its context settings rendered as hex. The collector does not merge the pair:
+two settings can give two plans, and that difference may be the finding.
 
-A plan's `compatibility_level` in `sys.query_store_plan` is the level of its
-last compilation, not of its first. Measured: after the level went from 170 to
-130, a plan compiled at 170 and recompiled to the same shape reported 130.
-So the plan rows carry it, named `last_compile_compatibility_level`, and the
-spec does not claim it tells the sides apart. `engine_version`, which moves on
-an upgrade, has the same caveat and the same naming.
+A plan's `compatibility_level` in `sys.query_store_plan` is that of its last
+compilation. Measured: after the level went from 170 to 130, a plan compiled
+at 170 and recompiled to the same shape reported 130. The plan rows name it
+`last_compile_compatibility_level`, and `engine_version` likewise
+`last_compile_engine_version`; neither is claimed to tell the sides apart.
 
 ### Selection
 
 Candidates: every query with at least one execution on either side.
 
-For each candidate and each of two metrics, CPU time and duration, an impact
-in microseconds:
+Three rankings:
 
-- on both sides: `|avg_after - avg_before| * executions_after`, the cost of the
-  change in per-execution cost at the after side's volume;
-- after only: `total_after`;
-- before only: `total_before`.
+1. `cpu_per_execution`: queries on both sides only, by
+   `|avg_cpu_after - avg_cpu_before| * executions_after`. The change in
+   per-execution cost, at the after side's volume.
+2. `duration_per_execution`: the same with duration.
+3. `cpu_total`: every candidate, by `|total_cpu_after - total_cpu_before|`,
+   a missing side counting as zero.
 
-The first form attributes to the change only the per-execution difference. A
-query that simply ran ten times more often keeps its per-execution cost and
-does not rank; its execution counts are in the row, and volume is a different
-question from regression. That is a choice, and it is written down so it can
-be argued with.
+The sides now have the same length and are made of whole intervals, so the
+totals can be compared directly. The third ranking is what catches a query
+that appeared, disappeared, or changed volume. The first draft ranked a
+one-side query by its total and a two-side query by its per-execution change,
+which a reviewer showed was discontinuous: a query falling to zero executions
+ranked first, the same query falling to one execution ranked near last.
 
-The selection is a round robin over the two rankings, deduplicated, up to
-`@qs_top` queries, the same shape as 021's four-metric round robin. Then,
-outside the cap:
+The selection is a round robin over the three rankings, deduplicated, up to
+`@qs_top`, the same shape as 021's round robin. Then, outside the cap:
 
-- every other query sharing a `query_text_id` with a selected query, so the
-  statement split by a SET change is never selected on one side only;
-- every query with a forced plan that executed on either side.
+- every query sharing `query_text_id` and `object_id` with a selected query
+  under another `context_settings_id`. Its size is bounded by the number of
+  distinct SET combinations the application uses, not by how often a
+  statement is repeated across procedures;
+- every query that executed on either side and has a plan with
+  `is_forced_plan = 1` or `force_failure_count > 0`, as in 020, since a
+  forcing that fails is the case that goes unnoticed.
 
-Each row says which ranking or which rule selected it (`selected_by`), and its
-rank in each ranking.
+Each row gives `selected_by` and its rank in each ranking it appears in.
 
 ### Rows
 
 `queries`, one row per selected `query_id`:
 
-- `query_id`, `query_text_id`, `query_hash`, `context_settings_id`,
-  `set_options`, `object` (schema.name, null for ad hoc), `selected_by`,
-  `rank.cpu`, `rank.duration`;
+- `query_id`, `query_text_id`, `object_id`, `object` (schema.name, null for
+  ad hoc), `query_hash`, `context_settings_id`, `set_options`,
+  `selected_by`, `rank.cpu_per_execution`, `rank.duration_per_execution`,
+  `rank.cpu_total`;
 - for each side, `before.*` and `after.*`: `executions`, `plans` (distinct
   plans that executed on that side), and per execution `duration_ms`,
   `cpu_ms`, `logical_reads`, `physical_reads`, `logical_writes`,
-  `max_used_memory_kb`, `rowcount`;
+  `max_used_memory_pages` (the source column counts 8 KB pages, and 021
+  already names its column that way), `rowcount`;
 - `text`: the first 500 characters, as 020 does.
 
 Averages are weighted by executions (`SUM(avg * count) / SUM(count)`), as in
-020 and 021, and converted from microseconds to milliseconds.
+020 and 021, and durations converted from microseconds to milliseconds.
 
 `plans`, one row per plan of a selected query that executed on either side:
 
 - `query_id`, `plan_id`, `query_plan_hash`, `is_forced_plan`,
-  `last_compile_compatibility_level`, `last_compile_engine_version`,
-  `first_execution_time`, `last_execution_time`;
-- per side, `executions` and the same per-execution averages.
+  `force_failure_count`, `last_compile_compatibility_level`,
+  `last_compile_engine_version`;
+- per side, `executions`, `first_execution` and `last_execution` (the minimum
+  and maximum of `sys.query_store_runtime_stats.first_execution_time` and
+  `last_execution_time` over that side's intervals; the plan view has no such
+  column, a reviewer checked), and the same per-execution averages.
 
-`query_plan_hash` rather than `plan_id` is what says two plans have the same
-shape. No plan XML: that is `--query-store-detail`'s disclosure, and an
-operator who wants the plans of the queries this collector selected turns it
-on. The two selections are independent, and the spec does not try to join them
-in `collect`.
+`query_plan_hash` groups plans of the same shape. It is a hash, and 022
+already treats a match on it as a match on a hash rather than as identity; the
+rows here are named the same way and no text claims more.
+
+No plan XML: that is `--query-store-detail`'s disclosure, and an operator who
+wants the plans of the queries this collector selected turns it on.
 
 ### No verdict
 
 Nothing is labelled a regression or an improvement. The ranking decides what
-is returned, not what it means. Whether a query that got slower after P got
-slower because of what happened at P, the data volume, a plan that would have
+is returned, not what it means. Whether a query that got slower after the
+change got slower because of it, the data volume, a plan that would have
 changed anyway, or a quiet week before a busy one, needs the deployment
 calendar and the workload, and that is analysis. The same principle as 021's
 header, and the same place for the judgement: outside this repository.
 
 ## What is not in scope
 
-- The wizard. The option exists on the command line and in `.env`; the TUI can
-  offer it later.
+- The wizard. It cannot take an instant on screen 3; offering the comparison
+  there is a separate screen, later.
 - Wait statistics per side (`sys.query_store_wait_stats`, 2017 and later). A
-  second result set would be the natural extension; it is left out because
-  the floor of the collector would then be two versions.
-- Anything outside the Query Store: wait stats, counters and file latency
-  have no history before the collection, so they cannot be split at P.
+  second result set would be the natural extension; it would raise the
+  collector's floor.
+- Anything outside the Query Store: wait stats, counters and file latency have
+  no history before the collection, so they cannot be split.
 - Private analysis of the output.
 
 ## Tests
 
-- `Resolve`: the key's shape is checked; the flag is set exactly when the
-  value is not empty.
-- The side computation: L capped at seven days, the two refusals, the flag-off
-  path that ignores a bad instant with a warning.
-- `queryStoreArgs`: the four parameters reach this collector and no other.
-- `queryStoreUnits`: `QUERY_STORE_DB_INCLUDE` narrows this collector.
+- `buildOptions`: the two shapes accepted, anything else refused with exit 2;
+  the flag set exactly when the option was given; `--all` alone leaves it off.
+- `ValueFlags` and `KnownFlags` disjoint; `@requires_flag` accepts a name from
+  either; the skip reason names `--query-store-compare-at`.
+- The span: a minute and a day, the future refusal against the server's clock.
+- `queryStoreArgs`: the three parameters reach this collector and no other.
+- `queryStoreUnits`: `QUERY_STORE_DB_INCLUDE` narrows this collector, and
+  still does not narrow an ordinary one.
+- The manifest records the typed and the resolved value.
 - The corpus inventory gains one entry (`testdata/corpus.txt`, regenerated).
+- On the lab, all of: the change typed on its minute excludes the 15:50
+  interval and nothing else; typed as a date excludes the whole day and gives
+  L = 0 on the same day; both statements of the scenario are selected, the
+  dropped index shows as a plan change on the first, and the SET pair is
+  returned together.
+- Cost, measured before merging: the collector on a store of at least a
+  hundred thousand `runtime_stats` rows, with its duration reported in the
+  commit.
 - CI: a run with `--query-store-compare-at` against the CI instance, asserting
   the collector ran and its root carries both sides.
-- On the lab: the scenario above (an index dropped mid-workload, and a SET
-  change) must select both statements, show the plan change on the first and
-  the `query_text_id` pair on the second.
+
+## What the panel changed
+
+Five readers (agy and codex, each with a directive and a neutral prompt, and a
+Claude subagent) ran the first draft against SQL Server 2025.
+
+- The typed value became a span, and the excluded intervals are those
+  overlapping it (three readers: the boundary case, the empty sides, the
+  asymmetric sides).
+- The sides are computed in SQL per database, of equal length in whole
+  intervals, and an empty side is reported rather than refused.
+- The sibling rule joins on `query_text_id` and `object_id` (two readers,
+  measured with two procedures).
+- The flag moved to `ValueFlags` (the `--all` and wizard tests fail
+  otherwise), and the option lost its `.env` key.
+- The ranking gained a total ranking and lost the discontinuity at zero
+  executions.
+- `first_execution_time` comes from `runtime_stats`; memory is in pages;
+  forced-plan selection includes forcing failures; the manifest records the
+  value; the `query_hash` row of the table was corrected.
+- The claim that the interval count tells an idle side from an unrecorded one
+  was withdrawn.
