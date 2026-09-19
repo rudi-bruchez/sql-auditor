@@ -364,6 +364,7 @@ Queries (38):
   70.schema/050.heaps.sql                    per database
   70.schema/055.page-density.sql             per database, --measure-page-density (off)
   80.workload/010.wait-stats.sql
+  80.workload/011.batch-response-times.sql
   80.workload/020.query-store.sql            per database, SQL Server 13.0+
   80.workload/021.query-store-detail.sql     per database, SQL Server 13+, --query-store-detail (off), one directory per database: query text, plans and per-interval statistics
   80.workload/022.query-store-profiled.sql   per database, SQL Server 15.0+, --query-store-plan-stats (off), the last profiled plan, when the instance still holds one
@@ -509,6 +510,7 @@ output/
         020.index-usage.json
     80.workload/
       010.wait-stats.json
+      011.batch-response-times.json
       AppDb/
         020.query-store.json
         023.query-store-most-executed.json
@@ -1008,7 +1010,7 @@ one, across seven tiers:
 | `@timeout` | Files |
 | --- | --- |
 | 30 s | 7 |
-| 60 s | 41 |
+| 60 s | 42 |
 | 120 s | 22 |
 | 180 s | 2 |
 | 300 s | 12 |
