@@ -1,8 +1,9 @@
 # Interrupted executions: query timeouts and errors from the Query Store
 
-Status: draft, not implemented. Written on 19 September 2026, and revised the
-same day after a panel of five independent readers ran it against a live SQL
-Server 2025. What the panel changed is listed at the end.
+Status: implemented on 19 September 2026
+(`queries/80.workload/026.query-store-interrupted.sql`). Written the same day,
+and revised after a panel of five independent readers ran it against a live
+SQL Server 2025. What the panel changed is listed at the end.
 
 ## The question
 
