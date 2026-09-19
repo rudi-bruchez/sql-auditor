@@ -1,6 +1,8 @@
 # Blocking watch: a collection must not hold anybody up
 
-Status: draft, not implemented. Written 19 September 2026.
+Status: draft, not implemented. Written 19 September 2026, revised the same day
+after a panel of five independent readers ran it against a live SQL Server
+2025. What the panel changed is listed at the end.
 
 ## The problem
 
@@ -17,8 +19,8 @@ on SQL Server 2025 (17.0.4065.4), in a scratch database:
    it holding `Sch-S` on `dbo.t` for the whole statement;
 2. session B runs `ALTER TABLE dbo.t ADD c int NULL` and waits,
    `LCK_M_SCH_M`, `blocking_session_id` = A;
-3. session C runs a plain `SELECT COUNT(*) FROM dbo.t` and waits,
-   `LCK_M_SCH_S`, `blocking_session_id` = B.
+3. session C runs a plain `SELECT COUNT(*) FROM dbo.t` and may wait behind B,
+   `blocking_session_id` = B.
 
 `sys.dm_os_waiting_tasks` showed both links after four seconds:
 
@@ -27,45 +29,99 @@ on SQL Server 2025 (17.0.4065.4), in a scratch database:
 | B | A | LCK_M_SCH_M | 5007 |
 | C | B | LCK_M_SCH_S | 4002 |
 
-C is an application query that has nothing to do with the audit, and it waits
-as long as the collector runs. On a production instance the schema change is a
-deployment or an index maintenance job, and everything reading that table queues
-behind it. The collectors most likely to hold a lock that long are the ones
-that read a lot of metadata or scan physical structures, which are also the
-ones with the longest `@timeout`: up to 300 seconds.
+Whether C waits depends on lock partitioning, which the engine uses on an
+instance with 16 or more schedulers: B takes its `Sch-M` partition by
+partition, and a reader landing on a partition B has not reached yet goes
+through. A reviewer started six copies of C on a 22-scheduler container; three
+waited, on `LCK_M_IS`, and three completed. B waits every time.
+
+A second shape needs no running statement at all. A session whose database
+context is a user database holds a shared lock on that database. Measured by a
+reviewer: a session that ran `USE` on a scratch database and a `SELECT`, then
+sat idle, made `ALTER DATABASE ... SET READ_ONLY` wait `LCK_M_X` on a
+`databaselock`, with `blocking_session_id` = the idle session, until that
+session changed database. `runUnit` sets the target database with `USE` and
+only the next unit's `ResetSession` moves it back, so today the collection
+session sits in the database it just read while the document is encoded and
+written, and after the last unit it stays there through the manifest and the
+archiving, which can be long enough on a large run that the code announces it
+as a phase.
+
+On a production instance B is a deployment or a maintenance job, and everything
+reading that table queues behind it. The collectors most likely to hold a lock
+that long are the ones that read a lot of metadata or scan user tables, which
+are also the ones with the longest `@timeout`: 1800 seconds for
+`70.schema/041.compression-savings` and `70.schema/055.page-density`, 600 for
+`80.workload/022.query-store-profiled`.
 
 The operator running the audit sees none of it. The collector succeeds, slowly.
 
-The code says otherwise today: the comment on `contractLint` in
-`collect/queryset.go` states that `READ UNCOMMITTED` "means the collector never
-waits on, or blocks, a production workload". The measurement above contradicts
-the "blocks" half, and the implementation corrects that comment.
+The comment on `contractLint` in `collect/queryset.go` states that `READ
+UNCOMMITTED` "means the collector never waits on, or blocks, a production
+workload". The measurements above contradict the "blocks" half, and the
+implementation corrects that comment.
 
-## What the watch does
+## What changes
 
-While a collector runs, a second connection looks, once a second, for sessions
-waiting on the collection's session. When one has waited long enough, the watch
-cancels the collector, which releases its locks, and the run moves on to the
-next unit.
+Two things, the second of which only works because of the first.
+
+### 1. The session leaves the target database as soon as the rows are read
+
+`runUnit` calls `ResetSession` right after `ReadResultSets` returns, before the
+document is encoded or written, and again on every path out of `runUnit`,
+success or failure, if it has not already run. The reset runs on the run's
+context under the usual `deadline`, never on the unit's context, which may be
+the one that was just cancelled.
+
+This closes the idle shape above for every unit, including the last one, and
+it is also what releases a transaction a collector left open: a cancel stops the statement, and locks the transaction already took stay until `ROLLBACK`, measured by a reviewer with `TABLOCKX`. No collector opens a transaction today, but the statement lint does not forbid it. It
+costs one round trip per unit. The reset at the start of the next unit stays:
+it is what makes a reconnected session predictable.
+
+### 2. A watch cancels a collector that someone is waiting on
+
+While a unit runs, a second connection looks, once a second, for sessions
+waiting on the collection's session. When one has waited 5 seconds, the watch
+cancels the unit, and the reset of section 1 follows.
+
+## The watch in detail
 
 ### The second connection
 
 A separate `*sql.DB` opened with the same configuration, pinned to one
-connection like the first. It cannot be a second connection of the existing
-pool: `Open` pins that pool to one connection on purpose, so that session state
-is predictable between scripts, and the run holds that connection for its whole
-life.
+connection like the first, with one `*sql.Conn` held for the whole run. It
+cannot be a second connection of the existing pool: `Open` pins that pool to
+one connection on purpose, and the run holds it.
 
-It is opened after the preflight and before the first unit. If it cannot be
-opened, the run goes on without a watch and says so (below). The collection is
-the product and the watch is a safeguard; losing the safeguard is a warning, not
-a reason to collect nothing.
+Its application name is the configured one with ` (blocking watch)` appended.
+The corpus already accounts for its own session: `10.system/042` and `046` mark
+the group holding `@@SPID` with `contains_collector_session`. The watch has
+another session id and is not marked. With its own application name it forms
+its own group in `046`, which groups by `program_name`, and reads as what it
+is. In `042`, which groups by transport and encryption, it is one more
+connection in the collector's group; the `dba-guide` says so.
 
-The watch session uses the same login and application name as the collection.
-It will appear in the collectors that list sessions, like the collection
-session itself already does.
+### Starting it
+
+After the preflight and before the first unit, in this order:
+
+1. if `view_server_state` is in `DeniedCapabilities(m.Preflight)`, the watch is
+   off. `DeniedCapabilities` counts anything that is not `ok`, which includes
+   the `not_needed` that `ProfileChecks` writes over a denied capability no
+   collector of the profile declares; testing for `denied` alone would miss it;
+2. open the connection. A failure turns the watch off;
+3. run the watch query once, with the collection's session id. A failure turns
+   the watch off. This is the probe that counts: the preflight probes
+   `sys.dm_os_wait_stats`, and a `DENY SELECT` on `sys.dm_os_waiting_tasks`
+   alone would pass the preflight and fail here.
+
+A watch that is off is a warning, never a reason to collect nothing. The
+collection is the product and the watch is a safeguard.
 
 ### What it reads
+
+The query, sent as a parameterised statement with the session id bound as
+`sql.Named("collector", spid)`, an `int`:
 
 ```sql
 SELECT TOP (1) w.session_id, w.wait_type, w.wait_duration_ms,
@@ -76,111 +132,162 @@ WHERE w.blocking_session_id = @collector
 ORDER BY w.wait_duration_ms DESC;
 ```
 
-`@collector` is `@@SPID` of the collection connection, read once after it
-connects and again after every reconnect: a reconnect gets a new session id,
-and watching the old one would watch nothing.
+To run it by hand, prepend `DECLARE @collector int = <session id>;`.
 
-`session_id <> @collector` excludes the collector's own parallel tasks. A
-parallel plan reports exchange waits (`CXPACKET`, `CXCONSUMER`) whose blocking
-session is the same session, and those are not somebody else waiting. The
-contract lint requires `OPTION (RECOMPILE, MAXDOP 1)`, but by counting hints
-against result sets, not statement by statement, so it does not prove every
-statement is serial; the filter costs nothing.
+The session id is `@@SPID` of the collection connection, read by `Run` after it
+connects and again after every reconnect, and passed to the watch when a unit
+is armed. A reconnect gets a new session id; watching the old one would watch
+nothing.
 
-Only direct waiters are read. In the chain above, B waits on the collector and
-C waits on B; B alone is enough to decide, since cancelling the collector
-releases B and therefore C. The chain would only matter for the message, and
-the message names B.
+`session_id <> @collector` excludes the collector's own parallel tasks, whose
+exchange waits name their own session as the blocker. The contract lint
+requires `OPTION (RECOMPILE, MAXDOP 1)`, but by counting hints against result
+sets, not statement by statement, so it does not prove every statement is
+serial; the filter costs nothing. Negative `blocking_session_id` values (-2 to
+-5) name orphaned, deferred or latch blockers, never a positive session id, so
+they cannot match.
 
-### When it cancels
+Only direct waiters are read. In the chain above, cancelling A releases B and
+therefore whatever waits on B.
 
-When the longest direct wait reaches 5 seconds. Polled once a second, so a
-waiter is released at most about 6 seconds after it started waiting, plus the
-time the cancellation takes.
+Each poll runs under a 2-second deadline. A poll that times out is a failure.
+A half-open socket does not fail, it hangs, and a watch that hangs protects
+nothing while the manifest says it ran.
+
+### When it cancels, and what "5 seconds" means
+
+When the longest direct wait read in one poll reaches 5000 ms. Polled once a
+second, so a waiter is released about 6 seconds after it started waiting, plus
+the cancellation itself: measured at 1 to 2 ms for a statement still
+executing, and 906 ms for one whose rows were streaming, while the driver
+drained them.
+
+`wait_duration_ms` is the time spent in the task's current wait. The bound
+therefore holds for one continuous wait, which is what a lock wait on the
+collector is: B waits on A's lock until A lets go. A waiter that changes wait
+type or resource starts again from zero, and the watch does not stitch waits
+together; it bounds the waits that matter, it does not account for every
+second anyone spent near the collector.
 
 Five seconds is half the collectors' own `LOCK_TIMEOUT`: the audit gives up
-waiting on others after 10 seconds, and it makes others wait on it for less than
-that. It is a constant, not a setting. A setting would be read as an invitation
-to raise it, and the number exists to bound the harm the audit can do, not to
-be tuned per site.
+waiting on others after 10 seconds, and it makes others wait on it for less
+than that. It is a constant, not a setting. A setting would be read as an
+invitation to raise it, and the number exists to bound the harm the audit can
+do, not to be tuned per site.
 
-Cancellation is the unit's context being cancelled. Measured with the driver
-this repository uses (go-mssqldb 1.10.0) against the same scratch setup:
+### How the cancel reaches the unit
 
-- the query returned `context canceled` 2 ms after the cancel;
-- `sys.dm_tran_locks` went from 2 object locks held by the collector's session
-  to 0;
-- the connection answered a ping afterwards, with the same session id.
+The watch goroutine never touches the manifest, the observer or the collection
+connection. Its only effect on the run is a function call:
 
-That holds for a statement outside any transaction, which is every collector in
-the corpus today: none opens one. Nothing enforces it, though. The statement
-lint does not forbid `BEGIN TRAN`, and a statement cancelled inside an explicit
-transaction keeps the locks the transaction already took. So after a
-cancellation the run calls `ResetSession` at once, whose `IF @@TRANCOUNT > 0
-ROLLBACK` releases them, rather than leaving that to the start of the next
-unit. For the last unit of a run, the connection is closed right after anyway.
+- `runUnit` creates the unit's context with `context.WithCancelCause` under the
+  run's context, and the query context under that with the collector's
+  timeout. It arms the watch with the session id and the cancel function, and
+  disarms it on every path out;
+- the watch, when it fires, calls that function with a `*blockedError` carrying
+  the sample: waiting session, wait type, duration, `resource_description`;
+- disarming returns the longest sample seen while armed, whether or not it
+  fired. Arm, disarm and the watch's reading of the armed state go through one
+  mutex; a cancel that arrives after disarming is dropped, so it can never
+  land on the next unit.
+
+The driver does not carry the cause: it returns a bare `context canceled`
+whatever was passed, verified by two reviewers. So on a query or read error
+`runUnit` asks `context.Cause` of the unit context, and when it is a
+`*blockedError`, returns that instead of the driver's error. `outOfTime` is not
+involved: it only relabels a `DeadlineExceeded` of the query context.
 
 ### What the run records
 
-A cancelled unit is a failed unit. It wrote nothing, so the manifest carries
-an `ErrorEntry` for it and the exit code is the one any failed collector gives.
-The message says why, with what a DBA needs to find the other side:
+Three outcomes, decided by `runUnit` on the main goroutine from what disarming
+returned and from its own error:
 
-```
-cancelled: session 78 had been waiting on this collector for 5.0 s
-(LCK_M_SCH_M, objectlock ... objid=1221579390 ... dbid=10)
-```
+- the unit returned a `*blockedError`: it is a failed unit. It wrote nothing,
+  the manifest carries an `ErrorEntry`, and the exit code is the one any failed
+  collector gives. The message:
 
-`resource_description` is kept as the engine writes it. It carries object and
-database ids, not names, which is enough to find the object and discloses
-nothing a collector does not already collect.
+  ```
+  cancelled by the blocking watch: session 78 had been waiting on this
+  collector for 5.0 s (LCK_M_SCH_M, objectlock ... objid=1221579390 ... dbid=10)
+  ```
 
-It is not a skip. A skip is a decision taken before running, and this one was
-taken because of what happened while running. It is not a partial unit either:
-a partial unit wrote its document.
+  `resource_description` is kept as the engine writes it: object and database
+  ids, which are enough to find the object and disclose nothing a collector
+  does not already collect;
+- the watch fired but the unit had already finished reading its rows, so the
+  cancel changed nothing and the reset of section 1 released the waiter: the
+  unit succeeded, and it gets a warning saying so with the sample;
+- the watch saw a wait under 5 seconds: the unit succeeded, with a warning
+  naming the longest wait seen. A wait shorter than the one-second poll can go
+  unseen.
 
-A unit that blocked somebody for less than 5 seconds and finished gets a
-warning with the longest wait seen and the waiting session, so a collection
-that came close is visible too. A wait shorter than the one-second poll can go
-unseen; the watch bounds long waits, it does not account for every short one.
+It is not a skip: a skip is decided before running. It is not a partial unit
+either: a partial unit wrote its document.
 
-The manifest gains a block that says whether the watch ran:
+Ctrl-C at the same moment is an operator stop, as it is today.
+`recordUnitFailure` asks the run's context first, and the watch never cancels
+that one. If the stop lands after the watch's `ErrorEntry` was written, the
+entry stays: the unit really was cancelled for blocking before the operator
+stopped the run.
+
+### After a cancellation: leave that database alone
+
+The 5-second bound is per wait. A deployment is many statements, and the next
+collector on the same database can hold a lock the next statement needs. So
+once a unit on database D was cancelled by the watch, every later unit
+targeting D is skipped, with the reason `skipped: the blocking watch cancelled
+<script> on this database`. Skipped, because this one is decided before
+running. Instance-scope units carry on; each is bounded by the watch on its
+own.
+
+### What the cancel costs the audit
+
+The watch cancels the collectors most expensive to lose. `055.page-density`
+documents in its header that a cancelled batch loses its whole document, after
+the buffer pool was already evicted, and `041.compression-savings` is the same
+kind of scan. Both are exactly the collectors likely to hold a lock on a user
+table for minutes. The trade is taken deliberately: a missing section in an
+audit is a line in the manifest and a question to ask; a deployment held up
+for twenty minutes by the audit is an incident caused by the auditor. The
+cancelled collector is not retried, for the reason the previous section gives.
+
+### The manifest
+
+A block that says whether the watch ran:
 
 ```json
 "blocking_watch": {
   "enabled": true,
   "poll_ms": 1000,
   "cancel_after_ms": 5000,
-  "cancelled_units": 0
+  "cancelled_units": 0,
+  "stopped": ""
 }
 ```
 
-with `"enabled": false` and a `reason` when it did not. `MANIFEST.txt` prints
-one line with the same facts. Without that block, a manifest with no
-cancellation cannot tell "nobody was blocked" from "nobody was looking".
+- `enabled` is false with a `reason` when the watch never started;
+- `stopped` is empty while it ran to the end, and otherwise carries the time
+  and the error that stopped it mid-run. `enabled: true` with a non-empty
+  `stopped` means the units before that time were watched and the ones after
+  were not;
+- `cancelled_units` counts the `*blockedError` outcomes only.
 
-### When the watch is off
+`MANIFEST.txt` prints one line with the same facts. Without the block, a
+manifest with no cancellation cannot tell "nobody was blocked" from "nobody was
+looking". Every reader of `_run.json` in this repository decodes with
+`encoding/json`, which ignores an unknown field; the private analysis reads the
+manifest the same way and is not affected by an added block.
 
-- `view_server_state` denied at preflight. Without `VIEW SERVER STATE` (from
-  SQL Server 2022, `VIEW SERVER PERFORMANCE STATE`) the read fails outright,
-  measured: Msg 300, "VIEW SERVER PERFORMANCE STATE permission was denied". The
-  watch is not started and the reason says so.
-- the second connection cannot be opened.
-- the watch query fails during the run. The watch stops for the rest of the
-  run, the reason records the error and the time, and the run continues. It
-  does not retry: a watch that silently comes and goes would make `enabled`
-  mean nothing.
+### When the watch is off, or stops
 
-In each case the run's summary line and the progress output say that the watch
-is off, once, so the operator knows before reading the manifest.
+The three start failures above, and a failed or timed-out poll during the run.
+After a failed poll the watch stops for the rest of the run and does not retry:
+a watch that silently comes and goes would make `enabled` mean nothing.
 
-### What it arms
-
-The watch is armed for the whole of `runUnit`: the `USE`, the query and the
-reading of its rows, since locks are held until the rows are read. It is not
-armed during the preflight, the identity probe or the database listing, which
-are short catalog reads on the same session; widening it to them later is a
-matter of arming earlier, not a change of design.
+The first time the watch is off or stops, one line goes to the progress
+writer, `o.progress()`, the same channel as "connection lost; attempting one
+reconnect", so the operator knows before reading the manifest. No change to
+the `Observer` interface.
 
 ## What this does not do
 
@@ -189,19 +296,30 @@ matter of arming earlier, not a change of design.
 - It does not record the blocking chains of the instance. That belongs with
   the separate request to log blocking situations in the shared JSON blocking
   format, which is broader than the audit's own session.
-- It does not retry a cancelled collector. Running it again a minute later
-  would block the same deployment again.
+- It does not retry a cancelled collector.
 
 ## How it is tested
 
-The decision logic (threshold, self-exclusion, warning under the threshold,
-stop on error, re-reading the session id after reconnect) is tested with a fake
-poll function, no server needed.
+Without a server:
 
-The engine behaviour is checked by hand against a local instance, with the
-three-session reproduction above, and recorded in the commit that implements
-it. CI runs a real collection on SQL Server 2017 and 2022; it proves the watch
-starts and does not disturb a run with no blocking, which is the common case.
+- the watch's decision against a fake poll function: threshold, the sample
+  returned on disarm, a fire after disarm dropped, stop on a poll error and on
+  a poll that exceeds its deadline;
+- `runUnit`'s classification: a unit context cancelled with a `*blockedError`
+  gives that error, not `context canceled`;
+- the skip of later units on a database where a unit was cancelled;
+- the manifest block in `_run.json` and its line in `MANIFEST.txt`, for the
+  three states: never started, ran to the end, stopped mid-run.
+
+Against a server:
+
+- CI runs a real collection on SQL Server 2017 and 2022. That run executes the
+  watch query, bound as specified, once a second throughout; the CI job asserts
+  that `_run.json` says `enabled: true` with an empty `stopped`. A query that
+  does not bind or does not parse fails there;
+- the cancellation itself is checked by hand with the reproduction below,
+  pointing `sql-auditor collect` at the scratch database while B waits, and
+  recorded in the commit that implements it.
 
 ## Appendix: the reproduction
 
@@ -241,7 +359,8 @@ ALTER TABLE dbo.t ADD c int NULL;
 ALTER TABLE dbo.t DROP COLUMN c;
 ```
 
-Session C, one second after B:
+Session C, one second after B. On 16 schedulers or more it may complete
+instead of waiting, as explained above:
 
 ```sql
 SET LOCK_TIMEOUT 60000;
@@ -249,5 +368,44 @@ USE WatchLab;
 SELECT COUNT(*) FROM dbo.t;
 ```
 
-Then the watch query above, with `@collector` set to session A. Clean up with
-`KILL` on session A and `DROP DATABASE WatchLab`.
+Then the watch query with `DECLARE @collector int = <session A>;` prepended.
+Clean up with `KILL` on session A and `DROP DATABASE WatchLab`.
+
+The idle shape: in session A, run `USE WatchLab; SELECT COUNT(*) FROM dbo.t;`
+and leave the session open; in session B, `SET LOCK_TIMEOUT 20000; ALTER
+DATABASE WatchLab SET READ_ONLY;`. B waits `LCK_M_X` on the database until A
+runs `USE master`.
+
+## What the panel changed
+
+Five readers: agy with a directive and a neutral prompt, codex with the same
+two, and a fresh Claude subagent with the neutral one.
+
+- The idle shape, found by one reader by running it, and the false sentence of
+  the first draft that the last unit's connection "is closed right after
+  anyway": it is closed when `Run` returns, after the manifest and the zip.
+  This added section 1, which is now half of the design.
+- The driver drops the cancellation cause (two readers, verified). Added
+  `context.Cause` and the `*blockedError`.
+- The watch query did not say how `@collector` is bound (two readers). Now it
+  does, and CI executes it.
+- The first draft's "the run calls `ResetSession` at once" had no place in the
+  code to happen (three readers). It is now the reset of section 1, on the run's
+  context.
+- `ProfileChecks` can turn a denial into `not_needed` (two readers), and an
+  object-level `DENY` on the DMV passes the preflight (one reader). Now the
+  gate is `DeniedCapabilities` plus one real poll.
+- The per-wait bound let the next unit block the same deployment again. Added
+  the skip of the rest of that database.
+- The `@timeout` ceiling was 1800 s, not 300, and the collectors the watch will
+  cancel are the ones that lose most. The trade is now argued.
+- No deadline on the poll; no value for `enabled` after a mid-run stop; the
+  watch goroutine writing the manifest concurrently; the watch session unmarked
+  in `042` and `046`; Ctrl-C precedence; the reproduction's third leg depending
+  on lock partitioning. Each is settled above.
+
+One claim was checked and kept: a reader found that `Sch-S` taken inside an
+explicit transaction is released at the end of the statement, not of the
+transaction. That is true of `Sch-S`, and another reader measured that locks a
+transaction took, `TABLOCKX` or an `UPDATE`, stay after the cancel until
+`ROLLBACK`. The reset of section 1 covers both.
