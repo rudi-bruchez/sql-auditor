@@ -118,17 +118,18 @@ jobs:
       # whatever the collector filters on. So the store is switched on for
       # ci_probe, capture mode ALL (under AUTO a first execution may not be
       # captured), and one statement is stopped by a client timeout while
-      # another fails. Both sqlcmd calls are expected to fail. The timeout is
-      # five seconds, not one: the client's clock includes compilation, a
-      # timeout that fires while compiling leaves no runtime row, and on a
-      # cold 2017 container one second did exactly that. The triple cross
-      # join cannot finish in five.
+      # another fails. Both sqlcmd calls are expected to fail. The statement
+      # has to be one the optimizer cannot shortcut: a bare COUNT_BIG over a
+      # triple cross join of sys.all_columns finished in about a second on
+      # the runners, since the rows are counted, not enumerated, and a
+      # one-second timeout then fired or not by chance. The CHECKSUM
+      # predicate makes every one of the trillion-odd rows be evaluated.
       - name: plant an aborted and a failed execution
         run: |
           tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
             /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe "$@"; }
           tools -Q "ALTER DATABASE ci_probe SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE, QUERY_CAPTURE_MODE = ALL);"
-          tools -t 5 -Q "SELECT COUNT_BIG(*) FROM sys.all_columns AS a CROSS JOIN sys.all_columns AS b CROSS JOIN sys.all_columns AS c OPTION (MAXDOP 1);" || true
+          tools -t 2 -Q "SELECT COUNT_BIG(*) FROM sys.all_columns AS a CROSS JOIN sys.all_columns AS b CROSS JOIN sys.all_columns AS c WHERE CHECKSUM(a.name, b.name, c.name) = 0 OPTION (MAXDOP 1);" || true
           tools -Q "SELECT 1 / (object_id - object_id) FROM sys.objects;" || true
       # --env /dev/null is not decoration. Configuration precedence is
       # flag > .env > process environment, so a .env file appearing in the

@@ -210,9 +210,11 @@ are the reader's material.
   contract and statement lints on the body.
 - CI proves the classification, not only that the file runs. The CI job
   switches the Query Store on for `ci_probe` with capture mode `ALL`, runs one
-  CPU-bound statement under a five-second client timeout (one second
-  proved racy: on a cold 2017 container it fired during compilation, which
-  leaves no runtime row) and one division by
+  CPU-bound statement under a two-second client timeout (the first
+  fixture's statement, a bare `COUNT_BIG` over a triple cross join, finished
+  in about a second on the CI runners because the optimizer counts such a
+  join without enumerating it, so it timed out or not by chance; a `CHECKSUM`
+  predicate over the three names now forces the enumeration) and one division by
   zero, and asserts that the timed-out statement is in `aborted` and not in
   `exceptions`, and the division the other way round. Without that fixture
   the database is empty and every total is zero, whatever the collector
