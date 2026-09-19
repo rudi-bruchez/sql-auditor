@@ -9,7 +9,7 @@
 --
 -- Why this collector exists: whether rebuilding an index gives space back
 -- depends on how full its pages are, and nothing else in the corpus says.
--- 20.databases/020.properties reads sys.dm_db_index_physical_stats in LIMITED
+-- 20.databases/025.fragmentation reads sys.dm_db_index_physical_stats in LIMITED
 -- mode, where avg_page_space_used_in_percent is NULL, and keeps only indexes
 -- above 10 % logical fragmentation. Logical fragmentation is page ORDER, not
 -- page FULLNESS: a table can be perfectly ordered and half empty, and it is
@@ -34,7 +34,7 @@
 --
 -- So it measures ONE PARTITION PER CALL, largest first, and starts no new call
 -- once @budget_sec have passed since the batch began, the way
--- 20.databases/020.properties bounds its own fragmentation read. The root says
+-- 20.databases/025.fragmentation bounds its own read. The root says
 -- in sample.measured_partitions how many were measured against
 -- counts.eligible_partitions, so a list cut short is not read as complete. The
 -- budget bounds the NUMBER of calls, not the length of one: a single enormous
@@ -148,8 +148,8 @@ BEGIN TRY
         /* The DMV is called with scalars, not through a CROSS APPLY filtered on
            [n]: an APPLY over the candidate table would leave the optimiser free
            to invoke the function for every row and filter afterwards, which is
-           50 scans per iteration instead of one. 20.databases/020.properties
-           reads its own fragmentation the same way, for the same reason. */
+           50 scans per iteration instead of one. 20.databases/025.fragmentation
+           reads its own partitions the same way, for the same reason. */
         INSERT INTO @density
         SELECT OBJECT_SCHEMA_NAME(@obj) + N'.' + OBJECT_NAME(@obj),
                c.index_name,

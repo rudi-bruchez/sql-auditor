@@ -17,7 +17,7 @@
 -- followed" everywhere and cannot answer "is it worth acting".
 --
 -- WHY A SEPARATE SCAN. forwarded_record_count is NULL in the LIMITED mode that
--- 020.properties.sql uses for fragmentation: the count requires SAMPLED or
+-- 20.databases/025.fragmentation uses: the count requires SAMPLED or
 -- DETAILED, which reads pages rather than metadata. Adding the column to that
 -- query would have returned NULL on every row without saying why — the exact
 -- shape of failure this corpus tries hardest to avoid.
