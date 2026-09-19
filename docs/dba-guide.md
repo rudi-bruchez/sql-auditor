@@ -369,6 +369,7 @@ Queries (38):
   80.workload/021.query-store-detail.sql     per database, SQL Server 13+, --query-store-detail (off), one directory per database: query text, plans and per-interval statistics
   80.workload/022.query-store-profiled.sql   per database, SQL Server 15.0+, --query-store-plan-stats (off), the last profiled plan, when the instance still holds one
   80.workload/023.query-store-most-executed.sql per database, SQL Server 13+
+  80.workload/026.query-store-interrupted.sql per database, SQL Server 13+
   80.workload/030.implicit-conversions.sql
   80.workload/040.plan-cache.sql
 
@@ -1424,8 +1425,9 @@ that value reaches the archive twice: once in the statement text and once
 compiled into the plan. Nothing filters it, because nothing could: the
 collector cannot tell which literal in somebody else's SQL is sensitive.
 
-This is why `80.workload/020.query-store.sql` and
-`80.workload/023.query-store-most-executed.sql` need no flag and run on every
+This is why `80.workload/020.query-store.sql`,
+`80.workload/023.query-store-most-executed.sql` and
+`80.workload/026.query-store-interrupted.sql` need no flag and run on every
 collection: they truncate the statement to 500 characters and collect no plan at
 all. Enough to identify a query, not enough to reconstruct a payload. The moment
 that trade stops being made, a flag appears.
@@ -1649,6 +1651,52 @@ database.
 each with its text, its statistics and one file per plan, is a larger archive
 than a metadata-only run, and the plans are what makes it a document to handle
 carefully rather than a big one.
+
+## Query timeouts and errors
+
+"The application gets timeouts" usually arrives after the fact, and a timeout
+leaves no trace where one would look first. It is decided by the client: its
+command timeout expires, it sends an attention, and the server stops the
+statement without logging an error. The default trace and `system_health` hold
+no attention event, and `sys.dm_exec_query_stats` does not count the
+interrupted execution at all.
+
+The Query Store records it. `80.workload/026.query-store-interrupted.sql` lists,
+per database, the 50 queries with the most executions stopped by the client
+(`Aborted`, where timeouts land, along with a user's Cancel and a lost
+connection) and the 50 with the most executions stopped by an error
+(`Exception`: a lock timeout, a deadlock victim, a division by zero, all without
+an error number). The design and the measurements are in
+`docs/query-store-interrupted-spec.md`.
+
+### Reading a row
+
+Each interrupted type comes with its duration (minimum, average, maximum) and
+its CPU, beside the same query's finished executions:
+
+- CPU close to the duration: the statement was working when it was stopped. A
+  query that is normally fast and was aborted while computing is often a
+  parameter-sensitive plan.
+- CPU far below the duration: the statement was waiting, typically on a lock.
+- Durations clustered on one value are consistent with a command timeout, but
+  the duration equals the timeout only when the statement was the first thing
+  the request did. Inside a procedure, the statement that gets cut shows the
+  timeout minus what ran before it.
+
+The `plans` counts say when the finished and the interrupted executions ran
+under different plans.
+
+### What it cannot see
+
+Under the default capture mode, `AUTO`, the Query Store captures a query on its
+execution count or its CPU, never on its duration. A rarely run statement that
+times out because it is blocked uses almost no CPU and is never captured; a
+frequent one is captured once it passes the threshold, and its earlier
+executions are lost. So under `AUTO` the listing is a lower bound, and an empty
+one does not mean there were no timeouts. The root gives `state.capture_mode`.
+
+A timeout during compilation leaves nothing, and neither does an execution ended
+by `KILL`.
 
 ## `--query-store-compare-at`
 
