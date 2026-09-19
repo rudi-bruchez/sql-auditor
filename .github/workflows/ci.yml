@@ -155,3 +155,11 @@ jobs:
           on_disk=$(find "$run_dir" -name '*.json' ! -name '_run.json' | wc -l)
           echo "json files on disk: $on_disk"
           test "$on_disk" -eq "$ok"
+          # The blocking watch polls sys.dm_os_waiting_tasks on a connection of
+          # its own: once before the first collector, then once a second while
+          # each one runs. This is the only place its real query is executed,
+          # bound as the code binds it. A statement that does not parse or bind
+          # turns the watch off at that first poll, which the manifest records
+          # and this catches.
+          jq -e '.blocking_watch.enabled == true and .blocking_watch.stopped == ""' "$run_dir/_run.json" \
+            || { jq '.blocking_watch' "$run_dir/_run.json"; exit 1; }

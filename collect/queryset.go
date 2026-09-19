@@ -867,10 +867,15 @@ func lint(sql string, results []ResultSpec) string {
 // It exists because the fourteen files in the corpus comply by review rather
 // than by rule, and review does not scale to the fifteenth. The rule is the
 // point of the contract: NOCOUNT keeps rowcount messages out of the result
-// stream the encoder walks, READ UNCOMMITTED means the collector never waits
-// on — or blocks — a production workload, and RECOMPILE with MAXDOP 1 keeps a
+// stream the encoder walks, READ UNCOMMITTED means the collector takes no
+// shared locks on the workload's data, and RECOMPILE with MAXDOP 1 keeps a
 // diagnostic query from poisoning the plan cache or taking a parallel worker
 // off the instance it is auditing.
+//
+// READ UNCOMMITTED does not mean the collector never blocks anybody. It still
+// takes Sch-S on every object it reads, and an ALTER TABLE queued behind that
+// Sch-S holds up every reader of the table behind it; that is what the
+// blocking watch in watch.go is for.
 //
 // The OPTION check is an approximation and is deliberately a weak one: telling
 // a rowset-producing statement from an assignment or a DECLARE needs a SQL

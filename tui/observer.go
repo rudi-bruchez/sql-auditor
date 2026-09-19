@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"errors"
 	"time"
+
+	"github.com/rudi-bruchez/sql-auditor/collect"
 )
 
 // event is one thing that happened, packaged so it can be folded into the
@@ -85,6 +88,14 @@ func (e unitDoneEvent) apply(s State) State {
 	// stuck?" question this screen exists to answer.
 	s.DoneUnits++
 	s.Bytes += e.bytes
+	// A planned unit the run skipped once running, after the blocking watch
+	// cancelled a collector on its database: counted, and shown as a skip.
+	var skip *collect.UnitSkipped
+	if errors.As(e.err, &skip) {
+		s.SkippedCount++
+		s.Notes = note(s.Notes, status("skipped")+where(e.script, e.database)+": "+skip.Reason)
+		return s
+	}
 	if e.err != nil {
 		s.ErrorCount++
 		s.Notes = note(s.Notes, status("error")+where(e.script, e.database)+": "+e.err.Error())

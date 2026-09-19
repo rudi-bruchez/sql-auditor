@@ -932,6 +932,45 @@ There is no case in this corpus where a dirty read produces a wrong answer that
 a clean read would have got right. The worst outcome is a value fractionally
 staler than the instant it was requested.
 
+#### The other direction: the collector holding someone else up
+
+`LOCK_TIMEOUT` bounds how long the collector waits on your workload. It does
+nothing for your workload waiting on the collector, and that happens too. The
+schema-stability lock a collector takes on every object it reads lasts for the
+whole statement, and an `ALTER TABLE` needs to wait for it; every reader of that
+table then queues behind the `ALTER`. A session whose context is a database also
+holds a shared lock on it, which an `ALTER DATABASE` waits on even when the
+session is running nothing. Both were reproduced on SQL Server 2025.
+
+So `collect` opens a second connection, under the application name you
+configured followed by ` (blocking watch)`, and while each collector runs it
+reads `sys.dm_os_waiting_tasks` once a second for sessions waiting on the
+collection's own session. When one has waited 5 seconds, the collector is
+cancelled, its locks are released, and the run moves on. The collector is
+recorded as an error that names the waiting session, its wait type and the
+object and database ids it was waiting for; the remaining collectors on that
+database are skipped, since the next one could hold up the same deployment
+again. The session also leaves the database it read as soon as the rows are in
+memory, rather than when the next collector starts.
+
+Five seconds is a constant, not a setting: it is half the collector's own
+`LOCK_TIMEOUT`, and it exists to bound what the audit can cost you. A cancelled
+collector is not retried. The ones most likely to be cancelled are the long
+scans (`041` behind `--estimate-compression`, `055` page density), and losing
+one of them costs a section of the audit, which is the right way round.
+
+The watch needs `VIEW SERVER STATE` (`VIEW SERVER PERFORMANCE STATE` from SQL
+Server 2022), which the collection asks for anyway. Without it, or if its
+connection or its first read fails, the run goes on unwatched and says so on
+screen and in the manifest. `MANIFEST.txt` has a `Block watch` line, and
+`_run.json` a `blocking_watch` block, in every case, so that "nobody was
+waiting" and "nobody was looking" read differently.
+
+Two side effects in the archive. `10.system/046.local-sessions` shows the watch
+as its own group of `program_name`, for a run on the server itself. In
+`10.system/042.connection-security` it is one more connection in the group the
+collector's session belongs to.
+
 ### A narrowed run may still collect the distribution database
 
 `DB_INCLUDE` names the databases you want. There is one case where the
