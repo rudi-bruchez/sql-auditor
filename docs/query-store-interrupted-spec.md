@@ -56,10 +56,12 @@ intervals, by the author and by the panel:
 
 ### What that means for the reader
 
-The duration of an aborted execution is at most the client's command timeout,
-and equal to it only when the statement was the first thing the batch or the
-RPC did: the client clock runs over the whole request, the Query Store times
-the statement. Inside a procedure, the statement that gets cut shows the
+The duration of an aborted execution is close to the client's command timeout
+only when the statement was the first thing the batch or the RPC did, and even
+then a little under or over it: the client clock runs over the whole request,
+compilation included, the Query Store times the statement's execution. A later
+review measured 958 ms (2017) and 936 ms (2022) for the CI fixture's 1-second
+timeout, 1000.4 to 1001.3 ms elsewhere, and 30025.6 ms for 30 seconds. Inside a procedure, the statement that gets cut shows the
 timeout minus what ran before it, and that varies. A panel reader also saw
 1923 ms for a 2-second timeout. So durations that cluster are consistent with a
 timeout, and durations that scatter do not rule one out. The collector
@@ -95,6 +97,14 @@ means it was waiting. The collector projects both and draws no line.
 - A timeout during compilation leaves no runtime row: there is no plan yet.
 - An execution ended by `KILL` leaves no runtime row. `system_health` records
   `process_killed`, which is outside this collector.
+- A blocked timeout has a second witness. `system_health` records `wait_info`
+  for a lock wait over 30 seconds (15 for latch and I/O waits), with the wait
+  type, the duration and the statement text: a later review saw two blocked
+  `SELECT`s timed out at 30 and 35 seconds there, `LCK_M_S` at 30025 and
+  35028 ms. A statement cut at the usual 30-second timeout passes that
+  threshold only just, and only when it was the first thing its request did.
+  `10.system/060.system-health.sql` counts these events; their text stays on
+  the instance.
 
 A side note, recorded because it cost an hour: after a load test drove a store
 into `READ_ONLY` with `readonly_reason` 262144, every Query Store on the
@@ -201,9 +211,12 @@ are the reader's material.
 - CI proves the classification, not only that the file runs. The CI job
   switches the Query Store on for `ci_probe` with capture mode `ALL`, runs one
   CPU-bound statement under a one-second client timeout and one division by
-  zero, and asserts that the root counts at least one aborted and one
-  exception execution. Without that fixture the database is empty and every
-  total is zero, whatever the collector filters on.
+  zero, and asserts that the timed-out statement is in `aborted` and not in
+  `exceptions`, and the division the other way round. Without that fixture
+  the database is empty and every total is zero, whatever the collector
+  filters on. The first version asserted only that both root counts were at
+  least one, which a later review showed passes with the two types swapped:
+  counts of one each are symmetric.
 - On the lab: one query in `aborted` with its durations near 2000 ms, its CPU
   beside them and its regular executions; queries in `exceptions`, one of them
   with an average near 500 ms.

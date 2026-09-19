@@ -369,6 +369,8 @@ Queries (38):
   80.workload/021.query-store-detail.sql     per database, SQL Server 13+, --query-store-detail (off), one directory per database: query text, plans and per-interval statistics
   80.workload/022.query-store-profiled.sql   per database, SQL Server 15.0+, --query-store-plan-stats (off), the last profiled plan, when the instance still holds one
   80.workload/023.query-store-most-executed.sql per database, SQL Server 13+
+  80.workload/024.query-store-rowcount.sql   per database, SQL Server 14+
+  80.workload/025.query-store-compare.sql    per database, SQL Server 13+, --query-store-compare-at (off)
   80.workload/026.query-store-interrupted.sql per database, SQL Server 13+
   80.workload/030.implicit-conversions.sql
   80.workload/040.plan-cache.sql
@@ -1655,7 +1657,7 @@ carefully rather than a big one.
 ## Query timeouts and errors
 
 "The application gets timeouts" usually arrives after the fact, and a timeout
-leaves no trace where one would look first. It is decided by the client: its
+leaves no error behind. It is decided by the client: its
 command timeout expires, it sends an attention, and the server stops the
 statement without logging an error. The default trace and `system_health` hold
 no attention event, and `sys.dm_exec_query_stats` does not count the
@@ -1679,9 +1681,11 @@ its CPU, beside the same query's finished executions:
   parameter-sensitive plan.
 - CPU far below the duration: the statement was waiting, typically on a lock.
 - Durations clustered on one value are consistent with a command timeout, but
-  the duration equals the timeout only when the statement was the first thing
-  the request did. Inside a procedure, the statement that gets cut shows the
-  timeout minus what ran before it.
+  the duration comes near the timeout only when the statement was the first
+  thing the request did, and even then lands a little under or over it:
+  compilation runs on the client's clock and not in the recorded duration.
+  Inside a procedure, the statement that gets cut shows the timeout minus what
+  ran before it.
 
 The `plans` counts say when the finished and the interrupted executions ran
 under different plans.
@@ -1697,6 +1701,12 @@ one does not mean there were no timeouts. The root gives `state.capture_mode`.
 
 A timeout during compilation leaves nothing, and neither does an execution ended
 by `KILL`.
+
+A blocked statement that waited more than 30 seconds on a lock may also be in
+`system_health`: its `wait_info` events carry the wait type, the duration and
+the statement text, and `10.system/060.system-health.sql` counts them per kind.
+A statement cut at the usual 30-second timeout crosses that threshold only
+just, so read that as a second witness, not a complete one.
 
 ## `--query-store-compare-at`
 

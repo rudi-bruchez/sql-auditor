@@ -159,10 +159,19 @@ jobs:
             "$run_dir/80.workload/ci_probe/025.query-store-compare.json"
           jq -e '.config.query_store_compare_at | test("/")' "$run_dir/_run.json"
           # 026 counted the planted timeout as Aborted and the division by
-          # zero as Exception.
-          jq -e '.executions.aborted >= 1 and .executions.exception >= 1' \
+          # zero as Exception. Counts alone are symmetric: a collector that
+          # swapped the two types, or counted every non-regular row as both,
+          # would still show one of each. So each statement is looked for in
+          # its own listing and required to be absent from the other.
+          jq -e '.executions.aborted >= 1 and .executions.exception >= 1
+                 and any(.aborted[]; .text | test("COUNT_BIG"))
+                 and all(.aborted[]; .text | test("object_id - object_id") | not)
+                 and any(.exceptions[]; .text | test("object_id - object_id"))
+                 and all(.exceptions[]; .text | test("COUNT_BIG") | not)' \
             "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json" \
-            || { jq 'del(.aborted, .exceptions)' "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json"; exit 1; }
+            || { jq -c '.results[] | select(.script == "80.workload/026.query-store-interrupted.sql")' "$run_dir/_run.json"
+                 jq '{executions, aborted: [.aborted[]?.text], exceptions: [.exceptions[]?.text]}' \
+                   "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json"; exit 1; }
           # The run must have produced something, and _run.json must describe
           # what is actually on disk. That is the property worth guarding — an
           # archive whose record disagrees with its contents is the one failure

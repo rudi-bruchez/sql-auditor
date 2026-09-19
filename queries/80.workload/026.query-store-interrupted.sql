@@ -16,10 +16,12 @@
 -- docs/query-store-interrupted-spec.md is the design and records what it was
 -- measured against.
 --
--- WHAT THE DURATION SAYS. An aborted execution lasts at most the client's
--- command timeout, and exactly that only when the statement was the first
--- thing the request did: the client clock runs over the whole batch or RPC,
--- the Query Store times the statement. Minimum, average and maximum are
+-- WHAT THE DURATION SAYS. An aborted execution lasts about the client's
+-- command timeout, a little under or over it, and only when the statement was
+-- the first thing the request did: the client clock runs over the whole batch
+-- or RPC, compilation included, the Query Store times the statement's
+-- execution (measured: 936 to 1001 ms for 1 s, 30026 ms for 30 s; a statement
+-- inside a procedure shows less). Minimum, average and maximum are
 -- projected; the timeout is never inferred. CPU is projected beside the
 -- duration because it is the reading that separates the two usual causes:
 -- CPU near the duration, the statement was working when it was stopped; CPU

@@ -26,10 +26,12 @@ release workflow refuses a tag that disagrees with either this file or
   where query timeouts land) or by an error (`Exception`), with the
   duration and CPU of those executions beside the query's finished ones. A
   timeout leaves no error on the server and `sys.dm_exec_query_stats` does not
-  count it; the Query Store is the only after-the-fact record. Under the
+  count it. Under the
   default capture mode `AUTO`, a rarely run query that times out while blocked
   is never captured, so the listing is a lower bound there; the root gives the
-  capture mode. Design in `docs/query-store-interrupted-spec.md`.
+  capture mode, and a blocked timeout past 30 seconds may also be in
+  `system_health`'s `wait_info` events, which `10.system/060` counts. Design
+  in `docs/query-store-interrupted-spec.md`.
 
 ### Fixed
 
