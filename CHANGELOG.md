@@ -21,6 +21,15 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Added
 
+- `10.system/078.performance-counters.sql` archives the content of
+  `sys.dm_os_performance_counters`, one snapshot, except the deprecated
+  features 075 already reads: `Access Methods`, `Locks`, `Latches`,
+  `SQL Errors`, `Plan Cache`, `Query Store`, `Columnstore`, resource pools
+  and the per-database counters had reached no archive. Each row carries the
+  type the engine declares, which does not say how to read it (some plain
+  values are counts since start), so nothing is computed. Root and array
+  come from one read of the view. Design in
+  `docs/performance-counters-spec.md`.
 - `80.workload/026.query-store-interrupted.sql` lists, per database, the
   queries whose executions did not finish: stopped by the client (`Aborted`,
   where query timeouts land) or by an error (`Exception`), with the

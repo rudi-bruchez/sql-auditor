@@ -158,6 +158,20 @@ jobs:
           jq -e 'has("side_minutes") and has("before") and has("after")' \
             "$run_dir/80.workload/ci_probe/025.query-store-compare.json"
           jq -e '.config.query_store_compare_at | test("/")' "$run_dir/_run.json"
+          # 078 carries the counters no other collector reads, not a handful:
+          # a file narrowed to a few rows fails the object checks. Its root
+          # and array come from one read of the view, so they must agree.
+          jq -e '(.counters | length) == .counts.rows
+                 and any(.counters[]; .counter == "Page Splits/sec")
+                 and any(.counters[]; .object | test(":Locks$"))
+                 and any(.counters[]; .object | test(":SQL Errors$"))
+                 and any(.counters[]; .object | test(":Plan Cache$"))
+                 and any(.counters[]; (.object | test(":Databases$")) and .instance == "ci_probe")
+                 and any(.counters[]; (.object | test(":Buffer Manager$")) and .counter == "Page life expectancy"
+                                      and .type_name == "PERF_COUNTER_LARGE_RAWCOUNT")
+                 and all(.counters[]; (.object | test("Deprecated Features") | not) and .type_name != null)' \
+            "$run_dir/10.system/078.performance-counters.json" \
+            || { jq 'del(.counters)' "$run_dir/10.system/078.performance-counters.json"; exit 1; }
           # 026 counted the planted timeout as Aborted and the division by
           # zero as Exception.
           jq -e '.executions.aborted >= 1 and .executions.exception >= 1' \

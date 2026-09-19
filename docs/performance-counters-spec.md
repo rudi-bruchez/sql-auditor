@@ -1,6 +1,7 @@
 # Performance counters: the raw content of `sys.dm_os_performance_counters`
 
-Status: draft, not implemented. Written on 19 September 2026, and revised
+Status: implemented on 19 September 2026
+(`queries/10.system/078.performance-counters.sql`). Written the same day, and revised
 the same day after a panel of five independent readers ran it against SQL
 Server 2025, 2022 and 2017. What the panel changed is listed at the end.
 
