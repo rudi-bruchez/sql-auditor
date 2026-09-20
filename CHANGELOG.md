@@ -17,7 +17,14 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.29.0] - 2026-09-20
+
+Two collectors, both for questions an audit is asked after the fact. "The
+application gets timeouts" left nothing on the server to read: the Query Store
+does keep the interrupted executions, and one collector now ranks them. And the
+performance counters a DBA would open Performance Monitor for reached no
+archive beyond the handful six collectors already picked out; another now
+carries the rest of that view.
 
 ### Added
 
