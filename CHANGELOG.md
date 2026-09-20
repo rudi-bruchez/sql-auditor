@@ -17,7 +17,12 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.31.1] - 2026-09-20
+
+A guard that could never fire, found by a reader attacking yesterday's
+measurements rather than the code. Nothing collected was wrong; a count that
+was always zero said a database had no statistic without a histogram when it
+had six.
 
 ### Fixed
 
