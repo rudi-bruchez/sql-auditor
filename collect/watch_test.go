@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -249,5 +250,238 @@ func TestManifestReportsTheWatch(t *testing.T) {
 	// A run that dies before the watch is decided still says why it was off.
 	if h := NewManifest("sql-auditor", "test", "").Human(); !strings.Contains(h, "off, the run ended before the first collector") {
 		t.Errorf("a fresh manifest does not explain the watch: %s", h)
+	}
+}
+
+// scriptedIdentify answers from a table of sessions, and records what it was
+// asked, so a test can prove the watch asked once per session and no more.
+func scriptedIdentify(known map[int]waiterIdentity, err error) (identifyFunc, *[]int) {
+	asked := []int{}
+	return func(ctx context.Context, session int) (waiterIdentity, error) {
+		asked = append(asked, session)
+		if err != nil {
+			return waiterIdentity{}, err
+		}
+		id, ok := known[session]
+		if !ok {
+			return waiterIdentity{}, sql.ErrNoRows
+		}
+		return id, nil
+	}, &asked
+}
+
+func strptr(s string) *string { return &s }
+
+func waiterFrom(session, ms int) waitSample {
+	return waitSample{Session: session, WaitType: "LCK_M_SCH_M",
+		Waited: time.Duration(ms) * time.Millisecond, Resource: "objectlock objid=1"}
+}
+
+func TestBlockedWaitNamesTheLongestWaiterAndCountsTheOthers(t *testing.T) {
+	db := "SALESDB"
+	w := scriptedWatch(waiterFrom(78, 1000), waiterFrom(91, 2000), waiterFrom(78, 3000))
+	id, asked := scriptedIdentify(map[int]waiterIdentity{
+		78: {Program: strptr("SQLAgent - TSQL JobStep"), Database: &db},
+		91: {Program: strptr("sqlcmd")},
+	}, nil)
+	w.identify = id
+	_, cancel := context.WithCancelCause(context.Background())
+	w.arm(55, cancel)
+	for range 3 {
+		w.tick()
+	}
+	worst, round, fired := w.disarmed()
+	if fired || worst.Session != 78 || worst.Waited != 3*time.Second {
+		t.Fatalf("worst = %+v, fired = %v", worst, fired)
+	}
+	if len(*asked) != 2 {
+		t.Errorf("identified %v, want one read per session", *asked)
+	}
+	in := incidentOf("70.schema/055.page-density.sql", "SALESDB", worst, round, false)
+	if in.WaitersSeen != 2 || in.WaitedMS != 3000 || in.Cancelled {
+		t.Errorf("incident = %+v", in)
+	}
+	if in.Waiter.Identified != identifyOK || (in.Waiter.ProgramName == nil || *in.Waiter.ProgramName != "SQLAgent - TSQL JobStep") {
+		t.Errorf("waiter = %+v", in.Waiter)
+	}
+	if in.Waiter.Database == nil || *in.Waiter.Database != "SALESDB" {
+		t.Errorf("database = %v", in.Waiter.Database)
+	}
+	if in.FirstSeen == "" {
+		t.Errorf("no first_seen")
+	}
+}
+
+// The identity read belongs to one session; the longest wait may be another's.
+// Pairing them would put a name on a wait that is not its own.
+func TestBlockedWaitRefusesAnIdentityFromAnotherSession(t *testing.T) {
+	w := scriptedWatch(waiterFrom(78, 1000), waiterFrom(91, 9000))
+	w.identify = func(ctx context.Context, session int) (waiterIdentity, error) {
+		return waiterIdentity{Program: strptr("sqlcmd")}, nil
+	}
+	w.identifyMax = 1
+	_, cancel := context.WithCancelCause(context.Background())
+	w.arm(55, cancel)
+	w.tick()
+	w.tick()
+	worst, round, _ := w.disarmed()
+	in := incidentOf("s.sql", "", worst, round, true)
+	if worst.Session != 91 {
+		t.Fatalf("worst session = %d", worst.Session)
+	}
+	if in.Waiter.Identified != identifyNotAttempted || in.Waiter.ProgramName != nil {
+		t.Errorf("waiter = %+v, want no identity from another session", in.Waiter)
+	}
+}
+
+func TestIdentityFailureNeitherStopsTheWatchNorDelaysTheCancel(t *testing.T) {
+	cases := []struct {
+		name string
+		id   identifyFunc
+		want string
+	}{
+		{"gone", func(ctx context.Context, s int) (waiterIdentity, error) {
+			return waiterIdentity{}, sql.ErrNoRows
+		}, identifyNoSession},
+		{"failed", func(ctx context.Context, s int) (waiterIdentity, error) {
+			return waiterIdentity{}, errors.New("mssql: VIEW SERVER STATE permission was denied")
+		}, identifyFailed},
+		{"hangs", func(ctx context.Context, s int) (waiterIdentity, error) {
+			<-ctx.Done()
+			return waiterIdentity{}, ctx.Err()
+		}, identifyFailed},
+	}
+	for _, c := range cases {
+		w := scriptedWatch(waiterFrom(78, 6000))
+		w.identify, w.deadline = c.id, 20*time.Millisecond
+		ctx, cancel := context.WithCancelCause(context.Background())
+		w.arm(55, cancel)
+		if !w.tick() {
+			t.Fatalf("%s: the watch stopped on a failed identity read", c.name)
+		}
+		var be *blockedError
+		if !errors.As(context.Cause(ctx), &be) {
+			t.Fatalf("%s: the unit was not cancelled: %v", c.name, context.Cause(ctx))
+		}
+		worst, round, _ := w.disarmed()
+		in := incidentOf("s.sql", "", worst, round, true)
+		if in.Waiter.Identified != c.want {
+			t.Errorf("%s: identified = %q, want %q", c.name, in.Waiter.Identified, c.want)
+		}
+		if c.want == identifyFailed && in.Waiter.IdentifiedDetail == "" {
+			t.Errorf("%s: no detail on a failure", c.name)
+		}
+	}
+}
+
+// A session with no request has no database, which is not an unknown one.
+func TestIdentityWithoutARequestKeepsTheDatabaseNull(t *testing.T) {
+	w := scriptedWatch(waiterFrom(78, 1000))
+	w.identify = func(ctx context.Context, s int) (waiterIdentity, error) {
+		return waiterIdentity{Program: strptr("sqlcmd")}, nil
+	}
+	_, cancel := context.WithCancelCause(context.Background())
+	w.arm(55, cancel)
+	w.tick()
+	worst, round, _ := w.disarmed()
+	in := incidentOf("s.sql", "", worst, round, false)
+	if in.Waiter.Identified != identifyOK || in.Waiter.Database != nil {
+		t.Errorf("waiter = %+v", in.Waiter)
+	}
+}
+
+func TestWaitCapKeepsTheCancellations(t *testing.T) {
+	var w BlockingWatchBlock
+	for i := range maxBlockedWaits {
+		w.AddBlockedWait(BlockedWait{Script: "warning.sql", WaitedMS: 1000 + i})
+	}
+	w.AddBlockedWait(BlockedWait{Script: "over.sql", WaitedMS: 900})
+	if n := len(w.Items()); n != maxBlockedWaits {
+		t.Fatalf("%d items", n)
+	}
+	if !w.BlockedWaits.Truncated || w.BlockedWaits.OmittedCount != 1 {
+		t.Errorf("truncation not declared: %+v", w.BlockedWaits)
+	}
+	w.AddBlockedWait(BlockedWait{Script: "cancelled.sql", WaitedMS: 5000, Cancelled: true})
+	if w.BlockedWaits.OmittedCount != 2 {
+		t.Errorf("omitted = %d", w.BlockedWaits.OmittedCount)
+	}
+	var kept, shortest bool
+	for _, in := range w.Items() {
+		if in.Script == "cancelled.sql" {
+			kept = true
+		}
+		if in.WaitedMS == 1000 {
+			shortest = true
+		}
+	}
+	if !kept || shortest {
+		t.Errorf("a cancellation did not displace the shortest warning: kept=%v shortest still there=%v", kept, shortest)
+	}
+}
+
+func TestManifestShowsBlockedWaitsAndSlowestCollectors(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "")
+	if h := m.Human(); strings.Contains(h, "held up by this collection") {
+		t.Errorf("a run with no incident lists some")
+	}
+	db := "SALESDB"
+	m.BlockingWatch.AddBlockedWait(BlockedWait{Script: "70.schema/055.page-density.sql", Target: "SALESDB",
+		WaitedMS: 5031, Cancelled: true, WaitersSeen: 2,
+		Waiter: BlockedWaiter{SessionID: 78, WaitType: "LCK_M_SCH_M", ProgramName: strptr("deploy.exe"),
+			Database: &db, Identified: identifyOK}})
+	m.Results = []ResultEntry{
+		{Script: "a.sql", DurationMS: 12000, Bytes: 2048},
+		{Script: "b.sql", Target: "SALESDB", DurationMS: 500, Bytes: 10},
+	}
+	h := m.Human()
+	for _, want := range []string{
+		"Sessions held up by this collection (1):",
+		"session 78 waited, and the collector was cancelled after 5.0 s (LCK_M_SCH_M) on 70.schema/055.page-density.sql on SALESDB",
+		"it calls itself \"deploy.exe\"",
+		"2 sessions waited on this collector",
+		"Slowest collectors (the run is longer than their sum):",
+		"12.0 s",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("MANIFEST.txt lacks %q\n%s", want, h)
+		}
+	}
+	b, err := m.marshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		BlockingWatch struct {
+			BlockedWaits struct {
+				Items []struct {
+					WaitedMS int `json:"waited_ms"`
+					Waiter   struct {
+						Database   *string `json:"database"`
+						Identified string  `json:"identified"`
+					} `json:"waiter"`
+				} `json:"items"`
+				Truncated bool `json:"truncated"`
+			} `json:"waits"`
+		} `json:"blocking_watch"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	items := got.BlockingWatch.BlockedWaits.Items
+	if len(items) != 1 || items[0].WaitedMS != 5031 || items[0].Waiter.Identified != identifyOK {
+		t.Errorf("_run.json waits = %+v", items)
+	}
+}
+
+// An archive that never recorded a wait and one where nobody waited must
+// not read the same.
+func TestEmptyBlockedWaitsAreWrittenAsAnEmptyList(t *testing.T) {
+	b, err := NewManifest("sql-auditor", "test", "").marshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"waits": {`) || !strings.Contains(string(b), `"items": []`) {
+		t.Errorf("_run.json has no empty waits block: %s", b)
 	}
 }

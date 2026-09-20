@@ -109,6 +109,23 @@ type ErrorEntry struct {
 	Target   string `json:"target"`
 	Message  string `json:"message"`
 	SQLError int    `json:"sql_error"`
+	// DurationMS is how long the unit ran before it failed. A collector that
+	// burns its @timeout — 1800 seconds for the two that scan — and then fails
+	// writes no result, so without this the run's own account of where the
+	// time went would be blind to exactly the units that spent it.
+	DurationMS int `json:"duration_ms,omitempty"`
+}
+
+// NoteFailureDuration records how long the unit that just failed had run. It
+// is set after the fact because the error is filed before the duration is
+// read: the context is consulted, and the entry written, before anything else.
+func (m *Manifest) NoteFailureDuration(script, target string, d time.Duration) {
+	for i := len(m.Errors) - 1; i >= 0; i-- {
+		if m.Errors[i].Script == script && m.Errors[i].Target == target {
+			m.Errors[i].DurationMS = int(d / time.Millisecond)
+			return
+		}
+	}
 }
 
 // CoverageBlock is the verdict on whether this archive describes the whole
@@ -256,7 +273,85 @@ type BlockingWatchBlock struct {
 	CancelAfterMS  int    `json:"cancel_after_ms"`
 	CancelledUnits int    `json:"cancelled_units"`
 	Stopped        string `json:"stopped"`
+	// BlockedWaits is what the watch saw, unit by unit. An empty Items with the
+	// field present is "nobody waited"; the field missing would be "this run
+	// never recorded any", which is a different archive.
+	BlockedWaits BlockedWaitBlock `json:"waits"`
 }
+
+// maxBlockedWaits caps the list. A run that blocks a hundred times has said what
+// it has to say, but a cancellation is never the entry that falls off the end.
+const maxBlockedWaits = 100
+
+type BlockedWaitBlock struct {
+	Items        []BlockedWait `json:"items"`
+	Truncated    bool          `json:"truncated"`
+	OmittedCount int           `json:"omitted_count"`
+}
+
+// BlockedWait is one unit someone waited on, whether or not it was cancelled.
+// The audit's own session is the other end of every one of these.
+type BlockedWait struct {
+	Script string `json:"script"`
+	// Target is the database, empty for an instance-scope collector. The key
+	// is always written: the contract this borrows from says absence is typed
+	// and never a missing key.
+	Target    string `json:"target"`
+	FirstSeen string `json:"first_seen"`
+	WaitedMS  int    `json:"waited_ms"`
+	Cancelled bool   `json:"cancelled"`
+	// WaitersSeen counts the distinct sessions that waited on this unit. The
+	// direct waiter can change between polls and several can wait at once;
+	// Waiter describes the longest one, and this says whether there were
+	// others.
+	WaitersSeen int           `json:"waiters_seen"`
+	Waiter      BlockedWaiter `json:"waiter"`
+}
+
+type BlockedWaiter struct {
+	SessionID           int    `json:"session_id"`
+	WaitType            string `json:"wait_type"`
+	ResourceDescription string `json:"resource_description"`
+	// ProgramName is client-supplied text and no evidence of anything, as
+	// 046.local-sessions says of the same column. It is null when the session
+	// reported none, empty when it reported an empty one, which is what a
+	// default SqlClient connection does. Database is null when the session has
+	// no request, which is not the same as an unknown database.
+	ProgramName *string `json:"program_name"`
+	Database    *string `json:"database"`
+	// Identified names why the two fields above may be empty, so a reader
+	// never has to guess: ok, not_attempted, no_session, failed.
+	Identified       string `json:"identified"`
+	IdentifiedDetail string `json:"identified_detail,omitempty"`
+}
+
+// AddBlockedWait appends one, keeping cancellations: when the list is full a
+// cancelled incident displaces the shortest wait that was not cancelled.
+func (w *BlockingWatchBlock) AddBlockedWait(in BlockedWait) {
+	if len(w.Items()) < maxBlockedWaits {
+		w.BlockedWaits.Items = append(w.BlockedWaits.Items, in)
+		return
+	}
+	w.BlockedWaits.Truncated = true
+	w.BlockedWaits.OmittedCount++
+	if !in.Cancelled {
+		return
+	}
+	victim, found := -1, 0
+	for i, held := range w.BlockedWaits.Items {
+		if held.Cancelled {
+			continue
+		}
+		if victim < 0 || held.WaitedMS < found {
+			victim, found = i, held.WaitedMS
+		}
+	}
+	if victim >= 0 {
+		w.BlockedWaits.Items[victim] = in
+	}
+}
+
+func (w *BlockingWatchBlock) Items() []BlockedWait { return w.BlockedWaits.Items }
 
 func (w BlockingWatchBlock) line() string {
 	switch {
@@ -279,7 +374,8 @@ func NewManifest(name, version, commit string) *Manifest {
 		Run:  RunInfo{StartedUTC: nowUTC()},
 		BlockingWatch: BlockingWatchBlock{
 			PollMS: int(watchPollEvery / time.Millisecond), CancelAfterMS: int(watchCancelAfter / time.Millisecond),
-			Reason: "the run ended before the first collector"},
+			Reason:       "the run ended before the first collector",
+			BlockedWaits: BlockedWaitBlock{Items: []BlockedWait{}}},
 	}
 }
 
@@ -524,6 +620,8 @@ func (m *Manifest) Human() string {
 	m.writeWhatWasRead(&b)
 	m.writeNotRun(&b)
 	m.writeProblems(&b)
+	m.writeBlockedWaits(&b)
+	m.writeSlowest(&b)
 	m.writeSources(&b)
 
 	b.WriteString("\nThe machine-readable form of everything above, including the full list of\n")
@@ -1091,3 +1189,83 @@ func relativeTo(root, p string) string {
 }
 
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339) }
+
+// writeBlockedWaits lists what waited on the collection. The one Block watch line
+// says whether anything was watching; this says what it saw, which is the
+// question a DBA asks when someone reports the audit held them up.
+func (m *Manifest) writeBlockedWaits(b *strings.Builder) {
+	items := m.BlockingWatch.Items()
+	if len(items) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\nSessions held up by this collection (%d):\n", len(items))
+	for _, in := range items {
+		where := in.Script
+		if in.Target != "" {
+			where += " on " + in.Target
+		}
+		what := "waited"
+		if in.Cancelled {
+			what = "waited, and the collector was cancelled after"
+		}
+		fmt.Fprintf(b, "  - session %d %s %.1f s (%s) on %s\n",
+			in.Waiter.SessionID, what, float64(in.WaitedMS)/1000, in.Waiter.WaitType, where)
+		if in.Waiter.ProgramName != nil {
+			fmt.Fprintf(b, "    it calls itself %q\n", *in.Waiter.ProgramName)
+		}
+		if in.WaitersSeen > 1 {
+			fmt.Fprintf(b, "    %d sessions waited on this collector; the longest is the one above\n", in.WaitersSeen)
+		}
+	}
+	if m.BlockingWatch.BlockedWaits.Truncated {
+		fmt.Fprintf(b, "  (%d more not listed)\n", m.BlockingWatch.BlockedWaits.OmittedCount)
+	}
+}
+
+// writeSlowest answers "where did the time go" without opening _run.json. The
+// durations are per collector and do not add up to the run: preflight, target
+// selection, resets, skips, the manifest and the archive are all outside them.
+// A unit that failed counts too, and is marked: the collector that spends the
+// minutes is often the one that then gives up.
+func (m *Manifest) writeSlowest(b *strings.Builder) {
+	type row struct {
+		label  string
+		ms     int
+		bytes  int
+		failed bool
+	}
+	var rows []row
+	label := func(script, target string) string {
+		if target == "" {
+			return script
+		}
+		return script + " on " + target
+	}
+	for _, r := range m.Results {
+		rows = append(rows, row{label(r.Script, r.Target), r.DurationMS, r.Bytes, false})
+	}
+	for _, e := range m.Errors {
+		if e.Script == "" {
+			continue
+		}
+		rows = append(rows, row{label(e.Script, e.Target), e.DurationMS, 0, true})
+	}
+	if len(rows) == 0 {
+		return
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].ms > rows[j].ms })
+	if len(rows) > 5 {
+		rows = rows[:5]
+	}
+	if rows[0].ms == 0 {
+		return
+	}
+	b.WriteString("\nSlowest collectors (the run is longer than their sum):\n")
+	for _, r := range rows {
+		note := ""
+		if r.failed {
+			note = "  (failed)"
+		}
+		fmt.Fprintf(b, "  - %6.1f s  %-9s  %s%s\n", float64(r.ms)/1000, HumanBytes(int64(r.bytes)), r.label, note)
+	}
+}

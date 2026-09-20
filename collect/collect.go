@@ -1891,6 +1891,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// the line between them took to format — a difference of microseconds
 		// that is nonetheless a second number for a reader to reconcile.
 		took, wrote := time.Since(started), rw.Spent()-before
+		m.NoteFailureDuration(s.Path, target.Name, took)
 		obs.UnitDone(s.Path, target.Name, int64(wrote), took, report)
 		// The duration is the whole point of the pair: the slow collector in a
 		// long run is invisible in a total and obvious in a column of these.
@@ -2080,9 +2081,12 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	}
 	watch.arm(spid, unitCancel)
 	defer func() {
-		worst, fired := watch.disarm()
+		worst, round, fired := watch.disarmed()
 		leave()
 		var be *blockedError
+		if worst.seen() {
+			m.BlockingWatch.AddBlockedWait(incidentOf(s.Path, u.Name, worst, round, errors.As(err, &be)))
+		}
 		switch {
 		case errors.As(err, &be):
 			m.BlockingWatch.CancelledUnits++

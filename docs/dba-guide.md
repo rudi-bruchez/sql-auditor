@@ -969,10 +969,43 @@ screen and in the manifest. `MANIFEST.txt` has a `Block watch` line, and
 `_run.json` a `blocking_watch` block, in every case, so that "nobody was
 waiting" and "nobody was looking" read differently.
 
+### What the archive keeps about it
+
+Every wait the watch saw is recorded, not only the ones that cost a collector.
+`_run.json` carries one entry per collector someone waited on, under
+`blocking_watch.waits`: the collector, the database, how long the longest
+waiter waited, the wait type, the lock resource as the engine wrote it, how
+many sessions waited, and whether the collector was cancelled. `MANIFEST.txt`
+lists the same thing in prose, so the answer to "your audit held up my
+deployment at nine o'clock" is in the archive rather than in anyone's memory.
+
+The waiter is named by the application name it reported, the database its
+request was running in, and its session id. No login name, no host name, no
+statement text: those enter an archive only under `--include-session-text`,
+and the disclosure paragraph of `MANIFEST.txt` says so. A session that
+reported no application name is recorded as having reported none, which is
+what most sessions do.
+
+The duration is a lower bound, since the wait is sampled once a second, and
+the database named is the one the waiter's request was running in, which is
+not always the database of the lock it was waiting on. The `dbid=` inside the
+resource is that one.
+
 Two side effects in the archive. `10.system/046.local-sessions` shows the watch
 as its own group of `program_name`, for a run on the server itself. In
 `10.system/042.connection-security` it is one more connection in the group the
-collector's session belongs to.
+collector's session belongs to. The watch holds two connections rather than
+one: the second is there so that a slow read of a waiter's name cannot stop
+the watch itself.
+
+### Where the time went
+
+`MANIFEST.txt` ends with the five slowest collectors, with their duration and
+the size they wrote, and marks the ones that failed. The durations do not add
+up to the run: preflight, the choice of databases, connection resets, the
+manifest and the archive itself are outside them, and the run's own elapsed
+time is on the `Duration` line at the top. The full list, collector by
+collector, is in `_run.json`.
 
 ### A narrowed run may still collect the distribution database
 
