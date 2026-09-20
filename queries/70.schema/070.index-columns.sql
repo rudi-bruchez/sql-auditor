@@ -44,6 +44,23 @@
 -- usage counters in 020 and the plans in 80.workload are the other half, and
 -- putting the verdict in the collector would fix an answer that needs both.
 --
+-- THE KEY WIDTH IS COLLECTED BECAUSE A REBUILD CANNOT BE SIZED WITHOUT IT.
+-- An ONLINE operation on a clustered index builds a temporary mapping index
+-- from old bookmarks to new, one row per table row, and with SORT_IN_TEMPDB
+-- OFF it is built in the data file rather than in tempdb. Its size is the row
+-- count times the width of the bookmarks it maps, so on a large table it runs
+-- to tens of gigabytes and it is the term routinely left out of a sizing.
+-- Nothing else in the archive carries a key width: 060.columns has the widths
+-- but not which columns are keys, and the key list here is a string of names.
+--
+-- key_bytes is the DECLARED width, which is the safe high assumption for
+-- sizing and not the average row. The uniquifier of a non-unique clustered
+-- index is not added: is_unique sits beside it and the analysis adds the four
+-- bytes where they apply, rather than the collector deciding it. A key column
+-- of MAX type is impossible, so a negative max_length would mean the view was
+-- read wrongly; it produces NULL for the whole index rather than a plausible
+-- small number.
+--
 -- SQL Server 2012 is the floor. Not collected for that reason:
 --   sys.indexes.optimize_for_sequential_key   (2019)
 --   sys.index_columns on columnstore ordering (2019, ordered clustered CCI)
@@ -104,6 +121,13 @@ SELECT SCHEMA_NAME(o.schema_id) + '.' + o.name                    AS [table],
        (SELECT COUNT(*) FROM sys.index_columns AS ic
         WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
           AND ic.key_ordinal > 0)                                 AS [key_count],
+       (SELECT CASE WHEN MIN(c.max_length) < 0 THEN NULL
+                    ELSE SUM(CAST(c.max_length AS int)) END
+        FROM sys.index_columns AS ic
+        JOIN sys.columns       AS c ON c.object_id = ic.object_id
+                                   AND c.column_id = ic.column_id
+        WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
+          AND ic.key_ordinal > 0)                                 AS [key_bytes],
        STUFF((SELECT ', ' + c.name
               FROM sys.index_columns AS ic
               JOIN sys.columns       AS c ON c.object_id = ic.object_id

@@ -19,9 +19,24 @@
 --
 -- INSTANT FILE INITIALIZATION IS A PROPERTY OF THE SERVICE ACCOUNT, NOT OF
 -- SQL SERVER. It is granted by the "Perform volume maintenance tasks" Windows
--- right, it takes effect at service start, and it never applies to log files —
--- a transaction log is always zero-filled, whatever the setting. A report must
--- not present it as a database or instance option.
+-- right and it takes effect at service start. A report must not present it as
+-- a database or instance option. Two limits belong with it, because a
+-- recommendation that ignores either one promises a gain that will not arrive:
+-- transparent data encryption blocks it on data files whatever the version,
+-- and the log is zero-filled except on SQL Server 2022 and later, where
+-- autogrowth events up to 64 MB can use it, TDE or not.
+--
+-- THE ENGINE ROW IS PROJECTED ONTO THE ROOT, as engine.instant_file_
+-- initialization, and the services array still carries every row. The setting
+-- belongs to the Database Engine service, and reaching it in the array means
+-- selecting a row whose name carries the instance name — which differs on
+-- every host, so nothing downstream can address it by a fixed path. The
+-- row is picked by process id and not by name: the service is called
+-- "SQL Server (MSSQLSERVER)" on Windows and "MSSQLSERVER" on Linux, and a
+-- pattern written for one returns NULL on the other. Measured: a first version
+-- matching 'SQL Server (%' reported NULL on SQL Server 2025 on Linux while the
+-- services array beside it showed Y. SERVERPROPERTY('ProcessID') is the
+-- process answering this very query, so it names the engine on both.
 --
 -- startup_parameters is the persisted truth. Trace flags set with
 -- DBCC TRACEON are NOT here: they live only in the running instance and are
@@ -60,6 +75,10 @@ SELECT CONVERT(sysname,  SERVERPROPERTY('MachineName'))           AS [machine_na
        si.sqlserver_start_time                                    AS [instance_start],
        DATEDIFF(second, si.sqlserver_start_time, GETDATE())       AS [seconds_since_instance_start],
        (SELECT COUNT(*) FROM sys.dm_server_services)              AS [services_reported],
+       (SELECT MAX(s.instant_file_initialization_enabled)
+          FROM sys.dm_server_services AS s
+         WHERE s.process_id = CONVERT(int, SERVERPROPERTY('ProcessID')))
+                                                                  AS [engine.instant_file_initialization],
        (SELECT COUNT(*) FROM sys.dm_server_registry
         WHERE registry_key LIKE '%Parameters')                    AS [startup_parameters_count]
 FROM sys.dm_os_sys_info AS si

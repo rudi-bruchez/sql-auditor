@@ -1,5 +1,5 @@
 -- @scope:       instance
--- @resultsets:  root:object, per_database:array, devices:array, recent:array
+-- @resultsets:  root:object, per_database:array, devices:array, recent:array, growth:array
 -- @permissions: CONNECT, MSDB READ
 -- @timeout:     120
 -- @profiles:    space
@@ -40,6 +40,23 @@
 -- leaves it; the count of rows outside the window is projected so a reader can
 -- see whether history is being trimmed aggressively, which itself changes what
 -- can be audited later.
+--
+-- GROWTH IS MEASURED HERE BECAUSE NOTHING ELSE CAN MEASURE IT. A collection
+-- is one point in time: file sizes say how big the database is, never how fast
+-- it grows, and the growth rate is the term that decides how much free space a
+-- data file has to keep and for how long. The successive full backups msdb
+-- still holds are the one series already in reach, and backup_size is the
+-- uncompressed size of what was written, which tracks used pages rather than
+-- allocated file size.
+--
+-- THE GROWTH SERIES IGNORES THE THIRTY-DAY WINDOW, on purpose. Everything else
+-- here answers "what is happening now"; a rate wants the longest honest span,
+-- so it reads whatever the purge has left and reports the span beside the
+-- number. Snapshot backups are excluded because their recorded size measures
+-- something else entirely. A shrink or a purge inside the span shows up as a
+-- negative rate, which is reported as measured rather than clamped to zero: a
+-- database that got smaller is a fact about the period, and hiding it would
+-- turn one honest measurement into an invented one.
 --
 -- SQL Server 2012 is the floor. compressed_backup_size is 2008+, is_snapshot
 -- is 2005+, so both are safe. Not collected for that reason:
@@ -176,4 +193,41 @@ SELECT TOP (200)
 FROM msdb.dbo.backupset AS bs
 WHERE bs.backup_finish_date >= @since
 ORDER BY bs.backup_finish_date DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* Data growth per database, from the full backups msdb still holds. One row
+   per database that has at least one full backup; a database with exactly one
+   reports fulls = 1, a span of zero days and a NULL rate, which is the
+   difference between "not growing" and "not measurable" that a zero would
+   destroy. */
+WITH fulls AS (
+    SELECT bs.database_name,
+           bs.backup_finish_date,
+           bs.backup_size,
+           ROW_NUMBER() OVER (PARTITION BY bs.database_name
+                              ORDER BY bs.backup_finish_date ASC)  AS oldest_first,
+           ROW_NUMBER() OVER (PARTITION BY bs.database_name
+                              ORDER BY bs.backup_finish_date DESC) AS newest_first,
+           COUNT(*)     OVER (PARTITION BY bs.database_name)       AS fulls
+    FROM msdb.dbo.backupset AS bs
+    WHERE bs.type = 'D' AND bs.is_snapshot = 0
+)
+SELECT
+    o.database_name                                             AS [database],
+    o.fulls                                                     AS [fulls],
+    CONVERT(varchar(19), o.backup_finish_date, 126)             AS [first],
+    CONVERT(varchar(19), n.backup_finish_date, 126)             AS [last],
+    DATEDIFF(day, o.backup_finish_date, n.backup_finish_date)   AS [span_days],
+    CAST(o.backup_size / 1048576.0 AS DECIMAL(18,1))            AS [first_mb],
+    CAST(n.backup_size / 1048576.0 AS DECIMAL(18,1))            AS [last_mb],
+    CAST((n.backup_size - o.backup_size) / 1048576.0 AS DECIMAL(18,1))
+                                                                AS [growth_mb],
+    CAST((n.backup_size - o.backup_size) / 1048576.0
+         / NULLIF(DATEDIFF(day, o.backup_finish_date, n.backup_finish_date), 0)
+         AS DECIMAL(18,2))                                      AS [mb_per_day]
+FROM fulls AS o
+JOIN fulls AS n ON n.database_name = o.database_name
+               AND n.newest_first = 1
+WHERE o.oldest_first = 1
+ORDER BY o.database_name
 OPTION (RECOMPILE, MAXDOP 1);

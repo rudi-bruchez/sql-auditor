@@ -73,6 +73,17 @@
 -- without the period it accumulated over. It is an upper bound on that period,
 -- not a measurement — the counters can also be cleared without a restart.
 --
+-- THE REBUILD UNIT IS THE PARTITION, WHICH IS WHY partitions AND
+-- largest_partition_mb SIT BESIDE reserved_mb. Free space in a data file is
+-- the working area of maintenance before it is a growth reserve: a rebuild
+-- builds the new structure before releasing the old one, so the space to keep
+-- free is set by the largest structure that has to be rebuilt at once. On a
+-- partitioned index rebuilt partition by partition that is the largest
+-- partition, not the whole index, and the two can differ by more than an order
+-- of magnitude. reserved_mb alone therefore overstates the requirement on
+-- exactly the tables where it matters most, and nothing else in the archive
+-- carries the partition-level size.
+--
 -- SQL Server 2012 is the floor. Not collected for that reason:
 --   sys.dm_db_index_operational_stats leaf_page_merge (behaviour differs)
 --   sys.dm_db_missing_index_group_stats_query          (2019)
@@ -106,6 +117,8 @@ DECLARE @usage TABLE (
     [hypothetical]         bit,
     [rows]                 bigint NULL,
     [reserved_mb]          decimal(18,2) NULL,
+    [partitions]           int NULL,
+    [largest_partition_mb] decimal(18,2) NULL,
     [has_usage_row]        int,
     [user_seeks]           bigint NULL,
     [user_scans]           bigint NULL,
@@ -201,6 +214,8 @@ BEGIN TRY
            CAST(i.is_hypothetical AS bit),
            ps.row_count,
            CAST(ps.reserved_page_count * 8.0 / 1024 AS DECIMAL(18,2)),
+           ps.partitions,
+           CAST(ps.largest_partition_pages * 8.0 / 1024 AS DECIMAL(18,2)),
            CASE WHEN us.index_id IS NULL THEN 0 ELSE 1 END,
            us.user_seeks, us.user_scans, us.user_lookups, us.user_updates,
            us.last_user_seek, us.last_user_scan, us.last_user_lookup,
@@ -213,7 +228,14 @@ BEGIN TRY
            AND us.database_id = DB_ID()
     LEFT JOIN (SELECT p.object_id, p.index_id,
                       SUM(p.row_count)            AS row_count,
-                      SUM(p.reserved_page_count)  AS reserved_page_count
+                      SUM(p.reserved_page_count)  AS reserved_page_count,
+                      -- One row per partition in this view, so COUNT(*) is the
+                      -- partition count and MAX is the biggest one. A
+                      -- non-partitioned index reports 1 and repeats its own
+                      -- size, which keeps the two columns readable without a
+                      -- special case downstream.
+                      COUNT(*)                    AS partitions,
+                      MAX(p.reserved_page_count)  AS largest_partition_pages
                FROM sys.dm_db_partition_stats AS p
                GROUP BY p.object_id, p.index_id) AS ps
             ON ps.object_id = i.object_id AND ps.index_id = i.index_id
@@ -274,6 +296,8 @@ SELECT u.[table], u.[index_name], u.[index_id], u.[index_type],
        u.[is_disabled], u.[filter_definition], u.[hypothetical],
        u.[rows]                                             AS [size.rows],
        u.[reserved_mb]                                      AS [size.reserved_mb],
+       u.[partitions]                                       AS [size.partitions],
+       u.[largest_partition_mb]                             AS [size.largest_partition_mb],
        u.[has_usage_row]                                    AS [usage.has_usage_row],
        u.[user_seeks]                                       AS [usage.user_seeks],
        u.[user_scans]                                       AS [usage.user_scans],
