@@ -1,5 +1,18 @@
 # `sql-auditor observe`, slice 1: implementation plan
 
+Status: SUPERSEDED on 20 September 2026, before any code came out of it. It
+plans the histogram design, and the histogram is gone: measured, the
+`sqlserver.query_hash` action returns zero on both events the command is built
+on, so the capture it plans returns one bucket holding the whole workload.
+`docs/observe-spec.md` records the measurement and the design that replaces it.
+
+The document is kept because the panel of three readers that broke it found much
+that survives the change: the ownership fingerprint, the lock-out with no way
+out, the create-time race, the cancellation teardown running on a cancelled
+context, the ordering of preflight against the sweep. Those findings are folded
+into the spec and belong in whatever plan replaces this one. The reviews are
+beside it, `-agy.md`, `-codex.md` and `-claude.md`.
+
 > For agentic workers: required sub-skill, superpowers:subagent-driven-development (recommended) or superpowers:executing-plans, task by task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 Goal: implement the default capture of `sql-auditor observe` as
