@@ -279,10 +279,17 @@ stops it after a while. There is no server-side timer to lean on.
 
 So the deadline is enforced by the tool, at its next visit, and the mechanism has
 to survive the loss of everything local. The session name is fixed,
-`sql-auditor observe`, and its start time is `sys.dm_xe_sessions.create_time`,
-which is the time of `STATE = START` and not of `CREATE`. Any later `observe`, on
-any machine, finds the session under the known name, reads when it started, reads
-its declared maximum, and stops it if it has outlived it.
+`sql-auditor observe`. Any later `observe`, on any machine, finds the session
+under the known name, reads its start time and its declared maximum out of the
+capture file stem, and stops it if it has outlived it.
+
+Both halves of the deadline come from the stem, and `sys.dm_xe_sessions.create_time`
+is not one of them. It is tempting, being the time of `STATE = START` and right
+beside the counters, and it is wrong: measured, a `STOP` followed by a `START`
+moves it while the stem does not, so a session a DBA restarted by hand has its
+deadline slide forward by however long the pause lasted, indefinitely and
+invisibly. An earlier draft of this document used `create_time` in one section
+and the stem in another without noticing there were two clocks.
 
 The declared maximum is read from the file stem and not from the flags of the
 process doing the reading. An earlier draft derived it from the sweeper's own
@@ -376,19 +383,27 @@ chosen mode needs, obtain consent, and only then sweep, create or alter. The
 sweep needs `ALTER ANY EVENT SESSION` like everything else, so putting preflight
 before it is also what turns a raw SQL error into the designed refusal.
 
-`observe status` is the awkward case and is resolved rather than ignored: it
-sweeps like every other entry point, which means it can issue DDL. It prints
-what it dropped, and its help text says it can.
+That order is for the modes that create something. `status`, `stop` and `finish`
+create nothing, so they do not prompt: they validate, connect, describe and
+sweep. Writing one order for all five subcommands, which an earlier draft did,
+would have had `observe status` printing a `CREATE EVENT SESSION` for approval
+before it could tell the operator anything.
+
+`observe status` is still the awkward case and is resolved rather than ignored:
+it sweeps like the others, which means it can issue `STOP` and `DROP`. That is
+the one documented exception to "no DDL before consent", and it is narrow
+because the sweep acts only on a session the fingerprint proved is ours. It
+prints what it dropped, and its help text says it can.
 
 One refusal cannot be made to fit before the instance is touched, and it is
 listed here rather than pretended away. A capture directory the service account
 cannot write to is not detected by `CREATE EVENT SESSION`, which validates no
 path and succeeds; the failure arrives at `STATE = START`, `Msg 25602` carrying
-the operating system error, with the session already in the catalog. Preflight
-probes the directory first, as described under Where the file goes, which turns
-the ordinary case into a code 3. A path that passes the probe and still fails at
-`START` is a code 1: the instance was altered, the compensating drop runs, and
-the run says the directory was accepted and then refused.
+the operating system error, with the session already in the catalog. It is
+therefore a code 1 and not a code 3: the instance was altered, the compensating
+drop runs, and the run says the directory was refused by the server. Where the
+file goes explains why the preflight probe that would have made it a 3 was
+withdrawn.
 
 ### Preflight, and why it departs from the collector's rule
 
@@ -471,6 +486,17 @@ otherwise find a discrepancy with no explanation.
 
 `observe` excludes its own traffic on `sqlserver.client_app_name`, the tool
 setting `Application Name` in its connection string, and never on a session id.
+
+The name in the predicate is the one the run is actually using and not the
+literal `sql-auditor`. `collect/config.go` defines `DefaultAppName` as that
+string and then lets `SQL_APPLICATION_NAME` replace it, and `collect/watch.go`
+opens a second connection with a suffix appended, so a predicate written against
+the constant excludes the wrong connection in both cases.
+
+The limitation that remains is worth stating rather than hiding: an application
+that is itself called `sql-auditor` is excluded from its own audit, silently. The
+command's help says so, and the end-to-end test that proves the exclusion works
+is the same test that would pass if this happened.
 
 An earlier draft specified the session id, read from `@@SPID` before the
 `CREATE`. That is the obvious spelling and it is a silent capture killer. The
@@ -619,14 +645,32 @@ directory is often on a volume sized for logs. The flag that overrides it is
 `--file-dir` and not `--file`, since it takes a directory and the operator does
 not choose the file name, which the stem above decides.
 
-A bad directory is not caught where the exit codes assume it is. Measured:
-`CREATE EVENT SESSION` validates no path at all and succeeds, and the failure
-arrives at `STATE = START`, as `Msg 25602` naming the operating system error,
-with the session left in the catalog. Preflight therefore tests the directory
-before the create, by starting a throwaway session there under the managed
-fingerprint's own name and dropping it, and a path that fails at `START` despite
-that is a run that has altered the instance and cannot exit 3. See the exit
-codes.
+A bad directory is not caught where an earlier draft of this document assumed it
+was. Measured: `CREATE EVENT SESSION` validates no path at all and succeeds, and
+the failure arrives at `STATE = START`, as `Msg 25602` naming the operating
+system error, with the session left in the catalog.
+
+That draft answered with a preflight probe: create a throwaway session at the
+directory, start it, stop it, drop it, so a bad path could be refused before the
+instance was touched. The probe is withdrawn, and the reasons are measurements
+rather than second thoughts.
+
+Run against an instance where something already held the managed name, the
+probe's four statements refuse the `CREATE` with `Msg 25631` and the `START` with
+`Msg 25705`, and then the `STOP` and the `DROP` succeed. It stopped and dropped a
+running session it did not own, before consent and before any ownership test.
+Giving the probe a name of its own repairs that and not the rest: a probe that
+succeeds leaves a `.xel` file, and nothing in this tool's permission set deletes a
+file, so the manifest's promise that nothing else was modified stops being true.
+And a directory that is merely absent is not refused at all, it is created, two
+levels deep if the path says so.
+
+Without a probe the same failure is cheaper. `Msg 25602` is catchable in `TRY`,
+the compensating `DROP` leaves no session, and no file exists because the file
+could not be written. So a bad capture directory is an exit code 1 after consent,
+not a 3 before it, and the only guard against a typo is that the consent prompt
+prints the path. The prompt also says the directory will be created if it is
+absent, since that is what the server does.
 
 ### The session, rendered
 
@@ -789,14 +833,15 @@ lets an operator paste the DDL into a ticket after the fact.
 | 0 | the capture completed, the file is on the instance, the archive was written |
 | 1 | the instance could not be reached, or the archive could not be written |
 | 2 | partial: the capture ran but something is missing, dropped events, rollover loss, a session that stopped on its own |
-| 3 | refused before touching the instance: missing permission, a session already running under the name, a same-named session that is not ours, a capture directory the preflight probe could not write to |
+| 3 | refused before touching the instance: missing permission, a session already running under the name, a same-named session that is not ours, a command line that does not parse |
 
 They are the interface a script uses, so they are listed rather than promised.
 
-A directory that passes the probe and is then refused at `STATE = START` is a 1
-and not a 3, the instance having been altered by then. An earlier draft listed
-"a bad path" under 3 without noticing that the path is never validated at
-`CREATE`.
+A capture directory the server refuses is a 1 and not a 3. Two earlier drafts got
+this wrong in opposite directions: the first listed "a bad path" under 3 without
+noticing that no path is validated at `CREATE`, and the second invented a
+preflight probe to make the 3 true, at the price described above. The instance is
+altered by the time the directory is known to be bad, and the exit code says so.
 
 ## Consent and safety
 
