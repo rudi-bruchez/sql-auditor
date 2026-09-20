@@ -36,7 +36,7 @@ log blocking situations in the shared JSON blocking format."
 The family of tools (ShareLock, sqltop, sql-auditor, SqlGoPace) shares a
 blocking-report contract. Its home is the `schema` module of
 `github.com/rudi-bruchez/mssqlkit` (the repository the request calls
-`sqlblocking-schema`), and as of 19 September 2026 **that module is a stub**:
+`sqlblocking-schema`), and as of 19 September 2026 that module is a stub:
 `doc.go` and nothing else. The structure lives in ShareLock's `SPEC01` section
 12, where sql-auditor's role is "historical blocking as one audit chapter".
 
@@ -141,17 +141,17 @@ go"; the full list is already in `_run.json` for anyone who wants to sort it.
 
 ## What is not in scope
 
-- **The blocking history of the instance in the shared format.** The archive
+- The blocking history of the instance in the shared format. The archive
   already holds it: `10.system/063.blocked-process-reports.sql`,
   `061.deadlock-graphs.sql` and `060.system-health.sql`. Rendering those into
   a section 12 document is a converter over collected data, it is the "one
   audit chapter" the ecosystem gives sql-auditor, and it should be written
   against the shared module rather than against a copy of the structure. It
   waits for that module to exist.
-- **Blocking the collection suffers**, which `LOCK_TIMEOUT` handles.
-- **A chain deeper than one waiter.** The watch reads the longest direct
+- Blocking the collection suffers, which `LOCK_TIMEOUT` handles.
+- A chain deeper than one waiter: the watch reads the longest direct
   waiter; cancelling the collector releases whatever queued behind it.
-- **A second sample of the same waiter** to show a wait growing.
+- A second sample of the same waiter, to show a wait growing.
 
 ## Tests
 
