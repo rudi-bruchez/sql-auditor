@@ -17,6 +17,18 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Changed
+
+- `70.schema/091.statistics-density.sql` joins the `space` profile. The index
+  ordering rule needs a density for each candidate column, and the statistic
+  it reads is the one the optimizer auto-creates for the column it filtered
+  on: on a workload of 793 distinct query shapes, all twelve columns any
+  suggestion named had a statistic leading on them. Measured on a database of
+  200 tables and 800 statistics, it is the cheapest collector of the profile
+  in time, at 158 to 176 ms.
+
 ## [0.30.0] - 2026-09-20
 
 An audit that holds up production leaves a record of it. The blocking watch
