@@ -119,6 +119,28 @@ Both fixes were checked in both directions: unchanged output on a healthy
 instance, and `source` `none` with null counts, and a null platform with no
 residue, on an instance in the broken state.
 
+## If it ever shows up on a real instance
+
+There is a cheap way out, and it was measured on an instance in the failing
+state rather than reasoned about: `EXEC ('<literal>')` is not affected. It
+deferred a read of `sys.dm_os_host_info` and returned `Linux` where
+`sp_executesql` raised 17750, and a read of an object that does not exist
+raised Msg 208 inside a `TRY`, which is the whole property the deferred form
+exists for. `20.databases/023.log-vlf.sql` already uses that construct for its
+`DBCC LOGINFO` branch.
+
+So the ten collectors could be moved off `sp_executesql` in an afternoon. They
+are not, because the state that breaks them is one a production instance
+leaves by restarting, and ten rewritten guards is ten chances to break
+something that works today. This paragraph is the note to come back to if the
+failure is ever seen on an instance nobody built from a container image.
+
+Two more boundaries, from the panel: the failure is not particular to
+`Latin1_General_BIN2` (`Latin1_General_BIN` and `French_BIN2` do it too), and
+it is a server-collation state and not a database one, since a database in
+`Latin1_General_BIN2` on a server with the default collation runs dynamic SQL
+without trouble.
+
 ## What did not need fixing
 
 The eight other deferred readers lose an array and keep an honest root, or
