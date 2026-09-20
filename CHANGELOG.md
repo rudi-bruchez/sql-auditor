@@ -17,6 +17,22 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Added
+
+- The run file records what the collection held up. The blocking watch already
+  saw the sessions waiting on a collector; `blocking_watch.waits` now carries
+  one record each, with the collector, the database, the duration, the wait
+  type, the resource, whether the collector was cancelled, how many sessions
+  waited and what the longest one calls itself. `MANIFEST.txt` lists them, and
+  says so in its disclosure paragraph when a program name is there. No login
+  name, host name or statement text: those stay behind
+  `--include-session-text`. Design in `docs/blocking-record-spec.md`.
+- `MANIFEST.txt` names the five slowest collectors, failures included. A unit
+  that spends its timeout and then fails writes no result, so the error entry
+  in `_run.json` carries its duration now.
+
 ## [0.29.0] - 2026-09-20
 
 Two collectors, both for questions an audit is asked after the fact. "The
