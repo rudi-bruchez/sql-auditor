@@ -148,6 +148,33 @@ jobs:
       # collect exits 0 on a clean run, but an empty run also exits 0 if the
       # corpus somehow produced nothing. Assert on the artefacts instead: the
       # six per-database results are the ones a missing fixture would drop.
+      # 70.schema/021 is @min_version 15, so it exists on one leg of this
+      # matrix and not the other, and the assertion has to say which rather
+      # than guess: added to the block below, which asserts files present on
+      # both legs, it would turn the 2017 leg red. On 2022 the file is there
+      # with its pre-cap counts; on 2017 the run records the skip and its
+      # reason, which is the half that proves the gate works.
+      - name: assert the per-query missing index file (2022)
+        if: matrix.mssql == '2022-latest'
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          f="$run_dir/70.schema/ci_probe/021.missing-index-queries.json"
+          jq -e 'has("counts")
+                 and (.counts | has("rows_before_cap")
+                      and has("suggestions_with_queries_before_cap")
+                      and has("distinct_query_hashes_before_cap"))
+                 and .listing_cap_per_suggestion == 20
+                 and (.queries | type) == "array"
+                 and all(.queries[]; has("query_hash") and (has("last_sql_handle") | not))' "$f" \
+            || { jq 'del(.queries)' "$f"; exit 1; }
+      - name: assert the per-query missing index file is skipped (2017)
+        if: matrix.mssql == '2017-latest'
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          test ! -f "$run_dir/70.schema/ci_probe/021.missing-index-queries.json"
+          jq -e '[.skipped_scripts[]? | select(.script == "70.schema/021.missing-index-queries.sql")] | length >= 1' \
+            "$run_dir/_run.json" \
+            || { jq '[.skipped_scripts[]? | select(.script | test("021"))]' "$run_dir/_run.json"; exit 1; }
       - name: assert the run is complete
         run: |
           run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
