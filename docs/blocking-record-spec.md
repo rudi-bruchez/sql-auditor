@@ -75,7 +75,7 @@ the longest at the moment of the reading.
     "host_name": "APP07",
     "program_name": ".Net SqlClient Data Provider",
     "database": "SALESDB",
-    "enriched": true
+    "enrichment": "ok"
   }
 }
 ```
@@ -100,11 +100,18 @@ LEFT JOIN sys.dm_exec_requests AS r ON r.session_id = s.session_id
 WHERE s.session_id = @waiter;
 ```
 
-It runs under the watch's own `watchPollDeadline`. If it fails or returns
-nothing, which happens when the waiter has gone, `enriched` is `false` and the
-identity fields are absent. That is the typed absence the contract asks for: a
-missing `login_name` beside `enriched: false` means "we could not look", not
-"no login".
+It runs under the watch's own `watchPollDeadline`, and it runs before the
+cancel rather than after: cancelling releases the waiter, which then leaves
+`sys.dm_exec_requests` at its own pace, and enriching afterwards would be a
+race the watch would often lose. `enrichment` says what happened, which is the
+typed absence the contract asks for, and the identity fields are there only
+when it reads `ok`:
+
+- `ok`: the query answered;
+- `not_attempted`: the wait never reached the cancel threshold, so nothing was
+  tried. That is every incident which is only a warning today;
+- `no_session`: the query answered with no row, so the waiter had gone;
+- `failed: <reason>`: the query errored or hit its deadline.
 
 No statement text, and no input buffer. `10.system/046.local-sessions.sql`
 already puts login, host and program of local sessions in every archive, so
@@ -155,7 +162,7 @@ Without a server:
   nothing waited;
 - the cap: 101 incidents give 100 entries, `truncated: true`,
   `omitted_count: 1`;
-- enrichment failure leaves `enriched: false` and no identity fields, and the
+- enrichment failure leaves `enrichment` at `no_session` or `failed`, no identity fields, and the
   incident is still written;
 - `MANIFEST.txt` for a run with no incident, one incident and a truncated
   list; the slowest-units block for a run with fewer than five units.
