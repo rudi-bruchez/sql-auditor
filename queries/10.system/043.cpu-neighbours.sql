@@ -126,7 +126,17 @@ BEGIN
     END CATCH
 END
 
-SELECT @platform = ISNULL((SELECT TOP 1 x.[platform] FROM @p AS x), 'Windows')
+/* The fallback is the deduction "below 2017 there was no platform but
+   Windows", and it holds only where the view is absent. Where the view is
+   there and the read came back with nothing, the platform is unknown, and
+   saying Windows would make residue_computed 1 and hand the reader a residue
+   computed from a false premise. Measured: a deferred read can return no row
+   and raise nothing, on an instance whose collation was changed in the same
+   server lifetime (docs/verification-binary-collation.md). */
+SELECT @platform = CASE
+         WHEN EXISTS (SELECT 1 FROM @p) THEN (SELECT TOP 1 x.[platform] FROM @p AS x)
+         WHEN OBJECT_ID(N'sys.dm_os_host_info') IS NULL THEN 'Windows'
+       END
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                     AS [collected_at],
