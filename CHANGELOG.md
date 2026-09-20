@@ -17,7 +17,13 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.30.0] - 2026-09-20
+
+An audit that holds up production leaves a record of it. The blocking watch
+already cancelled a collector someone had waited five seconds on; what it saw
+ended as a sentence in a warning, so a run that held up three deployments
+counted them and said nothing else. Every wait is now a record in the run
+file, and the manifest also says where the run's own time went.
 
 ### Added
 
