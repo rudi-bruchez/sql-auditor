@@ -17,7 +17,14 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.31.0] - 2026-09-20
+
+A profile change, and the measurements behind it. The `space` profile could
+name the columns an index should be built on and not the order to put them in,
+because the density that settles the order was collected only by a full run.
+The collector that reads it is now part of the profile, and
+`docs/missing-index-suggestions-spec.md` answers the four questions it had
+left open, each against a live instance rather than by argument.
 
 ### Changed
 
