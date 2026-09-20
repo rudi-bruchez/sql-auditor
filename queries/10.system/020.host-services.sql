@@ -3,6 +3,15 @@
 -- @permissions: CONNECT, VIEW SERVER STATE
 -- @timeout:     60
 -- @min_version: 13.0.4001
+-- @profiles:    space
+--
+-- IT IS IN THE SPACE PROFILE BECAUSE OF ONE COLUMN. That profile asks how to
+-- make the databases smaller, and every answer it produces ends in a file
+-- operation: a rebuild that needs room before it frees any, a compression pass
+-- followed by a shrink, a growth increment to set. What such an operation
+-- costs when it overflows depends on whether data-file growth is zero-filled,
+-- which is instant file initialization and is readable nowhere else. Without
+-- it the profile can say what to compress and not what the next rebuild costs.
 --
 -- The SQL Server services on the host, and the parameters the engine was
 -- started with.

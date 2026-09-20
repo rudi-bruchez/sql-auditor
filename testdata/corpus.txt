@@ -2,7 +2,7 @@
 10.system/013.memory-model.sql
 10.system/014.cpu-topology.sql
 10.system/015.buffer-pool.sql
-10.system/020.host-services.sql
+10.system/020.host-services.sql @profiles: space
 10.system/021.host-info.sql
 10.system/025.startup-parameters-2012.sql
 10.system/030.file-io.sql @profiles: space
