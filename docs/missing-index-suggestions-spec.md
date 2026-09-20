@@ -388,8 +388,10 @@ there, and this document does not pretend they can be accepted here.
 ## The four open questions, answered
 
 Settled on 20 September 2026 by measurement, against SQL Server 2017
-(14.0.3550.4) and 2022 (16.0.4265.3) in throwaway containers, and the 2025
-lab. The method for the first three: one table of 400,000 rows with twelve
+(14.0.3550.4), 2019 (15.0.4480.2) and 2022 (16.0.4265.3, Developer and
+Express) in throwaway containers, and the 2025 lab. A sixth reader then
+attacked the four answers, and three of them moved: what is below is the state
+after that, with the corrections marked. The method for the first three: one table of 400,000 rows with twelve
 populated integer columns, driven with every equality subset of one to four of
 them, which is 793 distinct query shapes, more than any documented cap.
 
@@ -404,6 +406,38 @@ is refuted wherever it can be tested.
 | --- | --- | --- | --- | --- |
 | 14.0.3550.4 | 793 | 600 | 600 | 600 |
 | 16.0.4265.3 | 793 | 600 | 600 | 600 |
+
+600 is the ceiling, not a reading. Under memory pressure the store is trimmed
+by a fifth and a saturated instance then reads 480. Measured twice by a
+reviewer and reproduced by the author: with `max server memory` driven to
+400 MB and a sort forcing real pressure, `mi2017` fell from 600 to 480 and
+stayed there. The reviewer's diff of the handles says what goes: 120 entries,
+the older ones and the ones with the fewest seeks, and the store refills to
+600 afterwards.
+
+Three consequences, and they are the reason this answer matters at all:
+
+- the analysis rule is a band, not an equality. At 480 or above on any build
+  reachable here, no statement about missing indexes on any database of that
+  instance can claim to be complete;
+- the reset list of the window section gains memory pressure, beside restart,
+  failover, offline and metadata change. It destroys a fifth of the
+  suggestions with nothing in the archive to record it;
+- a partially trimmed instance refills with whatever compiles next, from any
+  database, so a database can come back with a handful of suggestions that are
+  neither its worst nor a sample of anything. That case reads worse than a
+  clean zero and the report language has to say so.
+
+The reviewer also measured that a plan compiled while the store is full
+carries no missing-index annotation at all, and that its counters then stay
+frozen while the query goes on running: a saturated instance is not only short
+of suggestions, it is stale in place.
+
+What the cap counts: driving the 793 shapes as one batch gives 600 details and
+600 groups before a single statement has executed, because a batch compiles as
+a unit, while `sys.dm_db_missing_index_group_stats` still reads 0. The limit
+is enforced when a group is created during optimisation. Not edition (Express
+caps at 600 too), not MAXDOP.
 
 Two things worth keeping beside that number. Dropping the database that held
 the 600 suggestions took the instance count straight back to 0, which is the
@@ -433,34 +467,61 @@ every table, not only on the strange ones. `QUOTENAME` on the key and included
 lists of `070` makes the comparison direct and retires the abstain rule for
 ambiguous key strings.
 
+A reviewer widened it twice. The DMV does not merely bracket: it doubles an
+inner right bracket, so its output is exactly `QUOTENAME`, and a column named
+`a]b` arrives as `[a]]b]`. And the comma case is not the worst collision.
+These two indexes are identical in both of the signals the archive offers, the
+key string and `key_count`:
+
+```
+IX4_x_desc            keys "x DESC"  key_count 1   -- index on ([x] DESC)
+IX5_col_named_x_desc  keys "x DESC"  key_count 1   -- index on ([x DESC])
+```
+
+So an analysis using `key_count` as its ambiguity detector, which is all it
+has, does not abstain there. `QUOTENAME` on `070` closes both.
+
+While the change is made, `091.statistics-density.sql` emits its
+`leading_column` bare as well, and the ordering rule joins it to the same
+bracketed DMV list. Quoting one of the two and not the other fixes half a
+join. `020` and `070` also build their `table` field as `schema + '.' + name`
+unquoted, which is consistent between them but cannot be split back apart.
+
 It is not a change to make quietly: the analysis layer parses the current
 bare-name form, so the corpus change and its consumer have to move together.
 That coordination, and not the SQL, is the work.
 
-### Should `sys.dm_db_missing_index_group_stats_query` be collected above 15.x? Yes, and it carries no text.
+### Should `sys.dm_db_missing_index_group_stats_query` be collected above 15.x? Yes, and it reaches query text, which the first answer got wrong.
 
-The disclosure question it was held back for does not arise. The view exposes
-`query_hash` and `query_plan_hash`, both binary, and a
-`last_statement_sql_handle` that does not resolve the way a reader would
-expect: `sys.dm_exec_sql_text` refuses it outright, on a cached plan and on a
-recompiled one alike, with
+The view carries two statement handles, and the first answer tested only one
+of them. `last_statement_sql_handle` is refused by `sys.dm_exec_sql_text`,
+with `Msg 12413` redirecting to the Query Store, which is what the first
+measurement found. `last_sql_handle` is an ordinary handle, and with
+`last_statement_start_offset` and `last_statement_end_offset` beside it, the
+statement comes out whole, literals included. Verified by the author after the
+reviewer found it:
 
 ```
-Msg 12413 ... Cannot process statement SQL handle.
-Try querying the sys.query_store_query_text view instead.
+SELECT @p = MAX(pad) FROM dbo.Txt WHERE ssn = 4242
 ```
 
-So the identity it reaches is a hash, and a hash is already in this archive
-three times over: `80.workload/030.implicit-conversions.sql`,
-`060.spills.sql` and `025.query-store-compare.sql` all project one, none of
-them behind a flag or a disclosure token. What the view adds is the join
-between a suggestion and the queries that wanted it, with their seeks, scans
-and impact.
+It is best effort, and `DBCC FREEPROCCACHE` empties it, but "the disclosure
+question does not arise" was false. It arises exactly as it does for
+`052.session-text.sql`. The reviewer also showed the second path: joining
+`query_hash` to `sys.query_store_query_text` returns the text too, which means
+the hashes already in this archive are one Query Store away from statements,
+and three collectors project one today.
 
-Two limits to write into whatever collects it: the rows are bounded by the
-same 600 groups, and the handle is not projected at all. Projecting an
-identifier whose only resolution path is the Query Store would invite the text
-lookup this document declines to make.
+So the answer stands, with its instruction sharpened. What a collector may
+project: `group_handle`, `query_hash`, `query_plan_hash`, the seek and scan
+counts and the impact figures. What it may not project, by name:
+`last_sql_handle`, `last_statement_sql_handle`,
+`last_statement_start_offset`, `last_statement_end_offset`. An implementer who
+read the first answer and then the view's column list would have projected the
+handle believing it cleared, which is how a disclosure ships by accident.
+
+The rows are bounded by the same 600 groups, and they read 0 until the
+statements have executed, since the view is the execution side of the group.
 
 ### Is `70.schema/091.statistics-density.sql` worth adding to the `space` profile? Yes.
 
@@ -472,6 +533,24 @@ were auto-created. That is the mechanism the collector's own header claims:
 the optimizer creates a single-column statistic for the column it filtered on,
 which is the column a suggestion then names.
 
+That holds where `AUTO_CREATE_STATISTICS` is on, which the fixture had and the
+first answer failed to say. A reviewer drove a database with it off: of five
+columns named by suggestions, one had a usable leading statistic, one had only
+a filtered one, and three had none. The setting is in a `space` archive
+already, in `20.databases/010.all-databases.sql` and `020.properties.sql`, so
+the rule is to abstain from ordering on a database where auto-create is off
+rather than to discover the absence column by column.
+
+Two more conditions on the rule, both from the same review. A filtered
+statistic describes its filtered subset and not the column, so the rule
+requires `has_filter = 0`. And it requires a non-null `all_density_estimate`
+rather than the presence of a row: a statistic with no histogram still
+produces a row with a name and a leading column. That second one was a defect
+in `091` itself, not only in the rule. Its `counts.without_histogram` tested
+`steps IS NULL`, and the histogram is read through an `OUTER APPLY` over a
+scalar aggregate, which always returns a row: the count could never fire. It
+now tests zero, and reads 6 on a database holding six such statistics.
+
 Cost, measured on a database of 200 tables and 800 statistics, beside the
 collectors the profile already runs:
 
@@ -482,7 +561,14 @@ collectors the profile already runs:
 | `020.index-usage` | 315 ms | 103 KB |
 | `091.statistics-density` | 176 ms | 239 KB |
 
-It is the cheapest of the four in time. The one objection left, that a density
+"The cheapest collector of the profile" was too strong, and a reviewer
+refuted it by changing the shape of the database rather than the collector: on
+200 tables with 4,600 statistics it took 694 ms, behind nine collectors of the
+profile, and three to four times `070`, which reads indexes rather than
+statistics. Its size is the other half, 302 KB against `070`'s 57 KB, in a
+profile named after space. What survives is the weaker and sufficient claim:
+its cost is of the same order as the collectors already in the profile, and it
+scales with the number of statistics rather than with the data. The one objection left, that a density
 read on a sampled statistic cannot be judged without the sampling figures
 `090` carries, does not hold in this profile: `091` projects `histogram_rows`
 and `010.objects`, which the profile does run, carries the table's row count

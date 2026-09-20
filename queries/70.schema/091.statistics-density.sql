@@ -162,8 +162,16 @@ SELECT DB_NAME()                                                AS [database],
        /* A statistic with no histogram has never been populated — a filtered
           statistic whose predicate matches nothing, or one on a table that has
           never held a row. Counted rather than dropped, because a file whose
-          array is short says nothing about why. */
-       (SELECT COUNT(*) FROM @density AS d WHERE d.[steps] IS NULL)
+          array is short says nothing about why.
+
+          THE TEST IS ZERO AND NOT NULL, and the first version had it wrong:
+          the histogram is read through an OUTER APPLY over a scalar aggregate,
+          which always returns a row, so steps is 0 and never NULL. The count
+          could not fire, and a statistic with no histogram still produced a
+          row with a name, a leading column and a null density. An ordering
+          rule that tests for the row rather than for the density orders on
+          nothing. */
+       (SELECT COUNT(*) FROM @density AS d WHERE d.[steps] IS NULL OR d.[steps] = 0)
                                                                 AS [counts.without_histogram]
 OPTION (RECOMPILE, MAXDOP 1);
 

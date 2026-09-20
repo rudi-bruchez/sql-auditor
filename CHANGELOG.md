@@ -17,6 +17,27 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Fixed
+
+- `70.schema/091.statistics-density.sql` could never report a statistic
+  without a histogram. `counts.without_histogram` tested `steps IS NULL`,
+  while the histogram is read through an `OUTER APPLY` over a scalar
+  aggregate, which always returns a row: the count was always zero, and such a
+  statistic still produced a row with a name, a leading column and a null
+  density. An ordering rule testing for the row rather than for the density
+  would have ordered on nothing.
+
+### Changed
+
+- The 0.31.0 entry below claimed `091.statistics-density` was the cheapest
+  collector of the `space` profile in time. That was measured on one shape
+  only: on a database with 4,600 statistics it runs behind nine of them. What
+  holds is that its cost is of the same order as the profile's other
+  collectors, and that it grows with the number of statistics rather than with
+  the data. `docs/missing-index-suggestions-spec.md` carries both measurements.
+
 ## [0.31.0] - 2026-09-20
 
 A profile change, and the measurements behind it. The `space` profile could
