@@ -53,6 +53,7 @@
 60.backup/020.restore-history.sql @profiles: space
 70.schema/010.objects.sql @profiles: space
 70.schema/020.index-usage.sql @profiles: space
+70.schema/021.missing-index-queries.sql
 70.schema/030.index-operational.sql
 70.schema/040.compression.sql @profiles: space
 70.schema/041.compression-savings.sql @profiles: space

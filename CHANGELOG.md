@@ -17,6 +17,23 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+### Added
+
+- `70.schema/021.missing-index-queries.sql` says which queries wanted each
+  missing-index suggestion, from the view SQL Server 2019 added. The archive
+  carried the suggestions and nothing about what asked for them, so a report
+  could not tell one nightly job from four hundred statements. It publishes
+  the query hash and the plan hash, as two collectors already do in every
+  default archive, and never a statement handle: the view carries one that
+  returns the statement with its literals, and a test refuses it by name and
+  refuses a star expansion with it. The cap is twenty queries per suggestion
+  rather than a single global list, because a global list drops whole
+  suggestions and keeps the loudest statements, which answers the file's own
+  question in the wrong direction; each row says how many queries its
+  suggestion has in all. Design in `docs/missing-index-queries-spec.md`.
+
 ## [0.31.2] - 2026-09-20
 
 Two collectors stopped writing down a number nobody measured. Both came out
