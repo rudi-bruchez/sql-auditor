@@ -345,3 +345,55 @@ func TestObjectsAndColumnsSelectTheSameTables(t *testing.T) {
 		}
 	}
 }
+
+// The identity of a query and the text of it are two different disclosures,
+// and one view in this corpus carries both.
+// sys.dm_db_missing_index_group_stats_query has last_sql_handle beside
+// last_statement_start_offset and last_statement_end_offset, and together they
+// return the statement whole, literals included, while its plan is in cache.
+// Its sibling last_statement_sql_handle is refused by sys.dm_exec_sql_text,
+// which is what makes the working one look safe to someone reading the column
+// list. docs/missing-index-queries-spec.md carries the measurement.
+//
+// The rule is on what a collector EMITS, not on what its text mentions: a body
+// that selects the view's columns with a star and emits that passes any test
+// that greps for four names, and a reviewer wrote one to prove it. So the
+// check is twofold — the names must not appear in code, and no star may be
+// expanded from that view — and it reads the body with comments stripped,
+// because the file is asked to name those columns in its header and explain
+// why it refuses them.
+func TestNoCollectorEmitsAQueryStatementHandle(t *testing.T) {
+	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	forbidden := []string{
+		"last_sql_handle",
+		"last_statement_sql_handle",
+		"last_statement_start_offset",
+		"last_statement_end_offset",
+	}
+	// A star taken from the view or from an alias of it, in any of the shapes
+	// that reach a projection: SELECT *, SELECT q.*, SELECT TOP (n) x.*.
+	star := regexp.MustCompile(`(?i)select\s+(top\s*\(\s*\d+\s*\)\s*)?([a-z_][a-z0-9_]*\s*\.\s*)?\*`)
+	for _, s := range scripts {
+		code := collect.StripSQLComments(s.SQL)
+		if !strings.Contains(strings.ToLower(code), "missing_index_group_stats_query") {
+			continue
+		}
+		low := strings.ToLower(code)
+		for _, name := range forbidden {
+			if strings.Contains(low, name) {
+				t.Errorf("%s names %s in code. That column, with the two offsets, "+
+					"returns the statement and its literals; this corpus publishes "+
+					"the hash and never the text.", s.Path, name)
+			}
+		}
+		if star.MatchString(code) {
+			t.Errorf("%s expands a star while reading "+
+				"sys.dm_db_missing_index_group_stats_query. A star carries "+
+				"last_sql_handle and the offsets with it, whatever the file says "+
+				"elsewhere; project the columns by name.", s.Path)
+		}
+	}
+}
