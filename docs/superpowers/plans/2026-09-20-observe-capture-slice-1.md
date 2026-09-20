@@ -210,6 +210,31 @@ Files: `collect/observe/lifecycle.go`, `collect/observe/lifecycle_test.go`,
       create. There is a test that asserts the order by recording the calls a
       fake connection receives.
 
+### Task 2.5: the grant nobody can currently obtain
+
+Measured on this tree: the string `ALTER ANY EVENT SESSION` appears in no `.go`
+and no `.sql` file. `collect/grants.go` is twenty-eight kilobytes of rights,
+each carrying the reason it is narrower or wider than the obvious one, and this
+is not among them.
+
+That matters because of the path a locked-down instance actually takes. The
+auditor runs `sql-auditor check --grant-script grants.sql` and hands the script
+to whoever can run it. A script that omits the one right `observe` needs sends
+the auditor back for a second round trip, and the consent prompt meanwhile lists
+a permission the tool cannot help anybody obtain, which is the spec's "refuses
+rather than degrades" with nothing behind it.
+
+- [ ] `collect/grants.go` grows the server-scoped grant, in the shape it already
+      has for server-scoped rights.
+- [ ] `collect/preflight.go` grows the probe from task 2.4, so the capability and
+      the grant are the same vocabulary. Check `TestEveryProbedCapabilityCanBeGranted`
+      and `TestCapabilityNamesMatchNormalisedPermissions` still pass: those two
+      are what refused the withdrawn `dynamic_sql` capability, and a capability
+      with no matching grant fails the first one.
+- [ ] Run the existing grant tests before and after:
+      `go test ./collect/ -run 'Grant' -v`. Count them first so you know what a
+      regression looks like; do not take the number from this plan.
+
 ### Verify slice 2
 
 ```
@@ -249,9 +274,26 @@ to `cmd/sql-auditor/main.go`.
 - [ ] The dispatch `switch cmd` gains its case, beside `collect` and `check`.
 - [ ] Subcommands: bare, `start`, `status`, `finish`, `stop`. An unknown one is a
       refusal naming the five.
+- [ ] The subcommand split at `cmd/sql-auditor/main.go:750` gains `observe`, and
+      this is the line that decides whether slice 3 works at all:
+
+      ```go
+      if (cmd == "queries" || cmd == "env") && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+      ```
+
+      The comment above it says why it exists: `flag.Parse` stops at the first
+      non-flag argument, so parsing the arguments whole leaves the flags after a
+      subcommand unset. `observe start --for 2` is that shape exactly. Without
+      `observe` in this condition, `--for` is never parsed, the deadline is the
+      zero value, and every test of the deadline logic below tests the default
+      while passing. The repository has already been bitten by this once, which
+      is what the comment is a record of.
 - [ ] Flags: `--minutes`, `--for`, `--database`, `--file-dir`, `--max-minutes`
       defaulting to 60, `--yes`. Minutes are integers; a fractional value is
       refused rather than truncated.
+- [ ] A test that `observe start --for 2` reaches the code with 2 and not with
+      the default. Write it before the parsing change and watch it fail, because
+      it is the only test here that cannot pass by accident.
 
 ### Task 3.2: consent
 
@@ -312,6 +354,19 @@ Files: `collect/observe/archive.go`, `collect/observe/archive_test.go`.
 - [ ] `capture.json`: the path, the file set, the event count, the counters read
       before the stop, the recorded first file name and whether it survived.
 - [ ] `_run.json`: the executed statements, the window, the exit classification.
+- [ ] The archive is named with a time and not only a date, and it does not reuse
+      `RunFolderName` from `collect/output.go`. That function formats
+      `2006-01-02`, day granularity, and `collect/collect.go` handles a name
+      collision by renaming the previous run aside as `.superseded-<time>`. Two
+      captures in one day are the normal case for `observe`, not the exception,
+      so reusing it would quietly supersede the morning's capture. The spec's
+      `observe-<server>-<date>-<time>.zip` is the right shape;
+      `FailedRunFolderName` in the same file is the precedent for a time-granular
+      name.
+- [ ] The state file lives beside the archive directory, which is `OUTPUT_DIR`
+      and not the working directory, and it is named here rather than left to the
+      implementer. Where it lives decides whether slice 5 can test recovery at
+      all, see below.
 - [ ] The window a late `finish` reports is the one it really measured, with the
       overrun named. Test a `finish` arriving after the deadline.
 
@@ -337,6 +392,15 @@ cd /home/rudi/Sources/Repos/sql-auditor-workspace/sql-auditor && \
 - [ ] `start`, then `status` while it runs, then `finish`. Then `start`, kill the
       process, and check that the next invocation reports the orphan and stops it
       only when its own stem says it is past its deadline.
+- [ ] That last step tests nothing unless the state file is actually gone, and
+      "run it from a clean working directory" does not make it gone: the file is
+      under `OUTPUT_DIR`, which a clean working directory does not touch. Delete
+      the state file explicitly, say so in the step, and confirm the branch under
+      test is the one that recovers from the session name and its stem alone. A
+      step that passes whether or not it entered the branch is the hollow
+      assertion this repository keeps rediscovering.
+- [ ] Two captures on the same day, checked for two archives rather than one
+      superseding the other.
 - [ ] Hand the resulting `.xel` to SQLFerret and confirm it ingests it. That is
       the whole point of the file and it has never been tried end to end. If it
       refuses the file, that is a finding about the target options, not about
