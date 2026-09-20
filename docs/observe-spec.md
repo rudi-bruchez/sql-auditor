@@ -1,10 +1,12 @@
 # `sql-auditor observe`, specification
 
 Status: draft, not implemented. Written 27 August 2026, revised the same day
-after two reviews, and rewritten on 20 September 2026 after a panel of three
-readers and a round of measurement broke the design it then had. The section
-"What the measurement changed" records what was wrong and why, because the
-design it replaces is the obvious one to propose again.
+after two reviews, rewritten on 20 September 2026 after a panel of three readers
+and a round of measurement broke the design it then had, and revised again the
+same day after a panel of five readers ran the rewrite against SQL Server 2025.
+The section "What the measurement changed" records what was wrong with the design
+this replaces, because that design is the obvious one to propose again, and "What
+the second panel changed" at the end records what was wrong with the replacement.
 
 ## What it is for
 
@@ -154,7 +156,11 @@ invented at implementation time:
 > exact statements that created and dropped it are in `_run.json`. The session
 > subscribed to two events, `rpc_completed` and `sql_batch_completed`, which fire
 > once per call made by a client, and for each call it recorded the text, the
-> duration, the CPU time, the reads, the writes and the number of rows.
+> duration, the CPU time, the reads, the writes and the number of rows. Calls
+> your connection pool makes on its own account, to reset a connection before
+> handing it to the next user, were excluded, as was this tool's own traffic. If
+> the instance was busy enough for the session to drop events rather than slow
+> your workload down, the number it dropped is recorded below.
 >
 > The capture contains the text of your statements as your application sent
 > them, including any literal value written into the SQL by the application, and
@@ -211,22 +217,44 @@ useful window is exactly the one between "go" and "done".
 `start` creates the session, starts it, writes a state file, and returns.
 `finish` reads the counters, stops the session, drops it, and writes the archive.
 
-`observe status` says whether a session is running, since when, how many events
-it has recorded, how many it has dropped, and how much time is left before its
+`observe status` says whether a session is running, since when, how much it has
+written, how many events it has dropped, and how much time is left before its
 deadline.
+
+It does not say how many events it has recorded, and that is a correction to an
+earlier draft rather than a modesty. For a file target there is no event count in
+the dynamic management views: `sys.dm_xe_sessions` has the drops and
+`total_bytes_generated`, and the target's own `target_data` reports buffers
+written rather than events. The only count is a scan of the capture file, which
+is unbounded work on a file that may be a gigabyte, and which would be wrong
+anyway, since whatever is still in a buffer is not in the file yet. The old
+design could answer this cheaply because a histogram is a list of counts;
+this one cannot, and `status` reports the bytes, which is the number the DMV
+actually holds.
+
+The state file lives next to the archive directory, where the operator already
+looks, and binds server, database, session name and the capture file stem.
+`finish` deletes it on success. A `finish` that cannot find it, run from another
+machine or after a cleaned working folder, does not refuse: the stem on the
+server carries the start time and the maximum, so the window can be reconstructed
+from the session itself. What is lost is the operator's intent, and the manifest
+says the window was reconstructed rather than declared.
 
 ### `observe start --for <minutes>`
 
-A `start` that stops by itself at a declared deadline, in the shape chosen after
-the trade was explained. The deadline is declared and stored, `status` shows the
-time left or the overrun, any later invocation of `observe` stops a session past
-its deadline, and a `finish` that arrives late writes the archive with the window
-it really measured plus a manifest line saying by how much the capture ran past
-its intent. The archive never claims to have measured the window that was asked
-for.
+A `start` whose deadline is declared at the outset. `status` shows the time left
+or the overrun, any later invocation of `observe` stops a session past its
+deadline, and a `finish` that arrives late writes the archive with the window it
+really measured plus a manifest line saying by how much the capture ran past its
+intent. The archive never claims to have measured the window that was asked for.
 
-The honest part of that sentence is "any later invocation". There is no
-server-side timer, which the next section is about.
+It does not stop by itself, and an earlier draft that said so was wrong. There is
+no server-side timer, and nothing runs between the invocations of a command line
+tool. What "declared" buys is that the deadline is written where the next visitor
+can read it, which is the file stem, so the enforcement does not depend on the
+next visitor's own flags. The section on the maximum lifetime is the whole of it,
+and the honest summary is that `--for` bounds the capture at the next invocation
+of `observe` by anyone, and not before.
 
 ### `observe stop`
 
@@ -251,21 +279,33 @@ stops it after a while. There is no server-side timer to lean on.
 
 So the deadline is enforced by the tool, at its next visit, and the mechanism has
 to survive the loss of everything local. The session name is fixed,
-`sql-auditor observe`, and the deadline is derived from the session's own start
-time, `sys.dm_xe_sessions.create_time`, plus `--max-minutes`. Any later
-`observe`, on any machine, finds the session under the known name, reads when it
-started, and stops it if it has outlived its maximum.
+`sql-auditor observe`, and its start time is `sys.dm_xe_sessions.create_time`,
+which is the time of `STATE = START` and not of `CREATE`. Any later `observe`, on
+any machine, finds the session under the known name, reads when it started, reads
+its declared maximum, and stops it if it has outlived it.
 
-Deriving the deadline rather than storing it is what makes the fixed name and the
-self-healing consistent. A name carrying an expiry is not a fixed name, and a
-`status` that has lost its state file could not construct it.
+The declared maximum is read from the file stem and not from the flags of the
+process doing the reading. An earlier draft derived it from the sweeper's own
+`--max-minutes`, which gives the wrong answer in both directions: a `--minutes 5`
+run whose laptop died runs until minute 60 because nothing recorded the 5, and an
+operator running `status` with the default 60 stops and drops a colleague's
+capture authorised for 120, abandoning a file that was being filled. Two
+deadlines were in the document and neither section said which it meant.
 
 That is weaker than a guarantee and the spec does not pretend otherwise. If the
-laptop dies during a `start`, or during a `--minutes 5` run, the session keeps
-running until somebody runs `observe` again or a DBA notices it. `observe`
-reduces the window; it does not close it. And with a file target the residue is
-no longer a few megabytes of memory: an orphan goes on writing to disk, which
-raises the stakes of the sweep and is the reason the next section exists.
+laptop dies during a `start`, the session keeps running until somebody runs
+`observe` again or a DBA notices it. `observe` reduces the window; it does not
+close it. And with a file target the residue is no longer a few megabytes of
+memory: an orphan goes on writing to disk, which raises the stakes of the sweep
+and is the reason the next section exists.
+
+A session that exists in `sys.server_event_sessions` but not in
+`sys.dm_xe_sessions` is a third state the previous draft had no rule for, and it
+is the ordinary aftermath of a service restart, `STARTUP_STATE = OFF` doing
+exactly what it promises. There is no `create_time` for it, so no deadline can be
+computed, and a sweep that requires one would leave the name blocked forever. A
+stopped session matching the fingerprint is a remnant: it is dropped, whatever
+its age, and the run says it did.
 
 ### A fixed name is not proof of ownership
 
@@ -275,17 +315,42 @@ it after a previous run, or be looking at a failed one. Stopping it would be an
 unauthorised destructive action on a production instance, and with a file target
 it also abandons a file somebody was filling.
 
-So the managed session has a server-verifiable fingerprint: its events, its
-actions, its predicate, its target and its target options, read back from
-`sys.server_event_sessions` and its companions the way
-`queries/10.system/062.xe-sessions.sql` already reads them. The sweep acts only
-on a session that matches the fingerprint exactly. A same-named session that does
-not match is never altered: `observe` refuses, prints what it found and what it
-expected, and says the session must be dealt with by hand.
+So the managed session has a server-verifiable fingerprint, and it has to be one
+a recovering process can actually evaluate. That rules out the obvious
+components. The predicate carries the database id as a literal, read back as
+`([database_id]=(10) AND ...)`, and a process that has lost its state file does
+not know which database the run was for; requiring the predicate to match would
+mean the sweep never fires in exactly the case it exists for. Requiring only the
+shape and ignoring the literals would make a DBA's own session on another
+database match, which this section forbids.
 
-Ownership is a property of the session as the server describes it, not of the
-state file, because the state file is the thing most likely to be missing when
-the sweep matters.
+The fingerprint is therefore, in order of what it proves:
+
+- the target's `filename`, whose stem begins `sql-auditor-observe-`. That prefix
+  is what says the session is ours, and the rest of the stem carries the run's
+  start time and its declared maximum, which is what lets the sweep decide
+  without local state;
+- the two events, by name, and the presence of the text option on each;
+- the actions, by name;
+- the target type.
+
+The predicate is compared and reported but not required to match, since its
+literals belong to a run rather than to the tool. A same-named session that fails
+the first four is never altered: `observe` refuses, prints what it found and what
+it expected, and says the session must be dealt with by hand.
+
+Reading that back needs its own queries and not the ones this document previously
+pointed at. `queries/10.system/062.xe-sessions.sql` returns sessions, their
+options, one row per event, and targets with their fields. It joins
+`sys.server_event_session_actions` nowhere, and it leaves the predicate out
+deliberately, saying so in its own header: a filter can carry a literal, and it
+is the one part of a session definition that can. Two of the components above are
+not read by the file cited as reading them. `062` stays what it is, an inventory;
+the fingerprint gets its own reads, of `sys.server_event_sessions`,
+`sys.server_event_session_events`, `sys.server_event_session_actions` and
+`sys.server_event_session_fields`, all four of which were measured readable by a
+login holding only the two rights in the permissions table, with
+`VIEW ANY DEFINITION` explicitly denied.
 
 ### Two operators can still collide
 
@@ -315,6 +380,33 @@ before it is also what turns a raw SQL error into the designed refusal.
 sweeps like every other entry point, which means it can issue DDL. It prints
 what it dropped, and its help text says it can.
 
+One refusal cannot be made to fit before the instance is touched, and it is
+listed here rather than pretended away. A capture directory the service account
+cannot write to is not detected by `CREATE EVENT SESSION`, which validates no
+path and succeeds; the failure arrives at `STATE = START`, `Msg 25602` carrying
+the operating system error, with the session already in the catalog. Preflight
+probes the directory first, as described under Where the file goes, which turns
+the ordinary case into a code 3. A path that passes the probe and still fails at
+`START` is a code 1: the instance was altered, the compensating drop runs, and
+the run says the directory was accepted and then refused.
+
+### Preflight, and why it departs from the collector's rule
+
+`collect/preflight.go` states its discipline at the top of `Capabilities()`: a
+probe reads one row from the cheapest object the real collectors depend on, and
+it rejects `HAS_PERMS_BY_NAME` by name, on the grounds that a `SELECT` cannot
+disagree with reality.
+
+`ALTER ANY EVENT SESSION` has no such object. The only probe faithful to that
+rule is a `CREATE EVENT SESSION`, which is the very thing that must not happen
+before consent. So `observe` uses `HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY EVENT
+SESSION')`, and this document records that as a deliberate departure rather than
+letting an implementer discover the contradiction. It was measured to agree with
+reality on this build in both directions: without the grant the function returns
+0 and `CREATE` fails with `Msg 15247`; with the grant it returns 1 and `CREATE`
+succeeds. That agreement is a measurement on one build, not the property the
+collector's rule is protecting, which is why it is written down here.
+
 ### Cancellation
 
 Ctrl-C stops the session, drops it, and writes a partial archive whose manifest
@@ -322,7 +414,7 @@ records the shortened window and says it was interrupted. Leaving the session
 behind is the failure this whole design is nervous about.
 
 `collect/cancel.go` is named in an earlier draft as the discipline to reuse, and
-that reference is wrong in a way that would have shipped. Those 63 lines decide
+that reference is wrong in a way that would have shipped. Those 65 lines decide
 that a dead context means the operator stopped the run, so a cancellation is not
 filed as a network fault. They handle no signal, write no archive and touch no
 server, and they are enough for `collect` because `collect` creates nothing on
@@ -352,11 +444,14 @@ running.
 Two events, `rpc_completed` and `sql_batch_completed`, which between them cover
 every call a client driver makes.
 
-Both collect their text, which is off by default in SQL Server and has to be
-asked for: `SET collect_statement = 1` on `rpc_completed` and
-`SET collect_batch_text = 1` on `sql_batch_completed`. An implementer who omits
-them builds a session that works, fires, and records every column except the one
-the capture exists for.
+Both set their text option explicitly, `SET collect_statement = 1` on
+`rpc_completed` and `SET collect_batch_text = 1` on `sql_batch_completed`. An
+earlier draft said these are off by default and warned an implementer against
+omitting them. Measured, both default to `true` in `sys.dm_xe_object_columns`,
+and a session built with neither `SET` clause captures the text. They are still
+set explicitly, for the reason the next section gives about every other option,
+which is that an inherited default is a version-dependent default. The warning
+was the false part, not the instruction.
 
 The actions are the context the events do not carry and `SQLFerret` can use:
 `sqlserver.database_name`, `sqlserver.client_app_name`. Nothing that identifies a
@@ -372,9 +467,41 @@ one application's calls during one operation that is the right filter, and it is
 stated here because a reader comparing these numbers with the Query Store's will
 otherwise find a discrepancy with no explanation.
 
-The session also excludes `observe`'s own session id, which means reading
-`@@SPID` before the `CREATE`, so the id appears in the DDL the consent prompt
-shows.
+### The two exclusions, and the one that must not be written the obvious way
+
+`observe` excludes its own traffic on `sqlserver.client_app_name`, the tool
+setting `Application Name` in its connection string, and never on a session id.
+
+An earlier draft specified the session id, read from `@@SPID` before the
+`CREATE`. That is the obvious spelling and it is a silent capture killer. The
+predicate stores the number as a literal, read back from
+`sys.server_event_session_events` as `([database_id]=(10) AND
+[sqlserver].[session_id]<>(57))`, and the connection that supplied it then goes
+away, `start` being a command that exits. SQL Server reuses a freed session id
+immediately: measured, two consecutive client processes were both given id 78.
+From that moment the session silently discards every call made by whichever
+application connection inherited the id, and the capture comes back short or
+empty, with a well formed file and an exit code of zero. The exclusion also
+failed at its own job, since `finish`, `status` and `stop` run in other
+processes under other ids and were never excluded by it.
+
+The application name is stable for the life of the session, covers every later
+invocation of the tool, and is verifiable in the session definition rather than
+in a number nobody can check afterwards. Measured on the same fixture, twelve
+events kept for the driving application and none for the excluded name.
+
+The second exclusion is `object_name <> N'sp_reset_connection'` on
+`rpc_completed`. A pooled client driver issues that procedure every time it hands
+a connection to the next user, and it arrives as an ordinary `rpc_completed`:
+measured, six of twelve captured events for a workload of five real calls. The
+number this command exists to produce is the one that goes to an application
+vendor, so half of it being pool housekeeping is not a rounding error.
+
+The spelling matters and the obvious one does not compile. `sqlserver.object_name`
+is refused, "the event attribute or predicate source could not be found"; the
+bare `object_name` is accepted, the column belonging to the event rather than to
+the `sqlserver` package. The clause goes on `rpc_completed` only, that event
+being the only one of the two that has the column.
 
 ### Options
 
@@ -383,54 +510,172 @@ on a busy instance, dropping an event is preferable to stalling the workload, an
 the drop count is reported so the reader knows. `STARTUP_STATE = OFF`, so a
 service restart does not resurrect the session.
 
-`MAX_DISPATCH_LATENCY` matters less here than an earlier draft feared, and the
-correction is worth recording because it was reached by removing a variable
-rather than by reading. Under a session declared with a 30 second latency, a read
-of the histogram's `target_data` saw events one second after they fired, and the
-control run, driving and reading on a single connection with no disconnection in
-between, saw the count rise from 20 to 40 in the same batch. The latency governs
-buffering, not what a reader can see. It is still set low here, because with a
-file target it governs how much sits in memory rather than on disk when the
-process dies.
+`MAX_DISPATCH_LATENCY` is set low, and the reason is the opposite of what an
+earlier draft of this section said. That draft reported a measurement, true in
+itself, that a read of a histogram's `target_data` under a 30 second latency saw
+events one second after they fired, and generalised it into "the latency governs
+buffering, not what a reader can see". It does not generalise. With a file
+target, measured twice, the events are invisible until the buffer is flushed:
+under a 30 second latency a read of the file immediately after the workload
+returned zero events, and the same file after `STATE = STOP` returned all of
+them.
 
-### The target, and the trap in its file names
+So for this command the latency governs exactly when a reader can see anything,
+which makes it the number behind `status` reporting nothing on a capture that is
+working, and it governs how much sits in memory rather than on disk when the
+process dies. Both arguments point the same way. The value is in the table of
+defaults below rather than left to the implementer.
 
-`package0.event_file`, with `filename`, `max_file_size` and `max_rollover_files`
-all set explicitly. Inheriting version-dependent defaults is how two audits of
-two builds come back incomparable.
+The correction is recorded in full rather than quietly replaced, because the
+sentence it replaces was itself written to correct an earlier reviewer, and a
+correction made under review pressure is the least reviewed line in a document.
+
+### The file stem, which carries more than a name
+
+The capture file stem is per run and it is built rather than fixed:
+
+```
+sql-auditor-observe-<utc yyyyMMddTHHmmss>-<max minutes>.xel
+```
+
+Three problems are solved by that one decision, and an earlier draft that left
+the filename unspecified had all three.
+
+A fixed stem accumulates. Measured: a session configured at a path, run, stopped
+and dropped, then created again at the same configured path, does not overwrite.
+SQL Server writes a second `_0_<ticks>.xel` beside the first, and the wildcard
+that reads the capture then reads both. A first run of 11 events followed by a
+second of 9 reported 20. The number this command exists to produce would have
+been the sum of every audit ever taken at that path, with nothing on screen to
+say so. It is also what makes the rollover check below work: a count of files is
+only meaningful against a stem that belongs to one run.
+
+The deadline has nowhere else to live. The sweep is specified to work from a
+machine that has lost every local file, and the only server-side facts it has are
+the session name and `create_time`. Deriving the deadline from the sweeping
+process's own `--max-minutes` is what an earlier draft did, and it means an
+operator running `status` with the default 60 stops a colleague's capture that
+was authorised for 120. Putting the run's maximum in the stem makes the deadline
+a property of the session, readable by anyone, and removes the second deadline
+the document was carrying without noticing.
+
+The fingerprint needs something matchable. The predicate cannot serve: it carries
+the database id as a literal, which the recovering process does not know. The
+stem is readable from `sys.server_event_session_fields`, it is shaped
+predictably, and its prefix is what proves the session is ours.
+
+### The target
+
+`package0.event_file`, with every option explicit, the values being in the table
+of defaults below and not left to the implementer.
 
 Rollover deletes. A capture that outruns `max_file_size` times
 `max_rollover_files` loses its beginning, silently, and what remains looks like a
-complete capture of a shorter window. That is the answer-that-looks-like-an-answer
-this document objects to everywhere else, so the loss has to be visible: the tool
-records the number of files present at the end beside the number it expected, and
-says in the manifest when the earliest file is not the one the session started
-with.
+complete capture of a shorter window. A count of files at the end does not detect
+it: a run that exactly fills its allowance and a run that overflowed by one both
+end with the same number of files.
 
-The rollover naming deserves its own warning, since this command would inherit a
-mistake this repository has already made. SQL Server appends `_0_<ticks>.xel` to
+So the loss is detected against an identity rather than a count. Immediately
+after the session starts, and before the window is declared open, the tool reads
+the running target's current file name from `target_data` and stores it in the
+state file and in `_run.json`. Rollover loss is that name being absent from the
+final wildcard set. If the name cannot be read at that moment, the run says
+rollover is unobservable rather than reporting a clean capture.
+
+That read also removes the string surgery entirely, which matters because the
+obvious way to do it is wrong twice over. SQL Server appends `_0_<ticks>.xel` to
 the stem of the configured name, so a session configured as
 `/var/opt/mssql/log/observe.xel` writes
-`/var/opt/mssql/log/observe_0_134343862333780000.xel`. Building the pattern by
-appending a wildcard to the configured name, extension included, matches nothing
-and returns an empty capture with no error. That shipped in
+`/var/opt/mssql/log/observe_0_134343862333780000.xel`. Appending a wildcard to
+the configured name, extension included, matches nothing. Measured, that failure
+is silent in the common case: a pattern matching no file in a directory that
+exists returns zero rows and no error, and only a nonexistent directory raises
+`Msg 25718`. So an empty capture is the expected symptom of a wrong pattern, not
+an exotic one.
+
+The repository has already shipped that bug once, in
 `queries/10.system/063.blocked-process-reports.sql`, where the extension test
 searched the reversed name for the extension spelled forwards and so never
 matched. It was found when a collection reported an empty capture on an instance
 whose ring buffer held two reports and whose files, once read correctly, held
-205.
+205. Its current code fixes the extension and is still not a pattern to copy
+here: it splits the directory with `CHARINDEX('\', REVERSE(...))`, the Windows
+separator only, and run against the Linux paths this design uses it produces a
+concatenated nonsense path. The lesson to inherit from 063 is that the pattern is
+worth measuring, not its expression.
 
 ### Where the file goes
 
 The directory is the operator's choice and is never guessed, because it has to be
 one the SQL Server service account can write to and one with room. `observe`
-proposes the directory holding the error log, read from
-`SERVERPROPERTY('ErrorLogFileName')`, which is writable by that account by
-definition, and requires it to be confirmed or replaced with `--file <dir>`.
+proposes the directory holding the error log, and the emphasis is on the
+directory: `SERVERPROPERTY('ErrorLogFileName')` returns the path of the log file
+itself, `/var/opt/mssql/log/errorlog`, so the proposal is that path with its last
+component removed. Using the property's value as a directory yields
+`/var/opt/mssql/log/errorlog/observe.xel`, which is a path under a file.
 
 The proposal is a convenience and carries a warning with it: the error log
-directory is often on a volume sized for logs. The consent prompt states the
-expected size, from the measured batch rate times the window, beside the path.
+directory is often on a volume sized for logs. The flag that overrides it is
+`--file-dir` and not `--file`, since it takes a directory and the operator does
+not choose the file name, which the stem above decides.
+
+A bad directory is not caught where the exit codes assume it is. Measured:
+`CREATE EVENT SESSION` validates no path at all and succeeds, and the failure
+arrives at `STATE = START`, as `Msg 25602` naming the operating system error,
+with the session left in the catalog. Preflight therefore tests the directory
+before the create, by starting a throwaway session there under the managed
+fingerprint's own name and dropping it, and a path that fails at `START` despite
+that is a run that has altered the instance and cannot exit 3. See the exit
+codes.
+
+### The session, rendered
+
+Every option this document insists be explicit is worthless if the document does
+not say what it is. Four of the five readers of the previous draft stopped at the
+same place: there was no artefact to run.
+
+```sql
+CREATE EVENT SESSION [sql-auditor observe] ON SERVER
+  ADD EVENT sqlserver.rpc_completed (
+      SET collect_statement = 1
+      ACTION (sqlserver.database_name, sqlserver.client_app_name)
+      WHERE database_id = @database_id
+        AND sqlserver.client_app_name <> N'sql-auditor'
+        AND object_name <> N'sp_reset_connection'),
+  ADD EVENT sqlserver.sql_batch_completed (
+      SET collect_batch_text = 1
+      ACTION (sqlserver.database_name, sqlserver.client_app_name)
+      WHERE database_id = @database_id
+        AND sqlserver.client_app_name <> N'sql-auditor')
+  ADD TARGET package0.event_file (
+      SET filename = @stem,
+          max_file_size = @max_file_size_mb,
+          max_rollover_files = @max_rollover_files)
+  WITH (MAX_MEMORY = @max_memory_kb KB,
+        EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+        MAX_DISPATCH_LATENCY = @dispatch_latency_s SECONDS,
+        STARTUP_STATE = OFF);
+```
+
+Two spellings in there are not free choices and were established by running the
+alternatives. There is no comma between the last `ADD EVENT` and `ADD TARGET`,
+the plausible one returning `Msg 102`. And the pool exclusion is `object_name`
+and not `sqlserver.object_name`, which is refused.
+
+| Parameter | Default | Why, and what bounds it |
+| --- | --- | --- |
+| `@max_memory_kb` | 4096 | four buffers of a megabyte, the smallest that does not force partitioning decisions |
+| `@dispatch_latency_s` | 3 | the delay before `status` and a `finish` can see anything, see Options |
+| `@max_file_size_mb` | 128 | one file per few minutes at a few hundred calls a second |
+| `@max_rollover_files` | 8 | a gigabyte of capture before the beginning is at risk |
+
+These are defaults with reasons, not measurements, and they are the subject of
+open question 3. What matters for comparability is that two implementers reading
+this document produce the same session, which was not true of the previous draft.
+
+The rendered statement, with every parameter substituted, is what the consent
+prompt shows and what `_run.json` records, captured at execution rather than
+recomposed.
 
 ### Reading the counters before stopping
 
@@ -460,8 +705,21 @@ instance up for months is far below the rate during the window. Two reads a few
 seconds apart, subtracted.
 
 This is the same trap the corpus documents elsewhere, and getting it wrong here
-would contradict the discipline this section is built on. It matters more than it
-did: the number now predicts how much disk the capture will take.
+would contradict the discipline this section is built on.
+
+The rate answers how many calls, and the consent prompt needs bytes. Those are
+not the same question and an earlier draft slid between them: two workloads at
+the same rate differ by orders of magnitude in capture size, a chatty
+parameterised application against one that sends thousand-line generated
+statements. So the prompt states the expected call count, which is measured, and
+a size that is explicitly labelled an estimate, from the call count times a
+bytes-per-event figure whose source and window are named beside it. Open question
+3 is what turns that figure into a measurement.
+
+Batch Requests/sec was itself checked rather than assumed, since a counter that
+ignored RPCs would understate exactly the parameterised applications this command
+targets. It does not: fifty procedure calls sent over RPC moved the counter by
+fifty-one, the extra being the reading batch.
 
 ## Permissions
 
@@ -473,23 +731,39 @@ needs:
 | `ALTER ANY EVENT SESSION` | server | creating, starting, stopping, dropping the session |
 | `VIEW SERVER STATE` | server | `sys.dm_xe_sessions`, `sys.dm_xe_session_targets`, `sys.fn_xe_file_target_read_file` |
 
-That is the whole list, and it was measured rather than derived: a login holding
-those two read the capture file's event count and saw the session's counters,
-with no database-level right and no membership of any server role. The Query
-Store and plan cache rights the previous design needed are gone with the
+That is the whole list for the SQL Server the measurement was taken on, and it
+was measured rather than derived: a login holding those two, with no database
+mapping and no server role, created, started, stopped and dropped a file-target
+session, read the session counters, read the four catalog views the fingerprint
+needs with `VIEW ANY DEFINITION` explicitly denied, resolved
+`SERVERPROPERTY('ErrorLogFileName')` and counted the capture file's events. The
+Query Store and plan cache rights the previous design needed are gone with the
 resolution step.
+
+Two things the table does not cover, and saying so is what keeps it honest. The
+SQL Server service account needs write access to the capture directory, which is
+not a permission of the connecting login and is probed separately. And the same
+list has not been established on the version floor below.
 
 The consent prompt prints the permissions next to the DDL. Preflight checks them
 before the session is created, the way `collect/preflight.go` already does for the
 collector, and `collect/grants.go` grows the corresponding `GRANT`. Without that,
 "the tool refuses rather than degrades" is a promise with nothing behind it.
 
-Version floor: SQL Server 2012, the same as the corpus. The floor is a property
-of Extended Events rather than a convention: the session syntax changed
-substantially across 2008 and 2008 R2 and settled at 2012, so one DDL cannot
-cover the older builds. The measurements in this document were taken on SQL
-Server 2025 and are not a substitute for taking them on 2012; that is the first
-open question below.
+Version floor: SQL Server 2012 is the intended floor, the same as the corpus, and
+it is not yet a promise. The intent is a property of Extended Events rather than
+a convention: the session syntax changed substantially across 2008 and 2008 R2
+and settled at 2012, so no single DDL can cover the older builds, and 2012 is the
+oldest that one can.
+
+Every measurement in this document was taken on SQL Server 2025 RTM-CU7. Until
+the rendered session above, the permission list and
+`sys.fn_xe_file_target_read_file` have been run on a 2012 instance, the document
+says verified on 2025 and claims nothing older. Two columns in the capability
+table are already suspect on that floor, `page_server_reads` and `spills` being
+later additions. Promoting 2012 from intent to floor is open question 1, and
+until it happens the command refuses a build below the one it was measured on
+rather than degrading on it.
 
 ## Output
 
@@ -515,9 +789,14 @@ lets an operator paste the DDL into a ticket after the fact.
 | 0 | the capture completed, the file is on the instance, the archive was written |
 | 1 | the instance could not be reached, or the archive could not be written |
 | 2 | partial: the capture ran but something is missing, dropped events, rollover loss, a session that stopped on its own |
-| 3 | refused before touching the instance: missing permission, a session already running under the name, a same-named session that is not ours, a bad path |
+| 3 | refused before touching the instance: missing permission, a session already running under the name, a same-named session that is not ours, a capture directory the preflight probe could not write to |
 
 They are the interface a script uses, so they are listed rather than promised.
+
+A directory that passes the probe and is then refused at `STATE = START` is a 1
+and not a 3, the instance having been altered by then. An earlier draft listed
+"a bad path" under 3 without noticing that the path is never validated at
+`CREATE`.
 
 ## Consent and safety
 
@@ -590,6 +869,56 @@ already available.
 4. Whether `SQLFerret` ingests a rolled-over set of files as one capture, and what
    it does with a set whose first file was deleted by rollover. The handoff is
    only as good as its worst case.
+5. An actual rollover, driven hard enough to delete a file, so that the loss
+   detection above is a measured procedure rather than a described one.
 
 None of these changes the design. All of them are details this document would
 otherwise state with more confidence than it has earned.
+
+## What the second panel changed
+
+Five readers ran the rewrite against SQL Server 2025: agy and codex, each with a
+directive and a neutral prompt, and a Claude subagent on the neutral one. The
+overlap between any two was small and each found something no other did, which is
+the argument for running all five rather than the best two.
+
+- The `@@SPID` exclusion emptied the capture. The predicate stores the id as a
+  literal, the connection that supplied it exits, and the server hands the freed
+  id to the next client: measured, two consecutive processes both got id 78. The
+  exclusion is now on the application name, verified in both directions.
+- Connection-pool resets were half the capture. Six of twelve events for a
+  workload of five real calls, and the number the whole command exists to produce
+  is the one that goes to a vendor.
+- The proposed fix for that did not compile. `sqlserver.object_name` is refused
+  and the bare `object_name` is accepted, which is a reminder that a reviewer's
+  correction deserves the same check as a reviewer's finding.
+- There was no session to run. Four of the five stopped at the same place: the
+  document demanded that every option be explicit and gave no values, no file
+  name and no rendered DDL, so a verbatim execution was impossible and two
+  implementers would have produced two incomparable sessions.
+- The text options are not off by default, contradicting a product fact this
+  document asserted from memory in a section teaching an implementer what not to
+  get wrong.
+- The dispatch latency paragraph, itself written to correct an earlier reviewer,
+  generalised a histogram measurement to a file target where it is false. Events
+  are invisible until flushed, measured twice.
+- There were two deadlines and no section said which it meant, so an operator
+  running `status` with the default maximum would stop a colleague's authorised
+  capture. The maximum now travels in the file stem.
+- A fixed file name accumulates captures across runs, so the second audit of an
+  instance reported the sum of both.
+- Rollover loss cannot be detected by counting files, since a run that exactly
+  fills its allowance and one that overflowed look identical.
+- `queries/10.system/062.xe-sessions.sql` was cited as reading the fingerprint
+  and reads neither the actions nor the predicate, deliberately in the second
+  case.
+- `collect/preflight.go` rejects `HAS_PERMS_BY_NAME` by name, so the reuse this
+  document claimed argues against the only available probe.
+- A bad capture directory is not caught at `CREATE`, which validates no path, so
+  exit code 3 could be issued after the instance had been altered.
+- `SERVERPROPERTY('ErrorLogFileName')` returns a file and not a directory.
+- 063's rollover fix splits the directory on the Windows separator only and
+  produces nonsense on the paths this design uses.
+- A rate in calls per second does not estimate bytes.
+- A session stopped but still in the catalog, which is what a service restart
+  leaves, had no rule and would have blocked the name forever.
