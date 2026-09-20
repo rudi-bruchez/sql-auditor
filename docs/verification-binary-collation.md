@@ -18,12 +18,13 @@ Store on. The binary instance also got a second database in
 the archives compared field by field, looking for a value present on one side
 and null, empty or absent on the other.
 
-The short answer: the corpus's own SQL holds. One thing does not hold, and it
-is not the corpus.
+The short answer: the corpus's own SQL holds. One thing does not, and it is
+neither the corpus nor, as the first version of this document claimed, the
+collation.
 
-## The finding: dynamic SQL does not run at all on a BIN2 instance
+## The finding, and the correction a reviewer made to it
 
-On an instance whose server collation is `Latin1_General_BIN2`, every call of
+On a container built with `MSSQL_COLLATION=Latin1_General_BIN2`, every call of
 `sys.sp_executesql` from T-SQL fails:
 
 ```
@@ -35,7 +36,25 @@ Reason: 126(The specified module could not be found.).
 That is for `EXEC sys.sp_executesql N'SELECT ''ok'' AS r'`, with no dynamic
 content of any kind. It reproduced on three containers and two builds, 2019
 and 2022, and did not happen on `Latin1_General_CS_AS` or on the default
-collation of the same image. Two properties make it worse than an error:
+collation of the same image.
+
+RESTARTING THE INSTANCE CLEARS IT, and that is the correction. The first
+version of this document called the failure a property of the collation. A
+reviewer restarted a BIN2 container and watched `sp_executesql` start working,
+with the server collation unchanged; the author reproduced it on a container
+of his own, failing on first boot and answering `ok` after `podman restart`.
+The engine's log says what the state is: the instance reports `Attempting to
+change default collation`, then `The default collation was successfully
+changed`, and 17750 appears in that same server lifetime.
+
+So the trigger is a default collation changed on a running instance, not a
+collation. A container built with `MSSQL_COLLATION` is in that state exactly
+once, on its first boot, and never again. On a real instance the same change
+is made by rebuilding master, which restarts the service, so the window is
+narrow and this is a container artefact far more than a production case. It is
+recorded because it produced two real defects in the corpus, below, and
+because "measured on three containers" was not the same as "measured", which
+is the lesson worth keeping. Two properties make it worse than an error:
 
 - `TRY ... CATCH` does not catch it. The batch goes on, `ERROR_NUMBER()` is
   never set, and a collector that wraps the call in its own `TRY` reports
@@ -47,46 +66,65 @@ collation of the same image. Two properties make it worse than an error:
 The result is the failure this project dislikes most: a clean, complete
 looking, entirely empty answer.
 
-Eleven collectors read through `sp_executesql`, which is how this corpus
-defers a view that may not exist on the build in front of it:
+Ten collectors read through `sp_executesql`, which is how this corpus defers a
+view that may not exist on the build in front of it:
 
 ```
-10.system/021.host-info.sql          70.schema/020.index-usage.sql
-10.system/043.cpu-neighbours.sql     70.schema/091.statistics-density.sql
-10.system/044.default-trace.sql      90.availability/041.replication-publisher.sql
-10.system/045.default-trace-detail.sql   042.replication-distribution.sql
-20.databases/023.log-vlf.sql             043.replication-subscriber.sql
-                                         044.replication-counters.sql
+10.system/021.host-info.sql              90.availability/041.replication-publisher.sql
+10.system/043.cpu-neighbours.sql             042.replication-distribution.sql
+10.system/044.default-trace.sql              043.replication-subscriber.sql
+10.system/045.default-trace-detail.sql       044.replication-counters.sql
+20.databases/023.log-vlf.sql
+70.schema/091.statistics-density.sql
 ```
 
-Measured on the same fixture, binary against default:
+Ten and not eleven: the first version of this list came from `grep -l`, and
+`70.schema/020.index-usage.sql` matched on a comment saying it deliberately
+does NOT defer its reads that way. It contains no `EXEC` at all, and a
+reviewer confirmed its output is identical on both instances. A grep that
+reads comments is how a list of affected files gains a file that is fine.
 
-| Collector | On the binary instance | On the default one |
+Measured on the same fixture, in that state against a healthy instance:
+
+| Collector | In the broken state | On a healthy instance |
 | --- | --- | --- |
 | `021.host-info` | every field null, `source` still `dm_os_host_info`, `error_number` 0 | `Linux`, `Ubuntu`, `22.04`, `X64` |
 | `044.default-trace` | `traces` 0, `events` 0 | `traces` 1, `events` 72 |
 | `091.statistics-density` | `statistics` 0 | `statistics` 2 |
-| `023.log-vlf` | `vlf_per_file` empty | populated |
+| `023.log-vlf` | `vlf_per_file` empty, and the root said `vlf_count` 0 | populated |
+| `043.cpu-neighbours` | the root said `platform` Windows on a Linux host, `residue_computed` 1 | correct |
 
 The whole run reported `0 error(s)` on both.
 
-What is not affected: the parameters the tool itself binds. The driver sends a
-parameterized statement as an RPC rather than as `EXEC sys.sp_executesql`, and
-`80.workload/025.query-store-compare.sql`, which takes three parameters, ran
-and produced its root on the binary instance.
+The last two rows are the reason any of this is worth recording, and a
+reviewer found them. They are not "a collector returned less": they are a
+collector returning something false, and neither needs a rare instance to do
+it. Any silent failure of a deferred read produces them.
 
-### What to do about it
+`023.log-vlf` counted an empty staging table and wrote `vlf_count` 0 and
+`log_file_count` 0 into its root. A log always has at least two virtual log
+files, so zero is not a possible measurement; it now leaves those fields null
+and its `source` at `none`, which the file already has a word for.
 
-Not a corpus change: rewriting eleven guards to avoid dynamic SQL would trade
-a known and rare platform defect for a compile-time failure on every old
-build, which is what the guards exist to prevent.
+`043.cpu-neighbours` was worse. Its platform falls back to `Windows`, which is
+a sound deduction where `sys.dm_os_host_info` does not exist, because below
+SQL Server 2017 there was no other platform. Where the view exists and the
+read merely came back empty, the deduction is false, and the file then set
+`residue_computed` to 1 and published a memory residue computed from it: a
+number presented as measured, on a premise that was wrong. The fallback now
+applies only where the view is absent, and the platform is null otherwise,
+which takes the residue with it.
 
-The honest fix is a probe. One `EXEC sys.sp_executesql N'SELECT 1'` at
-preflight says whether dynamic SQL runs on this instance; where it does not,
-the coverage block says so and names the collectors whose results will be
-empty, exactly as it already does for a denied permission. A degraded run is a
-success; a degraded run that reads as a complete one is not. That needs a spec
-and a panel before code, and is recorded as its own task.
+Both fixes were checked in both directions: unchanged output on a healthy
+instance, and `source` `none` with null counts, and a null platform with no
+residue, on an instance in the broken state.
+
+## What did not need fixing
+
+The eight other deferred readers lose an array and keep an honest root, or
+lose nothing a reader could mistake for a measurement. And no probe was added
+to the preflight: `docs/dynamic-sql-probe-spec.md` records why that design was
+withdrawn once the trigger turned out to be what it is.
 
 ## What does hold
 

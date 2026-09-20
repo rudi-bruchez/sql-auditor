@@ -1,7 +1,48 @@
 # Saying so when deferred reads cannot run
 
-Status: draft, not implemented. Written on 20 September 2026, from the
-measurements in `docs/verification-binary-collation.md`.
+Status: WITHDRAWN on 20 September 2026, the day it was written, before any
+code came out of it. The panel that reviewed it broke its premise, and the
+document is kept because what it proposed is the obvious thing to propose
+again, and because the reasons not to are measurements rather than opinions.
+
+Why it is withdrawn, in the order the reasons arrived:
+
+- The failure is not a property of the collation. A reviewer restarted a BIN2
+  container and `sp_executesql` worked, collation unchanged, and the author
+  reproduced that. The state is "the default collation was changed on this
+  running instance", which a container built with `MSSQL_COLLATION` is in on
+  its first boot and never again, and which a real instance leaves by the
+  restart that rebuilding master performs. A probe on every run of every
+  instance, to name a state essentially unreachable in production, is a cost
+  paid by everyone for nobody.
+- The list of collectors it protects was wrong. It came from a grep that read
+  a comment: `70.schema/020.index-usage.sql` says it deliberately does not
+  defer its reads, and the number is ten, not eleven.
+- The vocabulary does not have room for it. `Capability` is one half of a
+  permission vocabulary whose other half is `@permissions`, and two tests
+  enforce that: a capability with no grant fails
+  `TestEveryProbedCapabilityCanBeGranted`, and one with no permission spelling
+  fails `TestCapabilityNamesMatchNormalisedPermissions`. The grant script
+  would have told a DBA to grant something that is not a permission, and the
+  wizard would have counted it among "Permissions". Making the name legal in
+  that vocabulary is worse: `skipReason` matches a script's declared
+  permissions against the denied set, so the ten collectors would then have
+  been skipped, which is the opposite of what this document argued for.
+- The coverage renderer would have lied. Its denial wording is "refused for
+  this login", hardcoded, and nothing here was refused for any login.
+- Two of its claims about the collectors were false: `023.log-vlf` loses half
+  its root, and `043.cpu-neighbours` keeps a full root with a wrong value in
+  it.
+
+Those last two were real defects and are fixed, without a probe: a deferred
+read that comes back with nothing now leaves a null rather than a zero or a
+deduction. `docs/verification-binary-collation.md` carries the measurements.
+
+What follows is the withdrawn design, unchanged.
+
+## The original document
+
+Written from the measurements in `docs/verification-binary-collation.md`.
 
 ## The question
 

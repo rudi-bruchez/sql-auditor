@@ -106,7 +106,15 @@ BEGIN
         EXEC sys.sp_executesql
             N'SELECT li.file_id, li.vlf_size_mb, li.vlf_active
               FROM sys.dm_db_log_info(DB_ID()) AS li OPTION (RECOMPILE, MAXDOP 1)';
-        SET @source = 'dm_db_log_info';
+        /* A deferred read that returns nothing raises nothing either, and
+           this view always has rows for a database it can read: a log has at
+           least two VLFs. Zero rows therefore means the read did not happen,
+           and saying dm_db_log_info there would put log_file_count 0 and
+           vlf_count 0 in the root, which read as measurements. Measured on an
+           instance whose collation was changed in the same server lifetime,
+           see docs/verification-binary-collation.md. */
+        IF @@ROWCOUNT > 0
+            SET @source = 'dm_db_log_info';
     END TRY
     BEGIN CATCH
         SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
@@ -154,14 +162,21 @@ SELECT
     @source                                                         AS [source],
     @err                                                            AS [error_number],
     NULLIF(@msg, N'')                                               AS [error_message],
-    COUNT(*)                                                        AS [space.vlf_count],
-    SUM(CASE WHEN v.vlf_active = 1 THEN 1 ELSE 0 END)               AS [space.vlf_active_count],
-    SUM(CASE WHEN v.vlf_active = 0 THEN 1 ELSE 0 END)               AS [space.vlf_inactive_count],
+    /* NULL rather than 0 where nothing was read: a log always has VLFs, so a
+       count of zero beside a source of none would be a measurement nobody
+       took. The averages below are NULL on an empty table already. */
+    CASE WHEN @source = 'none' THEN NULL ELSE COUNT(*) END          AS [space.vlf_count],
+    CASE WHEN @source = 'none' THEN NULL
+         ELSE SUM(CASE WHEN v.vlf_active = 1 THEN 1 ELSE 0 END) END AS [space.vlf_active_count],
+    CASE WHEN @source = 'none' THEN NULL
+         ELSE SUM(CASE WHEN v.vlf_active = 0 THEN 1 ELSE 0 END) END AS [space.vlf_inactive_count],
     CAST(MIN(v.vlf_size_mb) AS DECIMAL(14,2))                       AS [space.vlf_min_size_mb],
     CAST(AVG(v.vlf_size_mb) AS DECIMAL(14,2))                       AS [space.vlf_avg_size_mb],
     CAST(MAX(v.vlf_size_mb) AS DECIMAL(14,2))                       AS [space.vlf_max_size_mb],
-    SUM(CASE WHEN v.vlf_size_mb < 1 THEN 1 ELSE 0 END)              AS [space.vlf_under_1mb_count],
-    COUNT(DISTINCT v.file_id)                                       AS [space.log_file_count]
+    CASE WHEN @source = 'none' THEN NULL
+         ELSE SUM(CASE WHEN v.vlf_size_mb < 1 THEN 1 ELSE 0 END) END AS [space.vlf_under_1mb_count],
+    CASE WHEN @source = 'none' THEN NULL
+         ELSE COUNT(DISTINCT v.file_id) END                         AS [space.log_file_count]
 FROM @vlf AS v
 OPTION (RECOMPILE, MAXDOP 1);
 
