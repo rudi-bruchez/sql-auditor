@@ -17,7 +17,10 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
-## [Unreleased]
+## [0.32.0] - 2026-09-20
+
+The archive could say the optimizer asked for an index four thousand times and
+not whether that was one nightly report or four hundred statements. It can now.
 
 ### Added
 
