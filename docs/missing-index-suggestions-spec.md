@@ -385,22 +385,109 @@ applicable density rows; the window stated as a ceiling with pruned-history
 detection; and the report language above. Each needs a fixture and a named owner
 there, and this document does not pretend they can be accepted here.
 
-## Open questions
+## The four open questions, answered
 
-- Was the limit 500 on builds before SQL Server 2019? Claimed by one reader
-  without a source or a measurement, and not adopted. Someone should settle it
-  against a 2016 or 2017 instance before any threshold is hardcoded anywhere.
-- Should `070.index-columns.sql` emit escaped identifiers, so the coverage test
-  stops abstaining on tables whose column names contain a comma? A corpus change
-  and a golden diff, against a case that is rare and that the abstain rule
-  already handles safely.
-- Should `sys.dm_db_missing_index_group_stats_query` be collected above 15.x, so
-  a report can name the queries a suggestion came from? It reaches query
-  identity and carries a disclosure question.
-- Is adding `70.schema/091.statistics-density.sql` to the `space` profile worth
-  its cost, given that the ordering rule now depends on applicable density rows
-  rather than on the profile, and that its own single-leading-column limit means
-  the profile change would often still not deliver an ordering?
+Settled on 20 September 2026 by measurement, against SQL Server 2017
+(14.0.3550.4) and 2022 (16.0.4265.3) in throwaway containers, and the 2025
+lab. The method for the first three: one table of 400,000 rows with twelve
+populated integer columns, driven with every equality subset of one to four of
+them, which is 793 distinct query shapes, more than any documented cap.
+
+### Was the limit 500 before SQL Server 2019? No: it is 600 there too.
+
+On 2017 the instance count rose one per shape to exactly 600 and stopped:
+queries 601 to 793 recorded nothing. 2022 behaved identically, and the 2025
+measurement already in this document gives the same number. The claim of 500
+is refuted wherever it can be tested.
+
+| Build | Shapes driven | `sys.dm_db_missing_index_details` | Groups | Group stats |
+| --- | --- | --- | --- | --- |
+| 14.0.3550.4 | 793 | 600 | 600 | 600 |
+| 16.0.4265.3 | 793 | 600 | 600 | 600 |
+
+Two things worth keeping beside that number. Dropping the database that held
+the 600 suggestions took the instance count straight back to 0, which is the
+same instance-wide behaviour seen from the other end. And SQL Server 2016,
+which the claim also covered, was not measured: it has no Linux container
+image, so it is out of reach on this machine. Nothing hardcodes the threshold
+anyway, which is why this is a documentation answer and not a corpus change:
+the collector reports the count raw and the analysis holds the comparison.
+
+### Should `070.index-columns.sql` escape its identifiers? Yes, and not for the comma.
+
+The reason the question was asked, a column literally named `a, b`, is real
+and rare. The reason to act is broader, and it was measured rather than
+reasoned: `sys.dm_db_missing_index_details` brackets every identifier it
+returns. The same table, queried two ways:
+
+```
+equality_columns | included_columns
+[a, b]           | [pad]
+[a], [b]         | [pad]
+```
+
+So the DMV is already unambiguous, and `020.index-usage.sql` projects its
+strings verbatim. It is `070` that emits bare names, which means the two
+strings this document asks a reader to compare use different conventions on
+every table, not only on the strange ones. `QUOTENAME` on the key and included
+lists of `070` makes the comparison direct and retires the abstain rule for
+ambiguous key strings.
+
+It is not a change to make quietly: the analysis layer parses the current
+bare-name form, so the corpus change and its consumer have to move together.
+That coordination, and not the SQL, is the work.
+
+### Should `sys.dm_db_missing_index_group_stats_query` be collected above 15.x? Yes, and it carries no text.
+
+The disclosure question it was held back for does not arise. The view exposes
+`query_hash` and `query_plan_hash`, both binary, and a
+`last_statement_sql_handle` that does not resolve the way a reader would
+expect: `sys.dm_exec_sql_text` refuses it outright, on a cached plan and on a
+recompiled one alike, with
+
+```
+Msg 12413 ... Cannot process statement SQL handle.
+Try querying the sys.query_store_query_text view instead.
+```
+
+So the identity it reaches is a hash, and a hash is already in this archive
+three times over: `80.workload/030.implicit-conversions.sql`,
+`060.spills.sql` and `025.query-store-compare.sql` all project one, none of
+them behind a flag or a disclosure token. What the view adds is the join
+between a suggestion and the queries that wanted it, with their seeks, scans
+and impact.
+
+Two limits to write into whatever collects it: the rows are bounded by the
+same 600 groups, and the handle is not projected at all. Projecting an
+identifier whose only resolution path is the Query Store would invite the text
+lookup this document declines to make.
+
+### Is `70.schema/091.statistics-density.sql` worth adding to the `space` profile? Yes.
+
+The doubt was that the ordering rule needs a density row for each candidate
+column, and that `091` only describes the leading column of a statistic. On
+the 793-shape workload, all twelve columns any suggestion named had a
+statistic leading on them, and twelve of the thirteen statistics on the table
+were auto-created. That is the mechanism the collector's own header claims:
+the optimizer creates a single-column statistic for the column it filtered on,
+which is the column a suggestion then names.
+
+Cost, measured on a database of 200 tables and 800 statistics, beside the
+collectors the profile already runs:
+
+| Collector | Duration | Size |
+| --- | --- | --- |
+| `070.index-columns` | 346 ms | 81 KB |
+| `090.statistics` (not in the profile) | 332 ms | 291 KB |
+| `020.index-usage` | 315 ms | 103 KB |
+| `091.statistics-density` | 176 ms | 239 KB |
+
+It is the cheapest of the four in time. The one objection left, that a density
+read on a sampled statistic cannot be judged without the sampling figures
+`090` carries, does not hold in this profile: `091` projects `histogram_rows`
+and `010.objects`, which the profile does run, carries the table's row count
+beside it, so the gap between the histogram and the table is readable from a
+space run alone.
 
 ## What the panel changed
 
@@ -427,7 +514,8 @@ window sentence, which omitted offline resets and pruned restore history.
 Rejected: that `equality_columns` can arrive in query order. Two readers and the
 author measured the opposite, and the reader who claimed it offered no output.
 
-Not adopted pending evidence: the 500-row limit before 2019.
+Not adopted pending evidence: the 500-row limit before 2019. Measured on 20
+September 2026 and refuted: 2017 and 2022 both cap at 600, as 2025 does.
 
 Added by the author after the panel:
 `sys.dm_db_missing_index_group_stats_query`, which answers above SQL Server 2019

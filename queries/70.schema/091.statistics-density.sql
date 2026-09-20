@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, density:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @min_version: 13.0.4422
+-- @profiles:    space
 -- @timeout:     300
 --
 -- How selective each statistic's leading column is, so that an index key order
