@@ -17,6 +17,33 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [0.31.2] - 2026-09-20
+
+Two collectors stopped writing down a number nobody measured. Both came out
+of a verification pass against instances with unusual collations, and neither
+needs an unusual instance to matter: any silent failure of a deferred read
+produced them.
+
+### Fixed
+
+- `20.databases/023.log-vlf.sql` counted an empty staging table when its
+  deferred read came back with nothing, and wrote `space.vlf_count` 0 and
+  `space.log_file_count` 0 into its root. A transaction log always has virtual
+  log files, so zero was not a possible measurement. Those fields are null
+  now, beside a `source` of `none`, which the file already had a word for.
+- `10.system/043.cpu-neighbours.sql` fell back to `platform` `Windows`
+  whenever its deferred read returned nothing. The deduction holds only where
+  `sys.dm_os_host_info` does not exist, which is below SQL Server 2017; where
+  the view is there and the read merely failed, the file published a memory
+  residue computed from a false premise with `residue_computed` set to 1. The
+  fallback now applies only where the view is absent, the platform is null
+  otherwise, and the residue goes with it.
+
+The measurements, including the state that produced the silent failure and the
+design withdrawn once it was understood, are in
+`docs/verification-binary-collation.md` and
+`docs/dynamic-sql-probe-spec.md`.
+
 ## [0.31.1] - 2026-09-20
 
 A guard that could never fire, found by a reader attacking yesterday's
