@@ -50,6 +50,13 @@ plans all along.
   it. And catalog statistics are excluded, because they were 110 of the 113
   objects the first run named and none of them is something anyone can drop.
 
+  The cap is 2 000 plans and the spec said 5 000. At the measured 12 to 17 ms
+  per plan the larger number is over a minute of the client's CPU per database,
+  and covering the biggest store on record is not what the file is for: the
+  scan is ordered by recency because recent use is the better guard on a drop,
+  so the plans that answer the question are the ones at the top of the order.
+  `truncated` says when the cap bit.
+
 ## [0.32.0] - 2026-09-20
 
 The archive could say the optimizer asked for an index four thousand times and

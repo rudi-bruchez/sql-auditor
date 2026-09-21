@@ -242,7 +242,7 @@ jobs:
                  and .plans_examined <= .plans_total
                  and .catalog_statistics_excluded >= 1
                  and .truncated == 0
-                 and .cap == 5000
+                 and .cap == 2000
                  and .state.actual == "READ_WRITE"
                  and (.statistics_used | type) == "array"
                  and all(.statistics_used[]; has("text") | not)' \

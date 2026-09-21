@@ -279,6 +279,20 @@ reassemble. Showplan quotes these attributes (`Table="[Orders]"`), and the
 outer brackets are stripped, because a join against `dbo.Orders` fails silently
 on them.
 
+### The cap is 2 000 and not 5 000
+
+Section 3 chose 5 000 to cover the largest store measured on a real estate,
+6 515 plans in one database. At 12 to 17 ms per plan that is one to one and a
+half minutes of the client's CPU per database, and the corpus runs this against
+every database that has a store.
+
+Covering the largest store is not what the file is for. The question it feeds
+is whether a given statistic may be dropped, the scan is ordered by recency
+precisely because recent use is the better guard, and the plans that answer the
+question are therefore at the top of that order. Two thousand recent plans
+answer it for a third of the cost, and `truncated` says when the cap bit, so a
+partial scan cannot be read as a complete one.
+
 ### The cap is a constant, not an option
 
 Section 3 said "exposed as an option". The corpus has no directive for a
@@ -295,8 +309,8 @@ travels in root either way.
   returning a silently empty array. Nothing has been measured there.
 - A store at the cap. Every measurement above is on a store of a few
   hundred plans. The rate observed is roughly 12 to 17 ms per plan, which puts
-  5 000 plans at one to one and a half minutes per database, inside the
-  declared timeout, but never actually run against a store that large.
+  the cap of 2 000 at twenty-five to thirty-five seconds per database, inside
+  the declared timeout, but never actually run against a store that large.
 - The Query Store off case in CI. Verified by hand on a lab database whose
   store is `OFF`: `plans_total = 0`, an empty array, no error. Making that a
   permanent guard needs a second CI database, which this change did not add.
