@@ -74,6 +74,7 @@
 80.workload/024.query-store-rowcount.sql
 80.workload/025.query-store-compare.sql
 80.workload/026.query-store-interrupted.sql
+80.workload/027.query-store-stats-usage.sql
 80.workload/030.implicit-conversions.sql
 80.workload/040.plan-cache.sql
 80.workload/041.plan-cache-plans.sql

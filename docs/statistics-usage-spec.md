@@ -2,7 +2,10 @@
 
 **Date:** 21 September 2026, after a second-pass audit whose four requested
 subjects included statistics maintenance.
-**Status:** specified, not implemented. One collector, `80.workload/027.query-store-stats-usage.sql`.
+**Status:** implemented on 21 September 2026 as
+`80.workload/027.query-store-stats-usage.sql`. Section 7 records what building
+it changed; the rest of this document is left as written, because a spec
+rewritten to agree with the code it produced stops being evidence of anything.
 
 The audit that produced this could say which statistics were **stale** and
 could not say which ones were **used**. Those are different questions and only
@@ -193,3 +196,107 @@ database whose Query Store is **off**. It must return an empty array with
 `plans_total = 0`, not an error, because eight databases out of ten on a real
 estate are in that state and a collector that errors there will be read as a
 fault on the client's instance.
+
+## 7. What building it changed, and why
+
+Six things. Five were found by running the collector, not by reading it, which
+is the usual proportion and the reason the spec was not treated as the answer.
+
+### The XML has to become a column before an attribute is read
+
+The spec said "shreds with `.nodes()` server-side" and stopped there, which is
+where the whole cost turned out to live. Applied to an XML expression (a
+`TRY_CAST` in a derived table), every `.value()` call re-parses the entire
+plan, so six attributes per element cost six parses of a seventy-kilobyte
+document. Measured on a lab instance, 273 plans: 116 seconds. The same shred
+reading from a stored `xml` column, after one `.query('//OptimizerStatsUsage')`
+per plan extracted the fragment: 3.3 seconds, with 738 KB of fragment
+materialised in place of 14 MB of plan.
+
+At the spec's cap of 5 000 plans the first form would have taken around
+thirty-five minutes per database, against a declared timeout of 300 seconds. A
+collector that cannot finish is a collector that returns nothing.
+
+A warning for anyone re-measuring this. A benchmark of the form
+`SELECT COUNT(*) FROM (SELECT x.value(...), ...) AS z` measures nothing: the
+optimizer eliminates `.value()` calls whose results are never read, and it
+reported 1.5 seconds for the form that actually takes 116. The rows have to be
+inserted somewhere.
+
+### The scan is chunked, because of the lock and not the memory
+
+Reading `sys.query_store_plan` takes a shared QDS database lock, held for the
+length of the statement. The first version held it across the whole scan and
+was cancelled by this tool's own blocking watch, after another session had
+waited 5.2 seconds for `LCK_M_X` on it. A statement per hundred plans measures
+about 1.2 seconds, so the lock is released roughly that often. Total elapsed
+time is unchanged; what changes is how long anyone else is stopped.
+
+This is the one finding with no trace in the archive to check it against: it
+showed up as a cancelled collector on a lab instance with two databases. On a
+busy production store it would be more likely, not less.
+
+### `plans_examined` and `plans_total` cannot be two separate counts
+
+The first run reported `plans_examined` 116 against `plans_total` 115. Under
+`QUERY_CAPTURE_MODE ALL` the collector's own statements are captured into the
+store it is reading, so two counts a second apart disagree, and an impossible
+pair costs more trust than the number was ever worth. The plan ids are now
+pinned into a table variable first, `plans_examined` is that set, and
+`truncated` is whether the pin reached the cap rather than an arithmetic guess.
+`plans_total` remains a second snapshot, taken after the pin so that drift
+appears as headroom.
+
+### Catalog statistics are excluded, and counted
+
+Section 3 did not anticipate them. On the first run, 110 of the 113 objects
+named were statistics on `sys` tables, in `mssqlsystemresource`, `master` and
+`tempdb` as well as in the database being read, loaded by the audit's own
+catalog queries and by the Query Store's internal ones. None is a drop
+candidate, and `70.schema/091.statistics-density`, which this file exists to be
+joined against, lists only `is_ms_shipped = 0` tables and can never match one.
+They are dropped from the array and counted in root as
+`catalog_statistics_excluded`, because a count is what tells a reader the rows
+were excluded rather than never found.
+
+That count also turned out to be the only assertion CI can make about the
+shred: the CI probe database has no user tables, so `statistics_used` is
+legitimately empty there and only the excluded count proves the XML parsed.
+
+### The database is projected, and the table is projected in one column
+
+`StatisticsInfo/@Database` exists because a plan compiled in one database can
+load statistics in another, and the corpus files this collector's output under
+the database whose Query Store held the plan. Without the attribute, `OTHERDB`'s
+statistic is filed under `SALESDB`. The first run confirmed it is populated and
+varies.
+
+Section 3 named `schema` and `table` as separate fields, "matching
+`090.statistics`". `090.statistics` does not do that: it emits one `[table]`
+column holding `schema.table`. The collector follows the file rather than the
+sentence, so the two join on `(database, table, statistic)` with nothing to
+reassemble. Showplan quotes these attributes (`Table="[Orders]"`), and the
+outer brackets are stripped, because a join against `dbo.Orders` fails silently
+on them.
+
+### The cap is a constant, not an option
+
+Section 3 said "exposed as an option". The corpus has no directive for a
+per-collector parameter, and the collectors that bound themselves do it with a
+`DECLARE` and report the value they used. A command-line flag for a number
+nobody has yet asked to change would have been the first of its kind. The value
+travels in root either way.
+
+## 8. What is still unverified
+
+- SQL Server 2016 SP2. The gate is `@min_version: 14` and the reason is
+  unchanged: the element exists from 2016 SP2, the corpus cannot check a
+  service pack, and a 2016 instance is skipped with a reason rather than
+  returning a silently empty array. Nothing has been measured there.
+- A store at the cap. Every measurement above is on a store of a few
+  hundred plans. The rate observed is roughly 12 to 17 ms per plan, which puts
+  5 000 plans at one to one and a half minutes per database, inside the
+  declared timeout, but never actually run against a store that large.
+- The Query Store off case in CI. Verified by hand on a lab database whose
+  store is `OFF`: `plans_total = 0`, an empty array, no error. Making that a
+  permanent guard needs a second CI database, which this change did not add.
