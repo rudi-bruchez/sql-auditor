@@ -17,6 +17,64 @@ every archive, so a collection can always name the build that produced it. The
 release workflow refuses a tag that disagrees with either this file or
 `cmd/sql-auditor/main.go`.
 
+## [Unreleased]
+
+An audit could say which statistics were stale and not which ones were used.
+The engine has no usage DMV for statistics and never has; it does write the
+answer into every execution plan, and the Query Store has been keeping those
+plans all along.
+
+### Added
+
+- `80.workload/027.query-store-stats-usage.sql` reads the `OptimizerStatsUsage`
+  element out of the plans already in the Query Store and reports, per
+  statistics object, how many plans and how many distinct queries loaded it,
+  when it was last wanted, and the worst sampling and modification count any
+  compile saw. Those last two are the point: they say a statistic was used
+  while stale, which neither a usage flag nor `090.statistics` can say alone.
+  The shredding happens on the instance and no plan XML travels, so the file is
+  a few thousand short rows instead of gigabytes. It is the only Query Store
+  collector with no `@discloses`, which is what lets it run on a client who
+  refuses text disclosure, and the header states the rule the result has to be
+  read by: presence proves use, absence proves nothing, so the list is a veto
+  on a drop and never a list of things to drop. Design in
+  `docs/statistics-usage-spec.md`.
+
+  Three things came from running it rather than from reading the spec. The
+  fragment is materialised into an `xml` column before any attribute is read,
+  because applying `.value()` to an XML expression re-parses the whole plan
+  once per attribute: 273 plans took 116 seconds that way and 3.3 seconds as a
+  column. The scan is chunked a hundred plans at a time, because the first
+  version held the shared QDS lock for the whole scan and was cancelled by this
+  tool's own blocking watch after another session had waited 5.2 seconds for
+  it. And catalog statistics are excluded, because they were 110 of the 113
+  objects the first run named and none of them is something anyone can drop.
+
+  Two external reviewers then ran against the finished branch with disjoint
+  scopes, and three of their findings were reproduced and fixed here. The CI
+  assertion tested that no emitted row carried a column named `text`; a
+  reviewer added query text under a different alias and the archive shipped the
+  workload's SQL with every check green, so the assertion now compares the
+  whole key set of the root object and of each row against the declared one.
+  The identity the file emits was not injective: showplan escapes an inner `]`
+  by doubling it and only the outer pair was stripped, so a quoted statistic
+  name did not join to `090.statistics`, and two tables whose schema and name
+  differ only in where a dot falls were merged into one row, under-counting
+  distinct statistics. The escape is undone and `schema` is emitted beside the
+  concatenated `table`, which is what the grouping now uses. And `truncated`
+  was set on the scan reaching the cap, which called a complete scan of exactly
+  2 000 plans partial; the scan now asks for one plan more than it keeps and
+  sets the flag on that plan existing. `plans_selected` and `plans_unparsed`
+  join the root object, because a plan whose XML failed to parse used to lower
+  `plans_examined` and leave no trace.
+
+  The cap is 2 000 plans and the spec said 5 000. At the measured 12 to 17 ms
+  per plan the larger number is over a minute of the client's CPU per database,
+  and covering the biggest store on record is not what the file is for: the
+  scan is ordered by recency because recent use is the better guard on a drop,
+  so the plans that answer the question are the ones at the top of the order.
+  `truncated` says when the cap bit.
+
 ## [0.32.0] - 2026-09-20
 
 The archive could say the optimizer asked for an index four thousand times and

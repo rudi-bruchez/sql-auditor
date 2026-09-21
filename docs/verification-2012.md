@@ -58,11 +58,15 @@ change the id again.)
 As recorded, all 14 files parse with zero errors and every result-set count
 matches, including the four that carry the 2012 claim:
 
-> **The corpus has grown since this pass.** It is 62 files today. The 14 below
-> are the ones this run covered, and the number is left as recorded rather than
-> updated, because the record describes a run that happened. The corpus tree
-> hash above is what tells you the artifact is stale; the collectors added since
-> have not been through this parse.
+> **The corpus has grown since this pass.** The 14 below are the ones this run
+> covered, and the number is left as recorded rather than updated, because the
+> record describes a run that happened. The artifact alongside is not frozen the
+> same way: it is re-run over the whole corpus, and the `Corpus tree` line in it
+> is what tells you whether that happened recently enough to trust.
+>
+> How many files the corpus holds today is deliberately not written here. It
+> used to be, it said 62, and it had rotted to 93 before anyone read it again.
+> `testdata/corpus.txt` is the count.
 
 | Query | `@resultsets` declared | Counted from the parse tree |
 | --- | --- | --- |
