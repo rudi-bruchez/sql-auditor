@@ -68,6 +68,10 @@ plans all along.
   join the root object, because a plan whose XML failed to parse used to lower
   `plans_examined` and leave no trace.
 
+  The three steps section 6 requires are done, the third of them in the private
+  repository: this collector now feeds the statistics facet of the report's
+  object axis, beside `090` and `091`, with a fixture and a rendering test.
+
   The cap is 2 000 plans and the spec said 5 000. At the measured 12 to 17 ms
   per plan the larger number is over a minute of the client's CPU per database,
   and covering the biggest store on record is not what the file is for: the

@@ -398,11 +398,24 @@ identifier is in the diff or the commit messages.
   reviewer, on a lab database whose store is `OFF`: `plans_total = 0`, an empty
   array, no error. Making that a permanent guard needs a second CI database,
   which this change did not add.
-- The rendering fixture of section 6, step 3. Not done. Both the conformity
-  reviewer and the author reached the same conclusion about why it matters: the
-  CI probe database has no user tables, so `statistics_used` is empty there and
-  no automated check ever looks at a populated row. The strengthened key-set
-  assertion narrows that gap without closing it.
+- ~~The rendering fixture of section 6, step 3.~~ Done in the private
+  repository. The gap the conformity reviewer named is now closed from the
+  other side: the CI probe database has no user tables, so no automated check
+  in this repository ever looks at a populated row, and the private fixture is
+  where a populated row is exercised. It carries three cases, a statistic this
+  collector names, one it does not, and one it names under a DIFFERENT database
+  while bearing a table name that exists in the current one. The last is the
+  dangerous case: joined on table and statistic alone it would attach a
+  neighbouring database's statistic to this page's table, so the object axis
+  filters on the `database` key the rows carry, which no other source on that
+  axis has.
+
+  Two properties are pinned by tests there rather than left to hold by
+  accident. A statistic absent from this collector's listing renders blank and
+  never as zero, because zero would read as "never used" and invert the rule
+  this whole file is written around. And the cross-database row is checked to
+  be PRESENT in the fixture before the page is asserted not to show it,
+  otherwise the test would pass just as well on an empty fixture.
 - A schema whose name contains a dot, on the `090` side. This file no longer
   merges two such tables; `090.statistics` still renders both identically, so
   the join cannot separate them. Nobody has seen such a schema on a real
