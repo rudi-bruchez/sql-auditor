@@ -234,18 +234,38 @@ jobs:
           # statements into it. The pair is now taken from a pinned set and the
           # inequality is the cheapest guard that it stayed that way.
           #
-          # No query text and no plan XML: this is the one Query Store collector
-          # without @discloses, and the grep is on what the file emits rather
-          # than on what its header claims.
-          jq -e '.plans_total >= 1
-                 and .plans_examined >= 1
-                 and .plans_examined <= .plans_total
+          # The KEY SETS are asserted exactly, not probed for one bad name, and
+          # an external reviewer is why. The first version of this block tested
+          # `has("text") | not` on each row; the reviewer added a query text
+          # column aliased [query_sql_text], and the archive shipped the
+          # client's SQL while this assertion, go test and the grammar check
+          # all stayed green. A guard that names the one column it expects to
+          # be absent guards against that column. Comparing the whole key set
+          # refuses ANY column nobody declared, which is the property wanted
+          # here: this is the only Query Store collector without @discloses.
+          #
+          # The sys exclusion is asserted the same way. On this probe database
+          # statistics_used is legitimately empty, so the clause is vacuous
+          # while the filter works and fails the moment it is removed, which is
+          # the case it exists for.
+          jq -e '(keys_unsorted | sort) == (["cap","catalog_statistics_excluded","collected_at",
+                     "database","plans_examined","plans_selected","plans_total","plans_unparsed",
+                     "plans_with_usage","state","statistics_named","statistics_used","truncated"] | sort)
+                 and (.state | keys_unsorted | sort) == (["actual","capture_mode"] | sort)
+                 and .plans_total >= 1
+                 and .plans_selected >= 1
+                 and .plans_examined <= .plans_selected
+                 and .plans_selected <= .plans_total
+                 and .plans_unparsed >= 0
                  and .catalog_statistics_excluded >= 1
                  and .truncated == 0
                  and .cap == 2000
                  and .state.actual == "READ_WRITE"
                  and (.statistics_used | type) == "array"
-                 and all(.statistics_used[]; has("text") | not)' \
+                 and all(.statistics_used[]; (keys_unsorted | sort) == (["database","last_compile",
+                     "max_modification_count","min_sampling_percent","plans","queries","schema",
+                     "statistic","table"] | sort))
+                 and all(.statistics_used[]; .schema != "sys" and (.table | startswith("sys.") | not))' \
             "$run_dir/80.workload/ci_probe/027.query-store-stats-usage.json" \
             || { jq 'del(.statistics_used)' "$run_dir/80.workload/ci_probe/027.query-store-stats-usage.json"; exit 1; }
           # An `if`, not `cmd && { ... }`: this step runs under `set -e`, and a

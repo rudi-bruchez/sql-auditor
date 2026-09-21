@@ -301,16 +301,109 @@ per-collector parameter, and the collectors that bound themselves do it with a
 nobody has yet asked to change would have been the first of its kind. The value
 travels in root either way.
 
-## 8. What is still unverified
+## 8. What an external review changed
+
+Two reviewers ran against the finished branch with disjoint scopes, one on
+conformity and one on breaking and measuring, each with its own SQL Server.
+Every finding below was reproduced by the author before it was acted on.
+
+### The disclosure guard guarded one column name
+
+The CI assertion tested `has("text") | not` on each emitted row. The reviewer
+added a query text column aliased `[query_sql_text]`; the archive shipped the
+workload's SQL, and that assertion, `go test` and the grammar check all stayed
+green, with no warning in the run record. Reproduced exactly. The assertion now
+compares the WHOLE key set of the root object and of each row against the
+declared one, so any undeclared column fails, and it asserts the `sys`
+exclusion the same way. Verified in both directions on a real archive.
+
+The general shape is worth keeping: a guard that names the one thing it expects
+to be absent guards against that one thing. Naming what must be present is the
+stronger form, and costs the same.
+
+### The identity was not injective, and the header claimed it was
+
+The header said only the outer brackets were stripped so a quoted name reached
+the analysis as written. It did not. Showplan escapes an inner `]` by doubling
+it, so a statistic named `ST]Bracket` arrives as `[ST]]Bracket]` and the file
+emitted `ST]]Bracket` while `090.statistics` emitted `ST]Bracket`: the join the
+header promises fails on exactly the names that need quoting. The reviewer
+created the object and read both files; reproduced. The escape is now undone
+after the outer pair is stripped.
+
+Worse, and from the same reviewer: grouping on `schema + '.' + table` is not
+injective. A table `[c]` in schema `[a.b]` and a table `[b.c]` in schema `[a]`
+both render `a.b.c`, and the collector MERGED them into one row, reporting one
+distinct statistic where there were two. For a file whose output is a veto on
+dropping a statistic, silently losing one of two is the dangerous direction.
+The concatenated `table` stays, because that is what `090` emits and what the
+join needs, but `schema` is now emitted beside it and the grouping and distinct
+counts use the parts. `090` cannot tell those two tables apart either, so the
+join stays ambiguous for such a schema; what is fixed is this file losing one.
+
+### truncated called a complete scan partial
+
+`truncated` was set when the pinned set reached the cap. A store holding
+exactly 2 000 eligible plans is scanned completely and was reported truncated.
+Found by reading, and correct. The scan now asks for `TOP (@cap + 1)` and sets
+the flag on the extra row actually existing, then drops it. `plans_selected`
+and `plans_unparsed` are also emitted now, because a plan whose XML failed to
+parse used to lower `plans_examined` and vanish, leaving a reader unable to
+tell that loss from a plan that simply carried no statistics.
+
+### The measurement was true and stated without its condition
+
+Section 7 gives 116 s against 3.3 s for 273 plans. A reviewer rebuilt both
+forms on a store of small plans, measured the expression form FASTER, and read
+that as contradicting the figure. Re-measured by the author on one instance,
+300 plans each way, same store:
+
+| plans | average plan | expression form | column form |
+|---|---|---|---|
+| the 300 largest | 62 KB | 155.1 s | 5.2 s |
+| the 300 smallest | 6 KB | 2.2 s | 2.0 s |
+
+Both measurements are honest and they measure different workloads. The
+expression form re-parses the whole plan once per attribute read, so its cost
+follows plan size times element count; the column form parses once per plan.
+At 6 KB they are indistinguishable. At 62 KB the expression form is thirty
+times slower and would pass the declared 300 s timeout long before the cap.
+
+The defect was the sentence, not the number: it stated a ratio as a property of
+the code when it is a property of the code on a given shape of plan. The
+argument for the column form is that it has a ceiling, not that it is faster.
+
+### What the review confirmed rather than changed
+
+The same reviewer generated 3 145 plans, which is the first time this collector
+has ever run at its cap. It stopped at `plans_examined` 2 000, reported the
+truncation, took 34.0 s and stayed well inside the 300 s timeout, at 17 ms per
+plan. It also confirmed the lock claim by competing for the Query Store while
+the collector ran, measuring a chunk at 1.7 to 1.9 s rather than 1.2 s and a
+competing option change getting through, and it found the Query Store off,
+database read-only, and Query Store read-only cases all clean.
+
+The conformity reviewer separately confirmed the cross-database attribution is
+readable, the row-number paging has no off-by-one, the schema comparison
+behaves on a binary collation with a user schema named `Sys`, and no client
+identifier is in the diff or the commit messages.
+
+## 9. What is still unverified
 
 - SQL Server 2016 SP2. The gate is `@min_version: 14` and the reason is
   unchanged: the element exists from 2016 SP2, the corpus cannot check a
   service pack, and a 2016 instance is skipped with a reason rather than
   returning a silently empty array. Nothing has been measured there.
-- A store at the cap. Every measurement above is on a store of a few
-  hundred plans. The rate observed is roughly 12 to 17 ms per plan, which puts
-  the cap of 2 000 at twenty-five to thirty-five seconds per database, inside
-  the declared timeout, but never actually run against a store that large.
-- The Query Store off case in CI. Verified by hand on a lab database whose
-  store is `OFF`: `plans_total = 0`, an empty array, no error. Making that a
-  permanent guard needs a second CI database, which this change did not add.
+- The Query Store off case in CI. Verified by hand, and again by an external
+  reviewer, on a lab database whose store is `OFF`: `plans_total = 0`, an empty
+  array, no error. Making that a permanent guard needs a second CI database,
+  which this change did not add.
+- The rendering fixture of section 6, step 3. Not done. Both the conformity
+  reviewer and the author reached the same conclusion about why it matters: the
+  CI probe database has no user tables, so `statistics_used` is empty there and
+  no automated check ever looks at a populated row. The strengthened key-set
+  assertion narrows that gap without closing it.
+- A schema whose name contains a dot, on the `090` side. This file no longer
+  merges two such tables; `090.statistics` still renders both identically, so
+  the join cannot separate them. Nobody has seen such a schema on a real
+  estate.

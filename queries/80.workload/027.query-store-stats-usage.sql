@@ -30,8 +30,15 @@
 --
 -- NO @discloses. The projection carries object names and statistic names,
 -- never query text and never the plan. This is the one Query Store collector
--- that can run on a client who refuses text disclosure, and every column added
--- here has to keep it that way.
+-- that can run on a client who refuses QUERY TEXT disclosure, and every column
+-- added here has to keep it that way.
+--
+-- Read that sentence narrowly, because a reviewer read it broadly and was
+-- right to. It says nothing about identifiers. A database, schema, table or
+-- statistic name can itself carry a client's name, an account reference or an
+-- email address, and this file copies all four verbatim, as every schema
+-- collector in the corpus does. @discloses is about query text and plans; an
+-- operator who cannot transfer object names is not served by any of them.
 --
 -- MIN SAMPLING AND MAX MODIFICATION COUNT ARE THE REASON TO PREFER THIS OVER A
 -- BARE USAGE FLAG. Together they say a statistic was USED WHILE STALE, which
@@ -54,12 +61,25 @@
 -- name. The spec named schema and table separately; 090 does not, and matching
 -- the file that exists beats matching the sentence that described it.
 --
--- BRACKETS ARE STRIPPED BECAUSE SHOWPLAN QUOTES THESE ATTRIBUTES. The element
--- carries Table="[Orders]", 090 carries dbo.Orders, and a join between them
--- fails silently on the brackets. Only the outer pair is removed, so a name
--- containing a bracket — showplan escapes an inner ] by doubling it — still
--- reaches the analysis as written rather than half-unescaped. Such a name is
--- pathological and no client estate has produced one yet.
+-- BRACKETS ARE STRIPPED AND THE ]] ESCAPE IS UNDONE, in that order, because
+-- showplan quotes these attributes. The element carries Table="[Orders]", 090
+-- carries dbo.Orders, and a join between them fails silently on the brackets.
+-- An inner ] is escaped by doubling, so a statistic really named
+-- ST]Bracket arrives as [ST]]Bracket] and stripping the outer pair alone
+-- leaves ST]]Bracket, which is not what 090 emits and does not join to it.
+-- An earlier version of this file did exactly that while its header claimed
+-- the opposite; an external reviewer created the object and read both files.
+--
+-- SCHEMA AND TABLE ARE EMITTED SEPARATELY AS WELL AS CONCATENATED, and the
+-- same reviewer is why. Grouping on schema + '.' + table alone is not
+-- injective: a table [c] in schema [a.b] and a table [b.c] in schema [a] both
+-- render a.b.c, and the collector MERGED them into one row, reporting one
+-- distinct statistic where there were two. The concatenated [table] stays,
+-- because it is what 70.schema/090.statistics emits and what the join needs;
+-- the grouping and the distinct counts now use the parts. 090 cannot tell the
+-- two apart either, so the join remains ambiguous for such a schema; what is
+-- fixed here is this file silently losing one of them, which for a veto is the
+-- dangerous direction.
 --
 -- THE CAP IS ON PLANS AND NOT ON ROWS. Casting a plan from nvarchar(max) to
 -- xml is CPU-bound on the client's instance, so the scan takes a fixed budget:
@@ -161,6 +181,7 @@ DECLARE @frag TABLE (
 DECLARE @usage TABLE (
     [database]    nvarchar(300)  NULL,
     [schema]      nvarchar(300)  NULL,
+    [table_name]  nvarchar(300)  NULL,
     [table]       nvarchar(600)  NULL,
     [statistic]   nvarchar(300)  NULL,
     plan_id       bigint         NOT NULL,
@@ -179,7 +200,7 @@ SELECT ROW_NUMBER() OVER (ORDER BY t.last_execution_time DESC),
        t.plan_id,
        t.query_id,
        t.last_compile_start_time
-FROM (SELECT TOP (@cap)
+FROM (SELECT TOP (@cap + 1)
              p.plan_id,
              p.query_id,
              p.last_compile_start_time,
@@ -189,14 +210,24 @@ FROM (SELECT TOP (@cap)
       ORDER BY p.last_execution_time DESC) AS t
 OPTION (RECOMPILE, MAXDOP 1);
 
+/* One more than the cap was asked for, so that reaching @cap + 1 is EVIDENCE
+   that a further eligible plan exists rather than an inference from equality.
+   The extra row is then dropped and never read. A store holding exactly @cap
+   plans reports truncated 0, which is the truth; the previous test, cap
+   reached therefore truncated, called a complete scan partial. */
+DECLARE @truncated bit = CASE WHEN (SELECT COUNT_BIG(*) FROM @scan) > @cap THEN 1 ELSE 0 END;
+DELETE FROM @scan WHERE rn > @cap;
+
 DECLARE @plans_selected bigint = (SELECT COUNT_BIG(*) FROM @scan);
 DECLARE @plans_total    bigint = (SELECT COUNT_BIG(*) FROM sys.query_store_plan);
 
 /* ───────── the fragments, a hundred plans at a time ─────────
    One XML parse per plan, keeping only the OptimizerStatsUsage element. The
    whole plan is never stored: 279 plans on a lab instance carried 14 MB of
-   showplan and 738 KB of fragment, so what lands in tempdb is a fortieth of
-   what was read.
+   showplan and 738 KB of fragment, a twentieth; a reviewer measured a
+   sixteenth on 2 000 plans of a different shape. The ratio follows the
+   workload, and what matters is the magnitude it settles at: about 1.5 MB of
+   tempdb at the cap, which no client instance notices.
 
    TRY_CAST and not CAST. query_plan is nvarchar(max), and a plan the engine
    truncated on the way into the store is not well-formed XML; CAST would fail
@@ -208,9 +239,11 @@ DECLARE @plans_total    bigint = (SELECT COUNT_BIG(*) FROM sys.query_store_plan)
    takes a shared QDS database lock, and the first version of this file held it
    for the length of the whole scan: on the lab instance the run was cancelled
    by this tool's own blocking watch after another session had waited 5.2 s for
-   LCK_M_X on that lock. A statement per hundred plans measured about 1.2 s, so
-   the lock is released roughly that often and a waiter gets through. Total
-   elapsed time is unchanged; what changes is how long anyone else is stopped.
+   LCK_M_X on that lock. A statement per hundred plans measured 1.2 s on the
+   author's store and 1.7 to 1.9 s on a reviewer's, so the lock is released
+   every couple of seconds and a waiter gets through; the reviewer confirmed
+   that a competing QUERY_STORE option change does get in. Total elapsed time
+   is unchanged; what changes is how long anyone else is stopped.
 
    @chunk is deliberately small for that reason alone. Raising it makes the
    collector no faster and makes it a worse neighbour. */
@@ -240,22 +273,40 @@ END
 DECLARE @plans_examined bigint = (SELECT COUNT_BIG(*) FROM @frag);
 
 /* ───────── the shred ─────────
-   From a stored xml column, and that is the difference between three seconds
-   and two minutes. Applied to an xml EXPRESSION — a TRY_CAST in a derived
-   table — every .value() call re-parses the whole plan, so six attributes per
-   element cost six parses of a seventy-kilobyte document: 273 plans took 116 s
-   that way, and 3.3 s once the fragment was a column. The column is the whole
-   trick; the rest of this statement is ordinary.
+   From a stored xml column, and the reason is that the alternative is
+   UNBOUNDED. Applied to an xml EXPRESSION, a TRY_CAST in a derived table,
+   every .value() call re-parses the whole plan, so six attributes per element
+   cost six parses of the entire document. The cost of this form therefore
+   grows with plan size times element count; the cost of the column form grows
+   with plan count alone, one parse each.
+
+   Measured on one instance, 300 plans each way, same store:
+
+       plans            avg plan   expression form   column form
+       300 largest         62 KB           155.1 s         5.2 s
+       300 smallest         6 KB             2.2 s         2.0 s
+
+   So on small plans the two are indistinguishable and the expression form is
+   occasionally ahead. That is not an argument for it. A client's workload is
+   stored procedures and joins, not single-table lookups, and at 62 KB the
+   expression form is thirty times slower and would pass this collector's
+   declared 300 s timeout long before the cap. The column form is chosen for
+   having a ceiling, not for being faster on a given day.
+
+   An external reviewer measured the expression form ahead on a store of small
+   plans and read that as contradicting the figure above. It does not; the
+   figure was stated without its condition, which was the real defect.
 
    Note for anyone re-measuring this: a benchmark that wraps the projection in
    SELECT COUNT(*) measures nothing, because the optimizer eliminates .value()
-   calls whose results are never read. It reported 1.5 s for the form that
-   actually takes 116 s. Insert the rows. */
+   calls whose results are never read. It reported 1.5 s for a form that took
+   116 s when the rows were actually written. Insert the rows. */
 WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')
-INSERT INTO @usage ([database], [schema], [table], [statistic], plan_id, query_id,
+INSERT INTO @usage ([database], [schema], [table_name], [table], [statistic], plan_id, query_id,
                     last_compile, sampling, modifications)
 SELECT unq.db,
        unq.sch,
+       unq.tbl,
        CASE WHEN unq.sch IS NULL OR unq.sch = '' THEN unq.tbl
             ELSE unq.sch + '.' + unq.tbl END,
        unq.st,
@@ -271,10 +322,10 @@ CROSS APPLY (VALUES (si.n.value('@Database',   'nvarchar(300)'),
                      si.n.value('@Table',      'nvarchar(300)'),
                      si.n.value('@Statistics', 'nvarchar(300)'))) AS raw(db, sch, tbl, st)
 CROSS APPLY (VALUES (
-        CASE WHEN LEFT(raw.db, 1)  = '[' AND RIGHT(raw.db, 1)  = ']' THEN SUBSTRING(raw.db,  2, LEN(raw.db)  - 2) ELSE raw.db  END,
-        CASE WHEN LEFT(raw.sch, 1) = '[' AND RIGHT(raw.sch, 1) = ']' THEN SUBSTRING(raw.sch, 2, LEN(raw.sch) - 2) ELSE raw.sch END,
-        CASE WHEN LEFT(raw.tbl, 1) = '[' AND RIGHT(raw.tbl, 1) = ']' THEN SUBSTRING(raw.tbl, 2, LEN(raw.tbl) - 2) ELSE raw.tbl END,
-        CASE WHEN LEFT(raw.st, 1)  = '[' AND RIGHT(raw.st, 1)  = ']' THEN SUBSTRING(raw.st,  2, LEN(raw.st)  - 2) ELSE raw.st  END
+        CASE WHEN LEFT(raw.db, 1)  = '[' AND RIGHT(raw.db, 1)  = ']' THEN REPLACE(SUBSTRING(raw.db,  2, LEN(raw.db)  - 2), ']]', ']') ELSE raw.db  END,
+        CASE WHEN LEFT(raw.sch, 1) = '[' AND RIGHT(raw.sch, 1) = ']' THEN REPLACE(SUBSTRING(raw.sch, 2, LEN(raw.sch) - 2), ']]', ']') ELSE raw.sch END,
+        CASE WHEN LEFT(raw.tbl, 1) = '[' AND RIGHT(raw.tbl, 1) = ']' THEN REPLACE(SUBSTRING(raw.tbl, 2, LEN(raw.tbl) - 2), ']]', ']') ELSE raw.tbl END,
+        CASE WHEN LEFT(raw.st, 1)  = '[' AND RIGHT(raw.st, 1)  = ']' THEN REPLACE(SUBSTRING(raw.st,  2, LEN(raw.st)  - 2), ']]', ']') ELSE raw.st  END
      )) AS unq(db, sch, tbl, st)
 OPTION (RECOMPILE, MAXDOP 1);
 
@@ -287,15 +338,17 @@ SELECT DB_NAME()                                                      AS [databa
        CONVERT(varchar(23), SYSDATETIME(), 126)                       AS [collected_at],
        @cap                                                           AS [cap],
        @plans_total                                                   AS [plans_total],
+       @plans_selected                                                AS [plans_selected],
        @plans_examined                                                AS [plans_examined],
+       @plans_selected - @plans_examined                              AS [plans_unparsed],
        (SELECT COUNT(DISTINCT u.plan_id) FROM @usage AS u)            AS [plans_with_usage],
        (SELECT COUNT_BIG(*)
-        FROM (SELECT DISTINCT u.[database], u.[table], u.[statistic]
+        FROM (SELECT DISTINCT u.[database], u.[schema], u.[table_name], u.[statistic]
               FROM @usage AS u WHERE ISNULL(u.[schema], N'') <> 'sys') AS d)        AS [statistics_named],
        (SELECT COUNT_BIG(*)
-        FROM (SELECT DISTINCT u.[database], u.[table], u.[statistic]
+        FROM (SELECT DISTINCT u.[database], u.[schema], u.[table_name], u.[statistic]
               FROM @usage AS u WHERE u.[schema] = 'sys') AS d)         AS [catalog_statistics_excluded],
-       CASE WHEN @plans_selected >= @cap THEN 1 ELSE 0 END              AS [truncated],
+       CAST(@truncated AS int)                                        AS [truncated],
        CAST((SELECT actual_state_desc
              FROM sys.database_query_store_options) AS nvarchar(60))   AS [state.actual],
        CAST((SELECT query_capture_mode_desc
@@ -307,6 +360,7 @@ OPTION (RECOMPILE, MAXDOP 1);
    times is not fifty users, and the count that decides whether a statistic may
    be dropped is how many distinct queries wanted it. */
 SELECT u.[database]                                                   AS [database],
+       u.[schema]                                                     AS [schema],
        u.[table]                                                      AS [table],
        u.[statistic]                                                  AS [statistic],
        COUNT(DISTINCT u.plan_id)                                      AS [plans],
@@ -316,6 +370,6 @@ SELECT u.[database]                                                   AS [databa
        MAX(u.modifications)                                           AS [max_modification_count]
 FROM @usage AS u
 WHERE ISNULL(u.[schema], N'') <> 'sys'
-GROUP BY u.[database], u.[table], u.[statistic]
+GROUP BY u.[database], u.[schema], u.[table_name], u.[table], u.[statistic]
 ORDER BY COUNT(DISTINCT u.query_id) DESC, COUNT(DISTINCT u.plan_id) DESC
 OPTION (RECOMPILE, MAXDOP 1);

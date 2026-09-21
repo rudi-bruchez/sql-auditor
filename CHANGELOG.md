@@ -50,6 +50,24 @@ plans all along.
   it. And catalog statistics are excluded, because they were 110 of the 113
   objects the first run named and none of them is something anyone can drop.
 
+  Two external reviewers then ran against the finished branch with disjoint
+  scopes, and three of their findings were reproduced and fixed here. The CI
+  assertion tested that no emitted row carried a column named `text`; a
+  reviewer added query text under a different alias and the archive shipped the
+  workload's SQL with every check green, so the assertion now compares the
+  whole key set of the root object and of each row against the declared one.
+  The identity the file emits was not injective: showplan escapes an inner `]`
+  by doubling it and only the outer pair was stripped, so a quoted statistic
+  name did not join to `090.statistics`, and two tables whose schema and name
+  differ only in where a dot falls were merged into one row, under-counting
+  distinct statistics. The escape is undone and `schema` is emitted beside the
+  concatenated `table`, which is what the grouping now uses. And `truncated`
+  was set on the scan reaching the cap, which called a complete scan of exactly
+  2 000 plans partial; the scan now asks for one plan more than it keeps and
+  sets the flag on that plan existing. `plans_selected` and `plans_unparsed`
+  join the root object, because a plan whose XML failed to parse used to lower
+  `plans_examined` and leave no trace.
+
   The cap is 2 000 plans and the spec said 5 000. At the measured 12 to 17 ms
   per plan the larger number is over a minute of the client's CPU per database,
   and covering the biggest store on record is not what the file is for: the
