@@ -1765,3 +1765,84 @@ one: a database of 130 small uncompressed tables, with the size bound raised so
 that every one of them is excluded. The root reports 130, the array carries
 100. The gap was real, the fix is exact, and the two numbers now disagree out
 loud instead of silently.
+
+### 23. Two columns that do not exist below SQL Server 2019
+
+slug: columns-absent-on-2017
+
+Two collectors project a column their target instance does not have, on an
+instance reporting 14.0.1000.169. Neither is guarded by a version floor, so
+both fail at run time rather than being skipped with a reason.
+
+`10.system/021.host-info.sql` selects `host_architecture` from
+`sys.dm_os_host_info`. That column arrived with SQL Server 2019; on 2017 the
+view exists and the column does not. The collector returns `"source": "none"`
+and error 207, and the whole of the host description — Windows distribution,
+release, service pack level, SKU — is absent from the archive. The audit could
+not say which version of Windows the instance runs on, so
+`end-of-life-windows-server-os`, a high-severity topic, went `hors-collecte`.
+
+The workload collector projects `total_spills`, which is the one error the run
+recorded. Same shape, same cause.
+
+Why it matters more than an empty file. A version floor declared in the header
+produces "not run, needs SQL Server 15.0 or later", which the archive-opening
+step reports as a fact about the instance and which nobody mistakes for a
+problem. An unguarded column produces an SQL error, which reads as a fault on
+the client's instance, and it costs the whole result set rather than the one
+column. Four collectors on this run were correctly skipped by a declared floor;
+these two were not.
+
+What closes it. Either a declared floor, or the column selected conditionally so
+the rest of the projection survives. The second is better here: on 2017 every
+other field of `021.host-info` is available, and losing the operating system
+version to one absent column is the expensive part.
+
+### 24. One warning per capped item makes the cap unreadable
+
+slug: cap-warning-per-item
+
+`10.system/063.blocked-process-reports.sql` caps what it writes at 500 reports,
+which is right. It then emits one warning per report it did not write. On an
+instance whose capture held 38 426 reports, the run produced **37 949 distinct
+warning lines**, each naming a report number, a timestamp and the same
+explanatory sentence.
+
+The archive-opening step deduplicates warnings and counts repetitions, and says
+so in its own documentation: seven distinct messages repeated twenty-three
+times are not twenty-three problems. That defence does not apply here, because
+each line differs by its report number, so all 37 949 survive deduplication.
+The opening report became unreadable, and the single genuine error of the run —
+section 23 — was buried under it.
+
+The cap is doing its job. The announcement of the cap is what fails, for the
+same reason as section 22 and in the opposite direction: there, a bound was
+published too quietly; here, it is published once per excluded item.
+
+What closes it. One warning naming the cap and the count, in the shape the
+`_index.json` already carries: written 500 of 38 426, oldest and newest kept.
+The per-item lines add nothing a reader can act on, and the index file already
+holds the detail for anyone who wants it.
+
+### 25. Trace flag status is not collected
+
+slug: trace-flags-absent
+
+`DBCC TRACESTATUS(-1)` is one statement and the corpus does not run it. Three
+query-detection topics went `hors-collecte` on one audit for want of it:
+`trace-flag-3226-not-enabled`, `query-optimizer-hotfixes-disabled`, and the
+question of whether the dynamic statistics-update threshold is in force.
+
+The last one cost a sentence in a report whose main subject was statistics.
+Two thirds of the instance's statistics were past the refresh threshold, and
+the section could not say which threshold applied, because that depends on a
+trace flag as well as on the compatibility level.
+
+The startup parameters are collected and carry any flag set with `-T`, which is
+why this reads as covered when it is not: a flag enabled with `DBCC TRACEON` at
+run time appears nowhere. Those are the ones worth knowing about, since they
+vanish at the next restart without anybody noticing.
+
+What closes it. `DBCC TRACESTATUS(-1)` into a table variable, projected as an
+array of flag number, global status and session status. No permission beyond
+what the collector already requires.
