@@ -79,6 +79,66 @@ plans all along.
   so the plans that answer the question are the ones at the top of the order.
   `truncated` says when the cap bit.
 
+- `10.system/014.cpu-topology.sql` reports the edition's compute ceiling, in
+  six new fields under `processors`: `schedulers_offline`, `affinity_type`,
+  `edition_socket_limit`, `edition_core_limit`, `edition_cap_signature` and
+  `cpus_lost_at_least`. An edition licensed for fewer processors than the
+  machine carries makes every other count in that file read as something it is
+  not, and an analysis layer computing a MAXDOP from `cpu_count` then
+  recommends a degree of parallelism over schedulers that do not exist.
+
+  The signature is a string and it is a veto rather than a verdict. A positive
+  value proves a ceiling; `none_observed` proves nothing, because once a
+  ceiling is applied the instance stops reporting the size of the host it was
+  cut down from, and on one capped instance measured for this change
+  `socket_count` came back as 0. It is a string and not a flag because the
+  actionable part is which of the three readings fired, which a boolean would
+  erase.
+
+  The two ceilings do not look alike, and that is what made the first version
+  of this work wrong. A socket ceiling leaves surplus schedulers in
+  `VISIBLE OFFLINE`, so `scheduler_count` falls below `cpu_count`. A logical
+  processor ceiling applies before SQLOS starts, so `cpu_count` is already the
+  granted number and no scheduler is offline at all; a test on
+  `scheduler_count < cpu_count` never sees it, and `hyperthread_ratio`
+  exceeding `cpu_count` is what gives it away. Both were measured on disposable
+  instances before the table was written.
+
+  The per-edition limits come from two Microsoft pages, and the header names
+  which rows come from which, because they are not one source: the compute
+  capacity limits page carries four editions only, and the Web, Business
+  Intelligence and Express with Advanced Services rows come from older
+  "Editions and supported features" pages. A null limit means the operating
+  system maximum and never "unknown", which is what `unknown_edition` is for.
+  Continuous integration cannot exercise the table, since one instance knows
+  one edition, and the CI file says so rather than implying otherwise.
+
+### Changed
+
+- `10.system/014.cpu-topology.sql` computes `numa.maxdop_guidance` from the
+  nodes rather than from `cpu_count`, and applies the table in force since SQL
+  Server 2016 rather than the one that ended with 2014. This is a change of
+  contract, and the field had no consumer in either repository when it was
+  made.
+
+  Two defects, found in that order. Computing on `cpu_count` recommended a
+  parallelism over processors a capped instance is not allowed to use, which is
+  the whole reason the fields above exist. It is now the smallest
+  `online_scheduler_count` among the non-DAC nodes that carry a scheduler, the
+  minimum and not the maximum because asymmetric nodes of four and eight would
+  otherwise be handed eight, twice what the smaller node can hold.
+
+  Then the cap itself was wrong. Eight is the SQL Server 2008 to 2014 rule. The
+  current table has four rows and turns on the node count as well as the node
+  size, and the sentence that decides how to read it sits under the table:
+  NUMA node there means the soft-NUMA node, not the hardware node. That
+  distinction is this file's own subject, and it is not cosmetic. On the
+  instance this was measured on, reading hardware nodes gives one node of 22
+  and a guidance of 8, while reading SQLOS nodes gives two of 11 and a guidance
+  of 11. `numa.maxdop_guidance_basis` names which of the four rows answered, so
+  a guidance of 8 is never ambiguous between the single-node cap and a node
+  that simply holds eight schedulers.
+
 ## [0.32.0] - 2026-09-20
 
 The archive could say the optimizer asked for an index four thousand times and

@@ -190,6 +190,67 @@ jobs:
           jq -e 'has("side_minutes") and has("before") and has("after")' \
             "$run_dir/80.workload/ci_probe/025.query-store-compare.json"
           jq -e '.config.query_store_compare_at | test("/")' "$run_dir/_run.json"
+          # 014 gained the edition compute ceiling. Its KEY SETS are compared
+          # exactly, like 027 below, and it is .processors and .numa that have
+          # to be compared rather than the document root: the encoder builds an
+          # object out of each dotted alias prefix, so the root's own keys stay
+          # processors, numa, machine and nodes however many fields are added
+          # underneath. An assertion on the root would assert nothing and would
+          # go on passing while a field was dropped.
+          #
+          # What this cannot check is the table of per-edition limits. Both legs
+          # of the matrix are Developer, which has no ceiling, so the signature
+          # is none_observed and both limits are null here. The table is checked
+          # against Microsoft's documentation and against nothing else, because
+          # one instance knows one edition and a matrix of two knows the same
+          # one twice. Saying so is better than an assertion that looks like it
+          # covers the table and does not.
+          #
+          # maxdop_guidance is not compared against a literal, because the
+          # runner's shape decides which of the four rows of Microsoft's table
+          # answers and a literal would have to be revised the day the runners
+          # grow a core. It is recomputed here from the per-node evidence the
+          # same file publishes, which is a second implementation of the rule
+          # written in another language over data the SQL never touched after
+          # projecting it. It also pins the DAC exclusion: removing that line
+          # from the query was measured to turn a guidance of 11 into 1, which
+          # this catches. It does NOT pin the empty-node exclusion, and saying
+          # so is the point of writing this down. Removing that line changes
+          # nothing on an instance where every node carries a scheduler, which
+          # is every instance this matrix will ever run on, so nothing here
+          # guards it and only the header explains why it is there.
+          jq -e '(.processors | keys_unsorted | sort) == (["affinity_type","cores_per_socket",
+                     "cpus_lost_at_least","edition_cap_signature","edition_core_limit",
+                     "edition_socket_limit","hyperthread_ratio","logical","schedulers",
+                     "schedulers_offline","sockets"] | sort)
+                 and (.numa | keys_unsorted | sort) == (["hardware_numa_present",
+                     "maxdop_configured","maxdop_guidance","maxdop_guidance_basis",
+                     "memory_node_count","memory_nodes_reported","scheduler_node_count",
+                     "soft_numa_in_effect","softnuma_configuration",
+                     "softnuma_configuration_desc","sqlos_node_count"] | sort)
+                 and .processors.edition_cap_signature == "none_observed"
+                 and .processors.edition_socket_limit == null
+                 and .processors.edition_core_limit == null
+                 and .processors.cpus_lost_at_least == 0
+                 and .processors.schedulers_offline == 0
+                 and .processors.affinity_type == "AUTO"
+                 and ((.nodes | map(select((.state | test("DAC") | not)
+                                           and .online_schedulers > 0))) as $n
+                      | ($n | length) as $k
+                      | ($n | map(.online_schedulers) | min) as $p
+                      | $k >= 1
+                        and .numa.maxdop_guidance_basis ==
+                              (if   $k == 1 and $p <= 8 then "single_node_le_8"
+                               elif $k == 1             then "single_node_gt_8"
+                               elif $p <= 16            then "multiple_nodes_le_16"
+                               else                          "multiple_nodes_gt_16" end)
+                        and .numa.maxdop_guidance ==
+                              (if   $k == 1 and $p <= 8 then $p
+                               elif $k == 1             then 8
+                               elif $p <= 16            then $p
+                               else [($p / 2 | floor), 16] | min end))' \
+            "$run_dir/10.system/014.cpu-topology.json" \
+            || { jq '.' "$run_dir/10.system/014.cpu-topology.json"; exit 1; }
           # 078 carries the counters no other collector reads: a file that
           # lost whole objects fails the object checks, and one that dropped
           # its zeros, as 075 does on purpose, fails the zero check. Its root
