@@ -133,7 +133,7 @@ go build ./cmd/sql-auditor
 go install github.com/rudi-bruchez/sql-auditor/cmd/sql-auditor@latest
 ```
 
-`@latest` resolves to the highest published tag. Name one, `@v0.32.0`, to get
+`@latest` resolves to the highest published tag. Name one, `@v0.33.0`, to get
 the version this file describes rather than whatever has been tagged since. A
 build made this way carries no attestation: the module proxy hands you source,
 and the binary is compiled on your machine.

@@ -19,6 +19,8 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-09-22
+
 An audit could say which statistics were stale and not which ones were used.
 The engine has no usage DMV for statistics and never has; it does write the
 answer into every execution plan, and the Query Store has been keeping those
