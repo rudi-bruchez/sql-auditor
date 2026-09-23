@@ -61,6 +61,23 @@
 -- source column is what lets the reader tell. It is a fact to record, not a
 -- defect to fix.
 --
+-- WHERE THE ACTIVE TAIL SITS IS A SEPARATE QUESTION FROM HOW MANY VLFS THERE
+-- ARE, and it is the one that says whether the log can be reused from the
+-- start or is pinned at the end of the file. A log with two active VLFs out of
+-- two thousand is healthy if they are the first two and stuck if they are the
+-- last two, and the count alone cannot tell those apart. The position is
+-- therefore published relative to the total: space.vlf_last_active_pct over
+-- the whole log, and vlf_last_active_position per file beside the vlf_count it
+-- is relative to. A bare rank would need the reader to fetch the total before
+-- it meant anything.
+--
+-- THE ORDER COMES FROM THE OFFSET, NOT FROM THE INSERT. A table variable has
+-- no guaranteed insertion order, so @vlf stages the byte offset of each VLF —
+-- vlf_begin_offset from the view, StartOffset from DBCC LOGINFO — and the rank
+-- is computed from it. Both mechanisms report that offset in bytes and neither
+-- rounds it, so the position is exact on either path and the divergence above
+-- does not reach it.
+--
 -- SOURCE, ERROR_NUMBER AND ERROR_MESSAGE ARE IN THE ROOT OBJECT for the same
 -- reason: a reader must never have to infer which mechanism produced a number,
 -- and an analysis comparing two archives must be able to tell "no VLF count
@@ -79,7 +96,8 @@ DECLARE @source varchar(20) = 'none', @err int = 0, @msg nvarchar(2048) = N'';
 /* Staged, then emitted. Both result sets come out of these table variables
    whatever happened above, which is the whole point: a batch that stops inside
    a CATCH would declare two result sets and produce none. */
-DECLARE @vlf TABLE (file_id int, vlf_size_mb decimal(18,3), vlf_active bit);
+DECLARE @vlf TABLE (file_id int, vlf_begin_offset bigint,
+                    vlf_size_mb decimal(18,3), vlf_active bit);
 
 /* RecoveryUnitId leads the eight-column shape. The other columns are staged
    only because INSERT ... EXEC has to match the whole rowset; none of them is
@@ -102,9 +120,9 @@ BEGIN
        a runtime one inside the deferred batch where it can. OBJECT_ID decides,
        but it is not trusted to be the last word. */
     BEGIN TRY
-        INSERT INTO @vlf (file_id, vlf_size_mb, vlf_active)
+        INSERT INTO @vlf (file_id, vlf_begin_offset, vlf_size_mb, vlf_active)
         EXEC sys.sp_executesql
-            N'SELECT li.file_id, li.vlf_size_mb, li.vlf_active
+            N'SELECT li.file_id, li.vlf_begin_offset, li.vlf_size_mb, li.vlf_active
               FROM sys.dm_db_log_info(DB_ID()) AS li OPTION (RECOMPILE, MAXDOP 1)';
         /* A deferred read that returns nothing raises nothing either, and
            this view always has rows for a database it can read: a log has at
@@ -147,16 +165,35 @@ BEGIN
 
     /* Status 2 is an active VLF. FileSize is bytes, hence the division; the
        divisor is written as a decimal so the arithmetic is never integer. */
-    INSERT INTO @vlf (file_id, vlf_size_mb, vlf_active)
-    SELECT d.FileId, d.FileSize / 1048576.0,
+    INSERT INTO @vlf (file_id, vlf_begin_offset, vlf_size_mb, vlf_active)
+    SELECT d.FileId, d.StartOffset, d.FileSize / 1048576.0,
            CASE WHEN d.Status = 2 THEN 1 ELSE 0 END
     FROM @dbcc8 AS d
     UNION ALL
-    SELECT d.FileId, d.FileSize / 1048576.0,
+    SELECT d.FileId, d.StartOffset, d.FileSize / 1048576.0,
            CASE WHEN d.Status = 2 THEN 1 ELSE 0 END
     FROM @dbcc7 AS d
     OPTION (RECOMPILE, MAXDOP 1);
 END
+
+/* Where the active tail sits, as a percentage of the log rather than as a rank.
+   A rank of 1800 says nothing on its own; 1800 out of 1810 says the log cannot
+   wrap and the next write extends the file. The rank itself is published per
+   file below, where the total it is relative to is in the same row. NULL when
+   no VLF is active, which is a real state and not a missing measurement. */
+DECLARE @last_active_pct decimal(5,1);
+
+/* The CASE falls back to 0 rather than to NULL, and NULLIF puts the NULL back
+   afterwards: a rank starts at 1, so 0 cannot collide with a real position, and
+   MAX over a column holding NULLs raises the "null value is eliminated"
+   warning once per database on an instance with ANSI_WARNINGS on. */
+SELECT @last_active_pct = CAST(100.0
+        * NULLIF(MAX(CASE WHEN o.vlf_active = 1 THEN o.pos ELSE 0 END), 0)
+        / NULLIF(COUNT(*), 0) AS decimal(5,1))
+FROM (SELECT v.vlf_active,
+             ROW_NUMBER() OVER (ORDER BY v.file_id, v.vlf_begin_offset) AS pos
+      FROM @vlf AS v) AS o
+OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT
     @source                                                         AS [source],
@@ -176,22 +213,31 @@ SELECT
     CASE WHEN @source = 'none' THEN NULL
          ELSE SUM(CASE WHEN v.vlf_size_mb < 1 THEN 1 ELSE 0 END) END AS [space.vlf_under_1mb_count],
     CASE WHEN @source = 'none' THEN NULL
-         ELSE COUNT(DISTINCT v.file_id) END                         AS [space.log_file_count]
+         ELSE COUNT(DISTINCT v.file_id) END                         AS [space.log_file_count],
+    @last_active_pct                                                AS [space.vlf_last_active_pct]
 FROM @vlf AS v
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* vlf_per_file: one row per transaction log file. The name comes from
    sys.database_files, which both mechanisms can be joined to on file_id, so it
    is fetched once here rather than twice above. */
+WITH ranked AS (
+    SELECT v.file_id, v.vlf_size_mb, v.vlf_active,
+           ROW_NUMBER() OVER (PARTITION BY v.file_id
+                              ORDER BY v.vlf_begin_offset) AS vlf_position
+    FROM @vlf AS v
+)
 SELECT
     v.file_id,
     df.name                                                 AS logical_name,
     COUNT(*)                                                AS vlf_count,
     SUM(CASE WHEN v.vlf_active = 1 THEN 1 ELSE 0 END)       AS vlf_active_count,
+    NULLIF(MAX(CASE WHEN v.vlf_active = 1
+                    THEN v.vlf_position ELSE 0 END), 0)     AS vlf_last_active_position,
     CAST(SUM(v.vlf_size_mb) AS DECIMAL(14,2))               AS vlf_total_mb,
     CAST(MIN(v.vlf_size_mb) AS DECIMAL(14,2))               AS vlf_min_size_mb,
     CAST(MAX(v.vlf_size_mb) AS DECIMAL(14,2))               AS vlf_max_size_mb
-FROM @vlf AS v
+FROM ranked AS v
 LEFT JOIN sys.database_files AS df ON df.file_id = v.file_id
 GROUP BY v.file_id, df.name
 ORDER BY v.file_id
