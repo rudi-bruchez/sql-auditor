@@ -1,5 +1,5 @@
 -- @scope:       instance
--- @resultsets:  root:object, status:object, top_messages:array, by_source:array, notable:array, database_mounts:array, derived_patterns:array, recovery:array
+-- @resultsets:  root:object, status:object, top_messages:array, by_source:array, notable:array, database_mounts:array, derived_patterns:array, recovery:array, vlf_warnings:array
 -- @permissions: CONNECT, ERROR LOG
 -- @timeout:     300
 -- @discloses:   error_log
@@ -315,13 +315,19 @@ FROM @derived;
 
 DECLARE @db_left nvarchar(2048), @db_right nvarchar(2048),
         @sec_left nvarchar(2048), @sec_right nvarchar(2048),
-        @mnt_left nvarchar(2048), @mnt_right nvarchar(2048);
+        @mnt_left nvarchar(2048), @mnt_right nvarchar(2048),
+        @vlf_left nvarchar(2048), @vlf_right nvarchar(2048),
+        @cnt_left nvarchar(2048), @cnt_right nvarchar(2048);
 SELECT @db_left = lit_left, @db_right = lit_right
 FROM @bounds WHERE message_id = 3421 AND ordinal = 1;
 SELECT @sec_left = lit_left, @sec_right = lit_right
 FROM @bounds WHERE message_id = 3421 AND ordinal = 3;
 SELECT @mnt_left = lit_left, @mnt_right = lit_right
 FROM @bounds WHERE message_id = 17137 AND ordinal = 1;
+SELECT @vlf_left = lit_left, @vlf_right = lit_right
+FROM @bounds WHERE message_id = 9017 AND ordinal = 1;
+SELECT @cnt_left = lit_left, @cnt_right = lit_right
+FROM @bounds WHERE message_id = 9017 AND ordinal = 2;
 
 SELECT COUNT(*)                                                   AS [lines],
        MIN(l.LogDate)                                             AS [oldest],
@@ -571,5 +577,53 @@ CROSS APPLY (SELECT s.db_from, s.sec_from,
                       ELSE NULLIF(CHARINDEX(@sec_right, t.line, s.sec_from), 0) END) AS p
 WHERE @p3421 IS NOT NULL
   AND t.line LIKE @p3421 ESCAPE N'\'
+ORDER BY l.LogDate
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* One row per engine warning about virtual log files, with the database it
+   names and the count it reports.
+
+   It exists because derived_patterns says only HOW MANY lines matched 9017,
+   never which database each one is about, and the analysis layer needs the
+   name: 9017 is the engine's own assessment and it is the first of the three
+   criteria that decide whether a transaction log is worth rebuilding. Without
+   this set the only honest answer was to escalate at the level of the whole
+   instance and name every database whose virtual log files were measured,
+   which reports as a finding databases the engine never complained about.
+   That is the same shape of defect as an empty database name on a German
+   mount, a wrong answer standing where there used to be no answer.
+
+   The count is the second parameter, and it is taken as text as well as a
+   number for the reason seconds_text exists on the recovery set: a locale
+   that groups its digits must be visible rather than silently NULL.
+
+   notable cannot serve instead. It carries the raw line, but behind a rarity
+   filter and a two hundred row cap, so an instance that warns about thirty
+   databases at every restart loses exactly the lines that matter most. */
+SELECT l.LogDate                                                   AS [when],
+       CASE WHEN p.db_from > 0 AND p.db_to > p.db_from
+            THEN SUBSTRING(t.line, p.db_from, p.db_to - p.db_from) END
+                                                                   AS [database],
+       TRY_CONVERT(bigint, REPLACE(REPLACE(
+            CASE WHEN p.cnt_from > 0 AND p.cnt_to > p.cnt_from
+                 THEN SUBSTRING(t.line, p.cnt_from, p.cnt_to - p.cnt_from) END,
+            N' ', N''), NCHAR(160), N''))                          AS [vlf_count],
+       CASE WHEN p.cnt_from > 0 AND p.cnt_to > p.cnt_from
+            THEN SUBSTRING(t.line, p.cnt_from, p.cnt_to - p.cnt_from) END
+                                                                   AS [vlf_count_text]
+FROM        #log AS l
+CROSS APPLY (SELECT line = CONVERT(nvarchar(4000), RTRIM(l.Txt)) COLLATE Latin1_General_BIN2) AS t
+CROSS APPLY (SELECT
+        db_from = CASE WHEN DATALENGTH(@vlf_left) = 0 THEN 1
+                       ELSE NULLIF(CHARINDEX(@vlf_left, t.line), 0) + DATALENGTH(@vlf_left) / 2 END,
+        cnt_from = CASE WHEN DATALENGTH(@cnt_left) = 0 THEN 1
+                        ELSE NULLIF(CHARINDEX(@cnt_left, t.line), 0) + DATALENGTH(@cnt_left) / 2 END) AS s
+CROSS APPLY (SELECT s.db_from, s.cnt_from,
+        db_to = CASE WHEN DATALENGTH(@vlf_right) = 0 THEN DATALENGTH(t.line) / 2 + 1
+                     ELSE NULLIF(CHARINDEX(@vlf_right, t.line, s.db_from), 0) END,
+        cnt_to = CASE WHEN DATALENGTH(@cnt_right) = 0 THEN DATALENGTH(t.line) / 2 + 1
+                      ELSE NULLIF(CHARINDEX(@cnt_right, t.line, s.cnt_from), 0) END) AS p
+WHERE @p9017 IS NOT NULL
+  AND t.line LIKE @p9017 ESCAPE N'\'
 ORDER BY l.LogDate
 OPTION (RECOMPILE, MAXDOP 1);
