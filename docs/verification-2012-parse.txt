@@ -1,7 +1,7 @@
 sql-auditor corpus grammar check
 ================================
-Produced    : 2026-09-21T19:30:45Z
-Corpus tree : ec25d8b6f59044d1eff78ce6538dfa7adce97770
+Produced    : 2026-09-23T21:56:13Z
+Corpus tree : 5078788336cda51f486328962160825002a2c104
               (git rev-parse HEAD:queries - this artifact describes that corpus
                and no other; if the two differ, re-run this script)
 ScriptDom   : /home/rudi/.nuget/packages/microsoft.sqlserver.transactsql.scriptdom/180.37.3/lib/net472/Microsoft.SqlServer.TransactSql.ScriptDom.dll
@@ -15,7 +15,7 @@ queries/10.system/020.host-services.sql        TSql130 (SQL Server 2016)    resu
 queries/10.system/021.host-info.sql            TSql110 (SQL Server 2012)    resultsets 1/1  ok
 queries/10.system/025.startup-parameters-2012.sql TSql110 (SQL Server 2012)    resultsets 1/1  ok
 queries/10.system/030.file-io.sql              TSql110 (SQL Server 2012)    resultsets 3/3  ok
-queries/10.system/040.error-log.sql            TSql110 (SQL Server 2012)    resultsets 6/6  ok
+queries/10.system/040.error-log.sql            TSql110 (SQL Server 2012)    resultsets 8/8  ok
 queries/10.system/041.connectivity.sql         TSql110 (SQL Server 2012)    resultsets 4/4  ok
 queries/10.system/042.connection-security.sql  TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/10.system/043.cpu-neighbours.sql       TSql110 (SQL Server 2012)    resultsets 2/2  ok
