@@ -59,7 +59,8 @@
 -- turn one honest measurement into an invented one.
 --
 -- SQL Server 2012 is the floor. compressed_backup_size is 2008+, is_snapshot
--- is 2005+, so both are safe. Not collected for that reason:
+-- is 2005+, and LAG is 2012 itself, so all three are safe and none of them
+-- raises the floor. Not collected for that reason:
 --   backupset.encryptor_type / key_algorithm   (2014+)
 --   backupset.is_memory_optimized_enabled      (2014+)
 
@@ -67,7 +68,16 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-DECLARE @since datetime = DATEADD(day, -30, GETDATE());
+-- One instant, read once. The window starts from it and the gap between the
+-- last backup and now is measured against it, so the two cannot disagree.
+--
+-- GETDATE() AND NOT GETUTCDATE(), AND THIS IS NOT AN OVERSIGHT.
+-- backupset.backup_finish_date is recorded on the instance's local clock.
+-- Subtracting a UTC instant from it yields the offset as a wait nobody waited,
+-- and on a server running in UTC, which is what every test container does, the
+-- two agree and the defect is invisible. Local clock on both sides, always.
+DECLARE @now datetime = GETDATE();
+DECLARE @since datetime = DATEADD(day, -30, @now);
 
 SELECT
     30                                                          AS [window.days],
@@ -91,7 +101,54 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 /* One row per database and backup type. The averages are what a schedule
    review needs: a full backup whose duration has doubled is a finding long
-   before it starts failing. */
+   before it starts failing.
+
+   A GAP IS NOT A DURATION. max_seconds is how long a backup took;
+   max_gap_seconds is how long the database went without one, which is the
+   term a recovery objective is written in. The two read alike and answer
+   different questions, which is why both names say which one they are. The
+   gap needs LAG, and a window function is computed after the grouping and
+   cannot see the preceding row, so the per-row gap is resolved in a CTE and
+   only then aggregated.
+
+   NULL MEANS NO PAIR, NOT NO WAIT. A type with a single backup in the window
+   has nothing to measure against and LAG returns NULL for it. Folding that to
+   zero would read as "never went without", which is the opposite of what was
+   observed.
+
+   THE WINDOW IS APPLIED BEFORE THE GAP, inside the CTE. The first backup
+   inside the window therefore has no predecessor, and an interval straddling
+   the 30-day boundary is not reported rather than reported as if it began
+   inside. Filtering after the gap would make this result set speak about
+   history the collector says it does not read.
+
+   THE LAST BACKUP IS NOT THE END OF THE SERIES, and no LAG can close that
+   edge. A database whose log backups stopped three weeks ago still reports
+   the gaps of what it did before stopping: ten nightly log backups then
+   twenty days of nothing give max_gap_seconds = 86400, which reads as a
+   healthy daily schedule. seconds_since_last is what contradicts it, and a
+   schedule review reads the larger of the two. No judgement is applied to
+   either, as above: which interval is too long is the client's recovery
+   objective and not ours. */
+WITH history AS (
+    SELECT
+        bs.database_name,
+        bs.type,
+        bs.backup_start_date,
+        bs.backup_finish_date,
+        bs.backup_size,
+        bs.compressed_backup_size,
+        bs.is_snapshot,
+        bs.is_copy_only,
+        bs.user_name,
+        bs.recovery_model,
+        DATEDIFF(second,
+                 LAG(bs.backup_finish_date) OVER (PARTITION BY bs.database_name, bs.type
+                                                  ORDER BY bs.backup_finish_date),
+                 bs.backup_finish_date)                         AS gap_seconds
+    FROM msdb.dbo.backupset AS bs
+    WHERE bs.backup_finish_date >= @since
+)
 SELECT
     bs.database_name                                            AS [database],
     CASE bs.type WHEN 'D' THEN 'full'
@@ -109,6 +166,8 @@ SELECT
          AS bigint)                                             AS [avg_seconds],
     MAX(DATEDIFF(second, bs.backup_start_date, bs.backup_finish_date))
                                                                 AS [max_seconds],
+    MAX(bs.gap_seconds)                                         AS [max_gap_seconds],
+    DATEDIFF(second, MAX(bs.backup_finish_date), @now)          AS [seconds_since_last],
     CAST(SUM(bs.backup_size) / 1048576.0 AS DECIMAL(18,1))      AS [total_mb],
     CAST(AVG(bs.backup_size) / 1048576.0 AS DECIMAL(18,1))      AS [avg_mb],
     -- The ratio, not the flag. 1.0 means nothing was compressed; a job that
@@ -129,8 +188,7 @@ SELECT
     -- the model in force now; this says what one of the backups was taken
     -- under.
     MAX(bs.recovery_model)                                      AS [a_recovery_model]
-FROM msdb.dbo.backupset AS bs
-WHERE bs.backup_finish_date >= @since
+FROM history AS bs
 GROUP BY bs.database_name, bs.type
 ORDER BY bs.database_name, bs.type
 OPTION (RECOMPILE, MAXDOP 1);
