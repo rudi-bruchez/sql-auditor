@@ -307,17 +307,21 @@ LEFT JOIN @bounds AS b ON b.message_id = w.message_id AND b.ordinal = 1;
    3421. Parameter 3 of 3421 is the elapsed seconds in every language: the
    localised templates number their parameters explicitly, and the English one
    has them in that order. */
-DECLARE @p9017 nvarchar(4000), @p3421 nvarchar(4000);
-SELECT @p9017 = MAX(CASE WHEN message_id = 9017 THEN pattern END),
-       @p3421 = MAX(CASE WHEN message_id = 3421 THEN pattern END)
+DECLARE @p9017 nvarchar(4000), @p3421 nvarchar(4000), @p17137 nvarchar(4000);
+SELECT @p9017  = MAX(CASE WHEN message_id = 9017  THEN pattern END),
+       @p3421  = MAX(CASE WHEN message_id = 3421  THEN pattern END),
+       @p17137 = MAX(CASE WHEN message_id = 17137 THEN pattern END)
 FROM @derived;
 
 DECLARE @db_left nvarchar(2048), @db_right nvarchar(2048),
-        @sec_left nvarchar(2048), @sec_right nvarchar(2048);
+        @sec_left nvarchar(2048), @sec_right nvarchar(2048),
+        @mnt_left nvarchar(2048), @mnt_right nvarchar(2048);
 SELECT @db_left = lit_left, @db_right = lit_right
 FROM @bounds WHERE message_id = 3421 AND ordinal = 1;
 SELECT @sec_left = lit_left, @sec_right = lit_right
 FROM @bounds WHERE message_id = 3421 AND ordinal = 3;
+SELECT @mnt_left = lit_left, @mnt_right = lit_right
+FROM @bounds WHERE message_id = 17137 AND ordinal = 1;
 
 SELECT COUNT(*)                                                   AS [lines],
        MIN(l.LogDate)                                             AS [oldest],
@@ -450,33 +454,45 @@ OPTION (RECOMPILE, MAXDOP 1);
 
    La fenêtre est celle du journal d'erreurs lui-même, qui est recyclé : une base
    absente d'ici n'a pas forcément échappé à un montage, elle peut simplement
-   avoir été montée avant le plus ancien fichier conservé. first_seen le dit. */
-SELECT
-       LTRIM(RTRIM(REPLACE(REPLACE(
-           SUBSTRING(RTRIM(l.Txt),
-                     CHARINDEX('''', RTRIM(l.Txt)) + 1,
-                     CASE WHEN CHARINDEX('''', RTRIM(l.Txt),
-                                         CHARINDEX('''', RTRIM(l.Txt)) + 1) > 0
-                          THEN CHARINDEX('''', RTRIM(l.Txt),
-                                         CHARINDEX('''', RTRIM(l.Txt)) + 1)
-                               - CHARINDEX('''', RTRIM(l.Txt)) - 1
-                          ELSE 0 END),
-           CHAR(13), ''), CHAR(10), '')))                          AS [database],
+   avoir été montée avant le plus ancien fichier conservé. first_seen le dit.
+
+   Both halves of this set go through the derivation of 17137, and they have to
+   go together. The filter was LIKE 'Starting up database %' and the extraction
+   took whatever sat between the first two apostrophes, which is a second
+   English parser hidden inside a set whose filter was already one. Applying
+   that extraction verbatim to the twenty-two templates of 17137 returns an
+   EMPTY name in nine languages: cs, de, fi, hu, nl, no, pl, ru and sv. Five
+   quote nothing at all, Hungarian and Polish use typographic quotes, Russian
+   uses double quotes, and the Dutch template carries a single orphan
+   apostrophe, De database %1! opstarten'. Repairing the filter alone would
+   therefore fold every database of a German instance into one row with an
+   empty name, which is a wrong answer where there used to be no answer at all.
+
+   So the delimiters published by derived_patterns replace the apostrophes, the
+   same way the recovery set below uses them for 3421. The left literal is empty
+   in German, where the template is %1!-Datenbank wird gestartet and opens on
+   its parameter, and an empty left literal means "from the first character"
+   rather than "not found". Grouping is on the extracted NAME, so a row of this
+   set means the same thing in every language. */
+SELECT n.dbname                                                    AS [database],
        COUNT(*)                                                    AS [mounts],
        MIN(l.LogDate)                                              AS [first_seen],
        MAX(l.LogDate)                                              AS [last_seen]
-FROM #log AS l
-WHERE l.Txt LIKE 'Starting up database %'
-GROUP BY LTRIM(RTRIM(REPLACE(REPLACE(
-           SUBSTRING(RTRIM(l.Txt),
-                     CHARINDEX('''', RTRIM(l.Txt)) + 1,
-                     CASE WHEN CHARINDEX('''', RTRIM(l.Txt),
-                                         CHARINDEX('''', RTRIM(l.Txt)) + 1) > 0
-                          THEN CHARINDEX('''', RTRIM(l.Txt),
-                                         CHARINDEX('''', RTRIM(l.Txt)) + 1)
-                               - CHARINDEX('''', RTRIM(l.Txt)) - 1
-                          ELSE 0 END),
-           CHAR(13), ''), CHAR(10), '')))
+FROM        #log AS l
+CROSS APPLY (SELECT line = CONVERT(nvarchar(4000), RTRIM(l.Txt)) COLLATE Latin1_General_BIN2) AS t
+CROSS APPLY (SELECT
+        db_from = CASE WHEN DATALENGTH(@mnt_left) = 0 THEN 1
+                       ELSE NULLIF(CHARINDEX(@mnt_left, t.line), 0) + DATALENGTH(@mnt_left) / 2 END) AS s
+CROSS APPLY (SELECT s.db_from,
+        db_to = CASE WHEN DATALENGTH(@mnt_right) = 0 THEN DATALENGTH(t.line) / 2 + 1
+                     ELSE NULLIF(CHARINDEX(@mnt_right, t.line, s.db_from), 0) END) AS p
+CROSS APPLY (SELECT dbname = LTRIM(RTRIM(REPLACE(REPLACE(
+        CASE WHEN p.db_from > 0 AND p.db_to > p.db_from
+             THEN SUBSTRING(t.line, p.db_from, p.db_to - p.db_from) END,
+        NCHAR(13), N''), NCHAR(10), N'')))) AS n
+WHERE @p17137 IS NOT NULL
+  AND t.line LIKE @p17137 ESCAPE N'\'
+GROUP BY n.dbname
 ORDER BY MAX(l.LogDate) DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
