@@ -19,6 +19,105 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-09-24
+
+The error log is localised, and this repository has said so in a comment since
+the collector was written. Underneath that comment sat twelve hand-written
+English `LIKE` patterns, which is exactly the parser the comment warns against.
+Two of the messages they were meant to catch carry a decision rather than a
+hint, so those two are now derived from their message number instead of typed
+out, and the three collectors that decide whether a transaction log is healthy
+gained the fields that separate a log that works from a log that is stuck.
+
+### Added
+
+- `10.system/040.error-log.sql` derives the pattern for a message from its
+  NUMBER, in the language the instance actually logs in. The template comes out
+  of `sys.messages`, it is split on a grammar of parameter markers rather than
+  on a list of them, and the pattern is the longest literal piece that matches
+  this message and no other in that language's catalog. Eight things had to be
+  right and each is recorded in the file with the measurement behind it. Three
+  of them fail silently rather than loudly, so each was verified by breaking it
+  in a language where it can fall: without the binary collation the French
+  fragment of 17137 goes from unique to four matches, without the `ESCAPE`
+  clause the Dutch fragment of 3421 stops matching a line that literally
+  contains it, and with an enumerated marker list instead of the grammar the
+  retained fragment of 15457 keeps a percent sign and then matches zero lines
+  of a real log.
+
+  Two result sets come with it. `derived_patterns` publishes what the
+  derivation decided for each number, including the reason when it decided
+  nothing, so a message that could not be resolved stays distinguishable from a
+  message that did not occur. It also carries the two literals that delimit the
+  first parameter and their positions, because a unique fragment is enough to
+  find a message and not enough to pull a name out of it; the left literal is
+  legitimately empty in German, where 17137 opens on its parameter. `recovery`
+  publishes one row per recovery with the elapsed seconds as a number, because
+  that number arrives inside a localised sentence and parsing it downstream
+  would mean one regular expression per language.
+
+  Measured on the full English catalog while building it: `FORMATMESSAGE`
+  returns NULL, without raising, for every `message_id` below 13001, which is
+  the user-definable boundary. It renders all 10 384 messages at or above it
+  and none of the 6 366 below. That is worth knowing before spending an
+  afternoon on argument arity.
+
+- `20.databases/023.log-vlf.sql` reports where the active tail of the log sits.
+  The count alone cannot tell a healthy log from a blocked one: two active VLFs
+  out of two thousand are nothing if they are the first two and are a log that
+  can no longer wrap if they are the last two. The position was not computable
+  as the file stood, because the staging table held the size and the active
+  flag but no ordering key and a table variable has no guaranteed insertion
+  order. Both mechanisms already report a byte offset, `vlf_begin_offset` from
+  the view and `StartOffset` from `DBCC LOGINFO`, so the rank now comes from
+  that. The root carries `space.vlf_last_active_pct` over the whole log and
+  `vlf_per_file` carries the rank beside the count it is relative to.
+
+  Both `DBCC LOGINFO` shapes were exercised on a 2025 instance by forcing the
+  branch, which the design had assumed impossible there, and the eight-column
+  shape is what 2025 returns. What that does not prove, and the file says so,
+  is the behaviour on the versions the branch exists for.
+
+- `60.backup/010.history.sql` reports the maximum interval between two
+  consecutive backups per database and per type, and the interval between the
+  last backup and the collection. The existing `max_seconds` is the duration of
+  one backup, which is a different question, and the `recent` set cannot answer
+  this one because its cap is global to the instance. `LAG` returns NULL on the
+  first row of a partition, which gives the contract for "no pair" for free and
+  is published as NULL rather than covered by a zero. The right edge is
+  projected rather than left to inference: without it the set would report a
+  24 hour maximum gap for a database whose log backups stopped three weeks ago,
+  which is the failure this collector exists to reveal.
+
+- `vlf_warnings` in `10.system/040.error-log.sql` names the database each 9017
+  line is about, and the count it reports. `derived_patterns` says how many
+  lines matched a number and never which database any of them names, so the
+  analysis layer had nothing to attribute the engine's own warning to and could
+  only escalate at the level of the whole instance, reporting as a finding every
+  database whose virtual log files had been measured. The delimiters were
+  already published for every parameter of every derived number, so this is the
+  same gesture the recovery set makes for the elapsed seconds of 3421.
+
+### Changed
+
+- `database_mounts` in `10.system/040.error-log.sql` now extracts the database
+  name through the derived delimiters rather than from the first two
+  apostrophes of the line. Fixing only the filter would have been worse than
+  fixing neither: applying the old extraction to the twenty-two templates of
+  17137 returns an empty name in nine languages, five of which quote nothing at
+  all, so on a German instance every database would have been found and every
+  one of them folded into a single row named with the empty string. All
+  twenty-two catalog languages now return the right names and counts, and the
+  set is unchanged row for row against a real English log.
+
+### Fixed
+
+- `tools/verify-corpus-grammar.ps1` read `INTO` off the wrong node of the parse
+  tree, so the exclusion that keeps `SELECT ... INTO` out of the result-set
+  count had never fired. Nothing showed because no collector in the corpus
+  writes that form, which means the comment above it described behaviour the
+  script did not have. The fix is a no-op on the corpus as it stands.
+
 ## [0.33.0] - 2026-09-22
 
 An audit could say which statistics were stale and not which ones were used.
