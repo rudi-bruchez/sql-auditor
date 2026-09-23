@@ -164,9 +164,15 @@ foreach ($f in $files) {
         foreach ($batch in $fragment.Batches) {
             foreach ($st in $batch.Statements) {
                 if ($st -isnot [Microsoft.SqlServer.TransactSql.ScriptDom.SelectStatement]) { continue }
+                # INTO hangs off the SelectStatement, not off the QuerySpecification
+                # underneath it. The first version read $spec.Into, which is always
+                # null, so the exclusion below it never fired; nothing showed because
+                # no file in the corpus used SELECT ... INTO. Measured on ScriptDom
+                # 180.37.3, 23 September 2026: for "SELECT 1 AS a INTO #t FROM ..."
+                # the statement's Into is set and the specification's is not.
+                if ($st.Into) { continue }
                 $spec = $st.QueryExpression -as [Microsoft.SqlServer.TransactSql.ScriptDom.QuerySpecification]
                 if ($spec) {
-                    if ($spec.Into) { continue }
                     $assignments = @($spec.SelectElements | Where-Object {
                         $_ -is [Microsoft.SqlServer.TransactSql.ScriptDom.SelectSetVariable]
                     })
