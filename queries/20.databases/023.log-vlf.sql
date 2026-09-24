@@ -61,15 +61,18 @@
 -- source column is what lets the reader tell. It is a fact to record, not a
 -- defect to fix.
 --
--- WHERE THE ACTIVE TAIL SITS IS A SEPARATE QUESTION FROM HOW MANY VLFS THERE
--- ARE, and it is the one that says whether the log can be reused from the
--- start or is pinned at the end of the file. A log with two active VLFs out of
--- two thousand is healthy if they are the first two and stuck if they are the
--- last two, and the count alone cannot tell those apart. The position is
--- therefore published relative to the total: space.vlf_last_active_pct over
--- the whole log, and vlf_last_active_position per file beside the vlf_count it
--- is relative to. A bare rank would need the reader to fetch the total before
--- it meant anything.
+-- WHERE THE ACTIVE REGION SITS IS A SEPARATE QUESTION FROM HOW MANY VLFS THERE
+-- ARE, and it takes both of its ends to answer. The log is a ring: reuse runs
+-- off the last VLF and back onto the first, and it may do so the moment the
+-- VLFs at the start are inactive. So two active VLFs out of two thousand are
+-- healthy whether they are the first two or the last two. What is not healthy
+-- is the active region spanning the whole ring, the first VLF still active
+-- while the tail has reached the end, because then reuse has nowhere to return
+-- to and the next write grows the file. The positions are published relative to
+-- the total: space.vlf_first_active_pct and space.vlf_last_active_pct over the
+-- whole log, and vlf_last_active_position per file beside the vlf_count it is
+-- relative to. A bare rank would need the reader to fetch the total before it
+-- meant anything.
 --
 -- THE ORDER COMES FROM THE OFFSET, NOT FROM THE INSERT. A table variable has
 -- no guaranteed insertion order, so @vlf stages the byte offset of each VLF —
@@ -176,19 +179,38 @@ BEGIN
     OPTION (RECOMPILE, MAXDOP 1);
 END
 
-/* Where the active tail sits, as a percentage of the log rather than as a rank.
-   A rank of 1800 says nothing on its own; 1800 out of 1810 says the log cannot
-   wrap and the next write extends the file. The rank itself is published per
-   file below, where the total it is relative to is in the same row. NULL when
-   no VLF is active, which is a real state and not a missing measurement. */
-DECLARE @last_active_pct decimal(5,1);
+/* Where the active region begins and where it ends, as percentages of the log
+   rather than as ranks. Both ends are published because the end alone answers
+   nothing.
 
-/* The CASE falls back to 0 rather than to NULL, and NULLIF puts the NULL back
-   afterwards: a rank starts at 1, so 0 cannot collide with a real position, and
-   MAX over a column holding NULLs raises the "null value is eliminated"
-   warning once per database on an instance with ANSI_WARNINGS on. */
+   THE LOG IS CIRCULAR, SO A TAIL AT THE END IS NOT A LOG THAT CANNOT WRAP.
+   Reuse walks off the end of the last VLF and back to the first, and it is
+   allowed to do so as soon as the VLFs at the start are inactive. An active
+   region sitting at 99% of the file is therefore the ordinary state of a
+   healthy log partway through its cycle, not a diagnosis. This comment used to
+   say the opposite, and it would have turned a normal log into a finding.
+
+   What says a log cannot wrap is the other end: the first physical VLF still
+   active, so that reuse has nowhere to go and the next write has to grow the
+   file. vlf_first_active_pct near 0 with vlf_last_active_pct near 100 is the
+   pinned log, and it is the pair that identifies it. Either one on its own is
+   half a sentence.
+
+   NULL when no VLF is active, which is a real state and not a missing
+   measurement. The ranks themselves are published per file below, where the
+   total they are relative to is in the same row. */
+DECLARE @last_active_pct decimal(5,1), @first_active_pct decimal(5,1);
+
+/* Each CASE falls back to a sentinel rather than to NULL, and NULLIF puts the
+   NULL back afterwards: a rank starts at 1 and cannot reach 2147483647, so
+   neither sentinel can collide with a real position, and MAX or MIN over a
+   column holding NULLs raises the "null value is eliminated" warning once per
+   database on an instance with ANSI_WARNINGS on. */
 SELECT @last_active_pct = CAST(100.0
         * NULLIF(MAX(CASE WHEN o.vlf_active = 1 THEN o.pos ELSE 0 END), 0)
+        / NULLIF(COUNT(*), 0) AS decimal(5,1)),
+       @first_active_pct = CAST(100.0
+        * NULLIF(MIN(CASE WHEN o.vlf_active = 1 THEN o.pos ELSE 2147483647 END), 2147483647)
         / NULLIF(COUNT(*), 0) AS decimal(5,1))
 FROM (SELECT v.vlf_active,
              ROW_NUMBER() OVER (ORDER BY v.file_id, v.vlf_begin_offset) AS pos
@@ -214,6 +236,7 @@ SELECT
          ELSE SUM(CASE WHEN v.vlf_size_mb < 1 THEN 1 ELSE 0 END) END AS [space.vlf_under_1mb_count],
     CASE WHEN @source = 'none' THEN NULL
          ELSE COUNT(DISTINCT v.file_id) END                         AS [space.log_file_count],
+    @first_active_pct                                               AS [space.vlf_first_active_pct],
     @last_active_pct                                                AS [space.vlf_last_active_pct]
 FROM @vlf AS v
 OPTION (RECOMPILE, MAXDOP 1);
