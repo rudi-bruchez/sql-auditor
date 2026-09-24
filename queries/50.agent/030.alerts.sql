@@ -83,14 +83,29 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_
          WHERE a.enabled = 1 AND a.severity BETWEEN 19 AND 25)     AS [coverage.severities_19_to_25],
        7                                                          AS [coverage.severities_expected],
        /* The three I/O errors that mean a page could not be read, could not be
-          read consistently, or was read with a checksum failure. They are
-          message ids rather than severities, so a severity alert does not
-          cover them and an instance can be fully covered on 19 to 25 and still
-          silent on corruption. */
+          read consistently, or was read with a checksum failure. */
        (SELECT COUNT(DISTINCT a.message_id)
           FROM msdb.dbo.sysalerts AS a
          WHERE a.enabled = 1 AND a.message_id IN (823, 824, 825))  AS [coverage.io_error_alerts],
-       3                                                          AS [coverage.io_errors_expected],
+       /* Only one of the three needs an alert of its own, and this says whether
+          it has one. 823 and 824 are severity 24, so the severity alerts
+          counted above already fire on them; an instance covered on 19 to 25 is
+          covered on those two, and a separate message alert for them is
+          duplication rather than a gap. 825 is severity 10, an informational
+          "read retry succeeded" that no severity alert will ever reach, and it
+          is the one worth alerting on because it is the warning that arrives
+          before the failure. Read alongside coverage.severities_19_to_25:
+          missing severities and a missing 825 are two different findings with
+          two different remedies.
+
+          Measured on SQL Server 2025, sys.messages for language_id 1033: 823
+          severity 24, 824 severity 24, 825 severity 10. The count that used to
+          sit here expected all three to have message alerts, which scored an
+          instance that alerts on 825 plus severities 19 to 25, the usual
+          recommendation, at one out of three. */
+       (SELECT CASE WHEN EXISTS (SELECT 1 FROM msdb.dbo.sysalerts AS a
+                                  WHERE a.enabled = 1 AND a.message_id = 825)
+                    THEN 1 ELSE 0 END)                             AS [coverage.alert_on_825],
        (SELECT CONVERT(int, COUNT(*)) FROM msdb.dbo.sysoperators AS o
          WHERE o.enabled = 1
            AND (NULLIF(LTRIM(RTRIM(ISNULL(o.email_address, ''))), '') IS NOT NULL
