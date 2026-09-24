@@ -31,6 +31,30 @@ SELECT
     si.sqlserver_start_time                                         AS [instance.sqlserver_start_time],
     DATEDIFF(HOUR, si.sqlserver_start_time, SYSDATETIME()) / 24     AS [instance.uptime_days],
     DATEDIFF(HOUR, si.sqlserver_start_time, SYSDATETIME()) % 24     AS [instance.uptime_hours],
+    /* When the operating system came up, and how long SQL Server waited
+       after it. The pair separates two events that every uptime figure in
+       this archive collapses into one: a machine that rebooted, and a
+       service that was bounced on a machine that did not. Both reset the
+       counters an audit reads, and they call for different questions. A gap
+       of seconds is a service starting with its host; a gap of days is
+       somebody restarting SQL Server on a machine that had been up, which is
+       worth asking about before concluding anything from a cold cache, an
+       empty plan cache or a wait-stats window.
+
+       ms_ticks is the tick count since the OS started, so the boot time is
+       derived rather than read, in two steps to keep the arithmetic inside
+       int. Its meaning is the HOST's on a containerised instance, not a
+       virtual machine's: measured on this corpus, an instance restarted
+       minutes ago reported a boot 37.7 hours earlier, which is when the
+       container host came up. That is the honest reading of the number and
+       not a defect, but it is why the column is named for the operating
+       system rather than for the machine. */
+    DATEADD(ms, -(si.ms_ticks % 86400000),
+        DATEADD(day, -(si.ms_ticks / 86400000), SYSDATETIME()))     AS [instance.os_start_time],
+    DATEDIFF(second,
+        DATEADD(ms, -(si.ms_ticks % 86400000),
+            DATEADD(day, -(si.ms_ticks / 86400000), SYSDATETIME())),
+        si.sqlserver_start_time)                                    AS [instance.seconds_from_os_start_to_sqlserver_start],
 
     /* ───────── system / topology ───────── */
     si.cpu_count                                                    AS [system.logical_cpus],

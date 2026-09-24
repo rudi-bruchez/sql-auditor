@@ -78,7 +78,19 @@ SELECT SYSDATETIME()                                              AS [collected_
        @major                                                     AS [edition.major_version],
        @cap_mb                                                    AS [edition.buffer_pool_cap_mb],
        CONVERT(bigint, si.physical_memory_kb / 1024)              AS [machine.physical_memory_mb],
-       DATEDIFF(SECOND, si.sqlserver_start_time, SYSDATETIME())   AS [machine.uptime_seconds],
+       /* Named for what it measures. This is how long SQL SERVER has been
+          up, not the machine, and it sat under machine.uptime_seconds beside
+          machine.physical_memory_mb, where a reader had every reason to take
+          it for the host's. The distinction is the whole point here: a
+          buffer pool is cold because the service restarted, whether or not
+          the machine did, and only the second number tells the two apart.
+          Renamed rather than kept for compatibility because nothing in
+          either repository read the old name. */
+       DATEDIFF(SECOND, si.sqlserver_start_time, SYSDATETIME())   AS [machine.sqlserver_uptime_seconds],
+       DATEDIFF(SECOND,
+           DATEADD(ms, -(si.ms_ticks % 86400000),
+               DATEADD(day, -(si.ms_ticks / 86400000), SYSDATETIME())),
+           SYSDATETIME())                                         AS [machine.os_uptime_seconds],
        (SELECT CONVERT(bigint, value_in_use) FROM sys.configurations
          WHERE name = 'max server memory (MB)')                   AS [config.max_server_memory_mb],
        (SELECT CONVERT(bigint, value_in_use) FROM sys.configurations
