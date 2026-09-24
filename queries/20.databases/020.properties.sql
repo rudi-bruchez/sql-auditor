@@ -210,9 +210,19 @@ BEGIN TRY
            @last_differential =
              (SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset
                WHERE database_name = DB_NAME() AND type = 'I'),
+           /* is_copy_only is excluded here and not from the full above. A
+              copy-only log backup never truncates the log and the regular log
+              backups behave as if it did not exist, so it is not a link in the
+              chain this date is read as. A copy-only full restores like any
+              other full, and estates protected only by VSS or SAN tools have
+              nothing else; excluding it would report them as never backed up.
+              The differential needs no clause: COPY_ONLY is ignored when
+              DIFFERENTIAL is specified. 20.databases/010.all-databases carries
+              the same rule, and 60.backup/010.history the unfiltered counts. */
            @last_log =
              (SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset
-               WHERE database_name = DB_NAME() AND type = 'L')
+               WHERE database_name = DB_NAME() AND type = 'L'
+                 AND is_copy_only = 0)
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH

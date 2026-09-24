@@ -103,10 +103,26 @@ OUTER APPLY (
     WHERE mf.database_id = d.database_id AND mf.type = 1
 ) AS ls
 OUTER APPLY (
+    -- COPY_ONLY IS EXCLUDED FROM THE LOG AND NOT FROM THE FULL, AND THE
+    -- ASYMMETRY IS THE POINT. A copy-only log backup never truncates the log
+    -- and the other log backups behave as if it did not exist, so it is not a
+    -- link in any chain: counting it here would let a database whose log grows
+    -- without bound report a log backup minutes old, next to the
+    -- log_reuse_wait_desc that says LOG_BACKUP. A copy-only full, on the other
+    -- hand, restores exactly like any other full, and whole estates are
+    -- protected by VSS and SAN tools that take nothing else. Excluding it would
+    -- report those databases as never backed up, which is the more expensive
+    -- error of the two. The differential needs no clause at all: COPY_ONLY is
+    -- ignored when DIFFERENTIAL is specified, so no row can be both.
+    --
+    -- What is lost here is the count of copy-only backups, and it is not lost
+    -- from the archive: 60.backup/010.history projects copy_only_count per
+    -- database and per type, unfiltered.
     SELECT
         MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END) AS last_full,
         MAX(CASE WHEN bs.type = 'I' THEN bs.backup_finish_date END) AS last_diff,
-        MAX(CASE WHEN bs.type = 'L' THEN bs.backup_finish_date END) AS last_log
+        MAX(CASE WHEN bs.type = 'L' AND bs.is_copy_only = 0
+                 THEN bs.backup_finish_date END)                    AS last_log
     FROM msdb.dbo.backupset AS bs
     WHERE bs.database_name = d.name
 ) AS bk
