@@ -219,8 +219,18 @@ SELECT
     (SELECT cntr_value FROM sys.dm_os_performance_counters
       WHERE counter_name = 'Page life expectancy'
         AND object_name LIKE '%Buffer Manager%')                    AS [memory.ple_global_measured_sec],
-    (SELECT CAST( (CAST(value_in_use AS BIGINT) / 1024.0) / 4.0 * 300 AS INT)
-       FROM sys.configurations WHERE name = 'max server memory (MB)') AS [memory.ple_empirical_target_sec]
+    /* The rule of thumb of 300 seconds per 4 GB, applied to the cache that
+       exists. It used to be applied to max server memory, and that is wrong in
+       the one case that matters: max server memory is 2147483647 by default,
+       so an instance nobody has configured got a target of 157286399 seconds,
+       just short of five years, against which every real reading is a failure.
+       Measured on a default SQL Server 2025 instance. 015.buffer-pool computes
+       the same figure from the same clerk; it is restated here so the target
+       sits beside the measurement it is compared to. */
+    (SELECT CONVERT(int, 300.0 *
+              ((SELECT SUM(pages_kb) / 1024.0 FROM sys.dm_os_memory_clerks
+                 WHERE type = 'MEMORYCLERK_SQLBUFFERPOOL') / 4096.0)))
+                                                                    AS [memory.ple_empirical_target_sec]
 FROM        sys.dm_os_sys_info       AS si
 CROSS JOIN  sys.dm_os_process_memory AS pm
 CROSS JOIN  sys.dm_os_sys_memory     AS sm
