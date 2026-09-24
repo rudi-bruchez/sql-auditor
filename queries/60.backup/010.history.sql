@@ -76,6 +76,12 @@ SET LOCK_TIMEOUT 10000;
 -- Subtracting a UTC instant from it yields the offset as a wait nobody waited,
 -- and on a server running in UTC, which is what every test container does, the
 -- two agree and the defect is invisible. Local clock on both sides, always.
+--
+-- The residual, stated rather than fixed: a gap that spans a daylight-saving
+-- transition is off by the offset, because local time is what msdb recorded and
+-- local time is not monotonic. It costs an hour twice a year on a measure whose
+-- findings are counted in days, and there is no better source. Converting would
+-- trade a known hour for the unknown offset above.
 DECLARE @now datetime = GETDATE();
 DECLARE @since datetime = DATEADD(day, -30, @now);
 
@@ -187,7 +193,16 @@ SELECT
     -- alphabetically last rather than the current one. sys.databases holds
     -- the model in force now; this says what one of the backups was taken
     -- under.
-    MAX(bs.recovery_model)                                      AS [a_recovery_model]
+    MAX(bs.recovery_model)                                      AS [a_recovery_model],
+    -- Which is why the count sits beside it. The three models sort
+    -- BULK_LOGGED, FULL, SIMPLE, so a database switched to BULK_LOGGED for a
+    -- nightly load and switched back leaves a_recovery_model reading FULL and
+    -- the excursion invisible. Anything above 1 here says the model moved
+    -- inside the window, which is the fact worth having: under BULK_LOGGED a
+    -- log backup cannot serve a point-in-time restore into the interval it
+    -- covers, so a window that contains a switch contains a hole in the
+    -- recovery story that the dates alone do not show.
+    COUNT(DISTINCT bs.recovery_model)                           AS [distinct_recovery_models]
 FROM history AS bs
 GROUP BY bs.database_name, bs.type
 ORDER BY bs.database_name, bs.type
