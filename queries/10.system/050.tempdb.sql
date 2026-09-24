@@ -50,6 +50,30 @@ FROM sys.dm_os_schedulers
 WHERE status = 'VISIBLE ONLINE' AND scheduler_id < 1048576
 OPTION (RECOMPILE, MAXDOP 1);
 
+/* Whether a growth event extends every file of the filegroup or just the one
+   that filled. It is the setting that decides whether eight equally sized
+   tempdb files STAY equally sized, and the per-file rows below cannot say it:
+   they report the size and the growth each file has, which is the past, while
+   this is what the engine will do at the next growth. Read them together and
+   a file set that has drifted apart is either a history to explain or a
+   setting to change; read the sizes alone and the two are indistinguishable.
+   It is the filegroup-scoped equivalent of trace flag 1117, which is why the
+   flag is captured above and this beside it.
+
+   is_autogrow_all_files arrived in SQL Server 2016, below this file's 2012
+   floor, so it is asked for by existence rather than by build number and read
+   through sp_executesql: a column that does not exist is a compile-time error
+   where a TRY at this level cannot catch it, and a runtime one inside the
+   deferred batch where it could. The same reasoning and the same shape are in
+   20.databases/023.log-vlf.sql. Below 2016 the column below is NULL, which is
+   "not knowable on this build" and not "off". */
+DECLARE @fg_all_files TABLE (data_space_id int PRIMARY KEY, is_autogrow_all_files bit);
+IF COL_LENGTH('sys.filegroups', 'is_autogrow_all_files') IS NOT NULL
+    INSERT INTO @fg_all_files (data_space_id, is_autogrow_all_files)
+    EXEC sys.sp_executesql
+        N'SELECT fg.data_space_id, CAST(fg.is_autogrow_all_files AS bit)
+          FROM sys.filegroups AS fg OPTION (RECOMPILE, MAXDOP 1)';
+
 SELECT
     /* ───────── instance context ───────── */
     CONVERT(sysname,       SERVERPROPERTY('ServerName'))            AS [instance.instance_name],
@@ -146,11 +170,16 @@ SELECT
     CAST(mf.is_percent_growth AS BIT)                       AS percent_growth,
     CASE WHEN mf.is_percent_growth = 1 THEN CONCAT(mf.growth, ' %')
          ELSE CONCAT(CAST(CAST(mf.growth AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)), ' MB') END AS growth,
+    -- NULL on a log file, which belongs to no filegroup, and NULL below
+    -- SQL Server 2016, where the setting does not exist. Both are the answer
+    -- rather than a gap, and neither reads as "off".
+    ag.is_autogrow_all_files                                AS autogrow_all_files,
     vs.volume_mount_point                                   AS volume,
     CAST(vs.total_bytes     / 1073741824.0 AS DECIMAL(14,1)) AS volume_total_gb,
     CAST(vs.available_bytes / 1073741824.0 AS DECIMAL(14,1)) AS volume_free_gb
 FROM sys.master_files AS mf
 LEFT JOIN sys.database_files AS df ON df.file_id = mf.file_id
+LEFT JOIN @fg_all_files AS ag ON ag.data_space_id = mf.data_space_id
 OUTER APPLY sys.dm_os_volume_stats(2, mf.file_id) AS vs
 WHERE mf.database_id = 2
 ORDER BY mf.type, mf.file_id

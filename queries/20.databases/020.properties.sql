@@ -85,7 +85,33 @@ DECLARE @files TABLE (
     [max_mb]         varchar(20),
     [percent_growth] bit,
     [is_sparse]      bit,
-    [growth]         nvarchar(4000));
+    [growth]         nvarchar(4000),
+    [autogrow_all_files] bit NULL);
+
+/* Whether a growth event extends every file of the filegroup or just the one
+   that filled. The per-file rows report the size and the growth each file
+   HAS, which is the past; this is what the engine will do at the next growth,
+   and without it a filegroup whose files have drifted apart is a history to
+   explain and a setting to change at the same time, with no way to tell which.
+   It also decides where the room goes: the offline simulation that reserves
+   per filegroup has to know whether the space it needs will land in the file
+   it measured or be spread across all of them.
+
+   is_autogrow_all_files arrived in SQL Server 2016, below this file's 2012
+   floor, so it is asked for by existence rather than by build number and read
+   through sp_executesql: a column that does not exist is a compile-time error
+   where a TRY at this level cannot catch it, and a runtime one inside the
+   deferred batch where it could. Measured: wrapping a reference to an absent
+   column in TRY/CATCH does not catch it, it stops the batch with Msg 207 and
+   the statement after the CATCH never runs. Same shape as
+   20.databases/023.log-vlf.sql. Below 2016 the column is NULL, which is "not
+   knowable on this build" and not "off". */
+DECLARE @fg_all_files TABLE (data_space_id int PRIMARY KEY, is_autogrow_all_files bit);
+IF COL_LENGTH('sys.filegroups', 'is_autogrow_all_files') IS NOT NULL
+    INSERT INTO @fg_all_files (data_space_id, is_autogrow_all_files)
+    EXEC sys.sp_executesql
+        N'SELECT fg.data_space_id, CAST(fg.is_autogrow_all_files AS bit)
+          FROM sys.filegroups AS fg OPTION (RECOMPILE, MAXDOP 1)';
 
 /* reserved_pages is buffered although it is never emitted: the ranking is by
    the page count and not by the megabytes derived from it. Two objects that
@@ -227,8 +253,10 @@ BEGIN TRY
            -- the file as sized, not the disk it actually occupies.
            CAST(df.is_sparse AS BIT),
            CASE WHEN df.is_percent_growth = 1 THEN CONCAT(df.growth, ' %')
-                ELSE CONCAT(CAST(CAST(df.growth AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)), ' MB') END
+                ELSE CONCAT(CAST(CAST(df.growth AS BIGINT) * 8 / 1024.0 AS DECIMAL(14,1)), ' MB') END,
+           ag.is_autogrow_all_files
     FROM sys.database_files AS df
+    LEFT JOIN @fg_all_files AS ag ON ag.data_space_id = df.data_space_id
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
@@ -365,7 +393,8 @@ SELECT @last_full         AS last_full,
        @last_log          AS last_log
 OPTION (RECOMPILE, MAXDOP 1);
 
-SELECT f.[name], f.[type], f.[filegroup], f.[physical_name], f.[state], f.[size_mb],
+SELECT f.[name], f.[type], f.[filegroup], f.[autogrow_all_files], f.[physical_name],
+       f.[state], f.[size_mb],
        f.[used_mb], f.[max_mb], f.[percent_growth], f.[is_sparse], f.[growth]
 FROM @files AS f
 ORDER BY f.[file_type], f.[file_id]
