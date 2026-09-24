@@ -22,12 +22,16 @@
 -- query would have returned NULL on every row without saying why — the exact
 -- shape of failure this corpus tries hardest to avoid.
 --
--- THE COST IS BOUNDED ON PURPOSE. SAMPLED reads about 1% of pages, and the
--- scan is applied only to the largest heaps rather than to every object, so
--- the work is proportional to what is worth measuring. The cap is projected in
--- the root so a reader knows the list is not exhaustive. On a database of
--- small heaps this collector is nearly free; on one with a 200 GB heap it is
--- not, which is why the timeout is generous and the cap is low.
+-- THE COST IS BOUNDED BY THE CAP, NOT BY THE MODE. SAMPLED samples 1% of pages
+-- only above 10000 leaf pages; at or below that threshold the engine reads
+-- every page and answers as DETAILED would. Measured on SQL Server 2025 against
+-- a 2403-page heap: SAMPLED and DETAILED both returned record_count 60000,
+-- exactly the row count. So most heaps in a database are read in full, and what
+-- keeps this collector cheap is the cap on how many of them are scanned, not
+-- the mode. The cap is projected in the root so a reader knows the list is not
+-- exhaustive. On a database of small heaps this collector is nearly free; on
+-- one with a 200 GB heap it is not, which is why the timeout is generous and
+-- the cap is low.
 --
 -- NO JUDGEMENT IS APPLIED. A heap is not a defect. Staging tables that are
 -- truncated and bulk-loaded are legitimately heaps, and rebuilding one that is
@@ -37,8 +41,12 @@
 -- between them, and neither answers it alone.
 --
 -- A HEAP HAS NO REBUILD THAT IS FREE. ALTER TABLE ... REBUILD removes the
--- forwarding, and in Standard Edition it is offline. That belongs in the
--- analysis, not here; this file reports the count and the size.
+-- forwarding, in Standard Edition it is offline, and it rebuilds every
+-- non-clustered index on the table as well, because each of them holds the
+-- physical row locator that the rebuild changes. The count of those indexes is
+-- therefore part of the price, which is why it is projected per heap below.
+-- That belongs in the analysis, not here; this file reports the count and the
+-- size.
 --
 -- SQL Server 2012 is the floor. forwarded_record_count predates it. Not
 -- collected for that reason: nothing.
@@ -91,9 +99,13 @@ SELECT
     CAST(ips.avg_fragmentation_in_percent AS DECIMAL(5,2))      AS [fragmentation_pct],
     CAST(ips.avg_page_space_used_in_percent AS DECIMAL(5,2))    AS [page_fullness_pct],
     ips.record_count                                            AS [records_scanned],
-    -- How many non-clustered indexes ride on this heap. Rebuilding a heap
-    -- rebuilds none of them, but every one of them stores the heap's physical
-    -- row locator, so their size is part of the decision.
+    -- How many non-clustered indexes ride on this heap. Every one of them
+    -- stores the heap's physical row locator, so ALTER TABLE ... REBUILD has to
+    -- rebuild all of them too: moving every row gives every locator a new
+    -- value. That is the cost of the rebuild, and it is proportional to this
+    -- number. Measured on SQL Server 2025, one heap and one non-clustered
+    -- index: before the rebuild the index sat at 73.1% fragmentation over 212
+    -- pages, after it at 28.9% over 149. It was rebuilt, not left alone.
     (SELECT COUNT(*) FROM sys.indexes AS ni
       WHERE ni.object_id = h.object_id AND ni.index_id > 0)     AS [nonclustered_indexes],
     -- How many partitions the heap has, which decides whether a rebuild may be
@@ -132,5 +144,15 @@ FROM (
     ORDER BY ps.used_page_count DESC
 ) AS h
 CROSS APPLY sys.dm_db_index_physical_stats(DB_ID(), h.object_id, 0, h.partition_number, 'SAMPLED') AS ips
+-- One row per allocation unit, not one per partition. A heap holding a LOB or a
+-- row-overflow column produces two or three rows for the same partition, and
+-- without this filter each of them became a row of this result set: the same
+-- table listed twice, the second time with a NULL forwarded_records and a
+-- page_count that is the size of the LOB chain rather than of the heap.
+-- Measured on SQL Server 2025, one table with a varchar(max) column returned
+-- IN_ROW_DATA at 5488 pages and LOB_DATA at 13720. Forwarding is a property of
+-- in-row data alone, so that is the only unit this collector has ever meant.
+-- The filegroup lookup above already reads au.type = 1 for the same reason.
+WHERE ips.alloc_unit_type_desc = N'IN_ROW_DATA'
 ORDER BY ips.forwarded_record_count DESC, h.used_mb DESC
 OPTION (RECOMPILE, MAXDOP 1);

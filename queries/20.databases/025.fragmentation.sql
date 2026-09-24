@@ -104,7 +104,28 @@ BEGIN TRY
         FROM sys.dm_db_index_physical_stats(DB_ID(), @frag_object, @frag_index,
                                             @frag_partition, 'LIMITED') AS ips
         JOIN sys.indexes AS i ON i.object_id = ips.object_id AND i.index_id = ips.index_id
-        WHERE ips.page_count > 1000 AND ips.avg_fragmentation_in_percent > 10
+        -- sys.dm_db_index_physical_stats answers one row per allocation unit,
+        -- not one per partition, and the two extra units are not what logical
+        -- fragmentation means. IN_ROW_DATA is an ordered B-tree whose pages can
+        -- be out of order, which is what avg_fragmentation_in_percent measures
+        -- and what a rebuild repairs. LOB_DATA and ROW_OVERFLOW_DATA are
+        -- allocation chains; reorganising them is a different operation.
+        --
+        -- THIS PREDICATE CHANGES NO ROW TODAY, AND IS KEPT ON PURPOSE. LIMITED
+        -- reads the level above the leaf, and those two units have no such
+        -- level, so LIMITED reports their fragmentation as zero and the > 10
+        -- below already hides them. Measured on SQL Server 2025 over a database
+        -- built for the question: two LOB_DATA units of 608 and 7509 pages and
+        -- one ROW_OVERFLOW_DATA unit of 400, all three at 0.0, none of them
+        -- reaching the threshold. So the filter is not fixing a defect that is
+        -- live; it is saying which unit this query is about, so that lowering
+        -- the threshold or moving to SAMPLED, both of which have been
+        -- considered for this file, does not quietly start listing LOB chains
+        -- under the name of the index they hang from. 70.schema/050.heaps reads
+        -- the same DMV in SAMPLED with no threshold, and there the same filter
+        -- removes a real duplicate row.
+        WHERE ips.alloc_unit_type_desc = N'IN_ROW_DATA'
+          AND ips.page_count > 1000 AND ips.avg_fragmentation_in_percent > 10
         OPTION (RECOMPILE, MAXDOP 1);
 
         SET @frag_measured += 1;
