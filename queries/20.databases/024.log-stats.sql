@@ -14,10 +14,21 @@
 -- and only the second is actionable.
 --
 -- log_recovery_size_mb is the column that carries its weight here: it is how
--- much log a crash recovery would have to replay, which is the real measure of
--- how far behind the checkpoint has fallen. On an instance whose MessageBox
--- log had grown to seven times its data size with log_reuse_wait = OLDEST_PAGE,
--- nothing in the archive could put a number on it.
+-- much log a crash recovery would have to replay. On an instance whose
+-- MessageBox log had grown to seven times its data size with
+-- log_reuse_wait = OLDEST_PAGE, nothing in the archive could put a number on
+-- it.
+--
+-- IT IS NOT THE CHECKPOINT LAG, AND MUST NOT BE READ AS ONE. Recovery starts
+-- at the earlier of the last checkpoint and the oldest active transaction:
+-- sys.dm_db_log_stats documents log_recovery_lsn as the oldest active
+-- transaction LSN when that one precedes the checkpoint LSN, and as the
+-- checkpoint LSN otherwise. So one transaction left open for an hour inflates
+-- log_recovery_size_mb while the checkpoint is perfectly current, and tuning
+-- TARGET_RECOVERY_TIME on that reading would change nothing. The checkpoint lag
+-- alone is log_since_last_checkpoint_mb, projected beside it, and the pair of
+-- them, with holdup.recovery_lsn against holdup.checkpoint_lsn, is what says
+-- which of the two is holding the log.
 --
 -- log_since_last_log_backup_mb answers the neighbouring question — whether the
 -- log backup interval matches how fast the log is written — which today has to
