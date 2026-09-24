@@ -108,8 +108,22 @@ SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
           histogram is on its FIRST column only, and the rest carry density
           alone. A reader who cannot see the order cannot tell which of the two
           a given estimate came from. Same concatenation idiom as
-          070.index-columns.sql, and 2012 has no STRING_AGG. */
-       STUFF((SELECT ', ' + c.name
+          070.index-columns.sql, QUOTENAME included, and 2012 has no
+          STRING_AGG.
+
+          THE QUOTING IS WHAT MAKES THE LIST READABLE AT ALL. Bare, a statistic
+          on one column named "a, b" is indistinguishable from a statistic on
+          two columns a and b, so nobody can say from this field how many
+          columns the statistic has. That is not a rounding error on a strange
+          name: the count decides whether a given estimate came from the
+          histogram or from density, which is the question this field exists to
+          answer. QUOTENAME doubles an inner right bracket, so a column named
+          a]b comes out as [a]]b] and stays decodable.
+
+          No width to widen here, unlike 091.statistics-density: the list goes
+          straight into nvarchar(max) rather than through a sysname column, so
+          the 258 characters QUOTENAME can return have nowhere to be cut. */
+       STUFF((SELECT ', ' + QUOTENAME(c.name)
               FROM sys.stats_columns AS sc
               JOIN sys.columns       AS c ON c.object_id = sc.object_id
                                          AND c.column_id = sc.column_id
