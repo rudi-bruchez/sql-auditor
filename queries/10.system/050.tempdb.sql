@@ -220,7 +220,10 @@ SELECT
     wt.resource_description,
     p.pg AS page_id,
     CASE
-        WHEN p.pg = 1 OR (p.pg - 1) % 8088   = 0 THEN 'PFS'
+        /* PFS pages are 1, 8088, 16176...: exact multiples of 8088 after the
+           first. GAM and SGAM do sit at 2 and 3 plus multiples of 511232,
+           hence the asymmetry. */
+        WHEN p.pg = 1 OR p.pg % 8088         = 0 THEN 'PFS'
         WHEN p.pg = 2 OR (p.pg - 2) % 511232 = 0 THEN 'GAM'
         WHEN p.pg = 3 OR (p.pg - 3) % 511232 = 0 THEN 'SGAM'
         ELSE 'other' END AS page_type
