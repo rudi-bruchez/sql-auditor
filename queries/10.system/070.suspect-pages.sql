@@ -17,9 +17,16 @@
 -- beside its list.
 --
 -- event_type IS TRANSLATED, because the numbers are meaningless without the
--- table and two of them are good news. 4 means DBCC repaired the page and 7
--- means it was restored; reading either as an outstanding problem would be
--- wrong, and reading 1 or 2 as historical would be worse.
+-- table and three of them are good news. The labels follow the documented
+-- table (suspect_pages, Microsoft Learn): 1 to 3 are errors, 4 restored,
+-- 5 repaired, 7 deallocated by DBCC. Reading a resolution as an outstanding
+-- problem would be wrong, and reading an error as historical would be worse.
+--
+-- The first version of this file had 3, 4, 5 and 7 shifted: a torn page read
+-- as "restore attempted", which is the one mistake that hides an open error.
+-- 5 is not only written by a DBCC repair: automatic page repair on a
+-- mirroring partner or an availability replica updates this table too, so
+-- the label does not say who repaired the page.
 --
 -- THE TABLE IS NEVER PURGED AUTOMATICALLY. A row can describe an incident dealt
 -- with two years ago and still be there, so last_update_date is what decides
@@ -59,12 +66,12 @@ SELECT DB_NAME(sp.database_id)                                    AS [database],
        sp.page_id                                                 AS [page_id],
        sp.event_type                                              AS [event_type],
        CASE sp.event_type
-            WHEN 1 THEN 'error 823: the operating system could not read the page'
-            WHEN 2 THEN 'error 824: bad checksum or torn page'
-            WHEN 3 THEN 'restore attempted on a page marked bad'
-            WHEN 4 THEN 'repaired: DBCC fixed the page'
-            WHEN 5 THEN 'the page was deallocated by DBCC'
-            WHEN 7 THEN 'restored: the page was replaced from a backup'
+            WHEN 1 THEN 'error 823 (operating system CRC error), or an 824 other than a bad checksum or a torn page'
+            WHEN 2 THEN 'error 824: bad checksum'
+            WHEN 3 THEN 'error 824: torn page'
+            WHEN 4 THEN 'restored: the page was restored after it was marked bad'
+            WHEN 5 THEN 'repaired: the page was repaired'
+            WHEN 7 THEN 'deallocated by DBCC'
             ELSE 'unknown event type' END                         AS [event],
        /* 4, 5 and 7 are resolutions rather than problems. Projected as a flag so
           a reader can separate the two populations without parsing prose. */
