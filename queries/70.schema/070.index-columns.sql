@@ -166,8 +166,15 @@ SELECT SCHEMA_NAME(o.schema_id) + '.' + o.name                    AS [table],
        CAST(i.is_unique_constraint AS int)                        AS [is_unique_constraint],
        CAST(i.is_disabled AS int)                                 AS [is_disabled],
        CAST(i.is_padded AS int)                                   AS [is_padded],
-       /* 0 means unspecified, which is not the same as 100 and is left as the
-          server reports it. */
+       /* 0 means unspecified. The engine fills the leaf pages the same way for
+          0 and for 100: neither reserves free space. Measured on SQL Server
+          2025, the same 50000 rows under a clustered index built without a
+          FILLFACTOR and one built WITH (FILLFACTOR = 100), both settled at
+          about 99.5% page fullness. So a reader must not treat a 0 as a
+          setting that needs correcting to 100; there is nothing to correct.
+          The value is still left raw rather than folded to 100, because the
+          two say different things about intent: 0 is nobody ever chose, 100 is
+          somebody chose. Only the second tells you a decision was taken. */
        i.fill_factor                                              AS [fill_factor],
        CAST(i.allow_page_locks AS int)                            AS [allow_page_locks],
        CAST(i.allow_row_locks AS int)                             AS [allow_row_locks],
