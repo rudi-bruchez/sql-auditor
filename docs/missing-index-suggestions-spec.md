@@ -154,22 +154,30 @@ from the index. The two orderings genuinely differ: the DMV emits columns in
 physical `column_id` order, measured by three readers, and an index's key order
 is whatever its author chose.
 
-And the comparison cannot be a naive string one, because the two sides are in
-different notations. `070.index-columns.sql` concatenates bare names with `", "`
-and glues a `" DESC"` suffix into the same string, while the DMV emits
-bracket-quoted identifiers: `[x]` against `y, x DESC` matches nothing. Worse,
-the collector does not escape, so a table carrying a column literally named
-`a, b` alongside columns `a` and `b` produced two indexes with different leading
-columns, different key counts and the identical `keys` string. The rule is
-therefore: parse both sides into lists of identifiers, drop the direction marker
-for equality columns and keep it for inequality ones, and where the collector's
-string cannot be parsed unambiguously, ABSTAIN and say so rather than compare
-and be silently wrong.
+And the comparison cannot be a naive string one. It was not one for a long
+time: `070.index-columns.sql` concatenated bare names with `", "` and glued a
+`" DESC"` suffix into the same string, while the DMV emitted bracket-quoted
+identifiers, so `[x]` against `y, x DESC` matched nothing, and the
+collector did not escape, so a table carrying a column literally named `a, b`
+alongside columns `a` and `b` produced two indexes with different leading
+columns, different key counts and the identical `keys` string. Both sides speak
+`QUOTENAME` since 24 September 2026, which is the answer recorded below, so the
+rule is now: parse both sides into lists of identifiers with a splitter that
+knows the doubled right bracket, drop the direction marker for equality columns
+and keep it for inequality ones. The direction marker sits outside the closing
+bracket, which is what separates `[x] DESC` from `[x DESC]`.
+
+The abstention on an unparseable key string retires with the bare form, and it
+has to: the pair above was identical in the key string and in `key_count`, the
+only two signals the archive carries, so nothing could have known to abstain
+there. An archive collected before that date still carries bare names, and the
+splitter reads them, with the loss the bare form always had.
 
 One more asymmetry, cheap to state and cheap to fix later:
 `070.index-columns.sql` filters `is_ms_shipped = 0` and the `missing` result set
 filters nothing, so a suggestion on a shipped table has no counterpart to
-compare against. The abstain rule covers it.
+compare against. That one still abstains, and it is a different case: the
+counterpart is absent rather than unreadable.
 
 **Families: group by equality set, keep every maximal element.** Two suggestions
 belong to the same family when their equality sets are equal. Within a family,
@@ -380,8 +388,8 @@ Outside this repository, in the analysis that consumes the archive: saturation
 handling driven by the instance-wide count; family formation with several
 families per table and maximal elements preserved; the coverage test consulting
 `is_disabled`, `filter_definition` and `hypothetical`, testing set containment
-rather than a prefix, and abstaining on ambiguous key strings; ordering only on
-applicable density rows; the window stated as a ceiling with pruned-history
+rather than a prefix, and abstaining where a suggestion has no counterpart;
+ordering only on applicable density rows; the window stated as a ceiling with pruned-history
 detection; and the report language above. Each needs a fixture and a named owner
 there, and this document does not pretend they can be accepted here.
 

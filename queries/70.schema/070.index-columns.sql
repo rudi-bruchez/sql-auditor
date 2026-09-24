@@ -29,6 +29,25 @@
 -- Dropping the suffix would make the string wrong for the single question it is
 -- asked. Included columns carry no direction and have none appended.
 --
+-- IDENTIFIERS ARE QUOTENAME'd, and the reason is not the comma. It is that
+-- sys.dm_db_missing_index_details brackets everything it returns, 020 projects
+-- those strings verbatim, and this file emitted bare names: the two lists a
+-- reader is asked to compare used different conventions on every table, not
+-- only on the strange ones. QUOTENAME doubles an inner right bracket, so a
+-- column named a]b arrives as [a]]b] from both sides now, which is what makes
+-- the comparison a string comparison again.
+--
+-- The worst collision is not the comma either. Measured on SQL Server 2025
+-- (17.0.4065.4): an index on ([x] DESC) and an index on ([x DESC]) both came
+-- out of here as keys "x DESC" with key_count 1, which are the only two
+-- signals the archive carries, so nothing downstream could tell them apart or
+-- even know to abstain. Quoted, they are [x] DESC and [x DESC], and the
+-- direction marker is the part that sits OUTSIDE the closing bracket.
+--
+-- The table field stays unquoted, as schema + '.' + name, because 020 builds
+-- it the same way. It is consistent between the two and it cannot be split
+-- back apart; that asymmetry is known and is not closed here.
+--
 -- FOR XML PATH rather than STRING_AGG, which is SQL Server 2017 and this floor
 -- is 2012. TYPE and .value() are not decoration: without them a column named
 -- with an ampersand comes back as &amp; and the archive states a column name
@@ -107,7 +126,7 @@ SELECT SCHEMA_NAME(o.schema_id) + '.' + o.name                    AS [table],
           non-key columns are the table's other columns and are not listed
           here at all — sys.index_columns does not carry them, and 060.columns
           does. */
-       STUFF((SELECT ', ' + c.name
+       STUFF((SELECT ', ' + QUOTENAME(c.name)
                    + CASE WHEN ic.is_descending_key = 1 THEN ' DESC' ELSE '' END
               FROM sys.index_columns AS ic
               JOIN sys.columns       AS c ON c.object_id = ic.object_id
@@ -128,7 +147,7 @@ SELECT SCHEMA_NAME(o.schema_id) + '.' + o.name                    AS [table],
                                    AND c.column_id = ic.column_id
         WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
           AND ic.key_ordinal > 0)                                 AS [key_bytes],
-       STUFF((SELECT ', ' + c.name
+       STUFF((SELECT ', ' + QUOTENAME(c.name)
               FROM sys.index_columns AS ic
               JOIN sys.columns       AS c ON c.object_id = ic.object_id
                                          AND c.column_id = ic.column_id

@@ -48,6 +48,14 @@
 --   statistics the optimiser auto-created — which is usually exactly what
 --   exists.
 --
+--   leading_column is QUOTENAME'd, for the reason 070.index-columns.sql now
+--   quotes its key list: the ordering rule joins this name to the bracketed
+--   list sys.dm_db_missing_index_details returns, and quoting one side and not
+--   the other fixes half a join. QUOTENAME of a sysname runs to 258
+--   characters, which is why the holding column is nvarchar(258) and not
+--   sysname; sysname would silently truncate a long name into a string with no
+--   closing bracket.
+--
 --   The numbers are an estimate built on a sample. Where rows_sampled is below
 --   rows in 090, the distinct count here is an estimate of an estimate, and
 --   histogram_rows is projected beside it so the reader can see how far the
@@ -96,7 +104,7 @@ DECLARE @density TABLE (
     [table_name]         sysname,
     [statistic]          sysname,
     [stats_id]           int,
-    [leading_column]     sysname NULL,
+    [leading_column]     nvarchar(258) NULL,
     [is_auto_created]    int,
     [is_index_statistic] int,
     [has_filter]         int,
@@ -125,7 +133,7 @@ BEGIN TRY
             ORDER BY ps.row_count DESC, t.object_id
         )
         SELECT SCHEMA_NAME(t.schema_id), t.name, st.name, st.stats_id,
-               c.name,
+               QUOTENAME(c.name),
                CONVERT(int, st.auto_created),
                CONVERT(int, CASE WHEN i.index_id IS NULL THEN 0 ELSE 1 END),
                CONVERT(int, st.has_filter),
