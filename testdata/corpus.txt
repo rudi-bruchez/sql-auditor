@@ -45,6 +45,7 @@
 20.databases/025.fragmentation.sql @profiles: space
 20.databases/026.persisted-sku-features.sql
 20.databases/027.resumable-operations.sql
+20.databases/028.change-tracking.sql @profiles: space
 40.security/010.principals.sql
 40.security/020.database-principals.sql
 40.security/030.server-surface.sql
@@ -96,3 +97,4 @@
 90.availability/042.replication-distribution.sql
 90.availability/043.replication-subscriber.sql
 90.availability/044.replication-counters.sql
+90.availability/050.page-repair.sql
