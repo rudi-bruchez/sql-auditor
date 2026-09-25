@@ -54,9 +54,20 @@ SET LOCK_TIMEOUT 10000;
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_at],
        CONVERT(int, SERVERPROPERTY('IsHadrEnabled'))              AS [is_enabled],
        CONVERT(sysname, SERVERPROPERTY('HadrManagerStatus'))      AS [manager_status],
-       /* The Windows cluster underneath. Empty on an instance that is not a
-          cluster member, which is itself the answer when a group will not come
-          online. */
+       /* The Windows cluster underneath, AND THESE THREE DO NOT MEAN WHAT THEY
+          look like on an instance with no cluster. The comment here used to say
+          they are empty on an instance that is not a cluster member. Measured
+          on 16.0.4265.3 and 17.0.4065.4, both standalone containers:
+          sys.dm_hadr_cluster returns ONE ROW, with cluster_name as an empty
+          string but quorum_type_desc NODE_MAJORITY and quorum_state_desc
+          NORMAL_QUORUM. Only the name tells the truth; the two that read as a
+          verdict describe a healthy cluster that does not exist.
+
+          Kept and projected, because on a real cluster they are the right
+          fields. What changes is how they are read: the empty name is the tell,
+          and 90.availability/015.failover-cluster.sql carries the node list and
+          the counts that settle it. Quorum state without a node count is not
+          evidence. */
        (SELECT TOP (1) c.cluster_name FROM sys.dm_hadr_cluster AS c)      AS [cluster.name],
        (SELECT TOP (1) c.quorum_type_desc FROM sys.dm_hadr_cluster AS c)  AS [cluster.quorum_type],
        (SELECT TOP (1) c.quorum_state_desc FROM sys.dm_hadr_cluster AS c) AS [cluster.quorum_state],

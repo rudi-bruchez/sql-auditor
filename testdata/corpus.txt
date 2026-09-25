@@ -90,6 +90,7 @@
 80.workload/052.optimizer-hints.sql
 80.workload/060.spills.sql
 90.availability/010.topology.sql
+90.availability/015.failover-cluster.sql
 90.availability/020.always-on.sql
 90.availability/021.always-on-2016.sql
 90.availability/030.log-shipping.sql
