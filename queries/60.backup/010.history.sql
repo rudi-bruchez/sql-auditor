@@ -146,6 +146,10 @@ WITH history AS (
         bs.compressed_backup_size,
         bs.is_snapshot,
         bs.is_copy_only,
+        bs.has_backup_checksums,
+        bs.has_incomplete_metadata,
+        bs.is_password_protected,
+        bs.expiration_date,
         bs.user_name,
         bs.recovery_model,
         DATEDIFF(second,
@@ -186,6 +190,30 @@ SELECT
          END AS DECIMAL(5,3))                                   AS [compression_ratio],
     SUM(CASE WHEN bs.is_snapshot = 1 THEN 1 ELSE 0 END)         AS [snapshot_count],
     SUM(CASE WHEN bs.is_copy_only = 1 THEN 1 ELSE 0 END)        AS [copy_only_count],
+    -- HOW MANY OF THESE BACKUPS WOULD NOTICE A CORRUPT PAGE GOING INTO THEM.
+    -- WITH CHECKSUM is not the default: BACKUP verifies page checksums on the
+    -- way out only when asked, or when the instance runs with trace flag 3023,
+    -- which 025.startup-parameters-2012.sql would show. Without it a page that
+    -- was already damaged is copied into the backup set, the backup reports
+    -- success, and the damage is only found on the restore that had to work.
+    -- Nothing else in this archive answers it, and it costs nothing here
+    -- because the column sits in the row already being read.
+    SUM(CASE WHEN bs.has_backup_checksums = 1 THEN 1 ELSE 0 END) AS [with_checksum_count],
+    -- Tail-log backups, that is BACKUP LOG ... WITH NO_TRUNCATE or CONTINUE_
+    -- AFTER_ERROR. One is the normal first step of a restore; a run of them in
+    -- a 30-day window says the database has been left in the restoring state,
+    -- or that somebody has been taking log backups off a damaged database.
+    SUM(CASE WHEN bs.has_incomplete_metadata = 1 THEN 1 ELSE 0 END)
+                                                                AS [incomplete_metadata_count],
+    -- Password-protected backup sets. The feature is deprecated and the
+    -- password is not encryption; what makes it a finding is that a restore
+    -- needs a password nobody has written down.
+    SUM(CASE WHEN bs.is_password_protected = 1 THEN 1 ELSE 0 END)
+                                                                AS [password_protected_count],
+    -- Backups that carry an expiry, which changes what an overwrite does to
+    -- the media set.
+    SUM(CASE WHEN bs.expiration_date IS NOT NULL THEN 1 ELSE 0 END)
+                                                                AS [with_expiry_count],
     COUNT(DISTINCT bs.user_name)                                AS [distinct_users],
     MAX(bs.user_name)                                           AS [a_user],
     -- Arbitrary like a_user above, and named to say so: the recovery model
@@ -261,6 +289,21 @@ SELECT TOP (200)
     CAST(bs.compressed_backup_size / 1048576.0 AS DECIMAL(18,1)) AS [compressed_mb],
     CAST(bs.is_snapshot AS bit)                                 AS [is_snapshot],
     CAST(bs.is_copy_only AS bit)                                AS [is_copy_only],
+    CAST(bs.has_backup_checksums AS bit)                        AS [has_checksums],
+    CAST(bs.has_incomplete_metadata AS bit)                     AS [incomplete_metadata],
+    -- THE TWO NUMBERS THAT SAY WHETHER A RESTORE CHAIN ACTUALLY HOLDS, and
+    -- they belong here rather than in the aggregate above because they are
+    -- identities and not quantities. database_backup_lsn is the log sequence
+    -- number of the full backup this one belongs to; differential_base_lsn is
+    -- the full a differential is computed against. A differential restores only
+    -- onto the full whose first_lsn equals its differential_base_lsn, so a
+    -- differential whose base is a full that was taken by a third-party agent,
+    -- or by an ad-hoc COPY_ONLY that nobody kept, restores onto nothing. That
+    -- is invisible from dates alone, which is how it survives a review: the
+    -- schedule looks complete because a full and a differential both ran.
+    bs.database_backup_lsn                                      AS [database_backup_lsn],
+    bs.differential_base_lsn                                    AS [differential_base_lsn],
+    bs.first_lsn                                                AS [first_lsn],
     bs.user_name                                                AS [user],
     bs.server_name                                              AS [server]
 FROM msdb.dbo.backupset AS bs

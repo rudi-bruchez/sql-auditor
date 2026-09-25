@@ -48,6 +48,48 @@
 -- the root object. See 020.index-usage.sql for the same pattern and the
 -- measurement behind it.
 --
+-- A COLUMNSTORE INDEX HAS NO ROW OF ITS OWN IN THIS DMV, AND THIS FILE SPENT
+-- ITS LIFE NOT SAYING SO. sys.dm_db_index_operational_stats answers one row per
+-- allocation unit per partition, which for a rowstore index is one row and for
+-- a clustered columnstore index is two or three: its delta store and its delete
+-- bitmap, both carrying the index's own index_id and partition_number. Measured
+-- on 16.0.4265.3 and 17.0.4065.4, on a 300 000-row table given a clustered
+-- columnstore index, a third of its rows deleted and a seventh updated: the DMV
+-- returned two rows for index_id 1, whose hobt_id values matched the
+-- COLUMN_STORE_DELTA_STORE and COLUMN_STORE_DELETE_BITMAP rows of
+-- sys.internal_partitions. Neither was the hobt_id sys.partitions reports for
+-- that index. The columnstore's own segments are not represented at all.
+--
+-- So the contention aggregate sums two internal objects under the name of the
+-- index. The scope of that is narrower than it first looks, and worth stating
+-- precisely rather than dramatically: this result set only keeps rows that
+-- waited, so a columnstore index appears here only when its delta store or its
+-- delete bitmap was contended, and the error is then that the contention of two
+-- distinct internal structures is reported as one index's. Those two are
+-- contended for opposite reasons. A hot delta store means rows are arriving one
+-- at a time instead of in bulk-sized batches; a hot delete bitmap means rows
+-- are being deleted or updated in place. Summed under one name, the row says
+-- neither, and the remedy for one is not the remedy for the other.
+--
+-- The rows are not filtered out, because a delta store under lock contention is
+-- a real finding and dropping them would lose it. What changes is that the row
+-- now says what it is: index_type names the columnstore, and units_summed says
+-- how many rows of the DMV went into it. One is a plain index, two or three
+-- with a columnstore type is this case, and a larger number on a rowstore index
+-- is a partitioned index reporting its partitions. Whoever reads the archive
+-- can tell the three apart, which before this they could not.
+--
+-- sys.internal_partitions would name the two objects outright, and it is not
+-- used here: it arrived in SQL Server 2016 and this collector's floor is 2012.
+--
+-- THE WAIT COUNTS NOW CARRY THEIR DENOMINATORS. row_lock_count and
+-- page_lock_count are how many lock requests were made; row_lock_wait_count and
+-- page_lock_wait_count are how many of them had to wait. Only the second pair
+-- was projected, so this collector could say an index waited and never what
+-- share of its requests did. Ten thousand waits out of ten thousand requests
+-- and ten thousand out of forty million are the same number here and different
+-- findings. Both columns sit in the rows already being read.
+--
 -- SQL Server 2012 is the floor. sys.dm_db_index_operational_stats predates it.
 
 SET NOCOUNT ON;
@@ -76,6 +118,10 @@ DECLARE @contention TABLE (
     [table]             nvarchar(300),
     [index_name]        nvarchar(128),
     [index_id]          int,
+    [index_type]        nvarchar(60),
+    [units_summed]      int,
+    [row_locks]         bigint,
+    [page_locks]        bigint,
     [row_lock_waits]    bigint,
     [row_lock_wait_ms]  bigint,
     [page_lock_waits]   bigint,
@@ -153,6 +199,19 @@ BEGIN TRY
            SCHEMA_NAME(o.schema_id) + '.' + o.name,
            ISNULL(i.name, '(heap)'),
            os.index_id,
+           ISNULL(MAX(i.type_desc), N'HEAP'),
+           -- HOW MANY ROWS OF THE DMV WENT INTO THIS ONE. Normally one per
+           -- partition, so a partitioned index reports its partition count and
+           -- everything else reports 1. A columnstore index reports 2 or 3 and
+           -- means something different: see the header.
+           COUNT(*),
+           -- The denominators. Without them a wait count is unreadable: ten
+           -- thousand waits out of ten thousand requests is a table that is
+           -- always contended, and ten thousand out of forty million is noise
+           -- that will be chased for a week. These are the same rows already
+           -- being read, so the two columns are free.
+           SUM(os.row_lock_count),
+           SUM(os.page_lock_count),
            SUM(os.row_lock_wait_count),
            SUM(os.row_lock_wait_in_ms),
            SUM(os.page_lock_wait_count),
@@ -200,6 +259,10 @@ ORDER BY h.[forwarded_fetches] DESC, h.[leaf_updates] DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT c.[table], c.[index_name], c.[index_id],
+       c.[index_type]        AS [index_type],
+       c.[units_summed]      AS [units_summed],
+       c.[row_locks]         AS [row_lock.requests],
+       c.[page_locks]        AS [page_lock.requests],
        c.[row_lock_waits]    AS [row_lock.waits],
        c.[row_lock_wait_ms]  AS [row_lock.wait_ms],
        c.[page_lock_waits]   AS [page_lock.waits],
