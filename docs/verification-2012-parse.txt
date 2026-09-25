@@ -1,11 +1,11 @@
 sql-auditor corpus grammar check
 ================================
-Produced    : 2026-09-25T06:52:06Z
-Corpus tree : 2b5bf62068a64911e00debeee2eb318891fe1245
+Produced    : 2026-09-25T07:13:26Z
+Corpus tree : 9e61e0c61d5f39d9e80a2999378750795f177609
               (git rev-parse HEAD:queries - this artifact describes that corpus
                and no other; if the two differ, re-run this script)
 ScriptDom   : /home/rudi/.nuget/packages/microsoft.sqlserver.transactsql.scriptdom/180.37.3/lib/net472/Microsoft.SqlServer.TransactSql.ScriptDom.dll
-Files       : 100
+Files       : 101
 
 queries/10.system/010.properties.sql           TSql110 (SQL Server 2012)    resultsets 6/6  ok
 queries/10.system/013.memory-model.sql         TSql130 (SQL Server 2016)    resultsets 1/1  ok
@@ -42,6 +42,7 @@ queries/10.system/075.deprecated-features.sql  TSql110 (SQL Server 2012)    resu
 queries/10.system/076.pending-io.sql           TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/10.system/077.fulltext.sql             TSql110 (SQL Server 2012)    resultsets 1/1  ok
 queries/10.system/078.performance-counters.sql TSql110 (SQL Server 2012)    resultsets 2/2  ok
+queries/10.system/079.telemetry.sql            TSql110 (SQL Server 2012)    resultsets 3/3  ok
 queries/10.system/095.master-user-objects.sql  TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/20.databases/010.all-databases.sql     TSql110 (SQL Server 2012)    resultsets 1/1  ok
 queries/20.databases/011.all-databases-2014.sql TSql120 (SQL Server 2014)    resultsets 1/1  ok
@@ -108,5 +109,5 @@ queries/90.availability/043.replication-subscriber.sql TSql110 (SQL Server 2012)
 queries/90.availability/044.replication-counters.sql TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/90.availability/050.page-repair.sql    TSql110 (SQL Server 2012)    resultsets 2/2  ok
 
-All 100 files parse under their declared grammar, and every
+All 101 files parse under their declared grammar, and every
 @resultsets count matches the parse tree.
