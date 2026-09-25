@@ -28,6 +28,24 @@ SELECT
     CONVERT(nvarchar(128),  SERVERPROPERTY('ProductVersion'))       AS [instance.version],
     CONVERT(nvarchar(128),  SERVERPROPERTY('ProductLevel'))         AS [instance.level],
     CONVERT(nvarchar(128),  SERVERPROPERTY('ProductUpdateLevel'))   AS [instance.cu],
+    /* The knowledge-base article of the update actually applied. instance.cu
+       above says "CU12", which is the right thing to read in a sentence and
+       the wrong thing to search for: cumulative updates are numbered per major
+       version, so CU12 names a different build on 2019 and on 2022. The KB
+       number is unique across the product and is what a client's patching
+       record and Microsoft's own download page are keyed on. Measured on
+       16.0.4265.3 and 17.0.4065.4: KB5093420 and KB5096981.
+
+       Two neighbouring properties were tried and are deliberately absent.
+       ProductBuildType would distinguish a GDR branch from a CU branch, which
+       decides whether an instance can ever receive an engine fix rather than
+       only security ones, and that would be worth a great deal; it returned
+       NULL on both instances, so projecting it would add a column that is
+       empty everywhere and invites the reader to conclude from silence.
+       LicenseType returned the string DISABLED on both, which it has done
+       since licensing moved out of the engine. Neither is a gap to reopen
+       without a measurement on Windows saying otherwise. */
+    CONVERT(nvarchar(128),  SERVERPROPERTY('ProductUpdateReference')) AS [instance.update_kb],
     si.sqlserver_start_time                                         AS [instance.sqlserver_start_time],
     DATEDIFF(HOUR, si.sqlserver_start_time, SYSDATETIME()) / 24     AS [instance.uptime_days],
     DATEDIFF(HOUR, si.sqlserver_start_time, SYSDATETIME()) % 24     AS [instance.uptime_hours],
