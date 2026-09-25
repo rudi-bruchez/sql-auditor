@@ -111,17 +111,23 @@ BEGIN TRY
         -- and what a rebuild repairs. LOB_DATA and ROW_OVERFLOW_DATA are
         -- allocation chains; reorganising them is a different operation.
         --
-        -- THIS PREDICATE CHANGES NO ROW TODAY, AND IS KEPT ON PURPOSE. LIMITED
-        -- reads the level above the leaf, and those two units have no such
-        -- level, so LIMITED reports their fragmentation as zero and the > 10
-        -- below already hides them. Measured on SQL Server 2025 over a database
-        -- built for the question: two LOB_DATA units of 608 and 7509 pages and
-        -- one ROW_OVERFLOW_DATA unit of 400, all three at 0.0, none of them
-        -- reaching the threshold. So the filter is not fixing a defect that is
-        -- live; it is saying which unit this query is about, so that lowering
-        -- the threshold or moving to SAMPLED, both of which have been
-        -- considered for this file, does not quietly start listing LOB chains
-        -- under the name of the index they hang from. 70.schema/050.heaps reads
+        -- THIS PREDICATE CHANGES NO ROW TODAY, AND IS KEPT ON PURPOSE. The
+        -- reference is plain about why: avg_fragmentation_in_percent is 0 for
+        -- LOB_DATA and ROW_OVERFLOW_DATA allocation units, by definition and in
+        -- every mode, so the > 10 below already hides them. Measured on SQL
+        -- Server 2025 over a database built for the question: two LOB_DATA units
+        -- of 608 and 7509 pages and one ROW_OVERFLOW_DATA unit of 400, all
+        -- three at 0.0.
+        --
+        -- An earlier version of this comment credited the zero to LIMITED
+        -- reading the level above the leaf, which those units do not have. That
+        -- explanation was wrong, and it mattered, because it made the filter
+        -- look like a guard against switching this file to SAMPLED. It is not:
+        -- the same LOB unit reports 0.0 in SAMPLED and in DETAILED as well,
+        -- measured. What the filter really guards is the fragmentation
+        -- threshold itself. Drop or lower the > 10 and these units arrive, with
+        -- a page_count that is the size of the chain, under the name of the
+        -- index they hang from. 70.schema/050.heaps reads
         -- the same DMV in SAMPLED with no threshold, and there the same filter
         -- removes a real duplicate row.
         WHERE ips.alloc_unit_type_desc = N'IN_ROW_DATA'

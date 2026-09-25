@@ -96,7 +96,24 @@ SELECT
     CAST(CASE WHEN h.rows > 0
               THEN ips.forwarded_record_count * 100.0 / h.rows
          END AS DECIMAL(9,3))                                   AS [forwarded_percent_of_rows],
-    CAST(ips.avg_fragmentation_in_percent AS DECIMAL(5,2))      AS [fragmentation_pct],
+    -- FROM THE LIMITED CALL, NOT THE SAMPLED ONE, AND THAT IS THE WHOLE POINT.
+    -- SAMPLED does not measure extent fragmentation on a heap. The reference
+    -- says the column is NULL for heaps in SAMPLED mode; measured, it is worse
+    -- than that, because the engine returns 0.0. A NULL would have read as "not
+    -- measured" and a 0.00 reads as "not fragmented", so this collector spent
+    -- its life reporting every heap in the estate as perfectly ordered.
+    -- Measured twice, on 16.0.4265.3 and on 17.0.4065.4, on a heap built for
+    -- the question and then emptied of one row in three: SAMPLED returned 0.0
+    -- where LIMITED and DETAILED both returned the real figure, 3.33 and 97.56
+    -- respectively on the two shapes tried.
+    --
+    -- The two modes cannot be merged into one call. forwarded_record_count and
+    -- record_count are NULL in LIMITED, and they are what this file exists for;
+    -- avg_fragmentation_in_percent is only populated in LIMITED or DETAILED.
+    -- So the cheap mode is called a second time for this one column. LIMITED
+    -- reads allocation metadata rather than the data pages, which is why it can
+    -- be afforded per heap and why DETAILED cannot.
+    CAST(lim.avg_fragmentation_in_percent AS DECIMAL(5,2))      AS [fragmentation_pct],
     CAST(ips.avg_page_space_used_in_percent AS DECIMAL(5,2))    AS [page_fullness_pct],
     ips.record_count                                            AS [records_scanned],
     -- How many non-clustered indexes ride on this heap. Every one of them
@@ -153,6 +170,16 @@ CROSS APPLY sys.dm_db_index_physical_stats(DB_ID(), h.object_id, 0, h.partition_
 -- IN_ROW_DATA at 5488 pages and LOB_DATA at 13720. Forwarding is a property of
 -- in-row data alone, so that is the only unit this collector has ever meant.
 -- The filegroup lookup above already reads au.type = 1 for the same reason.
+/* OUTER, not CROSS: a heap whose fragmentation cannot be read must still be
+   listed with its forwarded records, which are the reason this file exists. The
+   IN_ROW_DATA filter is repeated here because this call returns one row per
+   allocation unit too. */
+OUTER APPLY (
+    SELECT TOP (1) l.avg_fragmentation_in_percent
+    FROM sys.dm_db_index_physical_stats(DB_ID(), h.object_id, 0,
+                                        h.partition_number, 'LIMITED') AS l
+    WHERE l.alloc_unit_type_desc = N'IN_ROW_DATA'
+) AS lim
 WHERE ips.alloc_unit_type_desc = N'IN_ROW_DATA'
 ORDER BY ips.forwarded_record_count DESC, h.used_mb DESC
 OPTION (RECOMPILE, MAXDOP 1);
