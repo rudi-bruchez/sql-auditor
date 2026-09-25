@@ -114,6 +114,7 @@ var flagOrder = []string{
 	collect.FlagPlanCachePlans,
 	collect.FlagEstimateCompression,
 	collect.FlagMeasurePageDensity,
+	collect.FlagJobStepCommands,
 }
 
 // State is the whole wizard. It is a value: every transition returns a new one

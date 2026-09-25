@@ -53,6 +53,7 @@
 40.security/031.database-protections.sql
 50.agent/010.jobs.sql @profiles: space
 50.agent/020.job-steps.sql @profiles: space
+50.agent/021.job-step-commands.sql
 50.agent/030.alerts.sql
 50.agent/040.maintenance-plans.sql @profiles: space
 60.backup/010.history.sql @profiles: space

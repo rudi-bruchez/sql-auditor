@@ -128,6 +128,7 @@ var KnownFlags = map[string]string{
 	"default_trace":           "--include-default-trace",
 	"plan_cache_plans":        "--plan-cache-plans",
 	"measure_page_density":    "--measure-page-density",
+	"job_step_commands":       "--include-job-step-commands",
 }
 
 // ValueFlags are flags set by an option that carries a value, true exactly
@@ -558,6 +559,11 @@ var KnownDisclosures = map[string][]string{
 	"error_log": {
 		"samples of the SQL Server error log, which name logins, databases,",
 		"file paths and client addresses",
+	},
+	"job_step_command": {
+		"the COMPLETE text of every Transact-SQL job step, not the first 200",
+		"characters: the whole command, including any connection string or",
+		"password typed into a step rather than kept in a credential",
 	},
 }
 

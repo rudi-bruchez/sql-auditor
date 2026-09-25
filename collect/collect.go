@@ -46,6 +46,22 @@ const FlagEstimateCompression = "estimate_compression"
 // partition into the buffer pool, LOB pages included, and all of a small one.
 const FlagMeasurePageDensity = "measure_page_density"
 
+// FlagJobStepCommands turns on 50.agent/021.job-step-commands.sql, which reads
+// the FULL text of every Transact-SQL job step instead of the first 200
+// characters 020.job-steps.sql projects.
+//
+// Off by default for disclosure and not for cost. A job step is application
+// code, and the one place a password is typed rather than kept in a credential
+// is a job step; 200 characters keeps that risk bounded because a connection
+// string rarely fits in them. The full command removes that bound, which is
+// why this is an opt-in the operator makes rather than a cap someone raised.
+//
+// It exists because the truncation cuts exactly where the answer lives.
+// Measured on a client's maintenance job: the projection stopped at 200 of 457
+// characters, and the parameters that say whether the job is aware of its
+// availability group all sit beyond the cut.
+const FlagJobStepCommands = "job_step_commands"
+
 // FlagQueryStoreDetail gates the deep read of the Query Store: the full,
 // untruncated text of the heaviest queries and their execution plans.
 //

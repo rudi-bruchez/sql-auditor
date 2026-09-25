@@ -100,6 +100,7 @@ type cliFlags struct {
 	defaultTrace, planCachePlans                bool
 	estimateCompression                         bool
 	measurePageDensity                          bool
+	jobStepCommands                             bool
 	queryStoreDetail, queryStorePlanStats       bool
 	queryStoreDays, queryStoreTop               int
 	queryStoreFrom, queryStoreTo, queryStoreDBs string
@@ -208,6 +209,16 @@ func defineFlags(cmd string) *cliFlags {
 	fs.BoolVar(&c.measurePageDensity, "measure-page-density", false,
 		"also measure how full the pages of the largest index partitions are: "+
 			"this reads 8 to 12 % of every large partition into the buffer pool, LOB included, and all of a small one")
+	// Off by default for DISCLOSURE, unlike the two above it, and the
+	// distinction is the reason this is a separate option rather than a wider
+	// cap on 020.job-steps.sql. A job step is application code, and a job step
+	// is the one place a password gets typed instead of being kept in a
+	// credential; two hundred characters bounds that risk because a connection
+	// string rarely fits in them, and the full command removes the bound.
+	fs.BoolVar(&c.jobStepCommands, "include-job-step-commands", false,
+		"also collect the COMPLETE text of every Transact-SQL job step instead "+
+			"of its first 200 characters: this is the whole command, including "+
+			"any password typed into a step rather than kept in a credential")
 	// Off by default, and it has to stay that way: this is the option that
 	// puts the full text of production queries and their execution plans
 	// into the archive. A plan carries the compiled parameter values and
@@ -514,6 +525,7 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 			collect.FlagDefaultTrace:          c.all || c.defaultTrace,
 			collect.FlagPlanCachePlans:        c.all || c.planCachePlans,
 			collect.FlagMeasurePageDensity:    c.all || c.measurePageDensity,
+			collect.FlagJobStepCommands:       c.all || c.jobStepCommands,
 			// Not c.all: a ValueFlag, on exactly when the moment was given.
 			collect.FlagQueryStoreCompare: c.queryStoreCompareAt != "",
 		},
@@ -1133,6 +1145,12 @@ Options (check, collect):
                               would give back. Off for cost: SAMPLED reads 8 to
                               12 % of every large partition into the buffer pool,
                               LOB pages included, and all of a small one.
+  --include-job-step-commands also collect the COMPLETE text of every Transact-SQL
+                              job step, instead of the first 200 characters that
+                              50.agent/020.job-steps.sql projects. Off by default
+                              for disclosure, not cost: a job step is application
+                              code, and it is where a password gets typed rather
+                              than kept in a credential.
   --query-store-detail        also collect the full text and the execution plans of
                               the heaviest Query Store queries. Off by default: a
                               plan carries the compiled parameter values and the

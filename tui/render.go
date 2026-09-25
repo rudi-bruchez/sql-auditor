@@ -520,6 +520,8 @@ func options(s State) []option {
 			"samples real data into tempdb; slow on large tables", false},
 		{collect.FlagMeasurePageDensity, "page density",
 			"reads 8 to 12 % of every large index partition into the buffer pool, LOB included, and all of a small one", false},
+		{collect.FlagJobStepCommands, "job step commands",
+			"the complete text of every Transact-SQL job step, which is where a password gets typed rather than kept in a credential", false},
 	}
 }
 
