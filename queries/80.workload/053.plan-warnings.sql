@@ -126,11 +126,19 @@
 -- Collecting the wrong one would have flagged most of the instance.
 --
 -- cursor_requested_type / cursor_actual_type. The two are projected side by
--- side because the finding is the GAP, not the cursor. A FAST_FORWARD cursor
--- silently converted to Dynamic or Keyset is a cursor whose cost is nothing
--- like what its author asked for. The attribute the plan carries is
--- CursorRequestedType and CursorActualType; there is no CursorType, which is
--- worth saying because it is the name one expects.
+-- side because the finding is the GAP, not the cursor. A cursor silently
+-- converted is a cursor whose cost is nothing like what its author asked for.
+-- The attributes the plan carries are CursorRequestedType and
+-- CursorActualType; there is no CursorType, which is worth saying because it
+-- is the name one expects and a read of it returns nothing without erroring.
+--
+-- Verified with a conversion built for the purpose on 16.0.4265.3, because a
+-- comparison between two attributes that has never once been true is a
+-- comparison nobody has tested. A KEYSET cursor over a heap with no unique
+-- index comes back as SnapShot, and counts.cursors_converted reported 1 of 4
+-- cursors with the pair Keyset -> SnapShot named in the array. A DYNAMIC
+-- cursor over the same table is not converted, so the same run also shows the
+-- predicate staying false where it should.
 --
 -- BOOLEAN ATTRIBUTES ARE TESTED FOR BOTH SPELLINGS. showplan types these as
 -- xs:boolean, which serialises as either 1 or true. Measured on 16.0.4265.3
