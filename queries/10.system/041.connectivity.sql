@@ -73,6 +73,48 @@ GROUP BY rb.ring_buffer_type
 ORDER BY COUNT(*) DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
+-- THE LOGIN PHASES, AND EXACTLY WHAT WAS ESTABLISHED ABOUT THEM. A slow login
+-- has four unrelated causes and one symptom, so the decomposition under
+-- LoginTimersInMilliseconds is worth more than its TotalTime. It exists, and
+-- the shape below was read off a dumped record on 16.0.4265.3 rather than
+-- guessed:
+--
+--   LoginTimersInMilliseconds
+--     TotalTime, EnqueueTime, NetWritesTime, NetReadsTime
+--     Ssl                  TotalTime, NetReadsTime, NetWritesTime,
+--                          SecureCallsTime, EnqueueTime
+--     Sspi                 same five
+--     TriggerAndResGovTime TotalTime, FindLogin, LogonTriggers,
+--                          ExecClassifier, SessionRecover
+--
+-- THE NAMES ARE NOT THE EXTENDED EVENTS NAMES, and that is the trap this file
+-- was one edit away from falling into. The login event carries the same
+-- meanings as login_task_enqueued_ms, ssl_processing_ms, sspi_processing_ms
+-- and login_trigger_and_resource_governor_processing_ms. None of those strings
+-- appears in the ring buffer. An XPath written from them matches nothing and
+-- yields NULL for every row, without an error and without a trace.
+--
+-- WHAT WAS NOT ESTABLISHED IS THE VALUES, and saying so is the point of this
+-- paragraph. On 16.0.4265.3 and 17.0.4065.4 every LoginTimers record carries
+-- SniConsumerError 17830 with socket error 10054, a client that reset the
+-- connection during login, and every timer in it is zero: the login never
+-- reached a phase in which to spend time. A login deliberately slowed to three
+-- seconds inside a LOGON trigger, which succeeded, wrote NO record at all.
+-- So on a healthy instance this decomposition is structurally present and
+-- semantically empty, and the columns below are collected for the archive
+-- where it is not. A reader who finds them all zero has learnt that the logins
+-- recorded here failed early, not that the phases are fast.
+--
+-- THE COST, with its condition, because six more .value() calls per record is
+-- exactly the shape that cost this corpus thirty seconds once. Measured at 18
+-- records on 16.0.4265.3 and 9 on 17.0.4065.4: 17 ms and 13 ms for the whole
+-- grouped query, fourteen path reads per record. This buffer is capped at 1024
+-- records, so the worst case is roughly fifty times that condition and has not
+-- been observed; filling the buffer means a thousand failed logins. The reason
+-- it is cheap here and was not in 064.server-diagnostics.sql is the document
+-- size: a connectivity record is about two kilobytes, a diagnostics payload is
+-- four megabytes, and .value() with a path re-walks the document it is given.
+--
 /* Grouped, not one row per event: 1024 raw records are mostly repetition, and
    the shape of the repetition is the answer. RemoteHost is what separates a
    monitoring probe from an application, and the socket error under
@@ -88,7 +130,21 @@ SELECT c.rec_type                                                 AS [record_typ
        MIN(c.when_local)                                          AS [first_seen],
        MAX(c.when_local)                                          AS [last_seen],
        MIN(c.total_login_ms)                                      AS [min_login_ms],
-       MAX(c.total_login_ms)                                      AS [max_login_ms]
+       MAX(c.total_login_ms)                                      AS [max_login_ms],
+       /* The phases of the login, worst observed per group. Four unrelated
+          causes produce one slow login, and only this decomposition separates
+          them: waiting for a worker, negotiating TLS, talking to a domain
+          controller, and running the client's own code. See the header for
+          what was and was not observed about the values. */
+       MAX(c.enqueue_ms)                                          AS [max_enqueue_ms],
+       MAX(c.ssl_ms)                                              AS [max_ssl_ms],
+       MAX(c.sspi_ms)                                             AS [max_sspi_ms],
+       MAX(c.trigger_resgov_ms)                                   AS [max_trigger_resgov_ms],
+       -- The last one splits again, and the split is the point: a logon
+       -- trigger is the client's code and a classifier is the Resource
+       -- Governor's. Same total, different owner, different conversation.
+       MAX(c.logon_trigger_ms)                                    AS [max_logon_trigger_ms],
+       MAX(c.classifier_ms)                                       AS [max_classifier_ms]
 FROM (
     SELECT DATEADD(second, -((@ticks - rb.timestamp) / 1000), GETDATE())              AS when_local,
            x.value('(//ConnectivityTraceRecord/RecordType)[1]',   'varchar(60)')      AS rec_type,
@@ -97,7 +153,24 @@ FROM (
            x.value('(//ConnectivityTraceRecord/SniConsumerError)[1]', 'int')          AS sni_error,
            x.value('(//ConnectivityTraceRecord/TdsBufInfo/InputBufError)[1]', 'int')  AS socket_error,
            x.value('(//ConnectivityTraceRecord/State)[1]', 'int')                     AS state,
-           x.value('(//ConnectivityTraceRecord/LoginTimersInMilliseconds/TotalTime)[1]', 'bigint') AS total_login_ms
+           x.value('(//ConnectivityTraceRecord/LoginTimersInMilliseconds/TotalTime)[1]', 'bigint') AS total_login_ms,
+           /* The four phases, plus the two sub-phases that name an owner. The
+              element names are the RING BUFFER's, taken from a dumped record
+              and not from the Extended Events login event, whose fields carry
+              the same meanings under entirely different names
+              (login_task_enqueued_ms, ssl_processing_ms, sspi_processing_ms,
+              login_trigger_and_resource_governor_processing_ms). Writing the
+              XE names here would have matched nothing and returned NULL for
+              every row, silently. */
+           x.value('(//LoginTimersInMilliseconds/EnqueueTime)[1]', 'bigint')          AS enqueue_ms,
+           x.value('(//LoginTimersInMilliseconds/Ssl/TotalTime)[1]', 'bigint')        AS ssl_ms,
+           x.value('(//LoginTimersInMilliseconds/Sspi/TotalTime)[1]', 'bigint')       AS sspi_ms,
+           x.value('(//LoginTimersInMilliseconds/TriggerAndResGovTime/TotalTime)[1]', 'bigint')
+                                                                                      AS trigger_resgov_ms,
+           x.value('(//LoginTimersInMilliseconds/TriggerAndResGovTime/LogonTriggers)[1]', 'bigint')
+                                                                                      AS logon_trigger_ms,
+           x.value('(//LoginTimersInMilliseconds/TriggerAndResGovTime/ExecClassifier)[1]', 'bigint')
+                                                                                      AS classifier_ms
     FROM sys.dm_os_ring_buffers AS rb
     CROSS APPLY (SELECT CAST(rb.record AS xml)) AS r(x)
     WHERE rb.ring_buffer_type = 'RING_BUFFER_CONNECTIVITY'
