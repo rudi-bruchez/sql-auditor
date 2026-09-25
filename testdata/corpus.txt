@@ -22,6 +22,7 @@
 10.system/061.deadlock-graphs.sql
 10.system/062.xe-sessions.sql
 10.system/063.blocked-process-reports.sql
+10.system/064.server-diagnostics.sql
 10.system/070.suspect-pages.sql
 10.system/071.memory-dumps.sql
 10.system/072.resource-governor.sql
