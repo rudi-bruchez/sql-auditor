@@ -84,6 +84,15 @@
 -- not have, so that array is written from the catalogue's documented shape and
 -- not from a measurement.
 --
+-- That unexercised array is where the file's first defect came from, and it
+-- was not about content. It read sys.external_data_sources.pushdown, which
+-- arrived in 2019, and a missing column is a compile-time error that fails the
+-- whole batch: on 2016 and 2017 this collector returned nothing at all, the
+-- five arrays that do work included. It ran clean on the 2022 lab instance and
+-- on nothing older, and the continuous integration of the public repository,
+-- which runs a 2017 leg, is what found it. A version floor is a claim about
+-- every column in the file, not only about the views it names.
+--
 -- NO JUDGEMENT IS APPLIED. Masking is not a security control against a
 -- principal who can also run a query of their own devising, and Microsoft says
 -- so; row-level security with only a filter predicate is a legitimate design
@@ -217,7 +226,23 @@ ORDER BY k.name
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* External data sources: what this database reaches outside itself.
-   connection_options is not read, for the reason in the header. */
+   connection_options is not read, for the reason in the header.
+
+   pushdown arrived in SQL Server 2019, three versions above this file's 2016
+   floor, so it is asked for by existence and read through sp_executesql. A
+   column that does not exist is a compile-time error, which no TRY at this
+   level catches and which fails the whole batch: on 2016 and 2017 the entire
+   collector produced nothing, five populated arrays included, because of one
+   column in the sixth. The shape is the one 10.system/050.tempdb.sql and
+   20.databases/023.log-vlf.sql already use. Below 2019 the column below is
+   NULL, which reads as "not knowable on this build" and not as "off". */
+DECLARE @eds_pushdown TABLE (data_source_id int PRIMARY KEY, pushdown nvarchar(256));
+IF COL_LENGTH('sys.external_data_sources', 'pushdown') IS NOT NULL
+    INSERT INTO @eds_pushdown (data_source_id, pushdown)
+    EXEC sys.sp_executesql
+        N'SELECT e.data_source_id, CONVERT(nvarchar(256), e.pushdown)
+          FROM sys.external_data_sources AS e OPTION (RECOMPILE, MAXDOP 1)';
+
 SELECT
     e.name                                                      AS [name],
     e.type_desc                                                 AS [type],
@@ -228,7 +253,8 @@ SELECT
     -- sys.database_scoped_credentials and is named here rather than inventoried.
     (SELECT c.name FROM sys.database_scoped_credentials AS c
       WHERE c.credential_id = e.credential_id)                  AS [credential],
-    CAST(e.pushdown AS varchar(10))                             AS [pushdown]
+    (SELECT d.pushdown FROM @eds_pushdown AS d
+      WHERE d.data_source_id = e.data_source_id)                AS [pushdown]
 FROM sys.external_data_sources AS e
 ORDER BY e.name
 OPTION (RECOMPILE, MAXDOP 1);
