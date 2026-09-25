@@ -29,7 +29,11 @@
 -- both on Linux: sys.dm_server_registry returns ZERO rows, not zero matching
 -- rows. There is no registry to read, and the Linux opt-out lives in
 -- mssql.conf, which no T-SQL reaches. sys.dm_server_services on the same two
--- instances lists the engine and the Agent and no telemetry service.
+-- instances names no telemetry service, and does not even agree with itself
+-- about the rest: 17.0.4065.4 lists the engine and the Agent, 16.0.4265.3
+-- lists the Agent alone. That is why the array below is projected whole and
+-- why counts.services_reported is in the root. An absent name in this view is
+-- not an absent service.
 --
 -- WHETHER THE CPE SUBKEY IS EXPOSED ON WINDOWS IS NOT VERIFIED. The subkey is a
 -- sibling of MSSQLServer under the instance's own key, which makes it plausible
@@ -142,8 +146,8 @@ SELECT
       WHERE [value_name] = N'EnableErrorReporting' AND [value_data] <> N'0')
                                                                 AS [error_reporting.opted_in_keys],
     -- Services whose name suggests a telemetry client. Named rather than
-    -- counted silently, because sys.dm_server_services is documented to list
-    -- the engine, the Agent and full-text only: a hit here would be news.
+    -- counted silently, because this view reports a short and unreliable list:
+    -- a hit here would be news, and a miss establishes nothing.
     (SELECT COUNT(*) FROM sys.dm_server_services
       WHERE servicename LIKE N'%TELEMETRY%' OR servicename LIKE N'%CEIP%')
                                                                 AS [counts.services_telemetry_like],
@@ -151,7 +155,15 @@ SELECT
     -- The edition, because it decides whether opting out is offered at all.
     -- Repeated from 010.properties.sql on purpose: a reader of this file needs
     -- it in the same breath as the counts above, and it is one string.
-    CONVERT(nvarchar(128), SERVERPROPERTY('Edition'))           AS [instance.edition],
+    --
+    -- Named [edition] and not [instance.edition], which is how 010.properties
+    -- names it, because [instance] above is a scalar here and an object there.
+    -- The encoder builds an object out of every dotted prefix, so the two
+    -- spellings in one result set make [instance] both a string and a
+    -- container and the whole document is refused. 010.properties is the one
+    -- file in the corpus with no scalar [instance] column, which is what lets
+    -- it own the prefix.
+    CONVERT(nvarchar(128), SERVERPROPERTY('Edition'))           AS [edition],
     CASE WHEN @err_telemetry = 0 THEN 1 ELSE 0 END              AS [collected.telemetry],
     @err_telemetry                                              AS [errors.telemetry],
     NULLIF(@msg, N'')                                           AS [error_message]
@@ -176,10 +188,12 @@ FROM @registry AS r
 ORDER BY r.[registry_key], r.[value_name]
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* The services the engine will admit to. This is a short list by design and is
-   projected whole rather than filtered, so that a reader can see that the
-   telemetry service is absent from it because the view does not report it, and
-   not because it is not installed. */
+/* The services the engine will admit to. Projected whole rather than filtered,
+   so that a reader can see that the telemetry service is absent from it because
+   the view does not report it, and not because it is not installed. Measured on
+   two Linux instances, the view does not even list the engine on both of them,
+   which is the strongest argument there is against reading anything into what
+   it leaves out. */
 SELECT
     s.servicename                                               AS [service],
     s.startup_type_desc                                         AS [startup_type],
