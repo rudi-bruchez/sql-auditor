@@ -53,9 +53,24 @@
 -- with an ampersand comes back as &amp; and the archive states a column name
 -- that does not exist.
 --
--- HEAPS ARE ABSENT, and that is correct rather than an omission: index_id = 0
--- has no index_columns rows to report. 050.heaps.sql covers them, and
--- 010.objects.sql counts them.
+-- HEAPS ARE ABSENT, and the reason written here for three months was wrong.
+-- It said index_id = 0 has no index_columns rows to report. Measured on
+-- 16.0.4265.3 against a partitioned heap: sys.index_columns DOES carry a row
+-- for index_id 0, naming the partitioning column, with partition_ordinal 1 and
+-- key_ordinal 0. The conclusion survives the correction, because a heap has no
+-- key list and no included list, which is what this file exists to report;
+-- 050.heaps.sql covers them and 010.objects.sql counts them. But the wrong
+-- reason had a cost: it is what made a partitioned heap's own data space
+-- invisible here, so a non-aligned index on such a table had nothing to compare
+-- itself to. base_data_space and base_partitioning_column below read that
+-- index_id 0 row and close the gap without listing the heap as an index.
+--
+-- ALIGNMENT IS PROJECTED AS EVIDENCE, NEVER AS A VERDICT, for the usual reason,
+-- and also because a non-aligned index is sometimes the right design: it is
+-- only a fault when someone means to use SWITCH PARTITION, and the archive
+-- cannot know that. What the archive can carry is the pair of facts that
+-- decide it. indexes_not_aligned in the root is a count of that same pair, not
+-- a judgement on it.
 --
 -- NO JUDGEMENT IS APPLIED. Two indexes sharing a leading column are not
 -- declared redundant here. Whether the narrower one can go depends on what
@@ -113,7 +128,46 @@ SELECT DB_NAME()                                                  AS [database],
         FROM sys.indexes AS i
         JOIN sys.objects AS o ON o.object_id = i.object_id
         WHERE i.index_id > 0 AND o.type = 'U' AND o.is_ms_shipped = 0
-          AND i.filter_definition IS NOT NULL)                    AS [filtered_indexes]
+          AND i.filter_definition IS NOT NULL)                    AS [filtered_indexes],
+       /* Les index qui ne sont PAS alignes sur le partitionnement de leur
+          table. Un index non aligne interdit SWITCH PARTITION, donc
+          l'archivage par bascule, qui est la raison pour laquelle la table a
+          ete partitionnee. Compte ici parce que c'est le constat ; les trois
+          colonnes qui le rendent lisible sont dans le detail. Un index est
+          aligne quand il porte le MEME espace de donnees que sa table ET la
+          MEME colonne de partitionnement. Les deux conditions comptent, et ce
+          n'est pas une precaution : chacune correspond a un refus distinct du
+          moteur, mesure en pilotant ALTER TABLE SWITCH sur 16.0.4265.3.
+          L'index pose sur un groupe de fichiers rend l'erreur 7733, « the table
+          is partitioned while index X is not partitioned ». L'index pose sur le
+          meme schema mais partitionne par une autre colonne rend la 4912, « the
+          column set used to partition the table is different from the column
+          set used to partition index X ». Avec les deux retires, la bascule
+          passe. */
+       (SELECT COUNT(*)
+        FROM sys.indexes AS i
+        JOIN sys.objects AS o ON o.object_id = i.object_id
+        CROSS APPLY (SELECT TOP (1) b.data_space_id
+                     FROM sys.indexes AS b
+                     WHERE b.object_id = i.object_id AND b.index_id < 2) AS base
+        WHERE i.index_id > 0 AND o.type = 'U' AND o.is_ms_shipped = 0
+          AND EXISTS (SELECT 1 FROM sys.data_spaces AS bds
+                       WHERE bds.data_space_id = base.data_space_id
+                         AND bds.type = 'PS')
+          AND (i.data_space_id <> base.data_space_id
+               OR ISNULL((SELECT c.name FROM sys.index_columns AS ic
+                            JOIN sys.columns AS c ON c.object_id = ic.object_id
+                                                 AND c.column_id = ic.column_id
+                           WHERE ic.object_id = i.object_id
+                             AND ic.index_id = i.index_id
+                             AND ic.partition_ordinal = 1), N'')
+                  <> ISNULL((SELECT c.name FROM sys.index_columns AS ic
+                               JOIN sys.columns AS c ON c.object_id = ic.object_id
+                                                    AND c.column_id = ic.column_id
+                              WHERE ic.object_id = i.object_id
+                                AND ic.index_id < 2
+                                AND ic.partition_ordinal = 1), N'')))
+                                                                  AS [indexes_not_aligned]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* Ordered by table then index_id, which is the order 020.index-usage.sql uses,
@@ -184,10 +238,47 @@ SELECT SCHEMA_NAME(o.schema_id) + '.' + o.name                    AS [table],
           operational fact from one placed apart. */
        ds.name                                                    AS [data_space],
        ds.type_desc                                               AS [data_space_type],
-       CASE WHEN ds.type = 'PS' THEN 1 ELSE 0 END                 AS [is_partitioned]
+       CASE WHEN ds.type = 'PS' THEN 1 ELSE 0 END                 AS [is_partitioned],
+       /* L'alignement, en trois colonnes plutot qu'un verdict. Mesure sur
+          16.0.4265.3 contre une base construite pour ca : un index pose sur un
+          groupe de fichiers alors que sa table est sur un schema de partition
+          se voyait deja, par comparaison avec la ligne index_id 1. Les deux
+          autres cas ne se voyaient pas du tout, et ce sont ceux qui RESSEMBLENT
+          a un index aligne. Un index sur le MEME schema mais partitionne par
+          une AUTRE colonne rendait exactement la meme ligne qu'un index aligne.
+          Et une table qui est un TAS partitionne n'a pas de ligne ici, puisque
+          index_id 0 est exclu, donc son index non aligne n'avait rien a quoi se
+          comparer.
+
+          D'ou base_data_space, qui porte l'espace de donnees de la TABLE et se
+          lit sur la ligne de l'index sans avoir besoin qu'une autre ligne soit
+          presente. */
+       basds.name                                                 AS [base_data_space],
+       -- La colonne par laquelle CET index est partitionne, NULL s'il ne l'est
+       -- pas. partition_ordinal, pas key_ordinal : mesure, un index aligne
+       -- porte sa colonne de partitionnement avec key_ordinal = 0, ajoutee
+       -- implicitement par le moteur et absente de la liste des cles ci-dessus.
+       (SELECT c.name FROM sys.index_columns AS ic
+          JOIN sys.columns AS c ON c.object_id = ic.object_id
+                               AND c.column_id = ic.column_id
+         WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
+           AND ic.partition_ordinal = 1)                          AS [partitioning_column],
+       -- Celle de la table. index_id < 2 couvre l'index cluster ET le tas :
+       -- sys.index_columns porte bien une ligne pour index_id 0 quand le tas
+       -- est partitionne, ce qui est mesure et contredit ce que l'en-tete de
+       -- ce fichier affirmait.
+       (SELECT c.name FROM sys.index_columns AS ic
+          JOIN sys.columns AS c ON c.object_id = ic.object_id
+                               AND c.column_id = ic.column_id
+         WHERE ic.object_id = i.object_id AND ic.index_id < 2
+           AND ic.partition_ordinal = 1)                          AS [base_partitioning_column]
 FROM       sys.indexes     AS i
 JOIN       sys.objects     AS o  ON o.object_id = i.object_id
 LEFT JOIN  sys.data_spaces AS ds ON ds.data_space_id = i.data_space_id
+OUTER APPLY (SELECT TOP (1) b.data_space_id
+             FROM sys.indexes AS b
+             WHERE b.object_id = i.object_id AND b.index_id < 2) AS base
+LEFT JOIN  sys.data_spaces AS basds ON basds.data_space_id = base.data_space_id
 WHERE i.index_id > 0
   AND o.type = 'U'
   AND o.is_ms_shipped = 0
