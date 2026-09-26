@@ -363,6 +363,25 @@ An argument therefore wins over everything else: `sql-auditor collect` does the
 same work whatever terminal it finds itself attached to, and no invocation that
 asked for something ever gets a wizard instead.
 
+#### Wrapping several collections in a script
+
+Two shell habits turn a failed collection into a reported success, and both
+were paid for on a real estate in September 2026, where eight collections
+reported `exit 0` while none had collected anything:
+
+- `$?` read after a pipe is the exit code of the LAST command in it. Piping
+  `sql-auditor collect` into `tail` to keep the summary makes every run look
+  successful. Write the output to a log file per instance and read the code
+  before any pipe, or read `${PIPESTATUS[0]}` in bash.
+- `pwsh -File script.ps1 a,b,c` called from bash does not bind a `[string[]]`
+  parameter: the list arrives as one string, the script fails on its
+  parameters and can still exit `0`. Call it with `pwsh -Command` and a real
+  PowerShell array, `@('a','b','c')`.
+
+Check each run by something that does not come from the same pipeline: the
+size of the archive, or the `results` count in its `_run.json`. That is what
+caught both in the case above.
+
 ### When the wizard steps aside
 
 Exactly three cases.
