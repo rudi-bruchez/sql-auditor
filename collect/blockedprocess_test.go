@@ -274,3 +274,25 @@ func TestBlockedProcessExtensionIsTestedOnTheEndOfTheName(t *testing.T) {
 		t.Error("063 no longer tests the .xel extension on the end of the configured name")
 	}
 }
+
+// The directory of an .xel is cut at its last separator, and on Linux that
+// separator is a slash. Looking for a backslash only kept the whole file name as
+// the directory: 063 read an empty capture on an instance holding four reports,
+// and 061 read no deadlock from system_health's files, keeping only what the
+// ring buffer still had. Measured on SQL Server 2025 CU7 on Linux, September
+// 2026.
+func TestXelPathsAreCutOnEitherSeparator(t *testing.T) {
+	for _, f := range []string{"061.deadlock-graphs.sql", "063.blocked-process-reports.sql"} {
+		b, err := os.ReadFile(filepath.Join("..", "queries", "10.system", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sql := string(b)
+		if regexp.MustCompile(`CHARINDEX\(\s*'\\'\s*,\s*REVERSE\(`).MatchString(sql) {
+			t.Errorf("%s cuts a path on a backslash only, which misses every Linux path", f)
+		}
+		if !strings.Contains(sql, `PATINDEX('%[\/]%', REVERSE(@current))`) {
+			t.Errorf("%s no longer cuts @current on either separator", f)
+		}
+	}
+}

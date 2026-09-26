@@ -118,14 +118,22 @@ DECLARE @stem nvarchar(400) =
          WHEN UPPER(RIGHT(@configured, 4)) = N'.XEL'
               THEN LEFT(@configured, LEN(@configured) - 4)
          ELSE @configured END;
+/* The separator is either slash. SQL Server on Linux reports its files as
+   /var/opt/mssql/log/..., and the earlier version looked for a backslash only:
+   finding none, it kept the whole current file name as the "directory" and
+   read '..._0_134349356263740000.xelclaude_sonde_bpr*.xel', which matches
+   nothing. The capture then read as present and empty on an instance that held
+   four reports. Measured on SQL Server 2025 CU7 on Linux, September 2026.
+   PATINDEX on the reversed name finds the LAST separator of either kind; a
+   backslash inside a LIKE bracket is a literal. */
 IF @stem IS NOT NULL
 BEGIN
-    SET @stem = REVERSE(LEFT(REVERSE(@stem), CASE WHEN CHARINDEX('\', REVERSE(@stem)) = 0
+    SET @stem = REVERSE(LEFT(REVERSE(@stem), CASE WHEN PATINDEX('%[\/]%', REVERSE(@stem)) = 0
                                                   THEN LEN(@stem)
-                                                  ELSE CHARINDEX('\', REVERSE(@stem)) - 1 END));
+                                                  ELSE PATINDEX('%[\/]%', REVERSE(@stem)) - 1 END));
     SET @path = CASE
         WHEN @current IS NULL THEN @stem + N'*.xel'
-        ELSE LEFT(@current, LEN(@current) - CHARINDEX('\', REVERSE(@current)) + 1) + @stem + N'*.xel'
+        ELSE LEFT(@current, LEN(@current) - PATINDEX('%[\/]%', REVERSE(@current)) + 1) + @stem + N'*.xel'
     END;
 END;
 

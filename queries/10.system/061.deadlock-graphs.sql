@@ -103,8 +103,12 @@ DECLARE @current nvarchar(600) =
        JOIN sys.dm_xe_sessions AS s ON s.address = t.event_session_address
       WHERE s.name = 'system_health' AND t.target_name = 'event_file');
 
+/* Either slash separates. On Linux the path is /var/opt/mssql/log/..., and
+   looking for a backslash only kept the whole file name as the directory, so
+   the file read matched nothing and the collection held only what the ring
+   buffer still had. Same defect as 063, found there first. */
 IF @current IS NOT NULL
-    SET @path = LEFT(@current, LEN(@current) - CHARINDEX('\', REVERSE(@current)) + 1) + N'system_health*.xel';
+    SET @path = LEFT(@current, LEN(@current) - PATINDEX('%[\/]%', REVERSE(@current)) + 1) + N'system_health*.xel';
 
 IF @path IS NOT NULL
 BEGIN
