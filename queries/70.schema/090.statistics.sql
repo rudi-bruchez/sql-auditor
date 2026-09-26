@@ -53,7 +53,13 @@
 -- reason:
 --   sys.stats.is_incremental              (2014)
 --   sys.dm_db_incremental_stats_properties (2014)
---   sys.stats.has_persisted_sample        (2016 SP1)
+--   sys.stats.has_persisted_sample        (2019; this line said 2016 SP1 until
+--                                          September 2026, and sys.stats
+--                                          documents 2019)
+--   sys.dm_db_stats_properties.persisted_sample_percent
+--                                         (2016 SP1 CU4, the DMF column that
+--                                          says a rate is persisted; the one a
+--                                          topic needs, not collected yet)
 --   sys.stats.auto_drop                   (2022)
 
 SET NOCOUNT ON;
