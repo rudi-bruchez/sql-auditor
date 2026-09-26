@@ -1802,6 +1802,14 @@ version to one absent column is the expensive part.
 
 slug: cap-warning-per-item
 
+**Closed for 063, in a different shape than below.** The cap now keeps one
+report per blocking episode rather than the most recent reports, and every
+report's fields are grouped into `episodes[]` of the index, so the reports that
+are not kept whole are not omissions at all. The ones that are, the longest
+reports of episodes past the cap, are still listed one by one in the index and
+announced to the manifest once, with their count. `061.deadlock-graphs.sql`
+still warns per graph past its cap of 100, and is not changed here.
+
 `10.system/063.blocked-process-reports.sql` caps what it writes at 500 reports,
 which is right. It then emits one warning per report it did not write. On an
 instance whose capture held 38 426 reports, the run produced **37 949 distinct

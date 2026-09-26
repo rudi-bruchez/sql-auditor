@@ -40,10 +40,30 @@
 -- the wildcard that covers the rollover files, which is where the history is —
 -- the current file alone would be the same mistake as reading the ring buffer.
 --
--- TWO CAPS, NEITHER SILENT. At most 500 reports, the most recent first, and at
--- most 1 MiB each. Past either, the XML is NULLed by a CONDITIONAL PROJECTION —
--- never a WHERE — so the row survives with its timestamp and its size, and the
--- writer records a named omission.
+-- EVERY REPORT IS READ, A SAMPLE IS KEPT WHOLE. The fields that say who blocked
+-- whom, on what and for how long are extracted from EVERY report in the files
+-- and projected on every row: the blocked session and its ownerId, the blocking
+-- session, its status and trancount, the wait resource, the lock mode and the
+-- wait. The writer groups them into episodes over the whole capture. Only the
+-- full XML is capped, and the cap keeps ONE report per episode, its longest,
+-- the longest episodes first.
+--
+-- The earlier cap kept the 500 most recent reports. On a client capture of
+-- 1 635 that threw away 1 135 and shrank the window to nineteen hours, and it
+-- biased every ranking a blocking analysis makes — who blocks, on what, in which
+-- mode, the median wait — towards the last hour. A report is re-emitted every
+-- monitor tick while the block lasts, so most of what the recency cap kept was
+-- the same few episodes again. Found in September 2026.
+--
+-- THE EPISODE KEY is the blocked session's spid and ownerId, the blocking spid
+-- and the wait resource, and it was measured rather than chosen: ownerId is
+-- carried on the blocked side even when its trancount is 0, and absent from the
+-- blocking side, so a key built on the blocker's ownerId would merge every
+-- episode into one.
+--
+-- TWO CAPS, NEITHER SILENT. At most 500 reports kept whole, and at most 1 MiB
+-- each. Past either, the XML is NULLed by a CONDITIONAL PROJECTION — never a
+-- WHERE — so the row survives with its timestamp, its size and its fields.
 --
 -- NO JUDGEMENT IS APPLIED. No report is called serious. A twenty-second block on
 -- a nightly load is not the same finding as a twenty-second block at 10am, and
@@ -141,7 +161,16 @@ DECLARE @reports TABLE (
     event_time datetime2(3),
     report     nvarchar(max),
     file_name  nvarchar(400),
-    file_offset bigint
+    file_offset bigint,
+    blocked_spid       int,
+    blocked_owner_id   bigint,
+    blocked_wait_ms    bigint,
+    blocked_trancount  int,
+    lock_mode          nvarchar(20),
+    wait_resource      nvarchar(256),
+    blocking_spid      int,
+    blocking_status    nvarchar(30),
+    blocking_trancount int
 );
 
 /* The read itself, guarded. Everything that can go wrong here goes wrong at the
@@ -151,13 +180,26 @@ DECLARE @reports TABLE (
 IF @path IS NOT NULL
 BEGIN
     BEGIN TRY
-        INSERT INTO @reports (event_time, report, file_name, file_offset)
+        INSERT INTO @reports (event_time, report, file_name, file_offset,
+                              blocked_spid, blocked_owner_id, blocked_wait_ms,
+                              blocked_trancount, lock_mode, wait_resource,
+                              blocking_spid, blocking_status, blocking_trancount)
         SELECT x.value('(/event/@timestamp)[1]', 'datetime2(3)'),
                CAST(x.query('(/event/data[@name="blocked_process"]/value/*)[1]') AS nvarchar(max)),
                t.file_name,
-               t.file_offset
+               t.file_offset,
+               d.value('(blocked-process/process/@spid)[1]',       'int'),
+               d.value('(blocked-process/process/@ownerId)[1]',    'bigint'),
+               d.value('(blocked-process/process/@waittime)[1]',   'bigint'),
+               d.value('(blocked-process/process/@trancount)[1]',  'int'),
+               d.value('(blocked-process/process/@lockMode)[1]',   'nvarchar(20)'),
+               d.value('(blocked-process/process/@waitresource)[1]', 'nvarchar(256)'),
+               d.value('(blocking-process/process/@spid)[1]',      'int'),
+               d.value('(blocking-process/process/@status)[1]',    'nvarchar(30)'),
+               d.value('(blocking-process/process/@trancount)[1]', 'int')
         FROM sys.fn_xe_file_target_read_file(@path, NULL, NULL, NULL) AS t
         CROSS APPLY (SELECT CAST(t.event_data AS xml)) AS e(x)
+        OUTER APPLY x.nodes('/event/data[@name="blocked_process"]/value/blocked-process-report') AS b(d)
         WHERE t.object_name = 'blocked_process_report';
     END TRY
     BEGIN CATCH
@@ -183,16 +225,47 @@ SELECT
     1048576                                                       AS [caps.report_bytes]
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* One row per report, whether or not its XML came back. Most recent first. */
+/* One row per report, whether or not its XML came back. Most recent first.
+
+   in_episode ranks the reports of one episode by wait, longest first; the
+   episode's representative is its 1. sample_rank then ranks the
+   representatives among themselves, longest wait first, and is NULL on every
+   other report, so the cap below can only ever keep representatives. */
+WITH ranked AS (
+    SELECT r.*,
+           ROW_NUMBER() OVER (ORDER BY r.event_time DESC)       AS rank_recent,
+           ROW_NUMBER() OVER (PARTITION BY r.blocked_spid, r.blocked_owner_id,
+                                           r.blocking_spid, r.wait_resource
+                              ORDER BY r.blocked_wait_ms DESC, r.event_time DESC)
+                                                                AS in_episode
+    FROM @reports AS r
+), sampled AS (
+    SELECT k.*,
+           CASE WHEN k.in_episode = 1
+                THEN ROW_NUMBER() OVER (PARTITION BY CASE WHEN k.in_episode = 1 THEN 0 ELSE 1 END
+                                        ORDER BY k.blocked_wait_ms DESC, k.event_time DESC)
+           END                                                  AS sample_rank
+    FROM ranked AS k
+)
 SELECT
-    ROW_NUMBER() OVER (ORDER BY r.event_time DESC)                AS [report.rank],
+    s.rank_recent                                                 AS [report.rank],
     COUNT(*)     OVER ()                                          AS [report.count],
-    CONVERT(varchar(23), r.event_time, 126)                       AS [occurred_at],
-    r.file_name                                                   AS [file_name],
-    CASE WHEN DATALENGTH(r.report) <= 1048576
-          AND ROW_NUMBER() OVER (ORDER BY r.event_time DESC) <= 500
-         THEN r.report END                                        AS [report],
-    DATALENGTH(r.report)                                          AS [report_bytes]
-FROM @reports AS r
-ORDER BY r.event_time DESC
+    s.sample_rank                                                 AS [report.sample_rank],
+    CONVERT(varchar(23), s.event_time, 126)                       AS [occurred_at],
+    s.file_name                                                   AS [file_name],
+    s.blocked_spid                                                AS [blocked.spid],
+    s.blocked_owner_id                                            AS [blocked.owner_id],
+    s.blocked_wait_ms                                             AS [blocked.wait_ms],
+    s.blocked_trancount                                           AS [blocked.trancount],
+    s.lock_mode                                                   AS [blocked.lock_mode],
+    s.wait_resource                                               AS [blocked.wait_resource],
+    s.blocking_spid                                               AS [blocking.spid],
+    s.blocking_status                                             AS [blocking.status],
+    s.blocking_trancount                                          AS [blocking.trancount],
+    CASE WHEN DATALENGTH(s.report) <= 1048576
+          AND s.sample_rank <= 500
+         THEN s.report END                                        AS [report],
+    DATALENGTH(s.report)                                          AS [report_bytes]
+FROM sampled AS s
+ORDER BY s.event_time DESC
 OPTION (RECOMPILE, MAXDOP 1);

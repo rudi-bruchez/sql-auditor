@@ -19,6 +19,29 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Changed
+
+- `10.system/063.blocked-process-reports.sql` reads the fields that place a
+  report in a blocking episode out of EVERY report in the capture, and the index
+  gains `episodes[]`: blocked session and ownerId, blocking session, wait
+  resource and lock mode, report count, first and last seen, longest wait, and
+  the blocker's status and trancount. The 500 reports written whole are now one
+  per episode, its longest, the longest episodes first, where they used to be
+  the 500 most recent. On a client capture of 1 635 reports the old cap dropped
+  1 135 and shrank the window to nineteen hours, and since a report is re-emitted
+  every monitor tick while a block lasts, most of what it kept was the same few
+  episodes again. A report that is not its episode's longest is no longer an
+  omission, and the ones past the cap are announced to the manifest once rather
+  than one line each.
+
+### Fixed
+
+- `061.deadlock-graphs.sql` and `063.blocked-process-reports.sql` cut the path
+  of an `.xel` on either slash. They looked for a backslash only, so on SQL
+  Server for Linux the pattern they read matched nothing: 063 reported a present
+  and empty capture on an instance holding four reports, and 061 kept only what
+  the ring buffer still held. Measured on SQL Server 2025 CU7 on Linux.
+
 ## [0.34.0] - 2026-09-24
 
 The error log is localised, and this repository has said so in a comment since

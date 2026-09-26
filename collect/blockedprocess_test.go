@@ -26,9 +26,14 @@ func bprSets(threshold int64, session string, rows [][]any) []NamedResultSet {
 			int64(maxBlockedProcessReports), int64(maxBlockedProcessBytes)}},
 	}
 	reports := ResultSet{
-		Columns: []string{"report.rank", "report.count", "occurred_at", "file_name", "report", "report_bytes"},
-		Types:   []string{"BIGINT", "BIGINT", "NVARCHAR", "NVARCHAR", "NVARCHAR", "BIGINT"},
-		Rows:    rows,
+		Columns: []string{"report.rank", "report.count", "report.sample_rank", "occurred_at", "file_name",
+			"blocked.spid", "blocked.owner_id", "blocked.wait_ms", "blocked.trancount", "blocked.lock_mode",
+			"blocked.wait_resource", "blocking.spid", "blocking.status", "blocking.trancount",
+			"report", "report_bytes"},
+		Types: []string{"BIGINT", "BIGINT", "BIGINT", "NVARCHAR", "NVARCHAR",
+			"INT", "BIGINT", "BIGINT", "INT", "NVARCHAR", "NVARCHAR", "INT", "NVARCHAR", "INT",
+			"NVARCHAR", "BIGINT"},
+		Rows: rows,
 	}
 	return []NamedResultSet{
 		{Spec: ResultSpec{Name: "root", Shape: ShapeObject}, Set: root},
@@ -36,15 +41,24 @@ func bprSets(threshold int64, session string, rows [][]any) []NamedResultSet {
 	}
 }
 
+// bprRow is one row of 063's reports set. sample is nil for a report that is
+// not its episode's longest, which is how 063 marks every such row.
+func bprRow(rank int64, sample any, at string, blocked, owner, wait, blocking int64,
+	resource string, body any, size int64) []any {
+	return []any{rank, int64(0), sample, at, `D:\MSSQL\Log\bp_0_1.xel`,
+		blocked, owner, wait, int64(0), "S", resource, blocking, "suspended", int64(1),
+		body, size}
+}
+
 func bprRows() [][]any {
 	body := `<blocked-process-report><blocked-process/></blocked-process-report>`
 	return [][]any{
-		{int64(1), int64(4), "2026-08-13T17:07:55.977", `D:\MSSQL\Log\bp_0_1.xel`, body, int64(len(body))},
-		{int64(2), int64(4), "2026-08-13T17:07:45.972", `D:\MSSQL\Log\bp_0_1.xel`, body, int64(len(body))},
+		bprRow(1, int64(1), "2026-08-13T17:07:55.977", 87, 1001, 30000, 68, "KEY: 7:1 (a)", body, int64(len(body))),
+		bprRow(2, int64(2), "2026-08-13T17:07:45.972", 88, 1002, 20000, 87, "KEY: 7:1 (a)", body, int64(len(body))),
 		// Above the byte cap: the SQL nulled it, the size still arrives.
-		{int64(3), int64(4), "2026-08-13T17:07:35.967", `D:\MSSQL\Log\bp_0_1.xel`, nil, int64(maxBlockedProcessBytes + 1)},
-		// Past the count cap.
-		{int64(maxBlockedProcessReports + 1), int64(4), "2026-08-13T17:07:25.963", `D:\MSSQL\Log\bp_0_1.xel`, nil, int64(400)},
+		bprRow(3, int64(3), "2026-08-13T17:07:35.967", 90, 1003, 10000, 68, "OBJECT: 7:2", nil, int64(maxBlockedProcessBytes+1)),
+		// The longest report of an episode past the episode cap.
+		bprRow(4, int64(maxBlockedProcessReports+1), "2026-08-13T17:07:25.963", 91, 1004, 5000, 68, "OBJECT: 7:3", nil, int64(400)),
 	}
 }
 
@@ -201,10 +215,10 @@ func TestBPRWriterTellsTheTwoCapsApart(t *testing.T) {
 	if !strings.Contains(reasons[3], "byte cap") {
 		t.Errorf("the oversized report: %q", reasons[3])
 	}
-	if !strings.Contains(reasons[maxBlockedProcessReports+1], "cap of") {
-		t.Errorf("the capped report: %q", reasons[maxBlockedProcessReports+1])
+	if !strings.Contains(reasons[4], "episodes kept whole") {
+		t.Errorf("the capped report: %q", reasons[4])
 	}
-	if strings.Contains(reasons[maxBlockedProcessReports+1], "holds no report body") {
+	if strings.Contains(reasons[4], "holds no report body") {
 		t.Error("a report dropped by the cap was reported as one the capture does not hold")
 	}
 	// Every report is listed whether or not its body was written, with the .xel
@@ -230,8 +244,8 @@ func TestBlockedProcessCapsAreTheSameNumbersInTheCorpus(t *testing.T) {
 		pattern string
 		want    int
 	}{
-		{"the report count cap", `ORDER BY r\.event_time DESC\) <= (\d+)`, maxBlockedProcessReports},
-		{"the per-report byte cap", `DATALENGTH\(r\.report\) <= (\d+)`, maxBlockedProcessBytes},
+		{"the report count cap", `s\.sample_rank <= (\d+)`, maxBlockedProcessReports},
+		{"the per-report byte cap", `DATALENGTH\(s\.report\) <= (\d+)`, maxBlockedProcessBytes},
 	} {
 		m := regexp.MustCompile(c.pattern).FindAllStringSubmatch(sql, -1)
 		if len(m) != 1 {
@@ -294,5 +308,89 @@ func TestXelPathsAreCutOnEitherSeparator(t *testing.T) {
 		if !strings.Contains(sql, `PATINDEX('%[\/]%', REVERSE(@current))`) {
 			t.Errorf("%s no longer cuts @current on either separator", f)
 		}
+	}
+}
+
+// The population is every report, not the ones written. Three reports of one
+// block and one of another make two episodes, the longer first, with the report
+// count and the extremes of each — and a report that is not its episode's
+// longest is neither written nor called an omission, since nothing of it is
+// lost.
+func TestBPRWriterGroupsEveryReportIntoEpisodes(t *testing.T) {
+	body := `<blocked-process-report><blocked-process/></blocked-process-report>`
+	// The shorter episode's row comes first, so the order of the episodes can
+	// only come from their wait and not from the order the rows arrive in.
+	rows := [][]any{
+		bprRow(4, int64(2), "2026-08-13T17:07:50.000", 88, 2002, 6000, 87, "KEY: 7:1 (a)", body, int64(len(body))),
+		bprRow(1, int64(1), "2026-08-13T17:08:05.000", 87, 1001, 15000, 68, "KEY: 7:1 (a)", body, int64(len(body))),
+		bprRow(2, nil, "2026-08-13T17:08:00.000", 87, 1001, 10000, 68, "KEY: 7:1 (a)", nil, int64(len(body))),
+		bprRow(3, nil, "2026-08-13T17:07:55.000", 87, 1001, 5000, 68, "KEY: 7:1 (a)", nil, int64(len(body))),
+	}
+	root, rel, res, warnings := runBPRWriter(t, bprSets(5, "blocked_processes", rows), maxRunBytes)
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel), "_index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx struct {
+		Counts   struct{ Episodes, Written int } `json:"counts"`
+		Episodes []struct {
+			Episode      int    `json:"episode"`
+			BlockedSpid  int64  `json:"blocked_spid"`
+			BlockingSpid int64  `json:"blocking_spid"`
+			Reports      int    `json:"reports"`
+			FirstSeen    string `json:"first_seen"`
+			LastSeen     string `json:"last_seen"`
+			MaxWaitMs    int64  `json:"max_wait_ms"`
+			File         string `json:"file"`
+		} `json:"episodes"`
+		Reports []struct {
+			Rank    int64 `json:"rank"`
+			Episode int   `json:"episode"`
+		} `json:"reports"`
+		Omissions []struct{ Rank int64 } `json:"omissions"`
+	}
+	if err := json.Unmarshal(b, &idx); err != nil {
+		t.Fatal(err)
+	}
+	if idx.Counts.Episodes != 2 || len(idx.Episodes) != 2 {
+		t.Fatalf("episodes = %d (%d listed), want 2", idx.Counts.Episodes, len(idx.Episodes))
+	}
+	first := idx.Episodes[0]
+	if first.BlockedSpid != 87 || first.BlockingSpid != 68 || first.Reports != 3 || first.MaxWaitMs != 15000 ||
+		first.FirstSeen != "2026-08-13T17:07:55.000" || first.LastSeen != "2026-08-13T17:08:05.000" {
+		t.Errorf("first episode = %+v", first)
+	}
+	if first.File != "blocked_process_0001.xml" || idx.Episodes[1].File != "blocked_process_0004.xml" {
+		t.Errorf("episode files = %q, %q", first.File, idx.Episodes[1].File)
+	}
+	for _, r := range idx.Reports {
+		want := 1
+		if r.Rank == 4 {
+			want = 2
+		}
+		if r.Episode != want {
+			t.Errorf("report %d is in episode %d, want %d", r.Rank, r.Episode, want)
+		}
+	}
+	if res.ReportFiles != 2 || idx.Counts.Written != 2 {
+		t.Errorf("written = %d files, %d counted, want 2", res.ReportFiles, idx.Counts.Written)
+	}
+	if len(idx.Omissions) != 0 || len(warnings) != 0 {
+		t.Errorf("a report whose episode was kept is not an omission: %v, %v", idx.Omissions, warnings)
+	}
+}
+
+// Past the episode cap, the omissions still name each report, and the manifest
+// hears about it once. A warning per report put 1 135 identical lines in a
+// client's manifest in September 2026.
+func TestBPRWriterWarnsOnceForEpisodesPastTheCap(t *testing.T) {
+	var rows [][]any
+	for i := 1; i <= 3; i++ {
+		rows = append(rows, bprRow(int64(i), int64(maxBlockedProcessReports+i), "2026-08-13T17:07:50.000",
+			int64(100+i), int64(i), 5000, 68, "KEY: 7:1 (a)", nil, 400))
+	}
+	_, _, _, warnings := runBPRWriter(t, bprSets(5, "blocked_processes", rows), maxRunBytes)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "3 episode(s) past the cap") {
+		t.Errorf("warnings = %q, want one line naming 3 episodes", warnings)
 	}
 }

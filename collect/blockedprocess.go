@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"sort"
 )
 
 // The blocked-process-reports writer turns 10.system/063 into one .xml file per
@@ -15,14 +16,15 @@ import (
 // "reports" into one generic shape would save a few lines here and cost every
 // reader of the archive the word that says what they are looking at.
 
-// maxBlockedProcessReports bounds how many reports are written, most recent
-// first. Higher than the deadlock cap on purpose: a blocked process report fires
-// on a threshold rather than on an event the engine had to resolve, so a busy
-// instance produces them in bursts, and a burst is the thing worth having whole.
+// maxBlockedProcessReports bounds how many reports are written whole: one per
+// episode, its longest, the longest episodes first.
 //
-// It bounds the FILES, not the rows. Every report still arrives with its
-// timestamp, its rank and its size, and the ones past the cap are named in the
-// omissions. The SAME NUMBER is a literal in 063, and
+// It bounds the FILES, not the rows, and not the episodes. Every report still
+// arrives with its timestamp, its size and the fields that place it in an
+// episode, and the episodes are built from all of them. The earlier cap kept the
+// most recent reports instead; on a client capture of 1 635 it dropped 1 135,
+// shrank the window to nineteen hours and tilted every ranking towards the last
+// hour. The SAME NUMBER is a literal in 063, and
 // TestBlockedProcessCapsAreTheSameNumbersInTheCorpus fails on any drift.
 const maxBlockedProcessReports = 500
 
@@ -39,7 +41,13 @@ type blockedProcessIndex struct {
 	// four different meanings here and only this block tells them apart.
 	Source  blockedProcessSource `json:"source"`
 	Counts  blockedProcessCounts `json:"counts"`
-	Reports []indexedReport      `json:"reports"`
+	// Episodes is the population, built from every report in the capture and
+	// not from the ones written. A report is re-emitted every monitor tick
+	// while a block lasts, so counting reports counts each block as many times
+	// as its duration divided by the threshold; the episode is the unit a
+	// ranking of who blocks whom has to be made in.
+	Episodes []blockingEpisode `json:"episodes"`
+	Reports  []indexedReport   `json:"reports"`
 	// Notes carries the readable form of what Source implies. The analysis
 	// layer can derive it; a human opening the archive should not have to.
 	Notes     []string        `json:"notes"`
@@ -60,6 +68,7 @@ type blockedProcessSource struct {
 
 type blockedProcessCounts struct {
 	InFiles    int    `json:"in_files"`
+	Episodes   int    `json:"episodes"`
 	Written    int    `json:"written"`
 	Earliest   string `json:"earliest,omitempty"`
 	Latest     string `json:"latest,omitempty"`
@@ -67,9 +76,35 @@ type blockedProcessCounts struct {
 	CapBytes   int    `json:"cap_report_bytes"`
 }
 
+// blockingEpisode is one block: the same blocked session and transaction, held
+// by the same blocking session, on the same resource. The key was measured on a
+// capture rather than chosen: ownerId is carried on the blocked side even at
+// trancount 0 and absent from the blocking side.
+type blockingEpisode struct {
+	Episode        int    `json:"episode"`
+	BlockedSpid    *int64 `json:"blocked_spid"`
+	BlockedOwnerID *int64 `json:"blocked_owner_id"`
+	BlockingSpid   *int64 `json:"blocking_spid"`
+	WaitResource   string `json:"wait_resource,omitempty"`
+	LockMode       string `json:"lock_mode,omitempty"`
+	Reports        int    `json:"reports"`
+	FirstSeen      string `json:"first_seen"`
+	LastSeen       string `json:"last_seen"`
+	MaxWaitMs      int64  `json:"max_wait_ms"`
+	// The blocker as its longest report saw it. A trancount of 0 separates a
+	// statement that holds locks for a long time from a transaction left open,
+	// and the two call for different remedies.
+	BlockingStatus    string `json:"blocking_status,omitempty"`
+	BlockingTrancount *int64 `json:"blocking_trancount"`
+	// File is the report kept whole for this episode, empty past the cap.
+	File string `json:"file,omitempty"`
+}
+
 type indexedReport struct {
 	Rank       int64  `json:"rank"`
 	OccurredAt string `json:"occurred_at"`
+	// Episode is the position of this report's episode in Episodes, 1-based.
+	Episode int `json:"episode,omitempty"`
 	// FromFile names the .xel the report was read out of. A report from a
 	// rollover file and one from the file being written are the same fact, but
 	// knowing which is what lets a reader see how far back the capture reaches.
@@ -118,10 +153,12 @@ func writeBlockedProcessReports(req WriteRequest) (WriteResult, error) {
 			CapReports: maxBlockedProcessReports,
 			CapBytes:   maxBlockedProcessBytes,
 		},
+		Episodes:  []blockingEpisode{},
 		Reports:   []indexedReport{},
 		Notes:     []string{},
 		Omissions: []graphOmission{},
 	}
+	episodeOf := groupEpisodes(reports, &idx)
 
 	// FOUR ways this directory ends up empty, and they are different facts about
 	// the server. Saying which one applies is the whole job of this block: an
@@ -177,19 +214,31 @@ func writeBlockedProcessReports(req WriteRequest) (WriteResult, error) {
 		return res, cause
 	}
 
+	// Reports past the episode cap are named one by one in the omissions and
+	// said ONCE to the manifest. A warning per report put 1 135 identical lines
+	// in a client's manifest in September 2026, which is how a real warning
+	// next to them goes unread.
+	beyondCap := 0
 	for r := range reports.Rows {
-		rank, haveRank := int64At(reports, r, "report.rank")
+		rank, _ := int64At(reports, r, "report.rank")
+		sample, sampled := int64At(reports, r, "report.sample_rank")
 		at, _ := stringAt(reports, r, "occurred_at")
 		from, _ := stringAt(reports, r, "file_name")
 		size, _ := int64At(reports, r, "report_bytes")
 		xml, present := stringAt(reports, r, "report")
 
-		entry := indexedReport{Rank: rank, OccurredAt: at, FromFile: from, Bytes: size}
+		ep := episodeOf[r]
+		entry := indexedReport{Rank: rank, OccurredAt: at, Episode: ep, FromFile: from, Bytes: size}
 		file := fmt.Sprintf("blocked_process_%04d.xml", rank)
 
 		switch {
-		case haveRank && rank > maxBlockedProcessReports:
-			omit(rank, at, "", fmt.Sprintf("report %d of %d in the capture: beyond the cap of %d reports, so the report was not collected; the most recent were kept", rank, idx.Counts.InFiles, maxBlockedProcessReports), size)
+		case !sampled:
+			// Not its episode's longest report. Nothing is lost: its fields are
+			// in the episode, and the episode's longest report is the one kept.
+		case sample > maxBlockedProcessReports:
+			beyondCap++
+			idx.Omissions = append(idx.Omissions, graphOmission{Rank: rank, OccurredAt: at, Bytes: size,
+				Reason: fmt.Sprintf("the longest report of episode %d, beyond the %d episodes kept whole; its fields are in the episode", ep, maxBlockedProcessReports)})
 		case size > maxBlockedProcessBytes:
 			omit(rank, at, "", fmt.Sprintf("the report is %d bytes, above the %d byte cap, so it was not collected", size, maxBlockedProcessBytes), size)
 		case !present:
@@ -208,13 +257,93 @@ func writeBlockedProcessReports(req WriteRequest) (WriteResult, error) {
 			res.ReportFiles++
 			entry.File = file
 			idx.Counts.Written++
+			if ep > 0 {
+				idx.Episodes[ep-1].File = file
+			}
 		}
 		idx.Reports = append(idx.Reports, entry)
+	}
+	if beyondCap > 0 {
+		req.Warn(fmt.Sprintf("%s: %d episode(s) past the cap of %d were not kept whole; every report's fields are in episodes[] of _index.json",
+			req.Script.Base, beyondCap, maxBlockedProcessReports))
 	}
 
 	n, err := writeBlockedProcessIndex(req, rel, idx)
 	res.Bytes += n
 	return res, err
+}
+
+// groupEpisodes builds idx.Episodes from every row and returns, per row, the
+// 1-based position of its episode. Episodes are ordered longest wait first, so
+// the numbering agrees with the order in which 063 keeps reports whole.
+func groupEpisodes(reports ResultSet, idx *blockedProcessIndex) []int {
+	nullable := func(r int, col string) *int64 {
+		if v, ok := int64At(reports, r, col); ok {
+			return &v
+		}
+		return nil
+	}
+	key := func(r int) string {
+		part := func(p *int64) string {
+			if p == nil {
+				return "-"
+			}
+			return fmt.Sprint(*p)
+		}
+		res, _ := stringAt(reports, r, "blocked.wait_resource")
+		return part(nullable(r, "blocked.spid")) + "|" + part(nullable(r, "blocked.owner_id")) +
+			"|" + part(nullable(r, "blocking.spid")) + "|" + res
+	}
+
+	byKey := map[string]*blockingEpisode{}
+	var order []*blockingEpisode
+	rowKey := make([]string, len(reports.Rows))
+	for r := range reports.Rows {
+		k := key(r)
+		rowKey[r] = k
+		at, _ := stringAt(reports, r, "occurred_at")
+		wait, _ := int64At(reports, r, "blocked.wait_ms")
+		e, seen := byKey[k]
+		if !seen {
+			res, _ := stringAt(reports, r, "blocked.wait_resource")
+			e = &blockingEpisode{BlockedSpid: nullable(r, "blocked.spid"),
+				BlockedOwnerID: nullable(r, "blocked.owner_id"), BlockingSpid: nullable(r, "blocking.spid"),
+				WaitResource: res, FirstSeen: at, LastSeen: at, MaxWaitMs: -1}
+			byKey[k] = e
+			order = append(order, e)
+		}
+		e.Reports++
+		if at < e.FirstSeen {
+			e.FirstSeen = at
+		}
+		if at > e.LastSeen {
+			e.LastSeen = at
+		}
+		if wait > e.MaxWaitMs {
+			e.MaxWaitMs = wait
+			e.LockMode, _ = stringAt(reports, r, "blocked.lock_mode")
+			e.BlockingStatus, _ = stringAt(reports, r, "blocking.status")
+			e.BlockingTrancount = nullable(r, "blocking.trancount")
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool { return order[i].MaxWaitMs > order[j].MaxWaitMs })
+	position := map[string]int{}
+	for i, e := range order {
+		e.Episode = i + 1
+		if e.MaxWaitMs < 0 {
+			e.MaxWaitMs = 0
+		}
+		idx.Episodes = append(idx.Episodes, *e)
+	}
+	for k, e := range byKey {
+		position[k] = e.Episode
+	}
+	idx.Counts.Episodes = len(order)
+	out := make([]int, len(reports.Rows))
+	for r, k := range rowKey {
+		out[r] = position[k]
+	}
+	return out
 }
 
 func writeBlockedProcessIndex(req WriteRequest, rel string, idx blockedProcessIndex) (int, error) {
