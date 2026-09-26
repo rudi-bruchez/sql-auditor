@@ -1836,6 +1836,14 @@ holds the detail for anyone who wants it.
 
 slug: trace-flags-absent
 
+**Wrong as written, corrected on 27 September 2026.** `DBCC TRACESTATUS(-1)` has
+been run by `10.system/050.tempdb.sql` since 8 August 2026, into its
+`trace_flags` result set (flag, global, session), and the topic on trace flag
+3226 already reads it. The flags were collected on the audit this section
+describes; why the three topics still went `hors-collecte` is a question for the
+analysis layer, not a gap in the corpus. The paragraphs below are kept as they
+were written.
+
 `DBCC TRACESTATUS(-1)` is one statement and the corpus does not run it. Three
 query-detection topics went `hors-collecte` on one audit for want of it:
 `trace-flag-3226-not-enabled`, `query-optimizer-hotfixes-disabled`, and the
