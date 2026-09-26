@@ -394,3 +394,18 @@ func TestBPRWriterWarnsOnceForEpisodesPastTheCap(t *testing.T) {
 		t.Errorf("warnings = %q, want one line naming 3 episodes", warnings)
 	}
 }
+
+// A stopped session has no running target, and its configured file name is the
+// only path there is. Stripping its directory first sent the read to the LOG
+// directory, so a session configured into another folder read as empty.
+// Reproduced on SQL Server 2025 CU7 with a stopped session writing to the data
+// directory, September 2026.
+func TestStoppedSessionKeepsItsConfiguredDirectory(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "queries", "10.system", "063.blocked-process-reports.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`WHEN @current IS NULL THEN @configured_stem \+ N'\*\.xel'`).MatchString(string(b)) {
+		t.Error("063 no longer reads a stopped session from its configured path, directory included")
+	}
+}

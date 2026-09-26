@@ -113,8 +113,11 @@ ORDER BY CASE WHEN rs.name IS NULL THEN 1 ELSE 0 END, s.event_session_id;
 /* The directory from the running target, the stem from the definition, and a
    wildcard between them so the rollover files come too. When the session is not
    running there is no running target, and the configured name is used as it
-   stands — relative to the LOG directory, which is where the function resolves
-   a bare name anyway. */
+   stands, directory included: a bare name resolves to the LOG directory, and a
+   full path to wherever it points. The earlier version stripped the directory
+   first and so read a session configured into another folder from the LOG
+   directory, where its files are not; found by an external review in
+   September 2026 and reproduced on SQL Server 2025 CU7. */
 DECLARE @current nvarchar(600) =
     CAST(CAST(@running AS xml).value('(/EventFileTarget/File/@name)[1]', 'nvarchar(600)') AS nvarchar(600));
 /* The extension is tested on the end of the name, not on a reversed copy of it.
@@ -146,13 +149,14 @@ DECLARE @stem nvarchar(400) =
    four reports. Measured on SQL Server 2025 CU7 on Linux, September 2026.
    PATINDEX on the reversed name finds the LAST separator of either kind; a
    backslash inside a LIKE bracket is a literal. */
+DECLARE @configured_stem nvarchar(400) = @stem;
 IF @stem IS NOT NULL
 BEGIN
     SET @stem = REVERSE(LEFT(REVERSE(@stem), CASE WHEN PATINDEX('%[\/]%', REVERSE(@stem)) = 0
                                                   THEN LEN(@stem)
                                                   ELSE PATINDEX('%[\/]%', REVERSE(@stem)) - 1 END));
     SET @path = CASE
-        WHEN @current IS NULL THEN @stem + N'*.xel'
+        WHEN @current IS NULL THEN @configured_stem + N'*.xel'
         ELSE LEFT(@current, LEN(@current) - PATINDEX('%[\/]%', REVERSE(@current)) + 1) + @stem + N'*.xel'
     END;
 END;
