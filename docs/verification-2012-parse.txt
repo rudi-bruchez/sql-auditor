@@ -1,7 +1,7 @@
 sql-auditor corpus grammar check
 ================================
-Produced    : 2026-09-27T02:32:52Z
-Corpus tree : 2529f45fda42302ad332af266cabf07d2562be05
+Produced    : 2026-09-27T08:07:30Z
+Corpus tree : cce80513bd9f9c9788611e7932715d75f1755ae7
               (git rev-parse HEAD:queries - this artifact describes that corpus
                and no other; if the two differ, re-run this script)
 ScriptDom   : /home/rudi/.nuget/packages/microsoft.sqlserver.transactsql.scriptdom/180.37.3/lib/net472/Microsoft.SqlServer.TransactSql.ScriptDom.dll
@@ -81,14 +81,14 @@ queries/70.schema/060.columns.sql              TSql110 (SQL Server 2012)    resu
 queries/70.schema/070.index-columns.sql        TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/70.schema/075.foreign-keys.sql         TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/70.schema/080.modules.sql              TSql110 (SQL Server 2012)    resultsets 2/2  ok
-queries/70.schema/090.statistics.sql           TSql110 (SQL Server 2012)    resultsets 2/2  ok
+queries/70.schema/090.statistics.sql           TSql110 (SQL Server 2012)    resultsets 3/3  ok
 queries/70.schema/091.statistics-density.sql   TSql130 (SQL Server 2016)    resultsets 2/2  ok
 queries/80.workload/010.wait-stats.sql         TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/80.workload/011.batch-response-times.sql TSql110 (SQL Server 2012)    resultsets 2/2  ok
-queries/80.workload/020.query-store.sql        TSql130 (SQL Server 2016)    resultsets 3/3  ok
+queries/80.workload/020.query-store.sql        TSql130 (SQL Server 2016)    resultsets 4/4  ok
 queries/80.workload/021.query-store-detail.sql TSql130 (SQL Server 2016)    resultsets 3/3  ok
 queries/80.workload/022.query-store-profiled.sql TSql150 (SQL Server 2019)    resultsets 2/2  ok
-queries/80.workload/023.query-store-most-executed.sql TSql130 (SQL Server 2016)    resultsets 2/2  ok
+queries/80.workload/023.query-store-most-executed.sql TSql130 (SQL Server 2016)    resultsets 3/3  ok
 queries/80.workload/024.query-store-rowcount.sql TSql140 (SQL Server 2017)    resultsets 2/2  ok
 queries/80.workload/025.query-store-compare.sql TSql130 (SQL Server 2016)    resultsets 3/3  ok
 queries/80.workload/026.query-store-interrupted.sql TSql130 (SQL Server 2016)    resultsets 3/3  ok
