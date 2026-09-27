@@ -111,16 +111,16 @@ func TestModuleWriterKeepsWhatTheModuleIs(t *testing.T) {
 		Columns: []string{"schema", "name", "type", "definition", "definition_bytes",
 			"is_encrypted", "module.rank", "module.count", "create_date", "modify_date",
 			"uses_ansi_nulls", "uses_quoted_identifier", "is_schema_bound", "is_recompiled",
-			"execute_as"},
+			"execute_as", "execute_as_principal_id"},
 		Types: []string{"NVARCHAR", "NVARCHAR", "NVARCHAR", "NVARCHAR", "BIGINT",
 			"INT", "BIGINT", "BIGINT", "DATETIME", "DATETIME",
-			"INT", "INT", "INT", "INT", "NVARCHAR"},
+			"INT", "INT", "INT", "INT", "NVARCHAR", "INT"},
 		Rows: [][]any{
 			{"dbo", "p_owner", "SQL_STORED_PROCEDURE", "CREATE PROCEDURE p_owner WITH EXECUTE AS OWNER AS SELECT 1", int64(60),
 				int64(0), int64(1), int64(2), time.Date(2026, 9, 1, 8, 30, 0, 0, time.UTC), time.Date(2026, 9, 20, 17, 5, 9, 0, time.UTC),
-				int64(1), int64(0), int64(0), int64(1), "OWNER"},
+				int64(1), int64(0), int64(0), int64(1), "OWNER", int64(-2)},
 			{"dbo", "p_caller", "SQL_STORED_PROCEDURE", "CREATE PROCEDURE p_caller AS SELECT 1", int64(37),
-				int64(0), int64(2), int64(2), nil, nil, int64(1), int64(1), int64(0), int64(0), nil},
+				int64(0), int64(2), int64(2), nil, nil, int64(1), int64(1), int64(0), int64(0), nil, nil},
 		},
 	}
 	root, rel, _, _ := runModuleWriter(t, sets, maxRunBytes)
@@ -138,9 +138,9 @@ func TestModuleWriterKeepsWhatTheModuleIs(t *testing.T) {
 		t.Fatalf("modules = %d, want 2", len(idx.Modules))
 	}
 	want := []map[string]string{
-		{"execute_as": `"OWNER"`, "modify_date": `"2026-09-20T17:05:09"`, "is_recompiled": "1",
+		{"execute_as": `"OWNER"`, "execute_as_principal_id": "-2", "modify_date": `"2026-09-20T17:05:09"`, "is_recompiled": "1",
 			"uses_quoted_identifier": "0", "create_date": `"2026-09-01T08:30:00"`},
-		{"execute_as": "null", "modify_date": "null", "is_recompiled": "0",
+		{"execute_as": "null", "execute_as_principal_id": "null", "modify_date": "null", "is_recompiled": "0",
 			"uses_ansi_nulls": "1", "is_schema_bound": "0"},
 	}
 	for i, fields := range want {
@@ -325,6 +325,27 @@ func TestModuleWriterRecordsWhatTheBudgetRefused(t *testing.T) {
 // SQL literal would make the module past the SQL's cap arrive with a NULL
 // definition and be reported here as one the catalog does not hold, which is a
 // false fact about the server.
+// The writer test above hands the writer "OWNER" ready-made, so it cannot see
+// the SQL go back to USER_NAME alone, which turns -2 into NULL. An external
+// review proved that by making exactly that change and watching every test
+// pass. This reads the corpus instead.
+func TestModuleSQLNamesTheOwnerContext(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "queries", "70.schema", "080.modules.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(b)
+	for _, c := range []struct{ what, pattern string }{
+		{"-2 mapped to OWNER in execute_as",
+			`(?s)CASE\s+WHEN\s+m\.execute_as_principal_id\s*=\s*-2\s+THEN\s+N'OWNER'.*?AS \[execute_as\]`},
+		{"the raw id projected", `m\.execute_as_principal_id\s+AS \[execute_as_principal_id\]`},
+	} {
+		if !regexp.MustCompile(c.pattern).MatchString(sql) {
+			t.Errorf("080.modules.sql lost %s", c.what)
+		}
+	}
+}
+
 func TestModuleCapsAreTheSameNumbersInTheCorpus(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("..", "queries", "70.schema", "080.modules.sql"))
 	if err != nil {

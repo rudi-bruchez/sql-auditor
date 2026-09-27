@@ -102,8 +102,7 @@ type DatabaseInfo struct {
 	IsSnapshot  bool
 	HasAccess   bool
 	// UserAccess is sys.databases.user_access_desc: MULTI_USER, SINGLE_USER
-	// or RESTRICTED_USER. Only SINGLE_USER changes what the run may do; see
-	// SkipSingleUser.
+	// or RESTRICTED_USER. See SkipSingleUser and SkipRestrictedUser.
 	UserAccess string
 	// The replication roles, read from sys.databases in the same pass that
 	// lists the candidates. They are flags and not proof of activity: a
@@ -143,6 +142,15 @@ const SkipNoAccess = "no access for this login"
 // the mode states, not on a measured harm. The mode itself stays visible in
 // 20.databases/010.all-databases, which runs at instance scope.
 const SkipSingleUser = "user_access=SINGLE_USER"
+
+// SkipRestrictedUser is the reason a RESTRICTED_USER database is left out when
+// the login may not enter it. That mode admits only db_owner, dbcreator and
+// sysadmin, so HAS_DBACCESS answers 0 for an audit login that already has a
+// user there, measured on 17.0.4065.4, and SkipNoAccess would again send the
+// grant script to create a user that exists. A login the mode admits has
+// HasAccess and is collected as usual. Found by an external review, 27
+// September 2026.
+const SkipRestrictedUser = "user_access=RESTRICTED_USER"
 
 // skipNotIncluded is the reason DB_INCLUDE did not name a database. It is a
 // constant for the same reason as the one above, and here the two places are
@@ -421,6 +429,8 @@ func SelectTargets(c []DatabaseInfo, include, exclude string, widen map[string]b
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, "database snapshot"})
 		case d.UserAccess == "SINGLE_USER":
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, SkipSingleUser})
+		case !d.HasAccess && d.UserAccess == "RESTRICTED_USER":
+			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, SkipRestrictedUser})
 		case !d.HasAccess:
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, SkipNoAccess})
 		case len(inc) > 0 && !matchAny(inc, d.Name):

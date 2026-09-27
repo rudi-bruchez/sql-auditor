@@ -79,7 +79,8 @@ type indexedModule struct {
 	// dates. They are never omitted, a NULL included: an archive written before
 	// that day has no key at all, and "no EXECUTE AS" must not read the same as
 	// "not collected". ExecuteAs is "OWNER", a principal name, or null for the
-	// caller's own context.
+	// caller's own context; ExecuteAsPrincipalID is the stored id, -2 for
+	// OWNER, and is what tells EXECUTE AS OWNER from a user named OWNER.
 	CreateDate           json.RawMessage `json:"create_date"`
 	ModifyDate           json.RawMessage `json:"modify_date"`
 	UsesAnsiNulls        json.RawMessage `json:"uses_ansi_nulls"`
@@ -87,6 +88,7 @@ type indexedModule struct {
 	IsSchemaBound        json.RawMessage `json:"is_schema_bound"`
 	IsRecompiled         json.RawMessage `json:"is_recompiled"`
 	ExecuteAs            json.RawMessage `json:"execute_as"`
+	ExecuteAsPrincipalID json.RawMessage `json:"execute_as_principal_id"`
 }
 
 // moduleOmission is one definition the archive does not contain, and why.
@@ -179,6 +181,7 @@ func writeObjectDefinitions(req WriteRequest) (WriteResult, error) {
 		entry.UsesQuotedIdentifier = attr("uses_quoted_identifier")
 		entry.IsSchemaBound, entry.IsRecompiled = attr("is_schema_bound"), attr("is_recompiled")
 		entry.ExecuteAs = attr("execute_as")
+		entry.ExecuteAsPrincipalID = attr("execute_as_principal_id")
 		file := moduleFileName(schema, name, used)
 
 		// FOUR reasons a definition is absent, and they are tested in this

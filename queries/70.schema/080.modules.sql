@@ -126,9 +126,15 @@ SELECT SCHEMA_NAME(o.schema_id)                                   AS [schema],
           be USER_NAME alone, so the most consequential case, a module that
           runs as its owner, came out NULL exactly like a module with no
           EXECUTE AS at all. Measured on 17.0.4065.4. SELF stores the creator's
-          id and resolves to a name like any named principal. */
+          id and resolves to a name like any named principal.
+
+          The raw id travels beside the name because the name alone is
+          ambiguous: a database may hold a user called OWNER, and EXECUTE AS
+          'OWNER' names that fixed user where EXECUTE AS OWNER follows whoever
+          owns the module. -2 is the second, a positive id the first. */
        CASE WHEN m.execute_as_principal_id = -2 THEN N'OWNER'
-            ELSE USER_NAME(m.execute_as_principal_id) END         AS [execute_as]
+            ELSE USER_NAME(m.execute_as_principal_id) END         AS [execute_as],
+       m.execute_as_principal_id                                  AS [execute_as_principal_id]
 FROM       sys.sql_modules AS m
 JOIN       sys.objects     AS o ON o.object_id = m.object_id
 JOIN       ranked          AS r ON r.object_id = m.object_id

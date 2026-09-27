@@ -60,6 +60,11 @@ release workflow refuses a tag that disagrees with either this file or
   free it used to be collected; it is now left alone, since the mode says
   somebody wants to be, and the mode stays visible in
   `20.databases/010.all-databases`. Measured on SQL Server 2025 CU7.
+- A database in `RESTRICTED_USER` mode that the login may not enter is skipped
+  with the reason `user_access=RESTRICTED_USER`. The mode admits only
+  `db_owner`, `dbcreator` and `sysadmin`, so `HAS_DBACCESS` answers 0 for an
+  audit login that has a user there, and the grant script offered to create
+  it. A login the mode admits is collected as before.
 - The `_index.json` of `70.schema/<database>/080.modules/` carries what each
   module is besides its text: `create_date`, `modify_date`, `uses_ansi_nulls`,
   `uses_quoted_identifier`, `is_schema_bound`, `is_recompiled` and
@@ -67,7 +72,10 @@ release workflow refuses a tag that disagrees with either this file or
   schema, name, type, rank and size. `execute_as` also reads `OWNER` for a
   module created `WITH EXECUTE AS OWNER`: it was `USER_NAME` of the stored id,
   and that id is -2, whose name is NULL, the same as a module with no
-  `EXECUTE AS`. Measured on SQL Server 2025 CU7.
+  `EXECUTE AS`. The stored id travels beside it as `execute_as_principal_id`,
+  since a database may also hold a user called `OWNER`: measured, `EXECUTE AS
+  OWNER` and `EXECUTE AS 'OWNER'` both read `OWNER`, with ids -2 and 5.
+  Measured on SQL Server 2025 CU7.
 - `70.schema/050.heaps.sql` reads its two areas inside TRY/CATCH into buffers
   and always emits its document, with `collected.*`, `errors.*` and
   `error_message` like `030.index-operational`. It had no TRY at all, so one

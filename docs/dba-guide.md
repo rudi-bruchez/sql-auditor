@@ -267,6 +267,9 @@ fragmentation data for it. The skip is recorded in `MANIFEST.txt` under
 A database in `SINGLE_USER` mode is not an access problem and no grant fixes
 it: the run leaves it out with the reason `user_access=SINGLE_USER`, whether or
 not somebody is inside it. Set it back to `MULTI_USER` if it should be audited.
+The same goes for `RESTRICTED_USER` when the login is not `db_owner`,
+`dbcreator` or `sysadmin`: the mode shuts it out whatever users exist, and the
+reason is `user_access=RESTRICTED_USER`.
 
 The generated script writes this section for you, one block per database the run
 reported as skipped. What it emits is a user and nothing else:

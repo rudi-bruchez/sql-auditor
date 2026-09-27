@@ -48,10 +48,11 @@ func TestSelectTargetsSkipsSingleUser(t *testing.T) {
 		{Name: "Free", State: "ONLINE", HasAccess: true, UserAccess: "SINGLE_USER"},
 		{Name: "Taken", State: "ONLINE", HasAccess: false, UserAccess: "SINGLE_USER"},
 		{Name: "Restricted", State: "ONLINE", HasAccess: true, UserAccess: "RESTRICTED_USER"},
+		{Name: "RestrictedShut", State: "ONLINE", HasAccess: false, UserAccess: "RESTRICTED_USER"},
 		{Name: "Distrib", State: "ONLINE", HasAccess: true, UserAccess: "SINGLE_USER", IsDistributor: true},
 		{Name: "Pub", State: "ONLINE", HasAccess: true, UserAccess: "MULTI_USER", IsPublished: true},
 	}
-	got, err := SelectTargets(cands, "Free,Taken,Restricted,Pub", "", widenReplication)
+	got, err := SelectTargets(cands, "Free,Taken,Restricted,RestrictedShut,Pub", "", widenReplication)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +64,11 @@ func TestSelectTargetsSkipsSingleUser(t *testing.T) {
 		if reasons[name] != SkipSingleUser {
 			t.Errorf("%s: reason = %q, want %q", name, reasons[name], SkipSingleUser)
 		}
+	}
+	// RESTRICTED_USER shuts out a login that is not db_owner, dbcreator or
+	// sysadmin even when it has a user there, and no grant script fixes that.
+	if reasons["RestrictedShut"] != SkipRestrictedUser {
+		t.Errorf("RestrictedShut: reason = %q, want %q", reasons["RestrictedShut"], SkipRestrictedUser)
 	}
 	if !slices.Contains(got.Included, "Restricted") {
 		t.Errorf("RESTRICTED_USER must still be collected; included = %v", got.Included)
