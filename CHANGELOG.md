@@ -48,6 +48,11 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Fixed
 
+- `10.system/010.properties.sql` no longer flags `pending_reconfigure` for
+  `max server memory (MB)` at 0 shown in use as 2147483647, nor `min server
+  memory (MB)` at 0 shown as 16. Both are the engine's documented display and
+  the second is how an instance comes out of installation, so every archive
+  carried a pending change nobody had made. Measured on SQL Server 2025 CU7.
 - `061.deadlock-graphs.sql` and `063.blocked-process-reports.sql` cut the path
   of an `.xel` on either slash. They looked for a backslash only, so on SQL
   Server for Linux the pattern they read matched nothing: 063 reported a present

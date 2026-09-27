@@ -39,10 +39,13 @@
 -- trigger runs inside the login transaction of every session, so one that
 -- errors, or that queries something slow or unavailable, refuses connections
 -- to the whole instance including the connection that would come to fix it.
--- The only way back in is the dedicated administrator connection, which has to
--- have been enabled beforehand. That makes the existence of a logon trigger a
--- fact worth carrying even when it is working, which is why is_disabled is
--- projected beside it rather than used as a filter.
+-- The way back in is the dedicated administrator connection, which logon
+-- triggers do not fire for. It is open locally by default; from another
+-- machine, often the only way an operator reaches the server, it works only
+-- if remote admin connections was enabled beforehand. Failing both, a restart
+-- in minimal configuration (-f), which is an outage. That makes the existence
+-- of a logon trigger a fact worth carrying even when it is working, which is
+-- why is_disabled is projected beside it rather than used as a filter.
 --
 -- CREDENTIALS ARE NAMED, NEVER OPENED. sys.credentials holds the identity a
 -- credential presents, not its secret, and the secret is not readable through

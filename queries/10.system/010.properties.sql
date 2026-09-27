@@ -283,12 +283,26 @@ OPTION (RECOMPILE, MAXDOP 1);
    time someone asks about a setting nobody listed.
 
    value and value_in_use are BOTH projected, and their divergence is itself a
-   finding: it means someone ran sp_configure without RECONFIGURE, so the
-   setting a reader sees in a script is not the one the engine is using. */
+   finding: the setting a reader sees in a script is not the one the engine is
+   using. For a dynamic option it means sp_configure ran without RECONFIGURE;
+   for a static one (is_dynamic = 0) RECONFIGURE is not enough and the value
+   waits for a restart, so the next restart changes behaviour on a day nobody
+   chose.
+
+   Two divergences are the engine's display and not a pending change, and the
+   flag leaves them out. max server memory at 0 is shown in use as 2147483647,
+   and min server memory at 0 as 16; both are documented for
+   sys.configurations and were measured on 17.0.4065.4, where the lab instance
+   carried the second one from installation. The raw pair is still projected. */
 SELECT name                          AS setting,
        CAST(value AS BIGINT)         AS value_configured,
        CAST(value_in_use AS BIGINT)  AS value_in_use,
-       CASE WHEN value <> value_in_use THEN 1 ELSE 0 END AS pending_reconfigure,
+       CASE WHEN value = value_in_use THEN 0
+            WHEN name = N'max server memory (MB)'
+                 AND CAST(value AS BIGINT) = 0 AND CAST(value_in_use AS BIGINT) = 2147483647 THEN 0
+            WHEN name = N'min server memory (MB)'
+                 AND CAST(value AS BIGINT) = 0 AND CAST(value_in_use AS BIGINT) = 16 THEN 0
+            ELSE 1 END               AS pending_reconfigure,
        CAST(is_dynamic AS INT)       AS is_dynamic,
        CAST(is_advanced AS INT)      AS is_advanced
 FROM sys.configurations
