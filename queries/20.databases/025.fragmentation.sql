@@ -76,6 +76,7 @@ DECLARE @err_fragmentation int = @replica_err, @msg nvarchar(2048) = @replica_ms
 
 DECLARE @batch_started datetime2 = SYSDATETIME(), @frag_budget_sec int = 150,
         @frag_eligible int = NULL, @frag_measured int = 0, @frag_i int = 1,
+        @frag_skipped_locked int = 0,
         @frag_object int, @frag_index int, @frag_partition int;
 
 /* The partitions the fragmentation read will visit, largest first. */
@@ -95,34 +96,63 @@ DECLARE @fragmentation TABLE (
     [fragmentation_pct] decimal(5,2));
 
 /* One partition per call, the 100 largest by used pages, until the budget runs
-   out. The candidates come from sys.dm_db_partition_stats, which is metadata;
-   used_page_count covers every allocation unit, so no partition the page_count
-   filter below would keep is left out for being too small. */
+   out. The candidates come from metadata, their used pages summed over every
+   allocation unit, so no partition the page_count filter below would keep is
+   left out for being too small.
+
+   A LOCK ON ONE TABLE COSTS THAT TABLE, NOT THE LIST. The candidates used to
+   come from sys.dm_db_partition_stats, which times out whole when one table is
+   under a schema-modification lock, and the first timeout inside the loop ended
+   the loop: one ALTER TABLE left open anywhere in the database cost every
+   measurement and marked the area failed. Measured on 17.0.4065.4 behind an
+   open ALTER TABLE, 27 September 2026: sys.partitions (without its rows column)
+   and sys.allocation_units read past the locked table, sys.dm_db_partition_stats
+   does not. So the list is built from those two, and each partition is read in
+   its own TRY/CATCH: a lock timeout, 1222, skips that partition and is counted
+   in fragmentation_sample.skipped_locked; any other error ends the list and is
+   the area's error, as before. A skip costs one LOCK_TIMEOUT of waiting, which
+   the time budget counts like any other call. The allocation units are
+   joined on partition_id, which holds the same value as hobt_id; see
+   70.schema/050.heaps. */
 IF @readable_secondary = 0
 BEGIN
 BEGIN TRY
-    SELECT @frag_eligible = COUNT(*)
-    FROM sys.dm_db_partition_stats AS ps
-    JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
-    WHERE ps.used_page_count > 1000
+    DECLARE @frag_sizes TABLE (
+        [object_id] int, [index_id] int, [partition_number] int, [used_pages] bigint);
+
+    INSERT INTO @frag_sizes ([object_id], [index_id], [partition_number], [used_pages])
+    SELECT p.object_id, p.index_id, p.partition_number, a.used_pages
+    FROM sys.partitions AS p
+    JOIN sys.indexes AS i ON i.object_id = p.object_id AND i.index_id = p.index_id
+    CROSS APPLY (SELECT SUM(au.used_pages) AS used_pages
+                 FROM sys.allocation_units AS au
+                 WHERE au.container_id = p.partition_id) AS a
+    WHERE a.used_pages > 1000
     OPTION (RECOMPILE, MAXDOP 1);
+
+    SELECT @frag_eligible = COUNT(*) FROM @frag_sizes;
 
     INSERT INTO @frag_candidates ([object_id], [index_id], [partition_number])
-    SELECT TOP (100) ps.object_id, ps.index_id, ps.partition_number
-    FROM sys.dm_db_partition_stats AS ps
-    JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
-    WHERE ps.used_page_count > 1000
-    ORDER BY ps.used_page_count DESC, ps.object_id, ps.index_id, ps.partition_number
+    SELECT TOP (100) [object_id], [index_id], [partition_number]
+    FROM @frag_sizes
+    ORDER BY [used_pages] DESC, [object_id], [index_id], [partition_number]
     OPTION (RECOMPILE, MAXDOP 1);
+END TRY
+BEGIN CATCH
+    SELECT @err_fragmentation = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+END CATCH
 
-    WHILE EXISTS (SELECT 1 FROM @frag_candidates WHERE [n] = @frag_i)
-          AND DATEDIFF(second, @batch_started, SYSDATETIME()) < @frag_budget_sec
-    BEGIN
-        SELECT @frag_object = [object_id], @frag_index = [index_id],
-               @frag_partition = [partition_number]
-        FROM @frag_candidates
-        WHERE [n] = @frag_i;
+WHILE @err_fragmentation = 0
+      AND EXISTS (SELECT 1 FROM @frag_candidates WHERE [n] = @frag_i)
+      AND DATEDIFF(second, @batch_started, SYSDATETIME()) < @frag_budget_sec
+BEGIN
+    SELECT @frag_object = [object_id], @frag_index = [index_id],
+           @frag_partition = [partition_number]
+    FROM @frag_candidates
+    WHERE [n] = @frag_i;
+    SET @frag_i += 1;
 
+    BEGIN TRY
         INSERT INTO @fragmentation
         SELECT ips.avg_fragmentation_in_percent,
                OBJECT_SCHEMA_NAME(ips.object_id) + '.' + OBJECT_NAME(ips.object_id),
@@ -165,17 +195,20 @@ BEGIN TRY
         OPTION (RECOMPILE, MAXDOP 1);
 
         SET @frag_measured += 1;
-        SET @frag_i += 1;
-    END
-END TRY
-BEGIN CATCH
-    SELECT @err_fragmentation = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
-END CATCH
+    END TRY
+    BEGIN CATCH
+        IF ERROR_NUMBER() = 1222
+            SET @frag_skipped_locked += 1;
+        ELSE
+            SELECT @err_fragmentation = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+    END CATCH
+END
 END
 
 SELECT @frag_eligible               AS [fragmentation_sample.eligible_partitions],
        @frag_measured               AS [fragmentation_sample.measured_partitions],
        @frag_budget_sec             AS [fragmentation_sample.budget_sec],
+       @frag_skipped_locked         AS [fragmentation_sample.skipped_locked],
        @readable_secondary                                         AS [skipped.readable_secondary],
        CASE WHEN @err_fragmentation = 0 AND @readable_secondary = 0 THEN 1 ELSE 0 END AS [collected.fragmentation],
        @err_fragmentation           AS [errors.fragmentation],

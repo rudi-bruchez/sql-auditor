@@ -22,16 +22,27 @@
 -- query would have returned NULL on every row without saying why — the exact
 -- shape of failure this corpus tries hardest to avoid.
 --
--- THE COST IS BOUNDED BY THE CAP, NOT BY THE MODE. SAMPLED samples 1% of pages
--- only above 10000 leaf pages; at or below that threshold the engine reads
--- every page and answers as DETAILED would. Measured on SQL Server 2025 against
--- a 2403-page heap: SAMPLED and DETAILED both returned record_count 60000,
--- exactly the row count. So most heaps in a database are read in full, and what
--- keeps this collector cheap is the cap on how many of them are scanned, not
--- the mode. The cap is projected in the root so a reader knows the list is not
--- exhaustive. On a database of small heaps this collector is nearly free; on
--- one with a 200 GB heap it is not, which is why the timeout is generous and
--- the cap is low.
+-- THE COST IS BOUNDED BY A PAGE BUDGET, NOT BY THE MODE. The reference says
+-- SAMPLED reads a 1 percent sample, and that an index or heap of fewer than
+-- 10,000 pages is read in DETAILED mode instead. Measured on SQL Server 2025
+-- against a 2403-page heap: SAMPLED and DETAILED both returned record_count
+-- 60000, exactly the row count. So most heaps in a database are read in full.
+-- Above the threshold the 1 percent holds for a heap: from a buffer pool emptied
+-- by taking the database offline, SAMPLED brought 265 pages of a 25,000-page
+-- heap into the buffer pool, and 159 of a 15,110-page heap whose extents were
+-- interleaved with another table's, 27 September 2026.
+--
+-- The cap of 50 heaps is a count, and a count bounds nothing: fifty heaps of
+-- 9,000 pages are 450,000 pages read in full. So each candidate is priced
+-- before it is read, allocation unit by allocation unit from metadata, at its
+-- used pages below 10,000 and at 1 percent of them from there on, and the
+-- heaps are read largest first until @page_budget would be exceeded. A heap
+-- that does not fit is skipped and counted in sample.skipped_budget, and a
+-- smaller one after it may still fit. The budget and the pages actually spent
+-- are projected in the root beside the cap, so a reader knows the list is not
+-- exhaustive and why. The LIMITED call made for fragmentation reads allocation
+-- pages only and is not priced. A heap is still read whole or not at all: the
+-- budget decides which heaps are read, not how much of one.
 --
 -- NO JUDGEMENT IS APPLIED. A heap is not a defect. Staging tables that are
 -- truncated and bulk-loaded are legitimately heaps, and rebuilding one that is
@@ -57,9 +68,21 @@
 -- about why. Measured on 17.0.4065.4 behind a Sch-M held on one heap by an open
 -- ALTER TABLE, 27 September 2026. Each area now reads inside its own
 -- TRY/CATCH, the root is emitted from variables, and a blocked area comes back
--- empty with its error number, as 030.index-operational does. A lock on one
--- heap still costs the whole list, because the candidate query itself blocks:
--- skipping locked objects one by one is a separate change.
+-- empty with its error number, as 030.index-operational does.
+--
+-- A LOCK ON ONE HEAP COSTS THAT HEAP, NOT THE LIST. Behind a Sch-M held by an
+-- open ALTER TABLE, sys.dm_db_partition_stats times out as a whole, and so does
+-- the rows column of sys.partitions, while sys.allocation_units and
+-- sys.partitions without rows read past the locked object; measured on
+-- 17.0.4065.4, 27 September 2026. So the candidates and the total size are
+-- taken from those two, and everything that names or reads one heap
+-- (OBJECT_NAME, the row count, both calls to the DMV) runs per heap inside its
+-- own TRY/CATCH. A lock timeout there, 1222, skips that heap and counts it in
+-- sample.skipped_locked; any other error ends the list and is reported as the
+-- area's error, as before. Each skipped heap costs a LOCK_TIMEOUT of waiting,
+-- so no new heap is started once @budget_sec have passed since the batch
+-- began, well inside @timeout, and sample.measured_heaps says how many were
+-- read.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -96,6 +119,25 @@ END CATCH
 DECLARE @err_counts int = 0, @err_heaps int = @replica_err, @msg nvarchar(2048) = @replica_msg,
         @heap_count int, @heaps_with_nc int, @heap_total_mb decimal(18,1);
 
+DECLARE @top int = 50, @page_budget bigint = 200000, @pages_spent bigint = 0,
+        @batch_started datetime2 = SYSDATETIME(), @budget_sec int = 240,
+        @measured int = 0, @skipped_locked int = 0, @skipped_budget int = 0,
+        @i int = 1, @obj int, @pid bigint, @part int, @est_pages bigint;
+
+/* The heap partitions to read, largest first, with what each is expected to
+   cost. The reference joins sys.allocation_units on the hobt id for in-row and
+   row-overflow units and on the partition id for LOB units; the two ids hold
+   the same value (207 partitions of 207 on the lab), so the joins below use
+   partition_id alone, as the filegroup lookup further down always has, and
+   keep an equality the optimiser can seek on. */
+DECLARE @candidates TABLE (
+    [n]                int IDENTITY(1,1) PRIMARY KEY,
+    [object_id]        int    NOT NULL,
+    [partition_id]     bigint NOT NULL,
+    [partition_number] int    NOT NULL,
+    [used_pages]       bigint NOT NULL,
+    [est_pages]        bigint NOT NULL);
+
 DECLARE @heaps TABLE (
     [table]                     nvarchar(300),
     [partition]                 int,
@@ -125,11 +167,14 @@ BEGIN TRY
                      WHERE ni.object_id = i.object_id AND ni.index_id > 0)
     OPTION (RECOMPILE, MAXDOP 1);
 
-    SELECT @heap_total_mb = CAST(SUM(ps.used_page_count) * 8 / 1024.0 AS DECIMAL(18,1))
-       FROM sys.dm_db_partition_stats AS ps
-       JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
-       JOIN sys.objects AS o ON o.object_id = i.object_id
-      WHERE i.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0
+    -- From the allocation units rather than sys.dm_db_partition_stats, which
+    -- times out whole on one locked heap (see the header). used_pages summed
+    -- over a partition's units is the used_page_count of the DMV.
+    SELECT @heap_total_mb = CAST(SUM(au.used_pages) * 8 / 1024.0 AS DECIMAL(18,1))
+       FROM sys.partitions AS p
+       JOIN sys.objects AS o ON o.object_id = p.object_id
+       JOIN sys.allocation_units AS au ON au.container_id = p.partition_id
+      WHERE p.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
@@ -138,9 +183,47 @@ END CATCH
 
 /* The fifty largest heaps, scanned in SAMPLED mode. Chosen by page count from
    metadata first, so the expensive scan only touches the objects that could
-   matter. */
+   matter. The estimate follows the reference: a unit of fewer than 10,000 pages
+   is read whole, a larger one at 1 percent. */
 IF @readable_secondary = 0
 BEGIN
+BEGIN TRY
+    INSERT INTO @candidates ([object_id], [partition_id], [partition_number],
+                             [used_pages], [est_pages])
+    SELECT TOP (@top) p.object_id, p.partition_id, p.partition_number,
+           a.used_pages, a.est_pages
+    FROM sys.partitions AS p
+    JOIN sys.objects AS o ON o.object_id = p.object_id
+    CROSS APPLY (SELECT SUM(au.used_pages) AS used_pages,
+                        SUM(CASE WHEN au.used_pages < 10000 THEN au.used_pages
+                                 ELSE CEILING(au.used_pages / 100.0) END) AS est_pages
+                 FROM sys.allocation_units AS au
+                 WHERE au.container_id = p.partition_id) AS a
+    WHERE p.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0
+      AND a.used_pages > 128
+    ORDER BY a.used_pages DESC, p.object_id, p.partition_number
+    OPTION (RECOMPILE, MAXDOP 1);
+END TRY
+BEGIN CATCH
+    SELECT @err_heaps = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+END CATCH
+
+WHILE @err_heaps = 0
+      AND EXISTS (SELECT 1 FROM @candidates WHERE [n] = @i)
+      AND DATEDIFF(second, @batch_started, SYSDATETIME()) < @budget_sec
+BEGIN
+    SELECT @obj = [object_id], @pid = [partition_id], @part = [partition_number],
+           @est_pages = [est_pages]
+    FROM @candidates
+    WHERE [n] = @i;
+    SET @i += 1;
+
+    IF @pages_spent + @est_pages > @page_budget
+    BEGIN
+        SET @skipped_budget += 1;
+        CONTINUE;
+    END
+
 BEGIN TRY
 INSERT INTO @heaps
 SELECT
@@ -206,21 +289,20 @@ SELECT
        FROM sys.allocation_units AS au
        JOIN sys.data_spaces      AS ds ON ds.data_space_id = au.data_space_id
       WHERE au.container_id = h.partition_id AND au.type = 1) AS [filegroup]
+-- The row count comes from sys.dm_db_partition_stats for this one partition,
+-- inside the per-heap TRY: read for the whole list it blocks on any locked heap.
+-- The object_id predicate is what confines it. Filtered on partition_id alone,
+-- the DMV still visited the locked heap and every heap timed out; measured.
 FROM (
-    SELECT TOP (50)
-           ps.object_id,
+    SELECT ps.object_id,
            ps.partition_id,
            ps.partition_number,
            ps.row_count                                  AS rows,
            ps.used_page_count * 8 / 1024.0               AS used_mb
     FROM sys.dm_db_partition_stats AS ps
-    JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
-    JOIN sys.objects AS o ON o.object_id = i.object_id
-    WHERE i.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0
-      AND ps.used_page_count > 128
-    ORDER BY ps.used_page_count DESC
+    WHERE ps.object_id = @obj AND ps.partition_id = @pid
 ) AS h
-CROSS APPLY sys.dm_db_index_physical_stats(DB_ID(), h.object_id, 0, h.partition_number, 'SAMPLED') AS ips
+CROSS APPLY sys.dm_db_index_physical_stats(DB_ID(), @obj, 0, @part, 'SAMPLED') AS ips
 -- One row per allocation unit, not one per partition. A heap holding a LOB or a
 -- row-overflow column produces two or three rows for the same partition, and
 -- without this filter each of them became a row of this result set: the same
@@ -236,17 +318,21 @@ CROSS APPLY sys.dm_db_index_physical_stats(DB_ID(), h.object_id, 0, h.partition_
    allocation unit too. */
 OUTER APPLY (
     SELECT TOP (1) l.avg_fragmentation_in_percent
-    FROM sys.dm_db_index_physical_stats(DB_ID(), h.object_id, 0,
-                                        h.partition_number, 'LIMITED') AS l
+    FROM sys.dm_db_index_physical_stats(DB_ID(), @obj, 0, @part, 'LIMITED') AS l
     WHERE l.alloc_unit_type_desc = N'IN_ROW_DATA'
 ) AS lim
 WHERE ips.alloc_unit_type_desc = N'IN_ROW_DATA'
-ORDER BY ips.forwarded_record_count DESC, h.used_mb DESC
 OPTION (RECOMPILE, MAXDOP 1);
+
+    SELECT @pages_spent += @est_pages, @measured += 1;
 END TRY
 BEGIN CATCH
-    SELECT @err_heaps = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+    IF ERROR_NUMBER() = 1222
+        SET @skipped_locked += 1;
+    ELSE
+        SELECT @err_heaps = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
 END CATCH
+END
 END
 
 SELECT
@@ -256,8 +342,15 @@ SELECT
     @heaps_with_nc                                              AS [counts.heaps_with_nonclustered],
     @heap_total_mb                                              AS [counts.total_mb],
     -- The cap, so a reader never mistakes the list below for the whole story.
-    50                                                          AS [sample.largest_heaps_scanned],
+    @top                                                        AS [sample.largest_heaps_scanned],
     'SAMPLED'                                                   AS [sample.mode],
+    -- How many of those were read, and why the others were not.
+    @measured                                                   AS [sample.measured_heaps],
+    @skipped_locked                                             AS [sample.skipped_locked],
+    @skipped_budget                                             AS [sample.skipped_budget],
+    @page_budget                                                AS [sample.page_budget],
+    @pages_spent                                                AS [sample.estimated_pages_read],
+    @budget_sec                                                 AS [sample.budget_sec],
        @readable_secondary                                         AS [skipped.readable_secondary],
     CASE WHEN @err_counts = 0 THEN 1 ELSE 0 END                 AS [collected.counts],
     CASE WHEN @err_heaps  = 0 AND @readable_secondary = 0 THEN 1 ELSE 0 END AS [collected.heaps],

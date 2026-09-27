@@ -104,7 +104,7 @@ DECLARE @top int = 50;
 DECLARE @eligible int = NULL, @indexes_covered int = NULL;
 DECLARE @err int = @replica_err, @msg nvarchar(2048) = @replica_msg;
 DECLARE @batch_started datetime2 = SYSDATETIME(), @budget_sec int = 1500,
-        @measured int = 0, @i int = 1;
+        @measured int = 0, @i int = 1, @skipped_locked int = 0;
 DECLARE @obj int, @idx int, @part int;
 DECLARE @candidates TABLE (
     [n]                int IDENTITY(1,1) PRIMARY KEY,
@@ -137,44 +137,74 @@ DECLARE @density TABLE (
 /* Read inside TRY/CATCH into a table variable, and emitted unconditionally
    below, for the reason 70.schema/020.index-usage gives: this names user
    objects, READ UNCOMMITTED does not release metadata locks, and a blocked read
-   must cost this list rather than the whole document. */
+   must cost this list rather than the whole document.
+
+   A LOCK ON ONE INDEX COSTS THAT PARTITION, NOT THE LIST. The candidates used
+   to come from sys.dm_db_partition_stats, which times out whole when one table
+   is under a schema-modification lock, and the first timeout inside the loop
+   ended the loop and marked the area failed. Measured on 17.0.4065.4 behind an
+   open ALTER TABLE, 27 September 2026: sys.partitions (without its rows column)
+   and sys.allocation_units read past the locked table. So the sizes come from
+   the allocation units, IN_ROW_DATA being type 1 and LOB_DATA type 2, with the
+   same meaning as the in_row and lob page counts of the DMV, and each partition
+   is read in its own TRY/CATCH: a lock timeout, 1222, skips it and is counted
+   in sample.skipped_locked; any other error ends the list and is the area's
+   error, as before. A skip costs one LOCK_TIMEOUT of waiting, which the time
+   budget counts like any other call. The units are joined on partition_id,
+   which holds the same value as hobt_id; see 70.schema/050.heaps. */
 IF @readable_secondary = 0
 BEGIN
 BEGIN TRY
-    SELECT @eligible = COUNT(*)
-    FROM sys.dm_db_partition_stats AS ps
-    JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
-    JOIN sys.objects AS o ON o.object_id = ps.object_id
+    DECLARE @sizes TABLE (
+        [object_id] int, [index_id] int, [partition_number] int,
+        [index_name] sysname NULL, [index_type] nvarchar(60), [fill_factor] tinyint,
+        [reserved_pages] bigint, [in_row_reserved_pages] bigint,
+        [lob_reserved_pages] bigint);
+
+    INSERT INTO @sizes
+    SELECT p.object_id, p.index_id, p.partition_number,
+           i.name, i.type_desc, i.fill_factor,
+           a.reserved_pages, a.in_row_reserved_pages, a.lob_reserved_pages
+    FROM sys.partitions AS p
+    JOIN sys.indexes AS i ON i.object_id = p.object_id AND i.index_id = p.index_id
+    JOIN sys.objects AS o ON o.object_id = p.object_id
+    CROSS APPLY (SELECT SUM(au.total_pages) AS reserved_pages,
+                        SUM(CASE WHEN au.type = 1 THEN au.total_pages ELSE 0 END) AS in_row_reserved_pages,
+                        SUM(CASE WHEN au.type = 2 THEN au.total_pages ELSE 0 END) AS lob_reserved_pages,
+                        SUM(CASE WHEN au.type = 1 THEN au.used_pages  ELSE 0 END) AS in_row_used_pages
+                 FROM sys.allocation_units AS au
+                 WHERE au.container_id = p.partition_id) AS a
     WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0
       AND i.type IN (1, 2) AND i.is_disabled = 0 AND i.is_hypothetical = 0
-      AND ps.in_row_used_page_count > 128
+      AND a.in_row_used_pages > 128
     OPTION (RECOMPILE, MAXDOP 1);
+
+    SELECT @eligible = COUNT(*) FROM @sizes;
 
     INSERT INTO @candidates ([object_id], [index_id], [partition_number],
                              [index_name], [index_type], [fill_factor],
                              [reserved_pages], [in_row_reserved_pages], [lob_reserved_pages])
     SELECT TOP (@top)
-           ps.object_id, ps.index_id, ps.partition_number,
-           i.name, i.type_desc, i.fill_factor,
-           ps.reserved_page_count,
-           ps.in_row_reserved_page_count,
-           ps.lob_reserved_page_count
-    FROM sys.dm_db_partition_stats AS ps
-    JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
-    JOIN sys.objects AS o ON o.object_id = ps.object_id
-    WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0
-      AND i.type IN (1, 2) AND i.is_disabled = 0 AND i.is_hypothetical = 0
-      AND ps.in_row_used_page_count > 128
-    ORDER BY ps.in_row_reserved_page_count DESC, ps.object_id, ps.index_id, ps.partition_number
+           [object_id], [index_id], [partition_number],
+           [index_name], [index_type], [fill_factor],
+           [reserved_pages], [in_row_reserved_pages], [lob_reserved_pages]
+    FROM @sizes
+    ORDER BY [in_row_reserved_pages] DESC, [object_id], [index_id], [partition_number]
     OPTION (RECOMPILE, MAXDOP 1);
+END TRY
+BEGIN CATCH
+    SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+END CATCH
 
-    WHILE EXISTS (SELECT 1 FROM @candidates WHERE [n] = @i)
-          AND DATEDIFF(second, @batch_started, SYSDATETIME()) < @budget_sec
-    BEGIN
-        SELECT @obj = [object_id], @idx = [index_id], @part = [partition_number]
-        FROM @candidates
-        WHERE [n] = @i;
+WHILE @err = 0
+      AND EXISTS (SELECT 1 FROM @candidates WHERE [n] = @i)
+      AND DATEDIFF(second, @batch_started, SYSDATETIME()) < @budget_sec
+BEGIN
+    SELECT @obj = [object_id], @idx = [index_id], @part = [partition_number]
+    FROM @candidates
+    WHERE [n] = @i;
 
+    BEGIN TRY
         /* The DMV is called with scalars, not through a CROSS APPLY filtered on
            [n]: an APPLY over the candidate table would leave the optimiser free
            to invoke the function for every row and filter afterwards, which is
@@ -201,12 +231,15 @@ BEGIN TRY
         OPTION (RECOMPILE, MAXDOP 1);
 
         SET @measured += 1;
-        SET @i += 1;
-    END
-END TRY
-BEGIN CATCH
-    SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
-END CATCH
+    END TRY
+    BEGIN CATCH
+        IF ERROR_NUMBER() = 1222
+            SET @skipped_locked += 1;
+        ELSE
+            SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+    END CATCH
+    SET @i += 1;
+END
 END
 
 SELECT @indexes_covered = COUNT(*)
@@ -218,6 +251,7 @@ SELECT DB_NAME()                                   AS [database],
        @top                                        AS [sample.largest_partitions_scanned],
        @measured                                   AS [sample.measured_partitions],
        @budget_sec                                 AS [sample.budget_sec],
+       @skipped_locked                             AS [sample.skipped_locked],
        'SAMPLED'                                   AS [sample.mode],
        @eligible                                   AS [counts.eligible_partitions],
        @indexes_covered                            AS [counts.indexes_covered],

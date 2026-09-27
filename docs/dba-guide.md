@@ -612,21 +612,28 @@ run scale with the size of the instance rather than with the number of objects:
 
 | What | Where | What it actually does |
 | --- | --- | --- |
-| Sampled page reads on heaps | `70.schema/050.heaps.sql` | `sys.dm_db_index_physical_stats(..., 'SAMPLED')` on the 50 largest heaps **in every collected database**. SAMPLED works allocation unit by allocation unit: a unit of 10,000 pages or more brings 8 to 12 % of its pages into the buffer pool, because each sample reads a whole extent, and a smaller one is read in full. On a 500 GB heap that is in the order of 40 to 60 GB of reads, not the 1 % the name suggests. |
+| Sampled page reads on heaps | `70.schema/050.heaps.sql` | `sys.dm_db_index_physical_stats(..., 'SAMPLED')` on the 50 largest heaps **in every collected database**, within a budget of 200,000 estimated pages (1.6 GB) per database. SAMPLED works allocation unit by allocation unit: a unit of fewer than 10,000 pages is read in full, a larger one at about 1 %. Measured on SQL Server 2025 from a cold buffer pool, a 25,000-page heap brought 265 pages in and a scattered 15,110-page heap 159. Most heaps are therefore read whole, and the budget is what bounds the total. |
 | The whole current error log | `10.system/040.error-log.sql` | copied into a `#temp` table before it is summarised. An instance that never cycles its log can carry hundreds of megabytes, so the log's size is read first with `sp_enumerrorlogs` and a log above 50 MB is not read at all: the collector's status says `skipped_for_size` and gives the size. Cycling the log with `sp_cycle_errorlog` is what brings it back. |
 | A string search over cached plans | `80.workload/030.implicit-conversions.sql`, `80.workload/053.plan-warnings.sql` | the 1 000 statements with the most reads (030) or CPU (053) are taken from `sys.dm_exec_query_stats` first, then each of their batch plans is cast to text and searched once — CPU, proportional to the size of those plans and not of the whole cache. Until 27 September 2026 every plan in the cache was searched before the cap applied. |
 
-The heap scan is the one to know about. **Neither guard in this corpus bounds
-it:** `SET LOCK_TIMEOUT 10000` bounds waiting for a lock and this takes none
-worth waiting on, and `@timeout: 300` bounds how long it runs while the cost is
-buffer-pool eviction — five minutes of scanning is more than enough, and
-cancelling the query does not put the evicted pages back. The instance is left
-colder than the collector found it.
+The heap scan is the one to know about. `SET LOCK_TIMEOUT 10000` bounds
+waiting for a lock and this takes none worth waiting on, and `@timeout: 300`
+bounds how long it runs while the cost is buffer-pool eviction: cancelling the
+query does not put the evicted pages back. What bounds the eviction is a page
+budget. Each of the 50 largest heaps is priced from metadata before it is read,
+at its used pages below 10,000 and at 1 % of them above, and heaps are read
+largest first until the next one would take the database past 200,000
+estimated pages. A heap that does not fit is skipped, and a smaller one after
+it may still be read. The root of `050.heaps.json` says how many heaps were
+read (`sample.measured_heaps`), how many were skipped for the budget
+(`sample.skipped_budget`) and for a lock (`sample.skipped_locked`), the budget
+itself (`sample.page_budget`) and what was spent against it
+(`sample.estimated_pages_read`).
 
-It is capped on purpose — the 50 *largest* heaps, sampled rather than detailed,
-chosen from metadata first so the scan only touches objects big enough to
-matter — and on an estate of ordinary tables it is close to free. On a
-warehouse it is not.
+The budget decides which heaps are read, not how much of one: a heap is read
+whole or not at all. On an estate of ordinary tables the collector is close to
+free; on a warehouse it reads up to the budget in every database, and that is
+still up to 1.6 GB of buffer pool per database.
 
 There is no flag for it. If that cost is unacceptable on a particular instance,
 run with `--queries-dir` on an exported corpus with that one file removed:
@@ -947,6 +954,17 @@ An empty array beside `"errors": { … : 0 }` means there was nothing to report.
 An empty array beside `1222` means the read did not come back. Those are
 different facts and the archive keeps them apart.
 
+The three collectors that read pages one object at a time,
+`20.databases/025.fragmentation.sql`, `70.schema/050.heaps.sql` and
+`70.schema/055.page-density.sql`, go one step further: a lock timeout costs the
+one partition or heap it happened on, not the area. They skip it, count it in
+`skipped_locked` beside their sample figures, and measure the rest; the area is
+still reported as collected, and only an error other than 1222 marks it failed.
+Measured behind an open `ALTER TABLE` and behind an offline rebuild left in an
+open transaction: each collector read every other object and reported
+`skipped_locked` for the locked ones, where before it reported `1222` and an
+empty list.
+
 The same run that used to end `50 result(s), 8 skipped, 4 error(s)` with four
 files missing now ends:
 
@@ -1150,8 +1168,11 @@ logical fragmentation with `sys.dm_db_index_physical_stats`, which walks the
 index pages themselves rather than metadata. It measures the 100 largest
 partitions one at a time and starts no new one after 150 seconds;
 `fragmentation_sample` in the archive says how many it measured out of how many
-were eligible. One call on a single very large partition can still run past the
-limit, and a collector that times out returns nothing.
+were eligible, and in `skipped_locked` how many it passed over because a lock
+held them longer than the lock timeout: a table under an open `ALTER TABLE` or
+offline rebuild costs that table, and the others are still measured. One call on a
+single very large partition can still run past the limit, and a collector that
+times out returns nothing.
 
 It used to be a result set of `20.databases/020.properties.sql`, and a timeout
 there cost the files, their autogrowth settings and the largest objects along
