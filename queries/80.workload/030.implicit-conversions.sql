@@ -67,12 +67,13 @@
 -- the estates most likely to be affected. server_raised_warning is projected
 -- so the analysis layer can see that split rather than infer it.
 --
--- BOUNDED, AND THE BOUND IS REPORTED. Casting plan XML to text is CPU-heavy
--- per plan, so only the heaviest cached plans are examined — heaviest by
--- logical reads, since that is the quantity this defect inflates. A count of
--- how many plans were examined out of how many exist travels with the result,
--- because "no conversions found" means nothing without knowing how much of
--- the cache was looked at.
+-- BOUNDED, AND THE BOUND IS REPORTED. Rendering a plan as text costs CPU in
+-- proportion to its size, so only the heaviest cached plans are examined,
+-- heaviest by logical reads, since that is the quantity this defect inflates.
+-- What the search costs per megabyte is set out beside the prefilter below. A
+-- count of how many plans were examined out of how many exist travels with
+-- the result, because "no conversions found" means nothing without knowing
+-- how much of the cache was looked at.
 --
 -- IT SEES ONLY WHAT IS STILL CACHED, which on a busy instance can be hours
 -- rather than days, and nothing at all for statements that never cache. The
@@ -168,15 +169,48 @@ OPTION (RECOMPILE, MAXDOP 1);
    of text and walks it; run over a whole sample it cost 27 s. The text match
    is a correct superset, since a statement that converts necessarily carries
    the pattern in its batch's plan text, so nothing true is lost and the
-   expensive test then runs on a handful of candidates. */
+   expensive test then runs on a handful of candidates.
+
+   THE PLAN IS READ AS TEXT AND COMPARED IN BINARY, and each half of that is
+   most of the cost. Until 27 September 2026 this read sys.dm_exec_query_plan,
+   which builds an xml value, cast it back to nvarchar(max) and ran LIKE under
+   the instance collation. Measured on 17.0.4065.4 over a window of 1 000
+   statements holding 66 MB of batch plan text: building the xml cost about
+   50 ms per megabyte, of which rendering the text is 15 and the conversion to
+   xml the rest, the cast 14 more, and a LIKE under the case-insensitive
+   SQL_Latin1_General_CP1_CI_AS about 24, against 3 under Latin1_General_BIN2.
+   The old form took 5.3 s of CPU, this one 1.2 s, and both kept the same 128
+   plans. That is one build, on Linux, under a SQL_ collation, on a lab schema
+   of five tables whose plans average 131 KB: the ratio between xml and text
+   can move with the shape of the plans, and a Windows collation was not
+   measured. Repeated on a second lab cache the same day, 62 MB in the
+   window: this step went from 4.6 s to 1.1 s and the whole file from 6.0 s
+   to 2.5 s, output unchanged. The xml is still built, but only by the
+   TRY_CAST below, on the statement fragments of the two hundred candidates,
+   and with the node reads that is most of the 1.4 s left.
+
+   BIN2 is case sensitive, so the pattern is spelt as showplan spells it, and
+   that loses nothing: the exact test below uses XPath contains(), which is
+   case sensitive too, so a plan the binary match rejects is one the exact
+   test would have rejected. What it drops is a statement that mentions the
+   pattern in other case in its own text, a decoy the node reads below reject
+   anyway.
+
+   sys.dm_exec_text_query_plan also renders a plan that sys.dm_exec_query_plan
+   returns as NULL because it nests deeper than the 128 levels the xml type
+   allows. Such a batch can now pass here. If its statement's fragment is
+   shallow, the statement is examined where it used to be skipped; if the
+   fragment is deep too, TRY_CAST gives NULL and the final WHERE drops it, but
+   only after it has taken one of the two hundred places, which matters only
+   when more than two hundred statements match. */
 DECLARE @matching TABLE ([plan_handle] varbinary(64) PRIMARY KEY);
 
 INSERT INTO @matching
 SELECT h.plan_handle
 FROM (SELECT DISTINCT w.plan_handle FROM @window AS w) AS h
-CROSS APPLY sys.dm_exec_query_plan(h.plan_handle) AS p
+CROSS APPLY sys.dm_exec_text_query_plan(h.plan_handle, 0, -1) AS p
 WHERE p.query_plan IS NOT NULL
-  AND CAST(p.query_plan AS nvarchar(max)) LIKE '%CONVERT_IMPLICIT(nvarchar%'
+  AND p.query_plan COLLATE Latin1_General_BIN2 LIKE N'%CONVERT_IMPLICIT(nvarchar%'
 OPTION (RECOMPILE, MAXDOP 1);
 
 INSERT INTO @candidates

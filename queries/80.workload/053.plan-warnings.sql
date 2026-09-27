@@ -234,18 +234,51 @@ BEGIN TRY
        statement carrying any of these annotations necessarily carries the
        string in its plan text, so nothing true is lost; a statement that
        merely mentions one is let through and rejected by the node reads
-       below. Cast once per batch plan, not once per predicate and statement. */
+       below. Read once per batch plan, not once per predicate and statement.
+
+       THE PLAN IS READ AS TEXT AND COMPARED IN BINARY, and each half of that
+       is most of the cost. Until 27 September 2026 this read
+       sys.dm_exec_query_plan, which builds an xml value, cast it back to
+       nvarchar(max) and ran the five LIKEs under the instance collation.
+       Measured on 17.0.4065.4 over a window of 1 000 statements holding 66 MB
+       of batch plan text: building the xml cost about 50 ms per megabyte, of
+       which rendering the text is 15, the cast 14 more, and the five LIKEs
+       under the case-insensitive SQL_Latin1_General_CP1_CI_AS about 56,
+       against 6.5 under Latin1_General_BIN2. The old form took 7.7 s of CPU,
+       this one 1.4 s, and both kept the same 200 plans. That is one build, on
+       Linux, under a SQL_ collation, on a lab schema of five tables whose
+       plans average 131 KB; a Windows collation was not measured. Repeated
+       on a second lab cache the same day, 67 MB in the window: this step went
+       from 5.0 s to 1.1 s and the whole file from 8.5 s to 4.6 s, output
+       unchanged. The xml is still built, but only by the TRY_CAST below, on
+       the statement fragments of the two hundred candidates, and with the
+       node reads that is most of the 3.5 s left.
+
+       BIN2 is case sensitive, so each pattern is spelt as showplan spells it:
+       the element names Warnings and CursorPlan, the attribute names, and the
+       attribute values between double quotes, which is how the text form
+       writes them. That loses nothing, because the node reads below are
+       XPath, whose names and value comparisons are case sensitive too. What
+       it drops is a statement mentioning a pattern in other case in its own
+       text, a decoy those reads reject anyway.
+
+       sys.dm_exec_text_query_plan also renders a batch that
+       sys.dm_exec_query_plan returns as NULL for nesting deeper than the 128
+       levels the xml type allows. Such a batch can now pass here: a shallow
+       statement of it is examined where it used to be skipped, and a deep one
+       fails the TRY_CAST and is counted in bounds.plans_unparsed rather than
+       being invisible, at the price of one of the two hundred places. */
     INSERT INTO @matching
     SELECT h.plan_handle
     FROM (SELECT DISTINCT w.plan_handle FROM @window AS w) AS h
-    CROSS APPLY sys.dm_exec_query_plan(h.plan_handle) AS p
-    CROSS APPLY (SELECT CAST(p.query_plan AS nvarchar(max)) AS t) AS x
+    CROSS APPLY sys.dm_exec_text_query_plan(h.plan_handle, 0, -1) AS p
+    CROSS APPLY (SELECT p.query_plan COLLATE Latin1_General_BIN2 AS t) AS x
     WHERE p.query_plan IS NOT NULL
-      AND (x.t LIKE '%<Warnings%'
-        OR x.t LIKE '%CursorPlan%'
-        OR x.t LIKE '%StatementOptmEarlyAbortReason%'
-        OR x.t LIKE '%Optimized="1"%'
-        OR x.t LIKE '%Optimized="true"%')
+      AND (x.t LIKE N'%<Warnings%'
+        OR x.t LIKE N'%CursorPlan%'
+        OR x.t LIKE N'%StatementOptmEarlyAbortReason%'
+        OR x.t LIKE N'%Optimized="1"%'
+        OR x.t LIKE N'%Optimized="true"%')
     OPTION (RECOMPILE, MAXDOP 1);
 
     INSERT INTO @candidates
