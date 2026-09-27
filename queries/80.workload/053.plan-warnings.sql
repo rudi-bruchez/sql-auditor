@@ -52,23 +52,27 @@
 --
 -- WHAT EACH FLAG MEANS, AND WHAT IT IS WORTH.
 --
--- no_join_predicate. A join with no predicate is a cartesian product. Measured:
--- it is raised only for a genuinely unrestricted join; the same query with a
--- WHERE on each side raises nothing, so this does not fire on the ordinary
--- large join that merely looks expensive.
+-- no_join_predicate. A join with no predicate is a cartesian product. It is
+-- not raised only for those. Measured again on 17.0.4065.4, 27 September 2026:
+-- an equality on a unique key on each side raises nothing, but a range filter
+-- on each side raises it, and so does a correct JOIN ... ON b.val = a.grp
+-- WHERE a.grp = 3, where the optimizer turned the join predicate into a filter
+-- on each input. The earlier sentence here, that a WHERE on each side raises
+-- nothing, held for the unique-key case only. A statement flagged here is a
+-- candidate to read, not a cartesian product established.
 --
 -- columns_with_no_statistics. The optimizer needed a distribution it did not
 -- have and guessed. On a database with AUTO_CREATE_STATISTICS off this is the
 -- consequence of that setting rather than an accident, so read it beside
 -- 20.databases/010.all-databases.sql before writing it up.
 --
--- Verified on a real workload and NOT on a synthetic one, which is worth
--- separating. Five statements on 17.0.4065.4 carry it, one of them naming
--- master.sys.sysguidrefs.id, so the read works. A purpose-built reproduction
--- failed: a join on a column with no statistics at all, on a database with
--- AUTO_CREATE_STATISTICS off and sys.stats showing only the two primary keys,
--- raised nothing. Written down so the next person does not spend an hour
--- building the bed that does not work.
+-- Verified on a real workload first: five statements on 17.0.4065.4 carry it,
+-- one of them naming master.sys.sysguidrefs.id. A first purpose-built
+-- reproduction raised nothing; a second one, on 27 September 2026, did: with
+-- AUTO_CREATE_STATISTICS off, a join to a heap column with no statistics and a
+-- filter on such a column both raise it, and switching the option on removes
+-- it and creates _WA_Sys_ statistics. The option change also flushed the
+-- database's cached plans, so a reading right after it finds nothing.
 --
 -- The warning names the column it lacked a distribution for, in a
 -- ColumnReference, and that is deliberately not projected: the finding is the
@@ -89,12 +93,16 @@
 -- query is parameterised, which is the finding an estate that invested in
 -- filtered indexes never hears about.
 --
--- THIS ONE IS THE UNVERIFIED READ. A covering filtered index plus a
--- parameterised predicate on its filter column raised nothing on 16.0.4265.3,
--- and no plan on either lab instance carries the attribute. The read stays,
--- written from the showplan schema, because the case is real and this lab is
--- two standalone containers rather than an estate; what is written down is that
--- it has matched nothing verified.
+-- VERIFIED ON 17.0.4065.4 ON 27 SEPTEMBER 2026, after being written from the
+-- showplan schema alone: an earlier attempt on 16.0.4265.3 raised nothing. The
+-- engine emits both the Warnings/@UnmatchedIndexes attribute read here and a
+-- QueryPlan/UnmatchedIndexes element naming the index, together in every case
+-- measured: a local variable, an sp_executesql parameter and a procedure
+-- parameter, each reading the clustered index instead (57 reads against 2).
+-- OPTION (RECOMPILE) raises neither. It has a FALSE POSITIVE this count
+-- includes: an ad hoc literal that simple parameterisation attempted carries
+-- the warning and still seeks the filtered index. object is NULL both for that
+-- case and for sp_executesql, so the plan is what separates them.
 --
 -- IT APPEARED TO BE REPRODUCED FIRST, AND THAT SIGHTING WAS THE MEASURING
 -- INSTRUMENT. The survey query carried the string UnmatchedIndexes in its own
