@@ -125,11 +125,16 @@ BEGIN TRY
         SELECT COUNT(*)                                        AS databases,
                SUM(dt.database_transaction_log_bytes_used)     AS log_bytes_used,
                SUM(dt.database_transaction_log_bytes_reserved) AS log_bytes_reserved,
-               SUM(dt.database_transaction_log_bytes_used_system)     AS log_bytes_used_system,
-               SUM(dt.database_transaction_log_bytes_reserved_system) AS log_bytes_reserved_system,
+               -- The two system columns are int; summed as int they could
+               -- overflow and cost the whole listing in the CATCH.
+               SUM(CAST(dt.database_transaction_log_bytes_used_system AS bigint))     AS log_bytes_used_system,
+               SUM(CAST(dt.database_transaction_log_bytes_reserved_system AS bigint)) AS log_bytes_reserved_system,
                MIN(dt.database_transaction_begin_time)         AS first_write
         FROM sys.dm_tran_database_transactions AS dt
-        WHERE dt.transaction_id = st.transaction_id
+        -- Correlated on the transaction and not on the session row: a
+        -- sessionless distributed transaction has no st row, and joining
+        -- through it reported every such transaction with no log at all.
+        WHERE dt.transaction_id = at.transaction_id
           AND dt.database_transaction_begin_time IS NOT NULL
     ) AS w
     WHERE (st.session_id IS NOT NULL AND st.session_id <> @@SPID)
