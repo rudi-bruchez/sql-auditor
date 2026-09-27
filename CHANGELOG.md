@@ -30,7 +30,13 @@ release workflow refuses a tag that disagrees with either this file or
   starts from the session rather than the request, because the case that
   matters is a session that went to sleep with its transaction open, which has
   no request: measured on SQL Server 2025 CU7, such a session holding 677 988
-  bytes of log is listed here as sleeping.
+  bytes of log is listed here as sleeping. Rows are keyed by `transaction_id`
+  and the counts are of distinct transactions, so a bound session or MARS does
+  not count one transaction twice; a transaction with no session is listed
+  only when it is distributed, the in-doubt DTC case, since every other one is
+  the engine's worktables; user transactions come before system ones in the
+  listing; the log written by system transactions on a transaction's behalf is
+  projected apart.
 
 ### Changed
 
@@ -46,6 +52,10 @@ release workflow refuses a tag that disagrees with either this file or
   an INSERT at 741. On the lab database the naive sum of the top queries came
   to 4 231 ms against 2 188 for the corrected total. Thirty statements sent
   with literals gave 40 query ids for 11 query hashes.
+  A statement whose object no longer resolves, a function since dropped, stays
+  in the totals and is counted under `totals.unresolved`; `top_queries` carries
+  the same classification per row as `nested`, so a share can be computed over
+  one population. An empty store reports totals of 0.
 - `10.system/063.blocked-process-reports.sql` reads the fields that place a
   report in a blocking episode out of EVERY report in the capture, and the index
   gains `episodes[]`: blocked session and ownerId, blocking session, wait

@@ -58,6 +58,16 @@
 -- trigger's own statement 616 ms. What was left out is projected beside the
 -- totals, so the reader can see how much it was.
 --
+-- Nested is decided by looking the recorded object up in sys.objects NOW, and
+-- the store outlives DDL: the queries of a function or trigger since dropped no
+-- longer resolve and cannot be classed. They stay in the totals, and are
+-- counted under totals.unresolved so a reader knows how much of the
+-- denominator is that uncertain. An object id reused by a different object
+-- would be misclassed and cannot be detected here. top_queries carries the
+-- same classification per row, nested 1, 0, or null when unresolved, so a
+-- numerator can be built from the same population as the denominator. An
+-- empty store has totals of 0, not null.
+--
 -- counts.query_hashes beside counts.queries says how scattered the workload
 -- is. A statement sent with literals instead of parameters becomes one
 -- query_id per distinct literal and one query_hash for all of them, so a ratio
@@ -98,32 +108,38 @@ SELECT DB_NAME()                                                  AS [database],
        (SELECT MIN(i.start_time) FROM sys.query_store_runtime_stats_interval AS i) AS [window.oldest_interval],
        (SELECT MAX(i.end_time)   FROM sys.query_store_runtime_stats_interval AS i) AS [window.newest_interval],
        (SELECT COUNT(*) FROM sys.query_store_runtime_stats_interval)               AS [window.intervals],
-       tot.executions                                             AS [totals.executions],
-       CAST(tot.duration_us / 1000.0 AS DECIMAL(18,1))            AS [totals.duration_ms],
-       CAST(tot.cpu_us / 1000.0 AS DECIMAL(18,1))                 AS [totals.cpu_ms],
-       tot.logical_reads                                          AS [totals.logical_reads],
-       tot.nested_queries                                         AS [totals.excluded.nested_queries],
-       CAST(tot.nested_cpu_us / 1000.0 AS DECIMAL(18,1))          AS [totals.excluded.nested_cpu_ms],
+       ISNULL(tot.executions, 0)                                  AS [totals.executions],
+       CAST(ISNULL(tot.duration_us, 0) / 1000.0 AS DECIMAL(18,1)) AS [totals.duration_ms],
+       CAST(ISNULL(tot.cpu_us, 0) / 1000.0 AS DECIMAL(18,1))      AS [totals.cpu_ms],
+       ISNULL(tot.logical_reads, 0)                               AS [totals.logical_reads],
+       ISNULL(tot.nested_queries, 0)                              AS [totals.excluded.nested_queries],
+       CAST(ISNULL(tot.nested_cpu_us, 0) / 1000.0 AS DECIMAL(18,1)) AS [totals.excluded.nested_cpu_ms],
+       ISNULL(tot.unresolved_queries, 0)                          AS [totals.unresolved.queries],
+       CAST(ISNULL(tot.unresolved_cpu_us, 0) / 1000.0 AS DECIMAL(18,1)) AS [totals.unresolved.cpu_ms],
        50                                                         AS [listing_cap]
 FROM sys.database_query_store_options AS o
 OUTER APPLY (
     -- Nested means run from inside another statement that is recorded too:
     -- scalar and table-valued multi-statement functions, and triggers. See the
     -- header for the measurement.
-    SELECT SUM(CASE WHEN n.nested = 0 THEN rs.count_executions END)                    AS executions,
-           SUM(CASE WHEN n.nested = 0 THEN rs.avg_duration * rs.count_executions END)  AS duration_us,
-           SUM(CASE WHEN n.nested = 0 THEN rs.avg_cpu_time * rs.count_executions END)  AS cpu_us,
-           SUM(CASE WHEN n.nested = 0
-                    THEN CAST(rs.avg_logical_io_reads * rs.count_executions AS bigint) END) AS logical_reads,
+    SELECT SUM(CASE WHEN ISNULL(n.nested, 0) = 0 THEN rs.count_executions END)                   AS executions,
+           SUM(CASE WHEN ISNULL(n.nested, 0) = 0 THEN rs.avg_duration * rs.count_executions END) AS duration_us,
+           SUM(CASE WHEN ISNULL(n.nested, 0) = 0 THEN rs.avg_cpu_time * rs.count_executions END) AS cpu_us,
+           SUM(CASE WHEN ISNULL(n.nested, 0) = 0
+                    THEN CAST(rs.avg_logical_io_reads * rs.count_executions AS bigint) END)     AS logical_reads,
            COUNT(DISTINCT CASE WHEN n.nested = 1 THEN q.query_id END)                  AS nested_queries,
-           SUM(CASE WHEN n.nested = 1 THEN rs.avg_cpu_time * rs.count_executions END)  AS nested_cpu_us
+           SUM(CASE WHEN n.nested = 1 THEN rs.avg_cpu_time * rs.count_executions END)  AS nested_cpu_us,
+           COUNT(DISTINCT CASE WHEN n.nested IS NULL THEN q.query_id END)              AS unresolved_queries,
+           SUM(CASE WHEN n.nested IS NULL THEN rs.avg_cpu_time * rs.count_executions END) AS unresolved_cpu_us
     FROM       sys.query_store_query         AS q
     JOIN       sys.query_store_plan          AS p  ON p.query_id = q.query_id
     JOIN       sys.query_store_runtime_stats AS rs ON rs.plan_id = p.plan_id
-    CROSS APPLY (SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.objects AS ob
-                                          WHERE ob.object_id = q.object_id
-                                            AND ob.type IN ('FN', 'TF', 'TR'))
-                             THEN 1 ELSE 0 END AS nested) AS n
+    CROSS APPLY (SELECT CASE WHEN q.object_id = 0 THEN 0
+                             WHEN ob.type IN ('FN', 'TF', 'TR') THEN 1
+                             WHEN ob.object_id IS NOT NULL THEN 0
+                        END AS nested
+                 FROM (SELECT 1 AS one) AS x
+                 LEFT JOIN sys.objects AS ob ON ob.object_id = q.object_id) AS n
 ) AS tot
 OPTION (RECOMPILE, MAXDOP 1);
 
@@ -144,11 +160,19 @@ SELECT TOP (50)
        CAST(SUM(rs.avg_logical_io_reads * rs.count_executions)
             / NULLIF(SUM(rs.count_executions), 0) AS DECIMAL(18,1))                  AS [per_execution.logical_reads],
        MAX(rs.last_execution_time)                                AS [last_execution],
+       -- Same rule as the root totals: 1 for a function or trigger statement,
+       -- already inside its caller's row; null when the object no longer
+       -- resolves.
+       CASE WHEN q.object_id = 0 THEN 0
+            WHEN MAX(ob.type) IN ('FN', 'TF', 'TR') THEN 1
+            WHEN MAX(ob.object_id) IS NOT NULL THEN 0
+       END                                                        AS [nested],
        LEFT(qt.query_sql_text, 500)                               AS [text]
 FROM       sys.query_store_query          AS q
 JOIN       sys.query_store_query_text     AS qt ON qt.query_text_id = q.query_text_id
 JOIN       sys.query_store_plan           AS p  ON p.query_id = q.query_id
 JOIN       sys.query_store_runtime_stats  AS rs ON rs.plan_id = p.plan_id
+LEFT JOIN  sys.objects                    AS ob ON ob.object_id = q.object_id
 GROUP BY q.query_id, q.object_id, LEFT(qt.query_sql_text, 500)
 ORDER BY SUM(rs.avg_duration * rs.count_executions) DESC
 OPTION (RECOMPILE, MAXDOP 1);

@@ -14,7 +14,7 @@
 -- workload that is never quiet. Found missing by a comparison with a
 -- monitoring tool's collection, September 2026.
 --
--- IT STARTS FROM THE SESSION, NOT FROM THE REQUEST. The dangerous case is a
+-- IT READS SESSIONS, NOT REQUESTS. The dangerous case is a
 -- session that opened a transaction, finished its batch and went to sleep with
 -- it still open: an application that forgot to commit, or a query window left
 -- open in a management tool. It has no row in sys.dm_exec_requests, so a query
@@ -37,6 +37,25 @@
 -- graphs of 061, which name sessions by id. The collector's own session is
 -- left out.
 --
+-- ONE ROW PER SESSION AND TRANSACTION, KEYED BY transaction_id. A bound
+-- session or a distributed transaction enlists several sessions in one
+-- transaction, and MARS can give one session several; the pair is the row, and
+-- transaction_id says which rows are the same transaction. The counts are of
+-- distinct transactions, and the log figures, which belong to the transaction,
+-- repeat on each of its rows.
+--
+-- A TRANSACTION WITH NO SESSION IS KEPT ONLY IF IT IS DISTRIBUTED. An in-doubt
+-- or orphaned DTC transaction can outlive every session and hold its locks and
+-- log until someone resolves it by its unit of work, which is projected. Every
+-- other sessionless transaction is the engine's own: measured on an idle
+-- 17.0.4065.4, all twelve were worktables and workfiles. The DTC case was not
+-- reproduced, the lab having no coordinator; it is read from the
+-- documentation. User transactions are listed before system ones, so internal
+-- work cannot crowd a forgotten user transaction out of the fifty.
+--
+-- The log a transaction holds is split as the view splits it: what it wrote
+-- itself, and what system transactions wrote on its behalf.
+--
 -- It is a snapshot. A transaction that opened and closed between two runs is
 -- not here, and the age is the age at the moment of collection.
 --
@@ -49,23 +68,31 @@ SET LOCK_TIMEOUT 10000;
 DECLARE @err_transactions int = 0, @msg nvarchar(2048) = N'';
 
 DECLARE @transactions TABLE (
-    [session_id]             int,
-    [session_status]         nvarchar(30),
-    [is_user_process]        int,
+    [transaction_id]         bigint,
+    [session_id]             int NULL,
+    [is_user_transaction]    int NULL,
+    [dtc_uow]                uniqueidentifier NULL,
+    [session_status]         nvarchar(30) NULL,
+    [is_user_process]        int NULL,
     [begin_time]             datetime,
     [age_seconds]            int,
     [type]                   nvarchar(20),
     [state]                  int,
-    [open_transaction_count] int,
+    [open_transaction_count] int NULL,
     [idle_seconds]           int NULL,
     [databases_written]      int,
     [log_bytes_used]         bigint NULL,
     [log_bytes_reserved]     bigint NULL,
+    [log_bytes_used_system]  bigint NULL,
+    [log_bytes_reserved_system] bigint NULL,
     [first_write_time]       datetime NULL);
 
 BEGIN TRY
     INSERT INTO @transactions
-    SELECT st.session_id,
+    SELECT at.transaction_id,
+           st.session_id,
+           CAST(st.is_user_transaction AS int),
+           at.transaction_uow,
            s.status,
            CAST(s.is_user_process AS int),
            at.transaction_begin_time,
@@ -88,20 +115,26 @@ BEGIN TRY
            ISNULL(w.databases, 0),
            w.log_bytes_used,
            w.log_bytes_reserved,
+           w.log_bytes_used_system,
+           w.log_bytes_reserved_system,
            w.first_write
-    FROM sys.dm_tran_session_transactions AS st
-    JOIN sys.dm_tran_active_transactions  AS at ON at.transaction_id = st.transaction_id
-    JOIN sys.dm_exec_sessions             AS s  ON s.session_id = st.session_id
+    FROM      sys.dm_tran_active_transactions  AS at
+    LEFT JOIN sys.dm_tran_session_transactions AS st ON st.transaction_id = at.transaction_id
+    LEFT JOIN sys.dm_exec_sessions             AS s  ON s.session_id = st.session_id
     OUTER APPLY (
         SELECT COUNT(*)                                        AS databases,
                SUM(dt.database_transaction_log_bytes_used)     AS log_bytes_used,
                SUM(dt.database_transaction_log_bytes_reserved) AS log_bytes_reserved,
+               SUM(dt.database_transaction_log_bytes_used_system)     AS log_bytes_used_system,
+               SUM(dt.database_transaction_log_bytes_reserved_system) AS log_bytes_reserved_system,
                MIN(dt.database_transaction_begin_time)         AS first_write
         FROM sys.dm_tran_database_transactions AS dt
         WHERE dt.transaction_id = st.transaction_id
           AND dt.database_transaction_begin_time IS NOT NULL
     ) AS w
-    WHERE st.session_id <> @@SPID
+    WHERE (st.session_id IS NOT NULL AND st.session_id <> @@SPID)
+       OR (st.session_id IS NULL
+           AND (at.transaction_type = 4 OR at.transaction_uow IS NOT NULL))
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
@@ -109,12 +142,19 @@ BEGIN CATCH
 END CATCH
 
 SELECT SYSDATETIME()                                             AS [collected_at],
-       (SELECT COUNT(*) FROM @transactions)                      AS [counts.transactions],
-       (SELECT COUNT(*) FROM @transactions
+       (SELECT COUNT(DISTINCT [transaction_id]) FROM @transactions) AS [counts.transactions],
+       (SELECT COUNT(DISTINCT [transaction_id]) FROM @transactions
+         WHERE [is_user_transaction] = 1)                        AS [counts.user],
+       (SELECT COUNT(DISTINCT [transaction_id]) FROM @transactions
+         WHERE [session_id] IS NULL)                             AS [counts.without_session],
+       (SELECT COUNT(DISTINCT [transaction_id]) FROM @transactions
          WHERE [session_status] = N'sleeping')                   AS [counts.sleeping],
-       (SELECT COUNT(*) FROM @transactions
+       (SELECT COUNT(DISTINCT [transaction_id]) FROM @transactions
          WHERE [databases_written] > 0)                          AS [counts.writing],
-       (SELECT MAX([age_seconds]) FROM @transactions)            AS [oldest.age_seconds],
+       -- System transactions left out: the engine's own work says nothing
+       -- about what somebody forgot to commit.
+       (SELECT MAX([age_seconds]) FROM @transactions
+         WHERE ISNULL([is_user_transaction], 1) = 1)             AS [oldest.age_seconds],
        (SELECT MAX([age_seconds]) FROM @transactions
          WHERE [session_status] = N'sleeping')                   AS [oldest.sleeping_age_seconds],
        50                                                        AS [listing_cap],
@@ -124,10 +164,13 @@ SELECT SYSDATETIME()                                             AS [collected_a
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT TOP (50)
-       t.[session_id], t.[session_status], t.[is_user_process], t.[begin_time],
+       t.[transaction_id], t.[session_id], t.[is_user_transaction], t.[dtc_uow],
+       t.[session_status], t.[is_user_process], t.[begin_time],
        t.[age_seconds], t.[type], t.[state], t.[open_transaction_count],
        t.[idle_seconds], t.[databases_written], t.[log_bytes_used],
-       t.[log_bytes_reserved], t.[first_write_time]
+       t.[log_bytes_reserved], t.[log_bytes_used_system],
+       t.[log_bytes_reserved_system], t.[first_write_time]
 FROM @transactions AS t
-ORDER BY t.[begin_time], t.[session_id]
+ORDER BY CASE WHEN t.[is_user_transaction] = 0 THEN 1 ELSE 0 END,
+         t.[begin_time], t.[transaction_id], t.[session_id]
 OPTION (RECOMPILE, MAXDOP 1);
