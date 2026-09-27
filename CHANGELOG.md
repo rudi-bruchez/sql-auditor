@@ -19,6 +19,20 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-09-27
+
+Two things moved in this release. The collector reads more of what an instance
+already records about itself: the transactions open when the run happened, the
+blocking reports grouped into episodes over the whole capture, why a kept plan
+is serial and what it cost to compile, the Query Store totals a top 50 needs
+for a denominator, and the grants to server roles that never reached the
+archive. And a harm review on 27 September 2026 asked what the tool can do to
+the instance it audits: the plan cache is no longer cast to text whole before
+the cap applies, the physical reads stand down on an availability group
+secondary, the documentation no longer promises that nothing waits behind the
+collector, and the lint that guards `--queries-dir` accepts only the procedures
+the shipped corpus calls.
+
 ### Added
 
 - `80.workload/053.plan-warnings.sql` says, for each statement it keeps, why
