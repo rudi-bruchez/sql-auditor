@@ -1,6 +1,6 @@
 sql-auditor corpus grammar check
 ================================
-Produced    : 2026-09-27T00:35:21Z
+Produced    : 2026-09-27T00:45:50Z
 Corpus tree : d6e4f84b4e129d25fa5c5ce1796c2e10cfe2df97
               (git rev-parse HEAD:queries - this artifact describes that corpus
                and no other; if the two differ, re-run this script)
