@@ -61,6 +61,14 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Fixed
 
+- `40.security/010.principals.sql` names the target of a grant on a login:
+  `IMPERSONATE ON LOGIN::sa` came out with `on_object` null, because class 101
+  was resolved with `OBJECT_NAME`, which looks up database objects. It now uses
+  `SUSER_NAME`, and names the endpoint for class 105. `server_permissions` also
+  lists grants to server roles, `public` included, with a new `grantee_type`:
+  `CONTROL SERVER` granted to a user-defined role and `VIEW SERVER STATE`
+  granted to `public` never reached the archive. Measured on SQL Server 2025
+  CU7.
 - `10.system/010.properties.sql` no longer flags `pending_reconfigure` for
   `max server memory (MB)` at 0 shown in use as 2147483647, nor `min server
   memory (MB)` at 0 shown as 16. Both are the engine's documented display and

@@ -94,15 +94,33 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 /* Grants made directly to a principal, as opposed to inherited from a role.
    CONNECT SQL on the endpoint is the one every login has and it is kept: its
-   ABSENCE for a login that exists is itself a finding. */
+   ABSENCE for a login that exists is itself a finding.
+
+   SERVER ROLES ARE GRANTEES TOO, public first. This used to keep logins only,
+   so CONTROL SERVER granted to a user-defined server role, or VIEW SERVER
+   STATE granted to public, which every login inherits, never reached the
+   archive. public's defaults come with them (VIEW ANY DATABASE and CONNECT on
+   the endpoints), which is what a reader compares a changed public against.
+   Fixed roles carry no rows here: their permissions are implicit.
+
+   THE TARGET OF A GRANT ON A LOGIN WAS ALWAYS NULL. Class 101 is a server
+   principal, and it was named with OBJECT_NAME, which looks up a database
+   object. Measured on 17.0.4065.4: IMPERSONATE ON LOGIN::sa came out with no
+   target, which is the whole finding. SUSER_NAME names it; class 105 names
+   the endpoint. */
 SELECT pr.name                                                    AS [grantee],
+       pr.type_desc                                               AS [grantee_type],
        pe.class_desc                                              AS [class],
        pe.permission_name                                         AS [permission],
        pe.state_desc                                              AS [state],
-       CASE WHEN pe.class = 101 THEN OBJECT_NAME(pe.major_id) END AS [on_object]
+       CASE pe.class
+            WHEN 101 THEN SUSER_NAME(pe.major_id)
+            WHEN 105 THEN (SELECT e.name FROM sys.endpoints AS e
+                            WHERE e.endpoint_id = pe.major_id)
+       END                                                        AS [on_object]
 FROM sys.server_permissions AS pe
 JOIN sys.server_principals AS pr ON pr.principal_id = pe.grantee_principal_id
-WHERE pr.type IN ('S', 'U', 'G')
+WHERE pr.type IN ('S', 'U', 'G', 'R')
 ORDER BY pr.name, pe.permission_name
 OPTION (RECOMPILE, MAXDOP 1);
 
