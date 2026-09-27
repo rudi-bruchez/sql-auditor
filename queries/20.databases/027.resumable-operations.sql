@@ -23,11 +23,13 @@
 --     place in the archive where the half-built index appears at all.
 --
 -- The partial structure also keeps the data pages it has written, page_count
--- here, until the operation is resumed or aborted. Since SQL Server 2019 the
+-- here, until the operation is resumed or aborted. Since SQL Server 2022 the
 -- database scoped configuration PAUSED_RESUMABLE_INDEX_ABORT_DURATION_MINUTES
 -- aborts a paused operation after a delay, 1440 minutes by default and 0 for
--- never; 20.databases/020.properties already carries the whole of
+-- never; 20.databases/022.query-store carries the whole of
 -- sys.database_scoped_configurations, so the setting is not repeated here.
+-- (This said 2019 and 020.properties until 27 September 2026: the reference
+-- gives 2022, and 020.properties dropped that result set for the 2012 floor.)
 --
 -- index_exists SAYS WHICH KIND OF OPERATION IT IS without reading sql_text.
 -- A rebuild works on an index that exists; a creation, of an index or of a
