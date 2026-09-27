@@ -573,7 +573,13 @@ Two things worth knowing:
   `QUERY_STORE_TOP`, a shorter `QUERY_STORE_DAYS`, a typed window that does
   not cover the earlier one, or another comparison point. Both runs' `_run.json` say what they covered, and a plain afternoon
   `collect` does not delete the morning's `collect --all`. The collection
-  names what was missing, on screen and in the manifest's warnings. If you
+  names what was missing, on screen and in the manifest's warnings. The
+  comparison is on what each run set out to collect, not on what it brought
+  back: a rerun whose error log was skipped for its size, or whose physical
+  reads skipped more locked objects or ran out of page budget sooner, still
+  replaces the earlier run, since none of that is an error. When the earlier
+  run matters, rerun with `--keep`, which leaves it untouched and writes the
+  new run beside it under a name suffixed with the time (`-HHMM`). If you
   find a `.superseded-` run lying around, either a run died or the one after
   it was narrower: it is earlier work, not a duplicate of anything.
 - **Runs are quick.** On a small instance the whole collection finishes in about
