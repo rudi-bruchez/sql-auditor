@@ -19,6 +19,33 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Added
+
+- `70.schema/090.statistics` emits `statistics_all`, one short row per statistic on every user table with no cap, so redundancy and staleness counts are no longer floors on wide schemas. The capped `statistics` detail is unchanged.
+- `70.schema/090.statistics` collects `persisted_sample_percent` (2016 SP1 CU4 and 2017 CU1 onward, NULL on older builds) in both lists.
+- `80.workload/020.query-store.sql` and `023.query-store-most-executed.sql` end with `by_query_hash`, which folds the query_ids that share a `query_hash` and counts them under `query_ids`. On SQL Server 2025, twenty literal variants of one join ranked 7th to 27th as query_ids and 3rd as one hash row.
+- `40.security/020.database-principals.sql` also runs on master and msdb, so msdb role memberships and master's certificate users are collected. They are brought in by a new `@widened: system_databases` purpose, so no other database-scoped collector reads them; DB_INCLUDE does not narrow them, DB_EXCLUDE does.
+
+### Changed
+
+- A failed blocking-watch poll is retried three times on a new connection (0.5, 1 and 2 seconds, never past the run) before the watch stops; each recovery and the stop are warnings in `_run.json`.
+- `10.system/040.error-log.sql` measures the current log with `sp_enumerrorlogs` and skips the read above 50 MB, reporting `skipped_for_size` and the size in `status`.
+- `70.schema/050.heaps` reads heaps within a budget of 200,000 estimated pages per database (full read under 10,000 pages, 1 percent above), reports `sample.skipped_budget`, `sample.page_budget`, `sample.estimated_pages_read` and `sample.measured_heaps`, and starts no new heap after 240 seconds (`sample.budget_sec`).
+- `80.workload/020.query-store.sql` ranks `top_queries` by a round robin over duration, CPU and logical reads, as 021 does, and projects `rank.duration`, `rank.cpu` and `rank.logical_reads`. Ranked on duration alone, the list missed the query that leads reads.
+- `40.security/010.principals.sql` lists server grants to certificate- and asymmetric-key-mapped logins as well, including the instance's own signing certificate logins.
+
+### Fixed
+
+- The blocking watch opened its identity connection from a pool of one, so every collection started the watch several seconds late and never identified a waiter.
+- A same-day rerun that exits 0 no longer deletes the earlier run when that run had an opt-in, a database or a wider profile the rerun lacks; what was missing is named on screen and in the warnings.
+- The collection session is reset after every collector, so `#temp` tables (the error log's whole `#log` among them) no longer stay in tempdb until the run ends.
+- `20.databases/025.fragmentation`, `70.schema/055.page-density` and `70.schema/050.heaps` skip a table held by a lock (open ALTER TABLE, offline rebuild) instead of losing the whole list; the skip is counted in `skipped_locked`, and only errors other than a lock timeout mark the area failed. `050.heaps` computes `counts.total_mb` from allocation units, so a locked heap no longer fails its counts either.
+- A malformed `.env` line is reported by line number without echoing its value.
+- Module definition file names skip names already taken, so a module named `p~2` is no longer overwritten.
+- README, the guide and `--help` said `--all` turns on ten options; it turns on eleven. The guide no longer says the 256 MB budget protects the disk.
+- The headers of 020 and 023 no longer claim that 500 characters are too few to rebuild a payload. `docs/dba-guide.md` lists which default collectors keep statement text and says a password written in one can reach the archive.
+- The `70.schema/090.statistics` header claimed the stats properties DMF returns no row for a never-populated statistic; on SQL Server 2025 it returns a row of NULLs.
+
 ## [0.35.0] - 2026-09-27
 
 Two things moved in this release. The collector reads more of what an instance
