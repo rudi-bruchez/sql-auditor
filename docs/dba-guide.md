@@ -1105,10 +1105,12 @@ run goes on unwatched and says so on screen and in the manifest. Any other
 failed read, the first one included, and including one that takes longer than
 its deadline on a busy instance, is retried on a new connection,
 since a timed-out read leaves its connection unusable: three attempts, after
-pauses of half a second, one second and two seconds, each reconnection and
-read under its own deadline, and none of it past the end of the run. The
-collector running meanwhile is unwatched for those few seconds, and the
-manifest's warnings say each time it happened. If the three attempts fail too,
+pauses of half a second, one second and two seconds, each reconnection under a
+deadline of 3 seconds whatever `SQL_CONNECT_TIMEOUT_SEC` says, each read under
+one of 2 seconds, and none of it past the end of the run. The collector running
+meanwhile is unwatched: about a second when the first attempt succeeds, and at
+worst 20.5 seconds when every step runs to its deadline. The manifest's
+warnings say each time it happened. If the three attempts fail too,
 the watch stops for the rest of the run: the manifest then says "on until it
 stopped at" with the time and the errors, a warning says every collector after
 that ran unwatched, and they did. `MANIFEST.txt` has a `Block watch` line, and

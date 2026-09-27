@@ -287,7 +287,10 @@ a watch that silently comes and goes would make `enabled` mean nothing.
 Revised in September 2026: a failed poll is now retried three times on a new
 connection, with a short growing pause and never past the run's own context,
 before the watch stops. The objection above is met by not being silent: each
-recovery, and the final stop, is a warning in the manifest.
+recovery, and the final stop, is a warning in the manifest. Each reconnect
+has a deadline of 3 s of its own rather than the connect timeout, so the
+collector is unwatched for 20.5 s at worst, and the first poll at start goes
+through the same retry unless the server answered it with an error.
 
 The first time the watch is off or stops, one line goes to the progress
 writer, `o.progress()`, the same channel as "connection lost; attempting one

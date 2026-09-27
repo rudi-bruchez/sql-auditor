@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -636,5 +638,76 @@ func TestWatchFirstPollRetries(t *testing.T) {
 	}
 	if err := w.firstPoll(55); err == nil || *polls != 1 || *reconnects != 0 {
 		t.Errorf("firstPoll = %v, polls = %d, reconnects = %d: a denial was retried", err, *polls, *reconnects)
+	}
+}
+
+// Codex review: a reconnect ran under ConnectTimeout plus the poll deadline,
+// 17 s by default, and three of them could leave the running collector
+// unwatched for about a minute. Each attempt now has its own short deadline,
+// whatever SQL_CONNECT_TIMEOUT_SEC says. The server here accepts the TCP
+// connection and never answers, which is what a hung reconnect looks like,
+// and the driver, which bounds only the dial, would wait on it for as long
+// as the socket lives: connWithin is what makes the deadline hold.
+func TestWatchReconnectIsCappedWhateverTheConnectTimeout(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var held []net.Conn
+	var mu sync.Mutex
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	db, err := Open(&Config{Server: ln.Addr().String(), User: "AUDIT_RO", Password: "x",
+		AppName: "sql-auditor-test", ConnectTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	w, _, _ := flakyWatch(1<<30, waitSample{})
+	w.retries = 1
+	w.reconnect = func(ctx context.Context) (pollFunc, error) {
+		c, err := connWithin(ctx, db)
+		if err != nil {
+			return nil, err
+		}
+		c.Close()
+		return nil, errors.New("the silent server answered")
+	}
+	_, cancel := context.WithCancelCause(context.Background())
+	w.arm(55, cancel)
+	began := time.Now()
+	done := make(chan bool, 1)
+	go func() { done <- w.tick() }()
+	select {
+	case goOn := <-done:
+		took := time.Since(began)
+		if goOn || took < watchReconnectDeadline-100*time.Millisecond {
+			t.Errorf("tick = %v after %v: the reconnect did not hang until its deadline", goOn, took)
+		}
+		if !strings.Contains(w.stoppedReason(), "reconnecting") {
+			t.Errorf("stopped = %q", w.stoppedReason())
+		}
+		t.Logf("one hung reconnect took %v", took)
+	case <-time.After(watchReconnectDeadline + 2*time.Second):
+		t.Fatalf("a reconnect ran past %v", watchReconnectDeadline)
 	}
 }

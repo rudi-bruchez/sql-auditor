@@ -36,11 +36,20 @@ const (
 	watchAppSuffix    = " (blocking watch)"
 	// A failed poll is retried on a fresh connection this many times, waiting
 	// watchRetryBackoff, then twice that, then four times, before the watch
-	// stops for good. The collector runs unwatched meanwhile, so the bound is
-	// kept short: 3.5 s of waiting plus at most three reconnects and polls,
-	// each under its own deadline, and never past the run's own context.
+	// stops for good. The collector runs unwatched meanwhile, and the worst
+	// case is what every step takes to its deadline: the failed poll (2 s),
+	// the three pauses (3.5 s), three reconnects (3 s each) and three polls
+	// (2 s each), 20.5 s in all, never past the run's own context. A recovery
+	// on the first attempt is usually about a second.
 	watchRetries      = 3
 	watchRetryBackoff = 500 * time.Millisecond
+	// A reconnect's own deadline, apart from SQL_CONNECT_TIMEOUT_SEC. That
+	// setting, 15 s by default, is sized for reaching a server at the start
+	// of a run; here every second of it is a second the running collector is
+	// unwatched, and with it three reconnects could last 51 s. A server that
+	// cannot log a session in within 3 s is one the watch stops on, which the
+	// manifest then says.
+	watchReconnectDeadline = 3 * time.Second
 	// How many recoveries the manifest names one by one before counting.
 	watchRecoveriesListed = 3
 )
@@ -181,7 +190,7 @@ func newBlockingWatch(poll pollFunc, every, after time.Duration) *blockingWatch 
 		waiters:     map[int]waiterRecord{},
 		quit:        make(chan struct{}), done: make(chan struct{}),
 		retries: watchRetries, backoff: watchRetryBackoff,
-		parent: context.Background(), reconnectTimeout: watchPollDeadline}
+		parent: context.Background(), reconnectTimeout: watchReconnectDeadline}
 }
 
 func (w *blockingWatch) start() { go w.loop() }
@@ -552,14 +561,13 @@ func startBlockingWatch(ctx context.Context, cfg *Config, denied map[string]bool
 	// goroutine, so c needs no lock.
 	w.reconnect = func(rctx context.Context) (pollFunc, error) {
 		c.Close()
-		nc, err := db.Conn(rctx)
+		nc, err := connWithin(rctx, db)
 		if err != nil {
 			return nil, err
 		}
 		c = nc
 		return sqlPoll(nc), nil
 	}
-	w.reconnectTimeout = cfg.ConnectTimeout + watchPollDeadline
 	w.parent = ctx
 	if err := w.firstPoll(spid); err != nil {
 		if idErr == nil {
@@ -578,6 +586,37 @@ func startBlockingWatch(ctx context.Context, cfg *Config, denied map[string]bool
 		c.Close()
 		db.Close()
 	}, ""
+}
+
+// connWithin is db.Conn, returning by ctx's deadline whatever the driver does.
+// go-mssqldb bounds the TCP dial and nothing after it: the pre-login read has
+// no deadline and does not watch the context, so a server that accepts the
+// connection and never answers holds db.Conn for as long as the socket lives.
+// Measured against a listener that accepts and stays silent, with a 3 s
+// context: still waiting after two minutes. The attempt is left to finish on
+// its own, and a connection it opens late is closed rather than leaked into
+// the pool.
+func connWithin(ctx context.Context, db *sql.DB) (*sql.Conn, error) {
+	type result struct {
+		c   *sql.Conn
+		err error
+	}
+	got := make(chan result, 1)
+	go func() {
+		c, err := db.Conn(ctx)
+		got <- result{c, err}
+	}()
+	select {
+	case r := <-got:
+		return r.c, r.err
+	case <-ctx.Done():
+		go func() {
+			if r := <-got; r.c != nil {
+				r.c.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
 }
 
 // orInstance names the target of an instance-scope unit, whose database name
