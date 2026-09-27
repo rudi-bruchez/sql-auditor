@@ -56,6 +56,14 @@ release workflow refuses a tag that disagrees with either this file or
   module created `WITH EXECUTE AS OWNER`: it was `USER_NAME` of the stored id,
   and that id is -2, whose name is NULL, the same as a module with no
   `EXECUTE AS`. Measured on SQL Server 2025 CU7.
+- `70.schema/050.heaps.sql` reads its two areas inside TRY/CATCH into buffers
+  and always emits its document, with `collected.*`, `errors.*` and
+  `error_message` like `030.index-operational`. It had no TRY at all, so one
+  lock timeout lost the whole file with no word in the archive about why:
+  measured behind a Sch-M held on one heap by an open `ALTER TABLE`, the old
+  version wrote nothing and the new one wrote the list with the blocked counts
+  marked. A lock can still cost the whole list, because the query that picks
+  the heaps blocks too.
 
 ## [0.34.0] - 2026-09-24
 

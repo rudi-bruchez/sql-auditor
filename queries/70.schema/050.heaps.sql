@@ -50,39 +50,69 @@
 --
 -- SQL Server 2012 is the floor. forwarded_record_count predates it. Not
 -- collected for that reason: nothing.
+--
+-- IT IS BLOCKABLE, AND THE READS ARE THEREFORE BUFFERED. This file had no
+-- TRY/CATCH at all, so one lock timeout anywhere lost the whole document: the
+-- run reported an error and the archive held no 050.heaps.json, with no word
+-- about why. Measured on 17.0.4065.4 behind a Sch-M held on one heap by an open
+-- ALTER TABLE, 27 September 2026. Each area now reads inside its own
+-- TRY/CATCH, the root is emitted from variables, and a blocked area comes back
+-- empty with its error number, as 030.index-operational does. A lock on one
+-- heap still costs the whole list, because the candidate query itself blocks:
+-- skipping locked objects one by one is a separate change.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-SELECT
-    DB_NAME()                                                   AS [database],
-    CONVERT(varchar(23), SYSDATETIME(), 126)                    AS [collected_at],
+DECLARE @err_counts int = 0, @err_heaps int = 0, @msg nvarchar(2048) = N'',
+        @heap_count int, @heaps_with_nc int, @heap_total_mb decimal(18,1);
+
+DECLARE @heaps TABLE (
+    [table]                     nvarchar(300),
+    [partition]                 int,
+    [rows]                      bigint,
+    [used_mb]                   decimal(18,1),
+    [page_count]                bigint,
+    [forwarded_records]         bigint,
+    [forwarded_percent_of_rows] decimal(9,3),
+    [fragmentation_pct]         decimal(5,2),
+    [page_fullness_pct]         decimal(5,2),
+    [records_scanned]           bigint,
+    [nonclustered_indexes]      int,
+    [partition_count]           int,
+    [filegroup]                 sysname NULL);
+
+BEGIN TRY
     -- Every heap, whether or not it was sampled below.
-    (SELECT COUNT(*) FROM sys.indexes AS i
+    SELECT @heap_count = COUNT(*) FROM sys.indexes AS i
        JOIN sys.objects AS o ON o.object_id = i.object_id
-      WHERE i.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0)
-                                                                AS [counts.heaps],
-    (SELECT COUNT(*) FROM sys.indexes AS i
+      WHERE i.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0
+    OPTION (RECOMPILE, MAXDOP 1);
+
+    SELECT @heaps_with_nc = COUNT(*) FROM sys.indexes AS i
        JOIN sys.objects AS o ON o.object_id = i.object_id
       WHERE i.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0
         AND EXISTS (SELECT 1 FROM sys.indexes AS ni
-                     WHERE ni.object_id = i.object_id AND ni.index_id > 0))
-                                                                AS [counts.heaps_with_nonclustered],
-    (SELECT CAST(SUM(ps.used_page_count) * 8 / 1024.0 AS DECIMAL(18,1))
+                     WHERE ni.object_id = i.object_id AND ni.index_id > 0)
+    OPTION (RECOMPILE, MAXDOP 1);
+
+    SELECT @heap_total_mb = CAST(SUM(ps.used_page_count) * 8 / 1024.0 AS DECIMAL(18,1))
        FROM sys.dm_db_partition_stats AS ps
        JOIN sys.indexes AS i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
        JOIN sys.objects AS o ON o.object_id = i.object_id
-      WHERE i.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0)
-                                                                AS [counts.total_mb],
-    -- The cap, so a reader never mistakes the list below for the whole story.
-    50                                                          AS [sample.largest_heaps_scanned],
-    'SAMPLED'                                                   AS [sample.mode]
-OPTION (RECOMPILE, MAXDOP 1);
+      WHERE i.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0
+    OPTION (RECOMPILE, MAXDOP 1);
+END TRY
+BEGIN CATCH
+    SELECT @err_counts = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+END CATCH
 
 /* The fifty largest heaps, scanned in SAMPLED mode. Chosen by page count from
    metadata first, so the expensive scan only touches the objects that could
    matter. */
+BEGIN TRY
+INSERT INTO @heaps
 SELECT
     OBJECT_SCHEMA_NAME(h.object_id) + '.' + OBJECT_NAME(h.object_id) AS [table],
     h.partition_number                                          AS [partition],
@@ -182,4 +212,32 @@ OUTER APPLY (
 ) AS lim
 WHERE ips.alloc_unit_type_desc = N'IN_ROW_DATA'
 ORDER BY ips.forwarded_record_count DESC, h.used_mb DESC
+OPTION (RECOMPILE, MAXDOP 1);
+END TRY
+BEGIN CATCH
+    SELECT @err_heaps = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+END CATCH
+
+SELECT
+    DB_NAME()                                                   AS [database],
+    CONVERT(varchar(23), SYSDATETIME(), 126)                    AS [collected_at],
+    @heap_count                                                 AS [counts.heaps],
+    @heaps_with_nc                                              AS [counts.heaps_with_nonclustered],
+    @heap_total_mb                                              AS [counts.total_mb],
+    -- The cap, so a reader never mistakes the list below for the whole story.
+    50                                                          AS [sample.largest_heaps_scanned],
+    'SAMPLED'                                                   AS [sample.mode],
+    CASE WHEN @err_counts = 0 THEN 1 ELSE 0 END                 AS [collected.counts],
+    CASE WHEN @err_heaps  = 0 THEN 1 ELSE 0 END                 AS [collected.heaps],
+    @err_counts                                                 AS [errors.counts],
+    @err_heaps                                                  AS [errors.heaps],
+    NULLIF(@msg, N'')                                           AS [error_message]
+OPTION (RECOMPILE, MAXDOP 1);
+
+SELECT h.[table], h.[partition], h.[rows], h.[used_mb], h.[page_count],
+       h.[forwarded_records], h.[forwarded_percent_of_rows], h.[fragmentation_pct],
+       h.[page_fullness_pct], h.[records_scanned], h.[nonclustered_indexes],
+       h.[partition_count], h.[filegroup]
+FROM @heaps AS h
+ORDER BY h.[forwarded_records] DESC, h.[used_mb] DESC
 OPTION (RECOMPILE, MAXDOP 1);
