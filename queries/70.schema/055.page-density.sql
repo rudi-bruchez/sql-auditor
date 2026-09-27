@@ -15,11 +15,15 @@
 -- page FULLNESS: a table can be perfectly ordered and half empty, and it is
 -- then the one a rebuild shrinks.
 --
--- IT IS BEHIND A FLAG FOR COST, LIKE 041.compression-savings. SAMPLED is not
--- the 1 % read its name suggests. Measured on SQL Server 2025, from a cold
--- buffer pool, allocation unit by allocation unit: one with 10,000 pages or
--- more brings in 8 to 12 % of its pages, because each sample reads a whole
--- extent; one below 10,000 pages is read in full. The LOB and row-overflow
+-- IT IS BEHIND A FLAG FOR COST, LIKE 041.compression-savings. SAMPLED works
+-- allocation unit by allocation unit: one below 10,000 pages is read in full,
+-- and a larger one is sampled. How much of a large one is read has been
+-- measured twice on SQL Server 2025 from a cold buffer pool, with different
+-- results. On 14 September 2026, 8 to 12 % of its pages, attributed to each
+-- sample reading a whole extent. On 27 September 2026, on freshly loaded
+-- tables, about 1 %: a 30,113-page clustered index read 424 pages from its
+-- file and a 30,001-page heap 319. What separates the two runs is not known,
+-- so the higher figure is the one to plan with. The LOB and row-overflow
 -- pages of the index count as units of their own and are read the same way.
 -- On a large database that is tens of gigabytes pulled into the buffer pool,
 -- evicting what the workload had there, and SET LOCK_TIMEOUT does not bound it.
