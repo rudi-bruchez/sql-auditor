@@ -401,7 +401,8 @@ func keepSuperseded(paths []string, why string, progress io.Writer) {
 }
 
 // runScope is what a run set out to collect, as its _run.json records it: the
-// opt-ins it had on, the profile that narrowed it, and the databases it read.
+// opt-ins it had on, the profile that narrowed it, the databases it read, and
+// every unit it planned, as a result, an error or a skip.
 type runScope struct {
 	Config  map[string]string `json:"config"`
 	Profile struct {
@@ -412,6 +413,16 @@ type runScope struct {
 			Name string `json:"name"`
 		} `json:"databases"`
 	} `json:"targets"`
+	Results []scopeUnit `json:"results"`
+	Errors  []scopeUnit `json:"errors"`
+	Skipped []scopeUnit `json:"skipped_scripts"`
+}
+
+// scopeUnit is one collector on one target. Target is empty for an instance
+// collector, and for a skip or a lint error that covers every target.
+type scopeUnit struct {
+	Script string `json:"script"`
+	Target string `json:"target"`
 }
 
 func scopeOfManifest(m *Manifest) runScope {
@@ -422,6 +433,15 @@ func scopeOfManifest(m *Manifest) runScope {
 		s.Targets.Databases = append(s.Targets.Databases, struct {
 			Name string `json:"name"`
 		}{d.Name})
+	}
+	for _, r := range m.Results {
+		s.Results = append(s.Results, scopeUnit{r.Script, r.Target})
+	}
+	for _, e := range m.Errors {
+		s.Errors = append(s.Errors, scopeUnit{e.Script, e.Target})
+	}
+	for _, k := range m.Skipped {
+		s.Skipped = append(s.Skipped, scopeUnit{k.Script, k.Target})
 	}
 	return s
 }
@@ -473,8 +493,9 @@ func manifestInZip(path string) ([]byte, error) {
 // scopeLost names what prev collected that cur did not: an opt-in prev had
 // on and cur had off, every collector outside cur's profile when prev had
 // none or another, a setting that let prev run more or return more
-// (settingsLost), and each database prev read and cur did not. Empty means
-// cur covers prev, and prev can go.
+// (settingsLost), each database prev read and cur did not, and each collector
+// prev ran that cur did not plan (collectorsLost). Empty means cur covers
+// prev, and prev can go.
 //
 // A set comparison rather than a count: a run over two other databases than
 // the morning's covers as many and still loses the morning's two.
@@ -501,11 +522,63 @@ func scopeLost(prev, cur runScope) []string {
 	for _, d := range cur.Targets.Databases {
 		read[d.Name] = true
 	}
+	gone := map[string]bool{}
 	for _, d := range prev.Targets.Databases {
 		if !read[d.Name] {
+			gone[d.Name] = true
 			lost = append(lost, "database "+d.Name)
 		}
 	}
+	return append(lost, collectorsLost(prev, cur, gone)...)
+}
+
+// collectorsLost names each collector prev ran, to a result or to an error,
+// that cur did not plan at all: no result, no error and no skip for it on that
+// target. The corpus is not named by its directory. The files under the same
+// QUERIES_DIR can change between two runs, and a new binary embeds another
+// corpus under the same empty setting, so two equal settings said nothing
+// about the collectors either run had. A skip is planning: the opt-ins, the
+// profile, the version and the permissions that skip a collector are compared
+// above, or are not a narrowing the operator chose.
+//
+// A unit on a database cur did not read at all is left out: that database is
+// named already, and naming each of its collectors again says nothing more.
+func collectorsLost(prev, cur runScope, gone map[string]bool) []string {
+	planned := map[scopeUnit]bool{}
+	whole := map[string]bool{}
+	for _, list := range [][]scopeUnit{cur.Results, cur.Errors, cur.Skipped} {
+		for _, u := range list {
+			planned[u] = true
+			if u.Target == "" {
+				whole[u.Script] = true
+			}
+		}
+	}
+	// An error with no script is about the run, a lost connection or a
+	// failed reset, and names no collector.
+	missing := map[string][]string{}
+	for _, list := range [][]scopeUnit{prev.Results, prev.Errors} {
+		for _, u := range list {
+			if u.Script == "" || planned[u] || whole[u.Script] || gone[u.Target] {
+				continue
+			}
+			planned[u] = true // once, when prev has both a result and an error
+			dbs := missing[u.Script]
+			if u.Target != "" {
+				dbs = append(dbs, u.Target)
+			}
+			missing[u.Script] = dbs
+		}
+	}
+	lost := make([]string, 0, len(missing))
+	for sc, dbs := range missing {
+		if len(dbs) > 0 {
+			lost = append(lost, "collector "+sc+" on "+strings.Join(dbs, ", "))
+		} else {
+			lost = append(lost, "collector "+sc)
+		}
+	}
+	sort.Strings(lost)
 	return lost
 }
 
@@ -524,9 +597,6 @@ func scopeLost(prev, cur runScope) []string {
 // A window with a typed bound is compared by its resolved instants.
 func settingsLost(prev, cur map[string]string) []string {
 	var lost []string
-	if prev["queries_dir"] != cur["queries_dir"] {
-		lost = append(lost, "the collectors of "+corpusName(prev["queries_dir"]))
-	}
 	if p, c := prev["query_store_db_include"], cur["query_store_db_include"]; c != "" && p != c {
 		// An empty value reads every collected database, so only a
 		// non-empty one on this run can narrow. Two different pattern lists
@@ -544,13 +614,6 @@ func settingsLost(prev, cur map[string]string) []string {
 		lost = append(lost, "the Query Store comparison around "+p)
 	}
 	return lost
-}
-
-func corpusName(dir string) string {
-	if dir == "" {
-		return "the embedded corpus"
-	}
-	return "QUERIES_DIR " + dir
 }
 
 // countLost reports whether cur is a smaller count than prev. A prev that is
@@ -605,20 +668,30 @@ func previousRunLost(superseded []string, m *Manifest) string {
 		return ""
 	}
 	// Options and the profile are a handful and each is named. Databases can
-	// be hundreds, and past a few the count says what matters.
-	const dbShown = 5
+	// be hundreds, and collectors a corpus, and past a few the count says what
+	// matters.
+	const shown = 5
 	var named []string
-	dbs := 0
+	counts := map[string]int{}
 	for _, l := range lost {
-		if strings.HasPrefix(l, "database ") {
-			if dbs++; dbs > dbShown {
+		kind := ""
+		for _, k := range []string{"database ", "collector "} {
+			if strings.HasPrefix(l, k) {
+				kind = k
+			}
+		}
+		if kind != "" {
+			if counts[kind]++; counts[kind] > shown {
 				continue
 			}
 		}
 		named = append(named, l)
 	}
-	if dbs > dbShown {
-		named = append(named, fmt.Sprintf("%d more databases", dbs-dbShown))
+	if n := counts["database "]; n > shown {
+		named = append(named, fmt.Sprintf("%d more databases", n-shown))
+	}
+	if n := counts["collector "]; n > shown {
+		named = append(named, fmt.Sprintf("%d more collectors", n-shown))
 	}
 	lost = named
 	return "this run did not collect " + strings.Join(lost, ", ") + ", which the run it replaced did"

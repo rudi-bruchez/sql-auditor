@@ -228,7 +228,9 @@ func TestARerunWithNarrowerSettingsKeepsThePreviousRun(t *testing.T) {
 				"query_store_from", "2026-09-01T00:00:00+02:00", "query_store_to", "2026-09-27T15:00:00+02:00"), ""},
 		{"previous window not resolved", with("query_store_from", "not resolved", "query_store_to", "not resolved"),
 			with("query_store_days", "1"), ""},
-		{"other queries_dir", with(), with("queries_dir", "/srv/corpus"), "the embedded corpus"},
+		// The directory is not the corpus: what each run planned is compared
+		// instead, in TestARerunThatPlannedFewerCollectorsKeepsThePreviousRun.
+		{"other queries_dir", with(), with("queries_dir", "/srv/corpus"), ""},
 		{"other comparison point", with("query_store_compare_at", "2026-09-25T10:00:00+02:00/2026-09-25T11:00:00+02:00"),
 			with(), "comparison around 2026-09-25T10:00"},
 	}
@@ -240,5 +242,89 @@ func TestARerunWithNarrowerSettingsKeepsThePreviousRun(t *testing.T) {
 				t.Errorf("previousRunLost = %q, want a reason naming %q", why, c.lost)
 			}
 		})
+	}
+}
+
+// Codex review: the corpus was identified by queries_dir, so a rerun from the
+// same directory after a collector was removed from it, or from a new binary
+// embedding another corpus, compared equal and deleted a run that held more.
+// What each run planned is compared instead, collector by collector and
+// target by target.
+func TestARerunThatPlannedFewerCollectorsKeepsThePreviousRun(t *testing.T) {
+	const srv, db = "10.system/001.server.sql", "20.database/021.files.sql"
+	run := func(dbs []string, units ...ResultEntry) *Manifest {
+		m := scopeManifest("", nil, dbs...)
+		m.Results = units
+		return m
+	}
+	both := []string{"SALESDB", "HRDB"}
+	full := []ResultEntry{{Script: srv}, {Script: db, Target: "SALESDB"}, {Script: db, Target: "HRDB"}}
+	cases := []struct {
+		name      string
+		prev, cur *Manifest
+		lost      []string // each must appear; none means the previous run may go
+		absent    []string // must not appear
+	}{
+		{"same collectors from another directory", run(both, full...),
+			func() *Manifest { m := run(both, full...); m.Config["queries_dir"] = "/srv/corpus"; return m }(), nil, nil},
+		{"an instance collector gone from the corpus", run(both, full...), run(both, full[1:]...),
+			[]string{"collector " + srv}, nil},
+		{"a database collector run on fewer databases", run(both, full...), run(both, full[:2]...),
+			[]string{"collector " + db + " on HRDB"}, nil},
+		{"a collector skipped by this run is planned", run(both, full...),
+			func() *Manifest {
+				m := run(both, full[1:]...)
+				m.Skipped = []SkippedScript{{Script: srv, Reason: "not collected by default"}}
+				return m
+			}(), nil, nil},
+		{"a database collector skipped as a whole is planned on every database", run(both, full...),
+			func() *Manifest {
+				m := run(both, full[0])
+				m.Skipped = []SkippedScript{{Script: db, Reason: "needs SQL Server 16.0 or later"}}
+				return m
+			}(), nil, nil},
+		{"a database skipped for a collector is planned", run(both, full...),
+			func() *Manifest {
+				m := run(both, full[:2]...)
+				m.Skipped = []SkippedScript{{Script: db, Target: "HRDB", Reason: "not matched by QUERY_STORE_DB_INCLUDE"}}
+				return m
+			}(), nil, nil},
+		{"a database not read is named once", run(both, full...), run([]string{"SALESDB"}, full[:2]...),
+			[]string{"database HRDB"}, []string{"collector"}},
+		{"a collector that failed before", func() *Manifest {
+			m := run(both, full[1:]...)
+			m.Errors = []ErrorEntry{{Script: srv, Message: "timeout"}}
+			return m
+		}(), run(both, full[1:]...), []string{"collector " + srv}, nil},
+		{"an error about the run names no collector", func() *Manifest {
+			m := run(both, full...)
+			m.Errors = []ErrorEntry{{Message: "session reset failed"}}
+			return m
+		}(), run(both, full...), nil, nil},
+		{"many collectors gone", run(nil,
+			ResultEntry{Script: "a"}, ResultEntry{Script: "b"}, ResultEntry{Script: "c"}, ResultEntry{Script: "d"},
+			ResultEntry{Script: "e"}, ResultEntry{Script: "f"}, ResultEntry{Script: "g"}), run(nil),
+			[]string{"collector a", "collector e", "2 more collectors"}, []string{"collector f"}},
+	}
+	for _, c := range cases {
+		for _, where := range []string{"folder", "archive only"} {
+			t.Run(c.name+", "+where, func(t *testing.T) {
+				aside := writeSetAside(t, c.prev, where == "folder", true)
+				why := previousRunLost(aside, c.cur)
+				if (why == "") != (len(c.lost) == 0) {
+					t.Fatalf("previousRunLost = %q", why)
+				}
+				for _, l := range c.lost {
+					if !strings.Contains(why, l) {
+						t.Errorf("the reason %q does not name %s", why, l)
+					}
+				}
+				for _, a := range c.absent {
+					if strings.Contains(why, a) {
+						t.Errorf("the reason %q names %s", why, a)
+					}
+				}
+			})
+		}
 	}
 }
