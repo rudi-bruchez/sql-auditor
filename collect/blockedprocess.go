@@ -39,8 +39,8 @@ type blockedProcessIndex struct {
 	// read, from which path, and what went wrong if anything did. It is the
 	// first thing to look at when the directory is empty, because empty has
 	// four different meanings here and only this block tells them apart.
-	Source  blockedProcessSource `json:"source"`
-	Counts  blockedProcessCounts `json:"counts"`
+	Source blockedProcessSource `json:"source"`
+	Counts blockedProcessCounts `json:"counts"`
 	// Episodes is the population, built from every report in the capture and
 	// not from the ones written. A report is re-emitted every monitor tick
 	// while a block lasts, so counting reports counts each block as many times
