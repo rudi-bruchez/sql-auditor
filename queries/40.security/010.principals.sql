@@ -34,9 +34,9 @@
 --
 -- Database-level principals and role memberships are NOT here: they are
 -- per-database and have their own database-scoped collector,
--- 020.database-principals.sql. A reader must not take this file as covering
--- database users; sysadmin membership is the shallow half of the question and
--- 020 is the other one.
+-- 020.database-principals.sql, which also reads master and msdb. A reader
+-- must not take this file as covering database users; sysadmin membership is
+-- the shallow half of the question and 020 is the other one.
 --
 -- SQL Server 2012 is the floor. Not collected for that reason:
 --   sys.server_principals.is_fixed_role   (2012 has it; kept)
@@ -103,6 +103,17 @@ OPTION (RECOMPILE, MAXDOP 1);
    the endpoints), which is what a reader compares a changed public against.
    Fixed roles carry no rows here: their permissions are implicit.
 
+   CERTIFICATE AND ASYMMETRIC KEY LOGINS ARE GRANTEES TOO, and there is no
+   type filter any more. Module signing works by granting a server permission
+   to a login mapped to a certificate, so a CONTROL SERVER held by such a login
+   is the escalation path a signed procedure opens, and a filter on logins and
+   roles dropped exactly those rows. Measured on 17.0.4065.4: nine grants to
+   six certificate logins ship with the instance, CONTROL SERVER to
+   ##MS_PolicySigningCertificate## among them, and they travel as the baseline
+   a certificate login someone created is read against. grantee_type
+   (CERTIFICATE_MAPPED_LOGIN, ASYMMETRIC_KEY_MAPPED_LOGIN) is what separates
+   them from a password login.
+
    THE TARGET OF A GRANT ON A LOGIN WAS ALWAYS NULL. Class 101 is a server
    principal, and it was named with OBJECT_NAME, which looks up a database
    object. Measured on 17.0.4065.4: IMPERSONATE ON LOGIN::sa came out with no
@@ -120,7 +131,6 @@ SELECT pr.name                                                    AS [grantee],
        END                                                        AS [on_object]
 FROM sys.server_permissions AS pe
 JOIN sys.server_principals AS pr ON pr.principal_id = pe.grantee_principal_id
-WHERE pr.type IN ('S', 'U', 'G', 'R')
 ORDER BY pr.name, pe.permission_name
 OPTION (RECOMPILE, MAXDOP 1);
 
