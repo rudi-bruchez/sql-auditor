@@ -25,6 +25,8 @@ release workflow refuses a tag that disagrees with either this file or
 - `70.schema/090.statistics` collects `persisted_sample_percent` (2016 SP1 CU4 and 2017 CU1 onward, NULL on older builds) in both lists.
 - `80.workload/020.query-store.sql` and `023.query-store-most-executed.sql` end with `by_query_hash`, which folds the query_ids that share a `query_hash` and counts them under `query_ids`. On SQL Server 2025, twenty literal variants of one join ranked 7th to 27th as query_ids and 3rd as one hash row.
 - `40.security/020.database-principals.sql` also runs on master and msdb, so msdb role memberships and master's certificate users are collected. They are brought in by a new `@widened: system_databases` purpose, so no other database-scoped collector reads them; DB_INCLUDE does not narrow them, DB_EXCLUDE does.
+- `10.system/042.connection-security.sql` has a `pools` result set: live connections grouped by host, program and login, capped at 200 groups with the total at the root, to compare each application with the client-side default Max Pool Size of 100. It is declared as the new `connection_pools` disclosure, which MANIFEST.txt prints on every run.
+- `10.system/040.error-log.sql` counts failed logins (18456), SSPI handshake failures (17806), the user connection limit (17809), network errors at login (17830), connections refused at start or for want of a thread (17187, 17189), long I/O (833), non-yielding workers and schedulers (17883, 17884, 17888) and paged-out memory (17890), each derived from sys.messages so it works on a localised log.
 
 ### Changed
 
@@ -33,6 +35,9 @@ release workflow refuses a tag that disagrees with either this file or
 - `70.schema/050.heaps` reads heaps within a budget of 200,000 estimated pages per database (full read under 10,000 pages, 1 percent above), reports `sample.skipped_budget`, `sample.page_budget`, `sample.estimated_pages_read` and `sample.measured_heaps`, and starts no new heap after 240 seconds (`sample.budget_sec`).
 - `80.workload/020.query-store.sql` ranks `top_queries` by a round robin over duration, CPU and logical reads, as 021 does, and projects `rank.duration`, `rank.cpu` and `rank.logical_reads`. Ranked on duration alone, the list missed the query that leads reads.
 - `40.security/010.principals.sql` lists server grants to certificate- and asymmetric-key-mapped logins as well, including the instance's own signing certificate logins.
+- `80.workload/030.implicit-conversions.sql` and `80.workload/053.plan-warnings.sql` read each batch plan with `sys.dm_exec_text_query_plan` and search it under `Latin1_General_BIN2`, instead of building it as xml, casting it to text and searching case-insensitively. Same matches on the lab, about four times cheaper in CPU for the search (030 5.3 s to 1.2 s, 053 7.7 s to 1.4 s over 1,000 statements). A batch plan too deep for the xml type can now reach the candidates; 053 counts it in `bounds.plans_unparsed`.
+- `derived_patterns` in `10.system/040.error-log.sql` reports NULL instead of 0 when the log was not read, including when the 50 MB guard skipped it.
+- The DBA guide states that the rerun rule compares what each run set out to collect, not what it brought back, and points to `--keep` to hold on to both runs.
 
 ### Fixed
 
@@ -45,6 +50,12 @@ release workflow refuses a tag that disagrees with either this file or
 - README, the guide and `--help` said `--all` turns on ten options; it turns on eleven. The guide no longer says the 256 MB budget protects the disk.
 - The headers of 020 and 023 no longer claim that 500 characters are too few to rebuild a payload. `docs/dba-guide.md` lists which default collectors keep statement text and says a password written in one can reach the archive.
 - The `70.schema/090.statistics` header claimed the stats properties DMF returns no row for a never-populated statistic; on SQL Server 2025 it returns a row of NULLs.
+- A same-day rerun that narrowed QUERY_STORE_DB_INCLUDE, lowered QUERY_STORE_TOP, shortened the Query Store window, changed the comparison point or used another QUERIES_DIR now keeps the earlier run instead of replacing it.
+- The blocking watch's first poll is retried on a new connection like later polls, so a transient failure at start no longer leaves the whole collection unwatched; a server's refusal still turns the watch off at once.
+- Each blocking watch reconnect is bounded to 3 seconds whatever SQL_CONNECT_TIMEOUT_SEC says, even against a server that accepts the connection and never answers; a collector is unwatched for 20.5 seconds at worst during a retry, down from about a minute.
+- The archive is no longer written through a symbolic link at its name in OUTPUT_DIR; a name already taken at archive time stops the archive and the run folder is kept.
+- A server whose SERVERPROPERTY('ServerName') is NULL is filed under the SQL_SERVER address, plus SQL_DATABASE when it is not master, instead of `_`, so two such targets collected the same day no longer replace each other.
+- The page density header, the README and the guide state both lab measurements of what SAMPLED reads from a large allocation unit (about 1 percent, and 8 to 12 percent), and plan with the higher one.
 
 ## [0.35.0] - 2026-09-27
 
