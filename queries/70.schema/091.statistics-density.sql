@@ -70,6 +70,23 @@
 --   Filtered statistics describe a subset. has_filter is projected so a density
 --   computed over one is not read as a density over the table.
 --
+-- THE 200-TABLE CAP STAYS, AND THERE IS NO UNCAPPED SHORT FORM, although
+-- 090.statistics.sql gained one in September 2026. Two reasons. Each row here
+-- is already the short form: one statistic, its leading column and two
+-- numbers, about 280 bytes. Nothing could be dropped to make a lighter row
+-- except the density itself, so a "short form" would be this file without the
+-- cap. And lifting the cap is not what the counts needed: the rules that count
+-- redundant or stale statistics read 090, whose statistics_all now covers
+-- every statistic. This file serves one question, the key order of an index
+-- candidate, and it reads the histogram of every statistic it lists, a read
+-- whose refusal is not documented the way the properties DMF's is (see
+-- below). The gap that remains is named rather than hidden: a missing-index
+-- candidate on a table outside the largest 200 gets no density from this
+-- file. If audits start meeting such candidates, the cap is the thing to
+-- lift. On the lab the histogram pass over 2,400 statistics cost the same as
+-- the properties pass, 95 ms each, but those tables held at most 600 rows, so
+-- that bounds nothing on a real database.
+--
 -- NO KEY ORDER IS RECOMMENDED HERE. This file reports distribution; deciding an
 -- index is the analysis step's job, with the write cost and the query shapes in
 -- hand that a collector does not have.
