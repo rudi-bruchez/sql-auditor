@@ -84,8 +84,11 @@ release workflow refuses a tag that disagrees with either this file or
   `70.schema/050.heaps` and `70.schema/055.page-density` skip their physical
   reads and say so under `skipped.readable_secondary`, without marking the run
   partial. `sys.dm_db_index_physical_stats` takes an intent-shared lock that
-  Microsoft documents as able to block REDO there. Not reproduced: the lab has
-  no availability group; tested with the flag forced.
+  Microsoft documents as able to block REDO there. A database that belongs to
+  an availability group and whose replica state cannot be read is skipped too,
+  and that is reported as an error, so the run is partial. Not reproduced: the
+  lab has no availability group; tested with the flag and the failed read
+  forced.
 - The README and the guide no longer say the collector takes no lock the
   workload waits behind, nor that reading the Query Store takes no lock. Both
   were contradicted by the guide's own section on the other direction and by
@@ -103,14 +106,19 @@ release workflow refuses a tag that disagrees with either this file or
   two versions returned the same statements, with one more for the new 030.
 - The statement lint that guards `--queries-dir` refuses every procedure
   except the four the shipped corpus calls (`sp_executesql`, `sp_readerrorlog`,
-  `sp_estimate_data_compression_savings`, `sp_help_jobhistory`), a procedure
+  `sp_estimate_data_compression_savings`, unqualified or in `sys`, and
+  `msdb.dbo.sp_help_jobhistory`; `dbo.sp_readerrorlog` is a user procedure
+  and is refused), a procedure
   named by a variable, and a batch that opens with a procedure name, which
   T-SQL calls without `EXEC`. It refused writing procedures by name, and a
   harm review on 27 September 2026 passed twenty statements through it,
   among them `msdb.dbo.sp_delete_backuphistory`, `sp_purge_jobhistory`,
   `sp_control_plan_guide N'DROP ALL'` and `sp_rename`. `ENABLE`, `DISABLE`,
-  the Service Broker verbs and `ADD SIGNATURE` are refused too. All of them are
-  in the adversarial test table.
+  the Service Broker verbs, `ADD SIGNATURE` and `NEXT VALUE FOR`, which
+  advances a sequence from a SELECT, are refused too. `SELECT ... INTO
+  dbo.Copy` is no longer let through by an `INSERT INTO #scratch` in the same
+  batch, which the count of permitted forms credited twice. All of them are in
+  the adversarial test table.
 - `40.security/010.principals.sql` names the target of a grant on a login:
   `IMPERSONATE ON LOGIN::sa` came out with `on_object` null, because class 101
   was resolved with `OBJECT_NAME`, which looks up database objects. It now uses

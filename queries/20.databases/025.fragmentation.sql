@@ -51,9 +51,11 @@ SET LOCK_TIMEOUT 10000;
    behind while this file reads, for as long as it reads. LOCK_TIMEOUT bounds
    this file's waits, not REDO's. Added 27 September 2026 after a harm review;
    not reproduced, the lab having no availability group. The skip is reported
-   as a reason, not as an error, so the run is not marked partial for it. If the
-   replica state cannot be read, the file behaves as before. */
-DECLARE @readable_secondary bit = 0;
+   as a reason, not as an error, so the run is not marked partial for it. A database that
+   belongs to an availability group and whose replica state cannot be read is
+   skipped too, and that one is reported as an error: reading on would be
+   guessing that it is not a secondary. */
+DECLARE @readable_secondary bit = 0, @replica_err int = 0, @replica_msg nvarchar(2048) = N'';
 BEGIN TRY
     IF EXISTS (SELECT 1
                FROM sys.databases AS d
@@ -63,10 +65,14 @@ BEGIN TRY
         SET @readable_secondary = 1;
 END TRY
 BEGIN CATCH
-    SET @readable_secondary = 0;
+    IF EXISTS (SELECT 1 FROM sys.databases
+               WHERE database_id = DB_ID() AND replica_id IS NOT NULL)
+        SELECT @readable_secondary = 1, @replica_err = ERROR_NUMBER(),
+               @replica_msg = N'availability replica state unreadable, physical reads skipped: '
+                              + ERROR_MESSAGE();
 END CATCH
 
-DECLARE @err_fragmentation int = 0, @msg nvarchar(2048) = N'';
+DECLARE @err_fragmentation int = @replica_err, @msg nvarchar(2048) = @replica_msg;
 
 DECLARE @batch_started datetime2 = SYSDATETIME(), @frag_budget_sec int = 150,
         @frag_eligible int = NULL, @frag_measured int = 0, @frag_i int = 1,

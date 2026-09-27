@@ -55,7 +55,9 @@ and heaps take an intent-shared lock on the table. A blocking watch cancels a
 collector that has held someone up for about five seconds, when the login has
 `VIEW SERVER STATE`; it is a bound in practice, not a guarantee. See
 [The other direction](#the-other-direction-the-collector-holding-someone-else-up). On an availability group readable secondary those
-physical reads are skipped, because their lock can hold up REDO.
+physical reads are skipped, because their lock can hold up REDO. So are they
+in a database that belongs to an availability group when the login cannot read
+the replica state, and that one is reported as an error rather than guessed.
 
 ### The queries are not hidden
 
