@@ -1,7 +1,7 @@
 sql-auditor corpus grammar check
 ================================
-Produced    : 2026-09-27T02:22:07Z
-Corpus tree : 63685cea0a7399c7dd670fa3760c0f3b610c2283
+Produced    : 2026-09-27T02:32:52Z
+Corpus tree : 2529f45fda42302ad332af266cabf07d2562be05
               (git rev-parse HEAD:queries - this artifact describes that corpus
                and no other; if the two differ, re-run this script)
 ScriptDom   : /home/rudi/.nuget/packages/microsoft.sqlserver.transactsql.scriptdom/180.37.3/lib/net472/Microsoft.SqlServer.TransactSql.ScriptDom.dll
