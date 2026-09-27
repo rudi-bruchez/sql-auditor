@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	mssql "github.com/microsoft/go-mssqldb"
 )
 
 // A watch whose poll answers from a script, one sample per tick. It is never
@@ -601,5 +603,38 @@ func TestEmptyBlockedWaitsAreWrittenAsAnEmptyList(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"waits": {`) || !strings.Contains(string(b), `"items": []`) {
 		t.Errorf("_run.json has no empty waits block: %s", b)
+	}
+}
+
+// Codex review: the first poll bypassed the retry, so a transient failure at
+// the start left the whole collection unwatched. It now retries like any
+// other poll, records no recovery since no collector was running, and does
+// not retry a server's answer, which is the denial the first poll is there to
+// catch.
+func TestWatchFirstPollRetries(t *testing.T) {
+	w, polls, reconnects := flakyWatch(1, waitSample{})
+	if err := w.firstPoll(55); err != nil {
+		t.Fatalf("firstPoll = %v after one transient failure", err)
+	}
+	if *polls != 2 || *reconnects != 1 || len(w.warnings()) != 0 {
+		t.Errorf("polls = %d, reconnects = %d, warnings = %q", *polls, *reconnects, w.warnings())
+	}
+
+	w, polls, reconnects = flakyWatch(1<<30, waitSample{})
+	if err := w.firstPoll(55); err == nil || !strings.Contains(err.Error(), "bad connection") {
+		t.Errorf("firstPoll = %v with every attempt failing", err)
+	}
+	if *polls != watchRetries+1 || *reconnects != watchRetries {
+		t.Errorf("polls = %d, reconnects = %d, want %d and %d", *polls, *reconnects, watchRetries+1, watchRetries)
+	}
+
+	w, _, reconnects = flakyWatch(0, waitSample{})
+	polls = new(int)
+	w.poll = func(ctx context.Context, spid int) (waitSample, error) {
+		*polls++
+		return waitSample{}, mssql.Error{Number: 300, Message: "VIEW SERVER STATE permission was denied"}
+	}
+	if err := w.firstPoll(55); err == nil || *polls != 1 || *reconnects != 0 {
+		t.Errorf("firstPoll = %v, polls = %d, reconnects = %d: a denial was retried", err, *polls, *reconnects)
 	}
 }

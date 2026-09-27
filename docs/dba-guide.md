@@ -1099,10 +1099,11 @@ scans (`041` behind `--estimate-compression`, `055` page density), and losing
 one of them costs a section of the audit, which is the right way round.
 
 The watch needs `VIEW SERVER STATE` (`VIEW SERVER PERFORMANCE STATE` from SQL
-Server 2022), which the collection asks for anyway. Without it, or if its
-connection or its first read fails, the run goes on unwatched and says so on
-screen and in the manifest. A read that fails LATER, including one that takes
-longer than its deadline on a busy instance, is retried on a new connection,
+Server 2022), which the collection asks for anyway. Without it, if its
+connection cannot be opened, or if its first read is refused by the server, the
+run goes on unwatched and says so on screen and in the manifest. Any other
+failed read, the first one included, and including one that takes longer than
+its deadline on a busy instance, is retried on a new connection,
 since a timed-out read leaves its connection unusable: three attempts, after
 pauses of half a second, one second and two seconds, each reconnection and
 read under its own deadline, and none of it past the end of the run. The

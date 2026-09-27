@@ -3,10 +3,13 @@ package collect
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
+
+	mssql "github.com/microsoft/go-mssqldb"
 )
 
 // The blocking watch: a second connection that looks, once a second, for
@@ -326,6 +329,32 @@ func (w *blockingWatch) retry(spid int, first error) (s waitSample, quiet bool, 
 		first, w.retries, err)
 }
 
+// firstPoll proves the watch's query runs before anything relies on it, with
+// the same bounded retry as every later poll: a transient failure here would
+// otherwise leave the whole collection unwatched, where the same failure one
+// second later costs a few seconds of it. A server that answered with an error
+// is not retried. That is the DENY on sys.dm_os_waiting_tasks this poll exists
+// to catch, and asking again on a new connection gets the same answer three
+// seconds and three logins later.
+//
+// A recovery here is not recorded. The manifest's line for one says the
+// collector running then went unwatched, and no collector has started yet.
+func (w *blockingWatch) firstPoll(spid int) error {
+	_, err := w.pollOnce(spid)
+	if err == nil {
+		return nil
+	}
+	var answered mssql.Error
+	if errors.As(err, &answered) {
+		return err
+	}
+	_, _, err = w.retry(spid, err)
+	w.mu.Lock()
+	w.recovered = nil
+	w.mu.Unlock()
+	return err
+}
+
 // identifyLocked reads one session's identity. It is called with mu held and
 // releases it for the query, which keeps the poll loop's lock discipline
 // intact without holding the mutex across a round trip. A failure is recorded
@@ -512,22 +541,15 @@ func startBlockingWatch(ctx context.Context, cfg *Config, denied map[string]bool
 	// connection returns "driver: bad connection" and then "connection is
 	// already closed". Failing to open it costs the identity, not the watch.
 	idConn, idErr := db.Conn(dctx)
-	pctx, pcancel := context.WithTimeout(ctx, watchPollDeadline)
-	_, err = poll(pctx, spid)
-	pcancel()
-	if err != nil {
-		c.Close()
-		db.Close()
-		return nil, func() {}, "its first poll failed: " + err.Error()
-	}
 	w := newBlockingWatch(poll, watchPollEvery, watchCancelAfter)
 	if idErr == nil {
 		w.identify = sqlIdentify(idConn)
 	}
 	// The dead connection is closed first, which gives its place in the pool
 	// of two back, and database/sql discards one the driver has marked bad.
-	// Only the watch's goroutine calls this, and the cleanup below runs after
-	// close has waited for that goroutine, so c needs no lock.
+	// Only the watch's goroutine calls this, and the first poll below before
+	// that goroutine exists; the cleanup runs after close has waited for the
+	// goroutine, so c needs no lock.
 	w.reconnect = func(rctx context.Context) (pollFunc, error) {
 		c.Close()
 		nc, err := db.Conn(rctx)
@@ -539,6 +561,14 @@ func startBlockingWatch(ctx context.Context, cfg *Config, denied map[string]bool
 	}
 	w.reconnectTimeout = cfg.ConnectTimeout + watchPollDeadline
 	w.parent = ctx
+	if err := w.firstPoll(spid); err != nil {
+		if idErr == nil {
+			idConn.Close()
+		}
+		c.Close()
+		db.Close()
+		return nil, func() {}, "its first poll failed: " + err.Error()
+	}
 	w.start()
 	return w, func() {
 		w.close()
