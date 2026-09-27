@@ -44,6 +44,28 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
+/* ON A READABLE SECONDARY, NO PHYSICAL READ. sys.dm_db_index_physical_stats
+   takes an intent-shared lock on the table it reads, and on an availability
+   group secondary that lock can block the REDO thread asking for an exclusive
+   one, as the Microsoft reference for the function says: the replica falls
+   behind while this file reads, for as long as it reads. LOCK_TIMEOUT bounds
+   this file's waits, not REDO's. Added 27 September 2026 after a harm review;
+   not reproduced, the lab having no availability group. The skip is reported
+   as a reason, not as an error, so the run is not marked partial for it. If the
+   replica state cannot be read, the file behaves as before. */
+DECLARE @readable_secondary bit = 0;
+BEGIN TRY
+    IF EXISTS (SELECT 1
+               FROM sys.databases AS d
+               JOIN sys.dm_hadr_availability_replica_states AS ars
+                 ON ars.replica_id = d.replica_id AND ars.is_local = 1
+               WHERE d.database_id = DB_ID() AND ars.role = 2)
+        SET @readable_secondary = 1;
+END TRY
+BEGIN CATCH
+    SET @readable_secondary = 0;
+END CATCH
+
 DECLARE @err_fragmentation int = 0, @msg nvarchar(2048) = N'';
 
 DECLARE @batch_started datetime2 = SYSDATETIME(), @frag_budget_sec int = 150,
@@ -70,6 +92,8 @@ DECLARE @fragmentation TABLE (
    out. The candidates come from sys.dm_db_partition_stats, which is metadata;
    used_page_count covers every allocation unit, so no partition the page_count
    filter below would keep is left out for being too small. */
+IF @readable_secondary = 0
+BEGIN
 BEGIN TRY
     SELECT @frag_eligible = COUNT(*)
     FROM sys.dm_db_partition_stats AS ps
@@ -141,11 +165,13 @@ END TRY
 BEGIN CATCH
     SELECT @err_fragmentation = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
 END CATCH
+END
 
 SELECT @frag_eligible               AS [fragmentation_sample.eligible_partitions],
        @frag_measured               AS [fragmentation_sample.measured_partitions],
        @frag_budget_sec             AS [fragmentation_sample.budget_sec],
-       CASE WHEN @err_fragmentation = 0 THEN 1 ELSE 0 END AS [collected.fragmentation],
+       @readable_secondary                                         AS [skipped.readable_secondary],
+       CASE WHEN @err_fragmentation = 0 AND @readable_secondary = 0 THEN 1 ELSE 0 END AS [collected.fragmentation],
        @err_fragmentation           AS [errors.fragmentation],
        NULLIF(@msg, N'')            AS [error_message]
 OPTION (RECOMPILE, MAXDOP 1);

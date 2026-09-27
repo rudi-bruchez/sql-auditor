@@ -72,6 +72,28 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
+/* ON A READABLE SECONDARY, NO PHYSICAL READ. sys.dm_db_index_physical_stats
+   takes an intent-shared lock on the table it reads, and on an availability
+   group secondary that lock can block the REDO thread asking for an exclusive
+   one, as the Microsoft reference for the function says: the replica falls
+   behind while this file reads, for as long as it reads. LOCK_TIMEOUT bounds
+   this file's waits, not REDO's. Added 27 September 2026 after a harm review;
+   not reproduced, the lab having no availability group. The skip is reported
+   as a reason, not as an error, so the run is not marked partial for it. If the
+   replica state cannot be read, the file behaves as before. */
+DECLARE @readable_secondary bit = 0;
+BEGIN TRY
+    IF EXISTS (SELECT 1
+               FROM sys.databases AS d
+               JOIN sys.dm_hadr_availability_replica_states AS ars
+                 ON ars.replica_id = d.replica_id AND ars.is_local = 1
+               WHERE d.database_id = DB_ID() AND ars.role = 2)
+        SET @readable_secondary = 1;
+END TRY
+BEGIN CATCH
+    SET @readable_secondary = 0;
+END CATCH
+
 DECLARE @top int = 50;
 DECLARE @eligible int = NULL, @indexes_covered int = NULL;
 DECLARE @err int = 0, @msg nvarchar(2048) = N'';
@@ -110,6 +132,8 @@ DECLARE @density TABLE (
    below, for the reason 70.schema/020.index-usage gives: this names user
    objects, READ UNCOMMITTED does not release metadata locks, and a blocked read
    must cost this list rather than the whole document. */
+IF @readable_secondary = 0
+BEGIN
 BEGIN TRY
     SELECT @eligible = COUNT(*)
     FROM sys.dm_db_partition_stats AS ps
@@ -177,19 +201,21 @@ END TRY
 BEGIN CATCH
     SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
 END CATCH
+END
 
 SELECT @indexes_covered = COUNT(*)
 FROM (SELECT DISTINCT [table], index_id FROM @density) AS d;
 
 SELECT DB_NAME()                                   AS [database],
        CONVERT(varchar(23), SYSDATETIME(), 126)    AS [collected_at],
+       @readable_secondary                                         AS [skipped.readable_secondary],
        @top                                        AS [sample.largest_partitions_scanned],
        @measured                                   AS [sample.measured_partitions],
        @budget_sec                                 AS [sample.budget_sec],
        'SAMPLED'                                   AS [sample.mode],
        @eligible                                   AS [counts.eligible_partitions],
        @indexes_covered                            AS [counts.indexes_covered],
-       CASE WHEN @err = 0 THEN 1 ELSE 0 END        AS [collected.indexes],
+       CASE WHEN @err = 0 AND @readable_secondary = 0 THEN 1 ELSE 0 END AS [collected.indexes],
        @err                                        AS [errors.indexes],
        NULLIF(@msg, N'')                           AS [error_message]
 OPTION (RECOMPILE, MAXDOP 1);

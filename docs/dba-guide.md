@@ -46,8 +46,16 @@ It does **not**:
 - read any user or application table;
 - run `INSERT`, `UPDATE`, `DELETE`, or any DDL;
 - change any server or database setting, trace flag or configuration option;
-- install anything on the server;
-- take a lock that your workload has to wait behind.
+- install anything on the server.
+
+What it does take is locks. Every catalog read holds a schema-stability lock on
+what it reads for the length of the statement, which an `ALTER TABLE` or an
+offline index rebuild has to wait for, and the physical reads of fragmentation
+and heaps take an intent-shared lock on the table. A blocking watch cancels a
+collector that has held someone up for about five seconds, when the login has
+`VIEW SERVER STATE`; it is a bound in practice, not a guarantee. See
+[The other direction](#the-other-direction-the-collector-holding-someone-else-up). On an availability group readable secondary those
+physical reads are skipped, because their lock can hold up REDO.
 
 ### The queries are not hidden
 
@@ -972,7 +980,12 @@ one of them costs a section of the audit, which is the right way round.
 The watch needs `VIEW SERVER STATE` (`VIEW SERVER PERFORMANCE STATE` from SQL
 Server 2022), which the collection asks for anyway. Without it, or if its
 connection or its first read fails, the run goes on unwatched and says so on
-screen and in the manifest. `MANIFEST.txt` has a `Block watch` line, and
+screen and in the manifest. A read that fails LATER, including one that takes
+longer than its deadline on a busy instance, stops the watch for the rest of the
+run, with no retry: a timed-out read leaves its connection unusable, and a watch
+that came and went would make "enabled" mean nothing. The manifest then says
+"on until it stopped at" with the time and the error, and every collector after
+that ran unwatched. `MANIFEST.txt` has a `Block watch` line, and
 `_run.json` a `blocking_watch` block, in every case, so that "nobody was
 waiting" and "nobody was looking" read differently.
 
@@ -1682,7 +1695,10 @@ back clean, the extraction has what it needs.
 
 Little. The Query Store is a set of catalog views over data already on disk, and
 the collector reads them under `READ UNCOMMITTED` like every other file in the
-corpus, so it takes no lock your workload has to wait behind.
+corpus. That spares it the data locks and not the others: reading the Query
+Store takes a shared lock on the store while each statement runs, which an
+option change on the store has to wait for, as `80.workload/027` measured. See
+[The other direction](#the-other-direction-the-collector-holding-someone-else-up).
 
 The detail collector declares a 300-second timeout per database and the profiled
 lookup 120 seconds; the work is the aggregation over the window, which grows

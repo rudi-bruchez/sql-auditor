@@ -65,6 +65,28 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
+/* ON A READABLE SECONDARY, NO PHYSICAL READ. sys.dm_db_index_physical_stats
+   takes an intent-shared lock on the table it reads, and on an availability
+   group secondary that lock can block the REDO thread asking for an exclusive
+   one, as the Microsoft reference for the function says: the replica falls
+   behind while this file reads, for as long as it reads. LOCK_TIMEOUT bounds
+   this file's waits, not REDO's. Added 27 September 2026 after a harm review;
+   not reproduced, the lab having no availability group. The skip is reported
+   as a reason, not as an error, so the run is not marked partial for it. If the
+   replica state cannot be read, the file behaves as before. */
+DECLARE @readable_secondary bit = 0;
+BEGIN TRY
+    IF EXISTS (SELECT 1
+               FROM sys.databases AS d
+               JOIN sys.dm_hadr_availability_replica_states AS ars
+                 ON ars.replica_id = d.replica_id AND ars.is_local = 1
+               WHERE d.database_id = DB_ID() AND ars.role = 2)
+        SET @readable_secondary = 1;
+END TRY
+BEGIN CATCH
+    SET @readable_secondary = 0;
+END CATCH
+
 DECLARE @err_counts int = 0, @err_heaps int = 0, @msg nvarchar(2048) = N'',
         @heap_count int, @heaps_with_nc int, @heap_total_mb decimal(18,1);
 
@@ -111,6 +133,8 @@ END CATCH
 /* The fifty largest heaps, scanned in SAMPLED mode. Chosen by page count from
    metadata first, so the expensive scan only touches the objects that could
    matter. */
+IF @readable_secondary = 0
+BEGIN
 BEGIN TRY
 INSERT INTO @heaps
 SELECT
@@ -217,6 +241,7 @@ END TRY
 BEGIN CATCH
     SELECT @err_heaps = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
 END CATCH
+END
 
 SELECT
     DB_NAME()                                                   AS [database],
@@ -227,8 +252,9 @@ SELECT
     -- The cap, so a reader never mistakes the list below for the whole story.
     50                                                          AS [sample.largest_heaps_scanned],
     'SAMPLED'                                                   AS [sample.mode],
+       @readable_secondary                                         AS [skipped.readable_secondary],
     CASE WHEN @err_counts = 0 THEN 1 ELSE 0 END                 AS [collected.counts],
-    CASE WHEN @err_heaps  = 0 THEN 1 ELSE 0 END                 AS [collected.heaps],
+    CASE WHEN @err_heaps  = 0 AND @readable_secondary = 0 THEN 1 ELSE 0 END AS [collected.heaps],
     @err_counts                                                 AS [errors.counts],
     @err_heaps                                                  AS [errors.heaps],
     NULLIF(@msg, N'')                                           AS [error_message]

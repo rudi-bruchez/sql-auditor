@@ -80,6 +80,17 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Fixed
 
+- On an availability group readable secondary, `20.databases/025.fragmentation`,
+  `70.schema/050.heaps` and `70.schema/055.page-density` skip their physical
+  reads and say so under `skipped.readable_secondary`, without marking the run
+  partial. `sys.dm_db_index_physical_stats` takes an intent-shared lock that
+  Microsoft documents as able to block REDO there. Not reproduced: the lab has
+  no availability group; tested with the flag forced.
+- The README and the guide no longer say the collector takes no lock the
+  workload waits behind, nor that reading the Query Store takes no lock. Both
+  were contradicted by the guide's own section on the other direction and by
+  the header of `80.workload/027`. The guide also says that a blocking watch
+  whose read fails during the run stops for the rest of it.
 - `80.workload/030.implicit-conversions.sql` and `053.plan-warnings.sql` bound
   their window before reading any plan: the 1 000 statements with the most
   reads (030) or CPU (053) are taken from `sys.dm_exec_query_stats`, and only

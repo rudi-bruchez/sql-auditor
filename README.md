@@ -16,9 +16,12 @@ What it does to your instance:
 - it does **not** read the contents of user or application tables;
 - it does **not** write to your databases;
 - it does **not** change any configuration;
-- read-only is not the same as free. One collector samples pages of the largest
-  heaps in each database to count forwarded records, which is real I/O on a
-  large instance. [What it costs the
+- read-only is not the same as free or lock-free. One collector samples pages
+  of the largest heaps in each database to count forwarded records, which is
+  real I/O on a large instance, and every read holds the locks a read holds
+  while it runs. Run it first off-peak. On an availability group readable
+  secondary the physical reads are skipped, because their lock can hold up
+  REDO; run it on the primary for those. [What it costs the
   instance](docs/dba-guide.md#what-the-default-run-costs-a-large-instance) says
   what that means and how to avoid it.
 
@@ -559,9 +562,9 @@ A plan is not merely a longer statement: it carries the parameter values the
 plan was compiled for, the literal predicates, and the name of every object the
 query touches.
 
-The cost to the instance is not the reason to hesitate. The Query Store is data
-already on disk and the collector takes no lock. What ends up in the archive
-is.
+The cost to the instance is not the main reason to hesitate: the Query Store is
+data already on disk, though reading it holds a shared lock on the store for the
+length of each statement. What ends up in the archive is.
 
 ### `--include-object-definitions`
 
