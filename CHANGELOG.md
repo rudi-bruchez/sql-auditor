@@ -80,6 +80,16 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Fixed
 
+- The statement lint that guards `--queries-dir` refuses every procedure
+  except the four the shipped corpus calls (`sp_executesql`, `sp_readerrorlog`,
+  `sp_estimate_data_compression_savings`, `sp_help_jobhistory`), a procedure
+  named by a variable, and a batch that opens with a procedure name, which
+  T-SQL calls without `EXEC`. It refused writing procedures by name, and a
+  harm review on 27 September 2026 passed twenty statements through it,
+  among them `msdb.dbo.sp_delete_backuphistory`, `sp_purge_jobhistory`,
+  `sp_control_plan_guide N'DROP ALL'` and `sp_rename`. `ENABLE`, `DISABLE`,
+  the Service Broker verbs and `ADD SIGNATURE` are refused too. All of them are
+  in the adversarial test table.
 - `40.security/010.principals.sql` names the target of a grant on a login:
   `IMPERSONATE ON LOGIN::sa` came out with `on_object` null, because class 101
   was resolved with `OBJECT_NAME`, which looks up database objects. It now uses

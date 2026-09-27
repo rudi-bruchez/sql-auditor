@@ -49,6 +49,41 @@ func TestStatementLintRefusesTheAdversarialTable(t *testing.T) {
 		{"execute as", `EXECUTE AS LOGIN = 'sa'; SELECT 1`},
 		{"xp_cmdshell", `EXEC xp_cmdshell 'del /q C:\data\*'`},
 		{"select into a permanent table", `SELECT * INTO dbo.Copy FROM sys.databases`},
+
+		// The harm review of 27 September 2026. Twenty writing statements that
+		// carried no keyword the rules looked for, and five ways of calling a
+		// procedure without a name the lint could read. Every one was accepted.
+		{"disable server triggers", `DISABLE TRIGGER ALL ON ALL SERVER`},
+		{"disable table triggers", `DISABLE TRIGGER ALL ON dbo.Orders`},
+		{"enable a database trigger", `ENABLE TRIGGER trg ON DATABASE`},
+		{"receive dequeues messages", `RECEIVE TOP (1000) * FROM dbo.TargetQueue`},
+		{"end conversation with cleanup", `END CONVERSATION @h WITH CLEANUP`},
+		{"add signature", `ADD SIGNATURE TO dbo.p BY CERTIFICATE c`},
+		// The same verbs after an ordinary statement, where the first-word rule
+		// does not see them and only the keyword list does.
+		{"disable server triggers mid-batch", `SET NOCOUNT ON; DISABLE TRIGGER ALL ON ALL SERVER`},
+		{"receive mid-batch", `SET NOCOUNT ON; RECEIVE TOP (1) * FROM dbo.TargetQueue`},
+		{"add signature mid-batch", `SELECT 1; ADD SIGNATURE TO dbo.p BY CERTIFICATE c`},
+		{"enable trigger mid-batch", `SELECT 1; ENABLE TRIGGER trg ON DATABASE`},
+		{"purge backup history", `EXEC msdb.dbo.sp_delete_backuphistory @oldest_date = '2030-01-01'`},
+		{"purge one database's backup history", `EXEC msdb.dbo.sp_delete_database_backuphistory 'SALESDB'`},
+		{"purge job history", `EXEC msdb.dbo.sp_purge_jobhistory`},
+		{"purge mail items", `EXEC msdb.dbo.sysmail_delete_mailitems_sp @sent_before = '2030-01-01'`},
+		{"drop every plan guide", `EXEC sp_control_plan_guide N'DROP ALL'`},
+		{"remove a query store query", `EXEC sp_query_store_remove_query 42`},
+		{"unforce a plan", `EXEC sp_query_store_unforce_plan 42, 7`},
+		{"reset query store stats", `EXEC sp_query_store_reset_exec_stats 7`},
+		{"rename a table", `EXEC sp_rename 'dbo.Orders', 'Orders_old'`},
+		{"startup procedure", `EXEC sp_procoption 'dbo.p', 'startup', 'on'`},
+		{"create statistics", `EXEC sp_createstats`},
+		{"turn auto stats off", `EXEC sp_autostats 'dbo.Orders', 'OFF'`},
+		{"drop a user", `EXEC sp_dropuser 'x'`},
+		{"firewall rule", `EXEC sp_set_database_firewall_rule N'x', '0.0.0.0', '255.255.255.255'`},
+		{"procedure opening a batch run by sp_executesql", `EXEC sp_executesql N'msdb.dbo.sp_purge_jobhistory'`},
+		{"procedure opening a batch run by EXEC()", `EXEC('sp_delete_backuphistory ''2030-01-01''')`},
+		{"procedure called with a return code", `EXEC @rc = msdb.dbo.sp_purge_jobhistory`},
+		{"procedure named by a variable", `DECLARE @p sysname = N'sp_purge_jobhistory'; EXEC @p`},
+		{"bracketed three-part name", `EXECUTE [msdb].[dbo].[sp_purge_jobhistory]`},
 	}
 	for _, c := range mustRefuse {
 		if msg := statementLint(c.sql); msg == "" {
@@ -69,6 +104,13 @@ func TestStatementLintRefusesTheAdversarialTable(t *testing.T) {
 		{"table variable scratch", `DECLARE @t TABLE (a int); INSERT INTO @t SELECT 1; SELECT * FROM @t`},
 		{"select into a temp table", `SELECT * INTO #t FROM sys.databases`},
 		{"checkpoint inside an identifier", `SELECT ls.log_since_last_checkpoint_mb, ls.log_checkpoint_lsn FROM sys.dm_db_log_stats(1) ls`},
+		// The four procedures the shipped corpus calls, under the spellings it
+		// uses. Turning the list round must not refuse them.
+		{"error log", `INSERT INTO #log EXEC sys.sp_readerrorlog 0`},
+		{"job history", `INSERT INTO @h EXEC msdb.dbo.sp_help_jobhistory @mode = 'FULL'`},
+		{"compression estimate", `INSERT INTO #s EXEC sys.sp_estimate_data_compression_savings @schema_name = N'dbo', @object_name = N'T', @index_id = NULL, @partition_number = NULL, @data_compression = N'PAGE'`},
+		{"guarded dynamic select", `EXEC sp_executesql N'SELECT name FROM sys.databases WHERE database_id = @id', N'@id int', @id = 1`},
+		{"columns named like the new keywords", `SELECT s.enable_broker, s.is_disabled, q.send_count FROM sys.databases s CROSS JOIN (SELECT 0 AS send_count) q`},
 	}
 	for _, c := range mustAccept {
 		if msg := statementLint(c.sql); msg != "" {

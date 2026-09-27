@@ -159,10 +159,12 @@ against. What can and cannot be verified is set out in full in
 
 `--queries-dir` and `QUERIES_DIR` run the SQL you give them. Every file is
 linted first for what its statements do, and one that would change the server
-is refused rather than run — but that guard has now been walked past by two
-separate adversarial reviews, six weeks apart, each time by a statement its
-patterns did not anticipate. Both are closed and the statements that got
-through are a test
+is refused rather than run — but that guard has now been walked past by three
+separate adversarial reviews, each time by statements its patterns did not
+anticipate; the third found that any writing procedure missing from a list of
+names ran, msdb's history purges among them. Procedures are now refused unless
+they are one of the four the shipped corpus calls, and every statement that got
+through is a test
 ([docs/harm-review-2026-09-12.md](docs/harm-review-2026-09-12.md)).
 
 Read that as the measure of what the guard is for. **It stops an accident, not
