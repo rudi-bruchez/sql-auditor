@@ -72,7 +72,7 @@ The output is the exact set of files this run will use. The archive records the
 SHA-256 of the exact corpus that was used, so a run can be tied to the
 questions it asked.
 
-### Ten files are opt-in
+### The opt-in files
 
 They produce nothing unless you ask for them:
 
@@ -82,15 +82,19 @@ They produce nothing unless you ask for them:
 | `10.system/052.session-text.sql` | `--include-session-text` |
 | `10.system/061.deadlock-graphs.sql` | `--include-deadlock-graphs` |
 | `10.system/063.blocked-process-reports.sql` | `--include-blocked-process-reports` |
+| `50.agent/021.job-step-commands.sql` | `--include-job-step-commands` |
 | `70.schema/041.compression-savings.sql` | `--estimate-compression` |
 | `70.schema/055.page-density.sql` | `--measure-page-density` |
 | `70.schema/080.modules.sql` | `--include-object-definitions` |
 | `80.workload/021.query-store-detail.sql` | `--query-store-detail` |
 | `80.workload/022.query-store-profiled.sql` | `--query-store-plan-stats` |
+| `80.workload/025.query-store-compare.sql` | `--query-store-compare-at T` |
 | `80.workload/041.plan-cache-plans.sql` | `--plan-cache-plans` |
 
-Eight of the ten change what kind of data ends up in the archive and have
-sections of their own below. `--estimate-compression` and
+`--all` turns on eleven of these options, every one but
+`--query-store-compare-at`, which needs a moment and is never implied. Nine of
+the eleven change what kind of data ends up in the archive, and the widest of
+them have sections of their own below. `--estimate-compression` and
 `--measure-page-density` are opt-in for cost rather than for disclosure.
 
 `--plan-cache-plans` deserves reading twice before it is used on an instance you
@@ -667,11 +671,22 @@ Named here because a limit an operator can plan around is worth more than a
 limit nobody wrote down. Each was raised in the adversarial harm review of
 4 September 2026 and each was left alone on purpose.
 
-**Result sets are materialised in memory before the size budget is consulted.**
-The 256 MB run budget protects the disk and never the RAM of the machine the
-tool runs on. Within the shipped corpus the `TOP` caps make this theoretical;
-it becomes reachable through `QUERY_STORE_TOP`, which is deliberately uncapped,
-and through a `--queries-dir` corpus with no caps of its own.
+**The 256 MB run budget is neither a memory bound nor a disk bound.** It
+caps the collector documents one run may write into its folder, and a write
+that would pass it is refused. It does not bound memory: every result set of
+a collector is read into memory, and encoded there, before the budget is
+consulted, so the RAM of the machine the tool runs on is never protected by
+it. Within the shipped corpus the `TOP` caps make this theoretical; it
+becomes reachable through `QUERY_STORE_TOP`, which is deliberately uncapped,
+and through a `--queries-dir` corpus with no caps of its own. It does not
+bound the disk either. `MANIFEST.txt`, `_run.json` and the `_index.json` of
+each collector directory are written outside it, since an archive that
+cannot describe itself is worse than a truncated one. The `.zip` is written
+beside the run folder, not inside it, and counts against nothing, so a run
+occupies its folder plus its archive. A run that replaced an earlier one of
+the same day keeps that one on disk until it has finished, or for good when
+it kept it. Plan the free space from the folder size of a previous run of
+the same instance, not from 256 MB.
 
 **The run folder is named from the server's own answer.** A same-day rerun
 replaces the previous run of the same name, and that name is what

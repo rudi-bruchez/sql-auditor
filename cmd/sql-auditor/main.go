@@ -135,12 +135,12 @@ func defineFlags(cmd string) *cliFlags {
 	_ = fs.Bool("debug", false,
 		"print a timeline of what the program is doing on stderr, stamped with the "+
 			"time since process start")
-	// A union of the ten opt-ins below, and deliberately not a mode: it
-	// turns them on and changes nothing else. Eight of them are disclosure
+	// A union of the eleven opt-ins below, and deliberately not a mode: it
+	// turns them on and changes nothing else. Nine of them are disclosure
 	// decisions and two are cost decisions, so what this asks for is the
 	// widest archive the tool can produce — which is the right thing on an
 	// instance you have a mandate for, and the wrong thing everywhere else.
-	// MANIFEST.txt is unchanged by it: the archive keeps recording the ten
+	// MANIFEST.txt is unchanged by it: the archive keeps recording the eleven
 	// individually, because what was collected is the fact worth keeping and
 	// how few words it took to ask is not.
 	fs.BoolVar(&c.all, "all", false,
@@ -1091,11 +1091,11 @@ Options (check, collect):
                               instance larger than they need to be. It removes
                               collectors and never adds one; an opt-in option
                               still needs to be given. Refused beside --all.
-  --all                       turn on all ten options below at once: the eight
+  --all                       turn on all eleven options below at once: the nine
                               that are off for disclosure and the two that are
                               off for cost. The widest archive this tool can
                               produce. It changes nothing else, and MANIFEST.txt
-                              still records the ten individually.
+                              still records the eleven individually.
   --grant-script FILE         check only. After probing permissions, write the
                               T-SQL that grants exactly the ones found missing,
                               for the login the server reports, with the reason

@@ -432,11 +432,14 @@ Exactly three cases.
 
 | Flag | Meaning |
 | --- | --- |
-| `--all` | turn on all ten options below at once: the eight off for disclosure and the two off for cost. See the note under these tables |
+| `--all` | turn on all eleven options below at once: the nine off for disclosure and the two off for cost. See the note under these tables |
 | `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
 | `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
 | `--include-deadlock-graphs` | also collect the deadlock reports `system_health` still holds, one `.xdl` file each |
 | `--include-blocked-process-reports` | also collect the blocked process reports an Extended Events session captured, one `.xml` file each |
+| `--include-default-trace` | also collect the retained rows of the default trace, not only the aggregate that is always made. The rows name the login, host and database of each event |
+| `--include-job-step-commands` | also collect the complete text of every Transact-SQL job step, instead of its first 200 characters. A job step is application code, and it is where a password gets typed rather than kept in a credential |
+| `--plan-cache-plans` | also collect execution plans from the plan cache, one `.sqlplan` file each: the only plans an instance without the Query Store contributes. The statement text beside them comes from the cache and can carry literal values |
 | `--estimate-compression` | also estimate page-compression savings on the 20 largest uncompressed objects, per database. Off for cost, not for disclosure: it samples real data into tempdb and is slow on large tables. Each database may take up to its 1800-second timeout, and nothing bounds the run as a whole |
 | `--measure-page-density` | also measure how full the pages of the 50 largest index partitions are, per database, which says what a rebuild would give back. Off for cost, not for disclosure: `SAMPLED` reads 8 to 12 % of every large partition into the buffer pool, LOB pages included, and all of a small one. Each database may take up to its 1800-second timeout, and nothing bounds the run as a whole: narrow it with `DB_INCLUDE` on an instance with many large databases |
 | `--query-store-detail` | also collect the full text and the execution plans of the heaviest Query Store queries, per database |
@@ -456,13 +459,13 @@ Exactly three cases.
 ### `--all` asks for the widest archive this tool can produce
 
 It is the one option that is a convenience rather than a decision, and it should
-be read as what it is: eight of the ten collectors it turns on are off by
+be read as what it is: nine of the eleven collectors it turns on are off by
 default because of what they put in the archive, not because of what they cost.
 
 That is the right thing on an instance you have a written mandate for and the
 wrong thing everywhere else, and the tool will not ask you which it is.
 
-It changes nothing else: no confirmation, no extra collectors beyond the ten,
+It changes nothing else: no confirmation, no extra collectors beyond the eleven,
 and `MANIFEST.txt` still discloses them one by one, because what the archive
 contains is the fact that matters and how briefly it was requested is not.
 
