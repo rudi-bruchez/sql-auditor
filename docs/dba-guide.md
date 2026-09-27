@@ -559,9 +559,16 @@ Two things worth knowing:
   to `<name>.superseded-HHMMSS`, kept there for the whole collection, and
   removed only once the new archive has been written. So a rerun that fails —
   a timeout, a lost connection, a Ctrl-C, a right missing on an option you
-  just added — leaves you with the run you already had, under that name. If
-  you find one lying around, a run died: it is the previous day's work, not
-  a duplicate of anything.
+  just added — leaves you with the run you already had, under that name.
+
+  A rerun that completes still keeps the earlier run when it collected less:
+  an option the earlier run had on and this one had off, a `--profile` the
+  earlier run did not use, or a database the earlier run read and this one
+  did not. Both runs' `_run.json` say what they covered, and a plain afternoon
+  `collect` does not delete the morning's `collect --all`. The collection
+  names what was missing, on screen and in the manifest's warnings. If you
+  find a `.superseded-` run lying around, either a run died or the one after
+  it was narrower: it is earlier work, not a duplicate of anything.
 - **Runs are quick.** On a small instance the whole collection finishes in about
   a second; on a large estate the per-database collectors dominate, so budget by
   database count.

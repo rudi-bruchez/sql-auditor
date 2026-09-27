@@ -362,7 +362,9 @@ from before the wizard.
 - A run that did not complete, because it was stopped or a collector failed,
   never deletes the earlier run of the same server and day that it replaces:
   that run stays beside it, named `.superseded-HHMMSS`, and the collection says
-  where. Only a run that exits `0` removes it.
+  where. Only a run that exits `0` removes it, and only when it collected
+  everything the earlier run did: every option that run had on, every
+  database it read, and no narrower `--profile`.
 
 An argument therefore wins over everything else: `sql-auditor collect` does the
 same work whatever terminal it finds itself attached to, and no invocation that

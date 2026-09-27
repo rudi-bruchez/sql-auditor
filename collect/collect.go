@@ -1,8 +1,10 @@
 package collect
 
 import (
+	"archive/zip"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -371,7 +373,9 @@ func discardSuperseded(paths []string) {
 // few seconds in, or ending with a collector that timed out, replaced a
 // complete archive with a partial one: measured, 73 results became 53 and the
 // morning's archive was gone. The snapshot of a given day cannot be collected
-// again, so a partial run keeps it.
+// again, so a partial run keeps it. Exit 0 is necessary, not sufficient: the
+// caller also asks previousRunLost whether this run covered the one it
+// replaced.
 func settleRun(exit int, cancelled bool) (code int, discardPrevious bool) {
 	if cancelled && exit == 0 {
 		exit = 2
@@ -380,23 +384,172 @@ func settleRun(exit int, cancelled bool) (code int, discardPrevious bool) {
 }
 
 // keepSuperseded tells the operator where the run this one replaced still is,
-// and why it was not deleted.
-func keepSuperseded(paths []string, progress io.Writer) {
+// and why it was not deleted. why is empty for a partial run, and otherwise
+// is previousRunLost's sentence.
+func keepSuperseded(paths []string, why string, progress io.Writer) {
 	if len(paths) == 0 {
 		return
 	}
-	fmt.Fprintln(progress, "this run is partial, so the run it replaced was kept:")
+	if why == "" {
+		why = "this run is partial"
+	}
+	fmt.Fprintf(progress, "%s, so the run it replaced was kept:\n", why)
 	for _, p := range paths {
 		fmt.Fprintf(progress, "  %s\n", p)
 	}
 }
 
+// runScope is what a run set out to collect, as its _run.json records it: the
+// opt-ins it had on, the profile that narrowed it, and the databases it read.
+type runScope struct {
+	Config  map[string]string `json:"config"`
+	Profile struct {
+		Name string `json:"name"`
+	} `json:"profile"`
+	Targets struct {
+		Databases []struct {
+			Name string `json:"name"`
+		} `json:"databases"`
+	} `json:"targets"`
+}
+
+func scopeOfManifest(m *Manifest) runScope {
+	var s runScope
+	s.Config = m.Config
+	s.Profile.Name = m.Profile.Name
+	for _, d := range m.Targets.Databases {
+		s.Targets.Databases = append(s.Targets.Databases, struct {
+			Name string `json:"name"`
+		}{d.Name})
+	}
+	return s
+}
+
+// supersededScope reads the scope of the run prepareRunFolder set aside, from
+// its folder's _run.json or, when only the archive is left, from the one inside
+// it. The archive holds the run folder under its original name, which the
+// rename to .superseded-HHMMSS did not change.
+func supersededScope(paths []string) (runScope, error) {
+	var s runScope
+	err := errors.New("no _run.json was found in what the previous run left")
+	for _, p := range paths {
+		var b []byte
+		if strings.HasSuffix(p, ".zip") {
+			b, err = manifestInZip(p)
+		} else {
+			b, err = os.ReadFile(filepath.Join(p, manifestJSONName))
+		}
+		if err == nil {
+			return s, json.Unmarshal(b, &s)
+		}
+	}
+	return s, err
+}
+
+func manifestInZip(path string) ([]byte, error) {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+	for _, f := range zr.File {
+		// The run folder's own manifest, one level down: <folder>/_run.json.
+		if strings.Count(f.Name, "/") != 1 || !strings.HasSuffix(f.Name, "/"+manifestJSONName) {
+			continue
+		}
+		r, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		defer r.Close()
+		// A manifest is kilobytes. The bound is against an archive that is
+		// not one of ours, since the name was all that was checked.
+		return io.ReadAll(io.LimitReader(r, 64<<20))
+	}
+	return nil, fmt.Errorf("%s holds no %s", path, manifestJSONName)
+}
+
+// scopeLost names what prev collected that cur did not: an opt-in prev had
+// on and cur had off, every collector outside cur's profile when prev had
+// none or another, and each database prev read and cur did not. Empty means
+// cur covers prev, and prev can go.
+//
+// A set comparison rather than a count: a run over two other databases than
+// the morning's covers as many and still loses the morning's two.
+func scopeLost(prev, cur runScope) []string {
+	var lost []string
+	names := make([]string, 0, len(KnownFlags)+len(ValueFlags))
+	for n := range KnownFlags {
+		names = append(names, n)
+	}
+	for n := range ValueFlags {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if prev.Config[n] == "true" && cur.Config[n] != "true" {
+			lost = append(lost, flagOption(n))
+		}
+	}
+	if cur.Profile.Name != "" && prev.Profile.Name != cur.Profile.Name {
+		lost = append(lost, "the collectors outside --profile "+cur.Profile.Name)
+	}
+	read := map[string]bool{}
+	for _, d := range cur.Targets.Databases {
+		read[d.Name] = true
+	}
+	for _, d := range prev.Targets.Databases {
+		if !read[d.Name] {
+			lost = append(lost, "database "+d.Name)
+		}
+	}
+	return lost
+}
+
+// previousRunLost is why a run that completed must still keep the run it
+// replaced, or "" when it may go. A previous run whose scope cannot be read is
+// kept: nothing proves this run covers it, and the cost of being wrong the
+// other way is a day's snapshot that cannot be collected again.
+func previousRunLost(superseded []string, m *Manifest) string {
+	if len(superseded) == 0 {
+		return ""
+	}
+	prev, err := supersededScope(superseded)
+	if err != nil {
+		return "this run could not be compared with the run it replaced (" + err.Error() + ")"
+	}
+	lost := scopeLost(prev, scopeOfManifest(m))
+	if len(lost) == 0 {
+		return ""
+	}
+	// Options and the profile are a handful and each is named. Databases can
+	// be hundreds, and past a few the count says what matters.
+	const dbShown = 5
+	var named []string
+	dbs := 0
+	for _, l := range lost {
+		if strings.HasPrefix(l, "database ") {
+			if dbs++; dbs > dbShown {
+				continue
+			}
+		}
+		named = append(named, l)
+	}
+	if dbs > dbShown {
+		named = append(named, fmt.Sprintf("%d more databases", dbs-dbShown))
+	}
+	lost = named
+	return "this run did not collect " + strings.Join(lost, ", ") + ", which the run it replaced did"
+}
+
 // RunNameTaken and RunFolderFor are exported for one caller and one reason:
 // the wizard has to ask before this package destroys anything. Without --keep,
-// prepareRunFolder does os.RemoveAll on the folder AND removes the .zip beside
-// it, warning only on stderr — which a full-screen wizard has covered up. An
-// operator rerunning the same day to add one option would lose the archive
-// just mailed. The wizard calls these two before Run and puts the answer on
+// prepareRunFolder renames the folder AND the .zip beside it out of the way,
+// and the run deletes both once it has written its own archive, if it
+// completed and collected everything they did. The notice goes only to
+// stderr, which a full-screen wizard has covered up, and an operator
+// rerunning the same day to add one option would lose the archive just
+// mailed. The wizard calls these two before Run and puts the answer on
 // screen; nothing is deleted without a keystroke that names the choice.
 //
 // RunNameTaken reports whether anything from an earlier run already occupies
@@ -1986,6 +2139,17 @@ func Run(ctx context.Context, o Options) (int, error) {
 	obs.Phase("writing manifest")
 	o.Debugf("all units done; writing the manifest")
 	exit, discardPrevious := settleRun(exit, m.Run.Cancelled)
+	// A complete run is not yet a run that covers the one it replaced. Exit 0
+	// alone deleted the morning's --all archive under a plain afternoon
+	// collect, with its session text, its plans and its module source.
+	keptBecause := ""
+	if discardPrevious {
+		if keptBecause = previousRunLost(superseded, m); keptBecause != "" {
+			discardPrevious = false
+			m.Warnings = append(m.Warnings, keptBecause+", so the run it replaced was kept at "+
+				strings.Join(superseded, " and "))
+		}
+	}
 	code, ferr := finish(runFolder, exit)
 	if ferr != nil {
 		return code, ferr
@@ -2000,14 +2164,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return 2, err
 	}
 	o.Debugf("archive written")
-	// Only now, and only for a run that completed. The run this one replaced
-	// has been on disk the whole time, so a rerun that died anywhere above, was
-	// stopped, or lost a collector leaves it there rather than leaving the
-	// operator with a partial run in place of a complete one.
+	// Only now, and only for a run that completed and covered what the run it
+	// replaced collected. The run this one replaced has been on disk the whole
+	// time, so a rerun that died anywhere above, was stopped, lost a collector,
+	// or collected less leaves it there rather than leaving the operator with
+	// a narrower run in place of a wider one.
 	if discardPrevious {
 		discardSuperseded(superseded)
 	} else {
-		keepSuperseded(superseded, o.progress())
+		keepSuperseded(superseded, keptBecause, o.progress())
 	}
 	// Silenced for a caller that owns the screen, not redirected.
 	// `sql-auditor collect | tail -1` is how a script picks up the archive path,
