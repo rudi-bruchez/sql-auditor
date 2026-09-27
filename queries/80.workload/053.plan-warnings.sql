@@ -182,7 +182,7 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-DECLARE @examined int = 200;
+DECLARE @examined int = 1000;
 
 DECLARE @candidates TABLE (
     [query_hash]          binary(8),
@@ -197,32 +197,66 @@ DECLARE @candidates TABLE (
 
 DECLARE @err int = 0, @msg nvarchar(2048) = N'';
 
+DECLARE @window TABLE (
+    [plan_handle]            varbinary(64),
+    [statement_start_offset] int,
+    [statement_end_offset]   int,
+    [query_hash]             binary(8),
+    [execution_count]        bigint,
+    [total_worker_time]      bigint,
+    [total_logical_reads]    bigint,
+    [creation_time]          datetime,
+    [last_execution_time]    datetime);
+DECLARE @matching TABLE ([plan_handle] varbinary(64) PRIMARY KEY);
+
 BEGIN TRY
+    /* THE WINDOW IS BOUNDED BEFORE ANY PLAN IS READ. Until 27 September 2026
+       the TOP (200) sat on the query that cast each plan to text, so every
+       statement's batch plan in the cache was cast and searched before two
+       hundred were kept: the cap bounded rows, not work. Measured on
+       17.0.4065.4 at about 95 ms per megabyte of plan text, which on a large
+       production cache runs into the 300-second timeout and returns nothing.
+       Found by a harm review. Now the thousand statements with the most CPU
+       are taken from the DMV first, without reading a plan, and each of their
+       batch plans is searched once. A statement outside that window is no
+       longer seen; bounds.statements_examined says how wide it was. */
+    INSERT INTO @window
+    SELECT TOP (@examined) qs.plan_handle, qs.statement_start_offset,
+           qs.statement_end_offset, qs.query_hash, qs.execution_count,
+           qs.total_worker_time, qs.total_logical_reads,
+           qs.creation_time, qs.last_execution_time
+    FROM sys.dm_exec_query_stats AS qs
+    ORDER BY qs.total_worker_time DESC
+    OPTION (RECOMPILE, MAXDOP 1);
+
     /* The prefilter is a text match, and it is safe here for the one reason
        that makes a wrong test usable: it only has to be a SUPERSET. A
        statement carrying any of these annotations necessarily carries the
        string in its plan text, so nothing true is lost; a statement that
        merely mentions one is let through and rejected by the node reads
-       below. Without it the shred runs on the whole sample, which is what
-       cost 27 s in the file this one is modelled on. */
+       below. Cast once per batch plan, not once per predicate and statement. */
+    INSERT INTO @matching
+    SELECT h.plan_handle
+    FROM (SELECT DISTINCT w.plan_handle FROM @window AS w) AS h
+    CROSS APPLY sys.dm_exec_query_plan(h.plan_handle) AS p
+    CROSS APPLY (SELECT CAST(p.query_plan AS nvarchar(max)) AS t) AS x
+    WHERE p.query_plan IS NOT NULL
+      AND (x.t LIKE '%<Warnings%'
+        OR x.t LIKE '%CursorPlan%'
+        OR x.t LIKE '%StatementOptmEarlyAbortReason%'
+        OR x.t LIKE '%Optimized="1"%'
+        OR x.t LIKE '%Optimized="true"%')
+    OPTION (RECOMPILE, MAXDOP 1);
+
     INSERT INTO @candidates
     SELECT c.query_hash, c.execution_count, c.total_worker_time,
            c.total_logical_reads, c.creation_time, c.last_execution_time,
            tp.dbid, tp.objectid, TRY_CAST(tp.query_plan AS xml)
     FROM (
-        SELECT TOP (200) qs.plan_handle, qs.statement_start_offset,
-               qs.statement_end_offset, qs.query_hash, qs.execution_count,
-               qs.total_worker_time, qs.total_logical_reads,
-               qs.creation_time, qs.last_execution_time
-        FROM sys.dm_exec_query_stats AS qs
-        CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS p
-        WHERE p.query_plan IS NOT NULL
-          AND (CAST(p.query_plan AS nvarchar(max)) LIKE '%<Warnings%'
-            OR CAST(p.query_plan AS nvarchar(max)) LIKE '%CursorPlan%'
-            OR CAST(p.query_plan AS nvarchar(max)) LIKE '%StatementOptmEarlyAbortReason%'
-            OR CAST(p.query_plan AS nvarchar(max)) LIKE '%Optimized="1"%'
-            OR CAST(p.query_plan AS nvarchar(max)) LIKE '%Optimized="true"%')
-        ORDER BY qs.total_worker_time DESC) AS c
+        SELECT TOP (200) w.*
+        FROM @window AS w
+        JOIN @matching AS m ON m.plan_handle = w.plan_handle
+        ORDER BY w.total_worker_time DESC) AS c
     CROSS APPLY sys.dm_exec_text_query_plan(c.plan_handle, c.statement_start_offset,
                                             c.statement_end_offset) AS tp
     OPTION (RECOMPILE, MAXDOP 1);
@@ -309,7 +343,7 @@ SELECT
     -- What the plan says about itself, read on the statements already kept
     -- and NOT added to the prefilter: every plan of an instance at MAXDOP 1
     -- carries NonParallelPlanReason="MaxDOPSetToOne", so filtering on it
-    -- would crowd the annotated statements out of the two hundred. The reason
+    -- would crowd the annotated statements out of the window. The reason
     -- is named so a reader can tell a code cause (a scalar function, a table
     -- variable modified) from a setting. Measured on 17.0.4065.4 in cached
     -- plans, 27 September 2026: MaxDOPSetToOne under OPTION (MAXDOP 1), the

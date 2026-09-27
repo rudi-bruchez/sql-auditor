@@ -80,6 +80,16 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Fixed
 
+- `80.workload/030.implicit-conversions.sql` and `053.plan-warnings.sql` bound
+  their window before reading any plan: the 1 000 statements with the most
+  reads (030) or CPU (053) are taken from `sys.dm_exec_query_stats`, and only
+  their batch plans are cast to text and searched, once each. The `TOP (200)`
+  sat on the query that did the casting, so every plan in the cache was cast
+  and searched before the cap applied, at about 95 ms per megabyte measured on
+  SQL Server 2025 CU7, which on a large production cache runs into the
+  300-second timeout. A converting statement outside the window is no longer
+  seen; `bounds.statements_examined` now reports 1 000. On the lab instance the
+  two versions returned the same statements, with one more for the new 030.
 - The statement lint that guards `--queries-dir` refuses every procedure
   except the four the shipped corpus calls (`sp_executesql`, `sp_readerrorlog`,
   `sp_estimate_data_compression_savings`, `sp_help_jobhistory`), a procedure

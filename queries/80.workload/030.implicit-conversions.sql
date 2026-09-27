@@ -97,7 +97,7 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-DECLARE @examined int = 200;
+DECLARE @examined int = 1000;
 
 SELECT SYSDATETIME()                                              AS [collected_at],
        @examined                                                  AS [bounds.statements_examined],
@@ -130,26 +130,64 @@ DECLARE @candidates TABLE (
     [objectid]            int,
     [px]                  xml);
 
+/* THE WINDOW IS BOUNDED BEFORE ANY PLAN IS READ. Until 27 September 2026 the
+   TOP (200) below sat on the query that cast each plan to text, so the server
+   cast and searched the plan of EVERY statement in the cache, a batch plan
+   once per statement of the batch, before keeping two hundred; the cap bounded
+   the rows kept, not the work. Measured on 17.0.4065.4: about 95 ms per
+   megabyte of plan text, on a cache where 44 statements in 50 passed the text
+   match, so on a production cache of several gigabytes of plans the read ran
+   into the 300-second timeout and returned nothing. Found by a harm review.
+
+   Now the thousand statements with the most logical reads are taken from the
+   DMV first, which reads no plan, and only their batch plans are searched,
+   each plan once. This changes what is found as well as what it costs: a
+   converting statement outside the thousand heaviest is no longer seen. The
+   finding is about statements that read a lot, so the heaviest are where it
+   is, and bounds.statements_examined says how wide the window was. */
+DECLARE @window TABLE (
+    [plan_handle]            varbinary(64),
+    [statement_start_offset] int,
+    [statement_end_offset]   int,
+    [query_hash]             binary(8),
+    [execution_count]        bigint,
+    [total_logical_reads]    bigint,
+    [total_worker_time]      bigint,
+    [creation_time]          datetime,
+    [last_execution_time]    datetime);
+
+INSERT INTO @window
+SELECT TOP (@examined) qs.plan_handle, qs.statement_start_offset, qs.statement_end_offset,
+       qs.query_hash, qs.execution_count, qs.total_logical_reads,
+       qs.total_worker_time, qs.creation_time, qs.last_execution_time
+FROM sys.dm_exec_query_stats AS qs
+ORDER BY qs.total_logical_reads DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* A CHEAP SUPERSET NEXT, once per batch plan. The exact test parses XML out
+   of text and walks it; run over a whole sample it cost 27 s. The text match
+   is a correct superset, since a statement that converts necessarily carries
+   the pattern in its batch's plan text, so nothing true is lost and the
+   expensive test then runs on a handful of candidates. */
+DECLARE @matching TABLE ([plan_handle] varbinary(64) PRIMARY KEY);
+
+INSERT INTO @matching
+SELECT h.plan_handle
+FROM (SELECT DISTINCT w.plan_handle FROM @window AS w) AS h
+CROSS APPLY sys.dm_exec_query_plan(h.plan_handle) AS p
+WHERE p.query_plan IS NOT NULL
+  AND CAST(p.query_plan AS nvarchar(max)) LIKE '%CONVERT_IMPLICIT(nvarchar%'
+OPTION (RECOMPILE, MAXDOP 1);
+
 INSERT INTO @candidates
 SELECT c.query_hash, c.execution_count, c.total_logical_reads, c.total_worker_time,
        c.creation_time, c.last_execution_time, tp.dbid, tp.objectid,
        TRY_CAST(tp.query_plan AS xml)
 FROM (
-    /* A CHEAP SUPERSET FIRST, and it is not an optimisation either, it is what
-       makes the exact test affordable at all. The exact test parses XML out of
-       text and walks it; run over the whole sample it cost 27 s. The text match
-       it replaces is a correct superset, since a statement that converts
-       necessarily carries the pattern in its batch's plan text, so nothing true
-       is lost and the expensive test then runs on a handful of candidates. On
-       the same instance the sample of 200 came down to 12. */
-    SELECT TOP (200) qs.plan_handle, qs.statement_start_offset, qs.statement_end_offset,
-           qs.query_hash, qs.execution_count, qs.total_logical_reads,
-           qs.total_worker_time, qs.creation_time, qs.last_execution_time
-    FROM sys.dm_exec_query_stats AS qs
-    CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS p
-    WHERE p.query_plan IS NOT NULL
-      AND CAST(p.query_plan AS nvarchar(max)) LIKE '%CONVERT_IMPLICIT(nvarchar%'
-    ORDER BY qs.total_logical_reads DESC) AS c
+    SELECT TOP (200) w.*
+    FROM @window AS w
+    JOIN @matching AS m ON m.plan_handle = w.plan_handle
+    ORDER BY w.total_logical_reads DESC) AS c
 /* One plan per STATEMENT, not per batch. sys.dm_exec_text_query_plan with the
    two offsets returns the fragment for the statement the row came from, so the
    document holds exactly one StmtSimple and a // read cannot reach a sibling
