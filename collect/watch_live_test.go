@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -227,4 +228,72 @@ func TestLiveStartBlockingWatchOpensBothConnections(t *testing.T) {
 		t.Errorf("the watch took %v to start: a connection waited out its deadline", took)
 	}
 	t.Logf("started in %v", took)
+}
+
+// A watch whose connection is killed under it reconnects and goes on, and
+// the manifest's warnings say it happened. KILL is the closest the lab comes
+// to a connection a failover or a network blip has cut.
+func TestLiveWatchReconnectsAfterItsConnectionIsKilled(t *testing.T) {
+	cfg := liveConfig(t)
+	cfg.AppName = "sql-auditor-live-reconnect"
+	ctx := context.Background()
+	setupDB, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer setupDB.Close()
+	setup := newStmtRunner(t, setupDB)
+	defer setup.close()
+	var spid int
+	if err := setup.conn.QueryRowContext(ctx, "SELECT @@SPID").Scan(&spid); err != nil {
+		t.Fatal(err)
+	}
+	w, stop, reason := startBlockingWatch(ctx, cfg, map[string]bool{}, spid)
+	if w == nil {
+		t.Fatalf("the watch did not start: %s", reason)
+	}
+	defer stop()
+	_, cancel := context.WithCancelCause(ctx)
+	w.arm(spid, cancel)
+	defer w.disarm()
+
+	rows, err := setup.conn.QueryContext(ctx, "SELECT session_id FROM sys.dm_exec_sessions WHERE program_name = @p",
+		sql.Named("p", cfg.AppName+watchAppSuffix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var watchers []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		watchers = append(watchers, id)
+	}
+	rows.Close()
+	if len(watchers) == 0 {
+		t.Fatal("no session carries the watch's application name")
+	}
+	for _, id := range watchers {
+		if err := setup.exec(ctx, fmt.Sprintf("KILL %d", id)); err != nil {
+			t.Fatalf("KILL %d: %v", id, err)
+		}
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) && len(w.warnings()) == 0 {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if r := w.stoppedReason(); r != "" {
+		t.Fatalf("the watch stopped: %s", r)
+	}
+	warns := w.warnings()
+	if len(warns) != 1 || !strings.Contains(warns[0], "reconnected") {
+		t.Fatalf("warnings = %q", warns)
+	}
+	// And the new connection answers the polls after it: two more ticks.
+	time.Sleep(2500 * time.Millisecond)
+	if r, n := w.stoppedReason(), len(w.warnings()); r != "" || n != 1 {
+		t.Errorf("after the reconnect: stopped = %q, %d warning(s)", r, n)
+	}
+	t.Logf("killed %v; %s", watchers, warns[0])
 }

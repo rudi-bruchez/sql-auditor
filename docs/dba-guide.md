@@ -983,11 +983,15 @@ The watch needs `VIEW SERVER STATE` (`VIEW SERVER PERFORMANCE STATE` from SQL
 Server 2022), which the collection asks for anyway. Without it, or if its
 connection or its first read fails, the run goes on unwatched and says so on
 screen and in the manifest. A read that fails LATER, including one that takes
-longer than its deadline on a busy instance, stops the watch for the rest of the
-run, with no retry: a timed-out read leaves its connection unusable, and a watch
-that came and went would make "enabled" mean nothing. The manifest then says
-"on until it stopped at" with the time and the error, and every collector after
-that ran unwatched. `MANIFEST.txt` has a `Block watch` line, and
+longer than its deadline on a busy instance, is retried on a new connection,
+since a timed-out read leaves its connection unusable: three attempts, after
+pauses of half a second, one second and two seconds, each reconnection and
+read under its own deadline, and none of it past the end of the run. The
+collector running meanwhile is unwatched for those few seconds, and the
+manifest's warnings say each time it happened. If the three attempts fail too,
+the watch stops for the rest of the run: the manifest then says "on until it
+stopped at" with the time and the errors, a warning says every collector after
+that ran unwatched, and they did. `MANIFEST.txt` has a `Block watch` line, and
 `_run.json` a `blocking_watch` block, in every case, so that "nobody was
 waiting" and "nobody was looking" read differently.
 

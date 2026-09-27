@@ -1524,6 +1524,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	var watch *blockingWatch
 	finish := func(runFolder string, code int) (int, error) {
 		m.BlockingWatch.Stopped = watch.stoppedReason()
+		m.Warnings = append(m.Warnings, watch.warnings()...)
 		m.Run.FinishedUTC = nowUTC()
 		m.Run.DurationSec = int(time.Since(started).Seconds())
 		m.Run.ExitCode = code

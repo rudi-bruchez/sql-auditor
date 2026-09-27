@@ -31,6 +31,15 @@ const (
 	// would leave a watch protecting nothing while the manifest says it ran.
 	watchPollDeadline = 2 * time.Second
 	watchAppSuffix    = " (blocking watch)"
+	// A failed poll is retried on a fresh connection this many times, waiting
+	// watchRetryBackoff, then twice that, then four times, before the watch
+	// stops for good. The collector runs unwatched meanwhile, so the bound is
+	// kept short: 3.5 s of waiting plus at most three reconnects and polls,
+	// each under its own deadline, and never past the run's own context.
+	watchRetries      = 3
+	watchRetryBackoff = 500 * time.Millisecond
+	// How many recoveries the manifest names one by one before counting.
+	watchRecoveriesListed = 3
 )
 
 // The parameter is bound with sql.Named("collector", spid). Direct waiters
@@ -118,6 +127,11 @@ func (e *blockedError) Error() string {
 // the decision logic is testable without a server.
 type pollFunc func(ctx context.Context, spid int) (waitSample, error)
 
+// reconnectFunc drops the poll's connection and returns a poll on a new one.
+// A query whose deadline expired leaves its connection dead, so retrying on
+// the same one only repeats the failure.
+type reconnectFunc func(ctx context.Context) (pollFunc, error)
+
 // blockingWatch is shared between the run loop and one goroutine. The
 // goroutine never touches the manifest, the observer or the collection
 // connection: its only effect on the run is calling the cancel function of the
@@ -129,6 +143,18 @@ type blockingWatch struct {
 	every       time.Duration
 	after       time.Duration
 	deadline    time.Duration
+
+	// The retry after a failed poll. reconnect may be nil, and the poll is
+	// then retried as it is. parent is the run's context: a retry never waits
+	// past it, and a run that is stopping does not record the watch as stopped.
+	reconnect        reconnectFunc
+	reconnectTimeout time.Duration
+	retries          int
+	backoff          time.Duration
+	parent           context.Context
+	// Each failure the watch came back from, with its time. The collector
+	// running then was unwatched for the length of the retry.
+	recovered []string
 
 	mu        sync.Mutex
 	armed     bool
@@ -149,6 +175,8 @@ type blockingWatch struct {
 func newBlockingWatch(poll pollFunc, every, after time.Duration) *blockingWatch {
 	return &blockingWatch{poll: poll, every: every, after: after, deadline: watchPollDeadline,
 		identifyMax: watchIdentifyPerUnit,
+		retries:     watchRetries, backoff: watchRetryBackoff,
+		reconnectTimeout: watchPollDeadline, parent: context.Background(),
 		waiters:     map[int]waiterRecord{},
 		quit:        make(chan struct{}), done: make(chan struct{})}
 }
@@ -194,15 +222,18 @@ func (w *blockingWatch) tick() bool {
 	if !armed {
 		return true
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), w.deadline)
-	s, err := w.poll(ctx, spid)
-	cancel()
+	s, err := w.pollOnce(spid)
+	if err != nil {
+		var quiet bool
+		s, quiet, err = w.retry(spid, err)
+		if quiet {
+			return false
+		}
+	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err != nil {
-		// No retry: a watch that silently comes and goes would make the
-		// manifest's "enabled" mean nothing.
 		w.stopped = fmt.Sprintf("%s: %v", time.Now().UTC().Format(time.RFC3339), err)
 		return false
 	}
@@ -241,6 +272,58 @@ func (w *blockingWatch) tick() bool {
 		}
 	}
 	return true
+}
+
+func (w *blockingWatch) pollOnce(spid int) (waitSample, error) {
+	ctx, cancel := context.WithTimeout(w.parent, w.deadline)
+	defer cancel()
+	return w.poll(ctx, spid)
+}
+
+// retry comes back from a failed poll: a bounded number of attempts, each on
+// a fresh connection after a growing pause. A recovery is recorded rather than
+// hidden, since a watch that silently came and went would make the manifest's
+// "enabled" mean nothing; recovered says when, and the manifest carries it.
+// quiet is true when the run itself is ending, the watch is being closed or
+// the run's context is done, and there is nothing to report as a stop.
+func (w *blockingWatch) retry(spid int, first error) (s waitSample, quiet bool, err error) {
+	err = first
+	pause := w.backoff
+	for attempt := 1; attempt <= w.retries; attempt++ {
+		t := time.NewTimer(pause)
+		select {
+		case <-w.quit:
+			t.Stop()
+			return waitSample{}, true, err
+		case <-w.parent.Done():
+			t.Stop()
+			return waitSample{}, true, err
+		case <-t.C:
+		}
+		pause *= 2
+		if w.reconnect != nil {
+			ctx, cancel := context.WithTimeout(w.parent, w.reconnectTimeout)
+			p, rerr := w.reconnect(ctx)
+			cancel()
+			if rerr != nil {
+				err = fmt.Errorf("reconnecting: %w", rerr)
+				continue
+			}
+			w.poll = p
+		}
+		if s, err = w.pollOnce(spid); err == nil {
+			w.mu.Lock()
+			w.recovered = append(w.recovered, fmt.Sprintf("%s: %v",
+				time.Now().UTC().Format(time.RFC3339), first))
+			w.mu.Unlock()
+			return s, false, nil
+		}
+	}
+	if w.parent.Err() != nil {
+		return waitSample{}, true, err
+	}
+	return waitSample{}, false, fmt.Errorf("%v; %d more attempts failed too, the last with: %w",
+		first, w.retries, err)
 }
 
 // identifyLocked reads one session's identity. It is called with mu held and
@@ -318,6 +401,35 @@ func (w *blockingWatch) stoppedReason() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.stopped
+}
+
+// warnings is what the manifest's warnings list says about the watch: that it
+// stopped, and each time it lost its connection and came back. The block's
+// "stopped" field already records the first, but a reader scanning the
+// warnings for what went wrong in a run should not have to know to look there.
+func (w *blockingWatch) warnings() []string {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []string
+	// A connection that fails on every other poll would otherwise write a
+	// line a second into the manifest.
+	for i, r := range w.recovered {
+		if i == watchRecoveriesListed {
+			out = append(out, fmt.Sprintf("the blocking watch lost its connection and reconnected %d more time(s)",
+				len(w.recovered)-i))
+			break
+		}
+		out = append(out, "the blocking watch lost its connection and reconnected ("+r+
+			"): the collector running then was unwatched for a few seconds")
+	}
+	if w.stopped != "" {
+		out = append(out, "the blocking watch stopped ("+w.stopped+
+			") after retrying on a new connection: every collector after that ran unwatched")
+	}
+	return out
 }
 
 // sqlPoll is the poll against a real server, on a connection of its own.
@@ -412,6 +524,21 @@ func startBlockingWatch(ctx context.Context, cfg *Config, denied map[string]bool
 	if idErr == nil {
 		w.identify = sqlIdentify(idConn)
 	}
+	// The dead connection is closed first, which gives its place in the pool
+	// of two back, and database/sql discards one the driver has marked bad.
+	// Only the watch's goroutine calls this, and the cleanup below runs after
+	// close has waited for that goroutine, so c needs no lock.
+	w.reconnect = func(rctx context.Context) (pollFunc, error) {
+		c.Close()
+		nc, err := db.Conn(rctx)
+		if err != nil {
+			return nil, err
+		}
+		c = nc
+		return sqlPoll(nc), nil
+	}
+	w.reconnectTimeout = cfg.ConnectTimeout + watchPollDeadline
+	w.parent = ctx
 	w.start()
 	return w, func() {
 		w.close()

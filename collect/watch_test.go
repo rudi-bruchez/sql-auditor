@@ -118,6 +118,7 @@ func TestWatchStopsOnAFailedPoll(t *testing.T) {
 	w := newBlockingWatch(func(ctx context.Context, spid int) (waitSample, error) {
 		return waitSample{}, errors.New("mssql: VIEW SERVER PERFORMANCE STATE permission was denied")
 	}, time.Second, watchCancelAfter)
+	w.backoff = time.Millisecond
 	_, cancel := context.WithCancelCause(context.Background())
 	w.arm(55, cancel)
 	if w.tick() {
@@ -136,6 +137,7 @@ func TestWatchStopsOnAPollThatHangs(t *testing.T) {
 		return waitSample{}, ctx.Err()
 	}, time.Second, watchCancelAfter)
 	w.deadline = 20 * time.Millisecond
+	w.backoff = time.Millisecond
 	_, cancel := context.WithCancelCause(context.Background())
 	w.arm(55, cancel)
 	done := make(chan bool)
@@ -147,6 +149,122 @@ func TestWatchStopsOnAPollThatHangs(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the poll had no deadline")
+	}
+}
+
+// flakyWatch fails its first n polls, then answers sample. It counts polls and
+// reconnects so a test can tell a retry from a stop.
+func flakyWatch(n int, sample waitSample) (w *blockingWatch, polls, reconnects *int) {
+	polls, reconnects = new(int), new(int)
+	var poll pollFunc = func(ctx context.Context, spid int) (waitSample, error) {
+		*polls++
+		if *polls <= n {
+			return waitSample{}, errors.New("driver: bad connection")
+		}
+		return sample, nil
+	}
+	w = newBlockingWatch(poll, time.Second, watchCancelAfter)
+	w.backoff = time.Millisecond
+	w.reconnect = func(ctx context.Context) (pollFunc, error) {
+		*reconnects++
+		return poll, nil
+	}
+	return w, polls, reconnects
+}
+
+func TestWatchReconnectsAfterFailedPolls(t *testing.T) {
+	w, polls, reconnects := flakyWatch(watchRetries, waiter(6000))
+	unitCtx, cancel := context.WithCancelCause(context.Background())
+	w.arm(55, cancel)
+	if !w.tick() {
+		t.Fatalf("the watch stopped: %s", w.stoppedReason())
+	}
+	if *polls != watchRetries+1 || *reconnects != watchRetries {
+		t.Errorf("polls = %d, reconnects = %d", *polls, *reconnects)
+	}
+	// The sample the recovered poll read is acted on like any other.
+	if _, ok := context.Cause(unitCtx).(*blockedError); !ok {
+		t.Errorf("the recovered poll's sample did not cancel the unit")
+	}
+	warns := w.warnings()
+	if w.stoppedReason() != "" || len(warns) != 1 ||
+		!strings.Contains(warns[0], "reconnected") || !strings.Contains(warns[0], "bad connection") {
+		t.Errorf("stopped = %q, warnings = %q", w.stoppedReason(), warns)
+	}
+}
+
+func TestWatchStopsAfterBoundedRetries(t *testing.T) {
+	w, polls, reconnects := flakyWatch(1<<30, waitSample{})
+	_, cancel := context.WithCancelCause(context.Background())
+	w.arm(55, cancel)
+	if w.tick() {
+		t.Fatalf("the watch went on after every retry failed")
+	}
+	if *polls != watchRetries+1 || *reconnects != watchRetries {
+		t.Errorf("polls = %d, reconnects = %d, want %d and %d", *polls, *reconnects, watchRetries+1, watchRetries)
+	}
+	warns := w.warnings()
+	if !strings.Contains(w.stoppedReason(), "bad connection") || len(warns) != 1 ||
+		!strings.Contains(warns[0], "stopped") || !strings.Contains(warns[0], "unwatched") {
+		t.Errorf("stopped = %q, warnings = %q", w.stoppedReason(), warns)
+	}
+}
+
+// A failed reconnect is an attempt like a failed poll, and its error is the
+// one the stop reports last.
+func TestWatchCountsAFailedReconnectAsAnAttempt(t *testing.T) {
+	w, polls, reconnects := flakyWatch(1, waitSample{})
+	inner := w.reconnect
+	w.reconnect = func(ctx context.Context) (pollFunc, error) {
+		inner(ctx)
+		return nil, errors.New("login timeout expired")
+	}
+	_, cancel := context.WithCancelCause(context.Background())
+	w.arm(55, cancel)
+	if w.tick() {
+		t.Fatalf("the watch went on with no connection")
+	}
+	if *polls != 1 || *reconnects != watchRetries ||
+		!strings.Contains(w.stoppedReason(), "login timeout expired") {
+		t.Errorf("polls = %d, reconnects = %d, stopped = %q", *polls, *reconnects, w.stoppedReason())
+	}
+}
+
+// The retry waits on the run's context: a run that is stopping does not sit
+// out the backoff, and does not record the watch as having failed.
+func TestWatchRetryNeverOutlivesTheRun(t *testing.T) {
+	w, _, reconnects := flakyWatch(1<<30, waitSample{})
+	w.backoff = time.Hour
+	run, stop := context.WithCancel(context.Background())
+	w.parent = run
+	_, cancel := context.WithCancelCause(context.Background())
+	w.arm(55, cancel)
+	done := make(chan bool)
+	go func() { done <- w.tick() }()
+	time.Sleep(10 * time.Millisecond)
+	stop()
+	select {
+	case goOn := <-done:
+		if goOn || *reconnects != 0 || w.stoppedReason() != "" || len(w.warnings()) != 0 {
+			t.Errorf("tick = %v, reconnects = %d, stopped = %q", goOn, *reconnects, w.stoppedReason())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry waited past the run's context")
+	}
+}
+
+func TestWatchWarningsCountFrequentRecoveries(t *testing.T) {
+	w := newBlockingWatch(nil, time.Second, watchCancelAfter)
+	for i := 0; i < watchRecoveriesListed+4; i++ {
+		w.recovered = append(w.recovered, "2026-09-19T15:00:00Z: driver: bad connection")
+	}
+	warns := w.warnings()
+	if len(warns) != watchRecoveriesListed+1 || !strings.Contains(warns[len(warns)-1], "4 more time(s)") {
+		t.Errorf("warnings = %q", warns)
+	}
+	var none *blockingWatch
+	if none.warnings() != nil {
+		t.Errorf("a nil watch has warnings")
 	}
 }
 
