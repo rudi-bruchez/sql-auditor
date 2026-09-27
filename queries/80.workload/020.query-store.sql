@@ -1,5 +1,5 @@
 -- @scope:       database
--- @resultsets:  root:object, top_queries:array, forced_plans:array
+-- @resultsets:  root:object, top_queries:array, forced_plans:array, by_query_hash:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     120
 -- @min_version: 13.0
@@ -32,10 +32,13 @@
 -- Query text is truncated to 500 characters. It is application SQL and can
 -- contain literal values from the workload, which is a disclosure decision:
 -- 052.session-text.sql puts the same class of data behind an explicit flag.
--- The truncation here is a deliberate middle ground — enough to identify a
--- statement, not enough to reconstruct a payload — and it is the reason this
--- collector is not itself flag-gated. If that trade is wrong for a client,
--- the file is the place to change it.
+-- The truncation bounds how much is taken, not what: a short statement fits
+-- whole in 500 characters, literals included, so an ALTER LOGIN or an INSERT
+-- carrying a password or a card number in clear lands in the archive as it
+-- was sent. What it does keep out is the tail of a long statement and every
+-- plan. That is the trade that leaves this collector outside any flag, taken
+-- knowingly and stated in MANIFEST.txt and docs/dba-guide.md. If it is wrong
+-- for a client, the file is the place to change it.
 --
 -- 021.query-store-detail.sql and 022.query-store-profiled.sql do the DEEP
 -- read: the whole statement text, the execution plans, and the per-interval
@@ -46,8 +49,9 @@
 -- the second is worth asking for.
 --
 -- THE ROOT CARRIES THE WINDOW'S TOTALS, and they are not the sum of the rows a
--- reader might add up. The top 50 is ranked by duration and says nothing about
--- the share of the whole it represents; a finding that five queries carry half
+-- reader might add up. The top 50 is a sample of the heaviest by duration, CPU
+-- and logical reads in turn, and says nothing about the share of the whole it
+-- represents; a finding that five queries carry half
 -- the CPU needs the denominator, which only this file can compute. The totals
 -- leave out the queries of scalar and multi-statement functions and of
 -- triggers, because each of those is recorded twice: once as its own query and
@@ -55,7 +59,11 @@
 -- 27 September 2026: a scalar function whose body runs a query, called 300
 -- times from one SELECT, gave the caller 4 179 ms of CPU and the function's
 -- query 4 120 ms; an AFTER INSERT trigger gave the INSERT 741 ms and the
--- trigger's own statement 616 ms. What was left out is projected beside the
+-- trigger's own statement 616 ms. Reproduced the same day on a second lab
+-- database: caller 1 346 ms, function 1 336 ms over 300 calls, and totals.cpu_ms
+-- of 2 139 where the naive sum was 3 475. That function had to be declared
+-- INLINE = OFF: a scalar function the engine inlines records no query of its
+-- own, and nothing is counted twice. What was left out is projected beside the
 -- totals, so the reader can see how much it was.
 --
 -- Nested is decided by looking the recorded object up in sys.objects NOW, and
@@ -72,7 +80,9 @@
 -- is. A statement sent with literals instead of parameters becomes one
 -- query_id per distinct literal and one query_hash for all of them, so a ratio
 -- far below one is the ad hoc workload the plan cache topics describe, visible
--- here without reading a single text.
+-- here without reading a single text. by_query_hash is the ranking that
+-- follows from it: the same round robin with the hash as the key, so twenty
+-- cheap literal variants of one statement read as the one heavy row they are.
 --
 -- NO JUDGEMENT IS APPLIED. Nothing here is labelled a regression: comparing
 -- two intervals and deciding a plan got worse is analysis, and it needs the
@@ -143,38 +153,84 @@ OUTER APPLY (
 ) AS tot
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* Aggregated across every interval the store still holds, so the ranking is
+/* ───────── top_queries ─────────
+   Aggregated across every interval the store still holds, so the ranking is
    over the whole retained window rather than over whichever interval happened
-   to be open when the collector ran. */
-SELECT TOP (50)
-       q.query_id                                                 AS [query_id],
-       OBJECT_SCHEMA_NAME(q.object_id)
-         + '.' + OBJECT_NAME(q.object_id)                         AS [object],
-       COUNT(DISTINCT p.plan_id)                                  AS [plans],
-       SUM(rs.count_executions)                                   AS [executions],
-       CAST(SUM(rs.avg_duration * rs.count_executions) / 1000.0 AS DECIMAL(18,1))    AS [total.duration_ms],
-       CAST(SUM(rs.avg_cpu_time * rs.count_executions) / 1000.0 AS DECIMAL(18,1))    AS [total.cpu_ms],
-       SUM(CAST(rs.avg_logical_io_reads * rs.count_executions AS bigint))            AS [total.logical_reads],
-       CAST(SUM(rs.avg_duration * rs.count_executions)
-            / NULLIF(SUM(rs.count_executions), 0) / 1000.0 AS DECIMAL(18,1))         AS [per_execution.duration_ms],
-       CAST(SUM(rs.avg_logical_io_reads * rs.count_executions)
-            / NULLIF(SUM(rs.count_executions), 0) AS DECIMAL(18,1))                  AS [per_execution.logical_reads],
-       MAX(rs.last_execution_time)                                AS [last_execution],
+   to be open when the collector ran.
+
+   A capped round robin over three metrics, the idiom of
+   021.query-store-detail.sql without its fourth: every metric's first place,
+   then every metric's second place, and so on, each query keeping its single
+   best (rank, metric) pair so that one leading all three takes one slot.
+   Ranked on duration alone, the list missed the query that leads logical
+   reads while waiting on nothing. Execution count is left to
+   023.query-store-most-executed.sql, which exists for it. query_id is the
+   tie-break, so two collections of an unchanged store list the same fifty. */
+WITH agg AS (
+    SELECT q.query_id, q.object_id,
+           COUNT(DISTINCT p.plan_id)                                       AS plans,
+           SUM(rs.count_executions)                                        AS executions,
+           SUM(rs.avg_duration * rs.count_executions)                      AS total_duration,
+           SUM(rs.avg_cpu_time * rs.count_executions)                      AS total_cpu,
+           SUM(rs.avg_logical_io_reads * rs.count_executions)              AS total_reads,
+           SUM(CAST(rs.avg_logical_io_reads * rs.count_executions AS bigint)) AS total_reads_int,
+           MAX(rs.last_execution_time)                                     AS last_execution
+    FROM       sys.query_store_query         AS q
+    JOIN       sys.query_store_plan          AS p  ON p.query_id = q.query_id
+    JOIN       sys.query_store_runtime_stats AS rs ON rs.plan_id = p.plan_id
+    GROUP BY q.query_id, q.object_id
+),
+ranked AS (
+    SELECT a.*,
+           ROW_NUMBER() OVER (ORDER BY a.total_duration DESC, a.query_id) AS rn_duration,
+           ROW_NUMBER() OVER (ORDER BY a.total_cpu      DESC, a.query_id) AS rn_cpu,
+           ROW_NUMBER() OVER (ORDER BY a.total_reads    DESC, a.query_id) AS rn_reads
+    FROM agg AS a
+),
+best AS (
+    SELECT r.query_id, m.metric_order, m.rn,
+           ROW_NUMBER() OVER (PARTITION BY r.query_id ORDER BY m.rn, m.metric_order) AS dedupe
+    FROM ranked AS r
+    CROSS APPLY (VALUES (1, r.rn_duration), (2, r.rn_cpu), (3, r.rn_reads)) AS m(metric_order, rn)
+),
+capped AS (            /* ORDER BY rn, metric_order IS the round robin */
+    SELECT TOP (50) query_id, rn, metric_order
+    FROM best
+    WHERE dedupe = 1
+    ORDER BY rn, metric_order, query_id
+)
+SELECT r.query_id                                                 AS [query_id],
+       OBJECT_SCHEMA_NAME(r.object_id)
+         + '.' + OBJECT_NAME(r.object_id)                         AS [object],
+       r.plans                                                    AS [plans],
+       r.executions                                               AS [executions],
+       CAST(r.total_duration / 1000.0 AS DECIMAL(18,1))           AS [total.duration_ms],
+       CAST(r.total_cpu / 1000.0 AS DECIMAL(18,1))                AS [total.cpu_ms],
+       r.total_reads_int                                          AS [total.logical_reads],
+       CAST(r.total_duration
+            / NULLIF(r.executions, 0) / 1000.0 AS DECIMAL(18,1))  AS [per_execution.duration_ms],
+       CAST(r.total_reads
+            / NULLIF(r.executions, 0) AS DECIMAL(18,1))           AS [per_execution.logical_reads],
+       r.last_execution                                           AS [last_execution],
+       -- The raw ranks, never capped: whichever of the three let the query in
+       -- is the smallest of them.
+       r.rn_duration                                              AS [rank.duration],
+       r.rn_cpu                                                   AS [rank.cpu],
+       r.rn_reads                                                 AS [rank.logical_reads],
        -- Same rule as the root totals: 1 for a function or trigger statement,
        -- already inside its caller's row; null when the object no longer
        -- resolves.
-       CASE WHEN q.object_id = 0 THEN 0
-            WHEN MAX(ob.type) IN ('FN', 'TF', 'TR') THEN 1
-            WHEN MAX(ob.object_id) IS NOT NULL THEN 0
+       CASE WHEN r.object_id = 0 THEN 0
+            WHEN ob.type IN ('FN', 'TF', 'TR') THEN 1
+            WHEN ob.object_id IS NOT NULL THEN 0
        END                                                        AS [nested],
        LEFT(qt.query_sql_text, 500)                               AS [text]
-FROM       sys.query_store_query          AS q
+FROM       capped                         AS c
+JOIN       ranked                         AS r  ON r.query_id = c.query_id
+JOIN       sys.query_store_query          AS q  ON q.query_id = r.query_id
 JOIN       sys.query_store_query_text     AS qt ON qt.query_text_id = q.query_text_id
-JOIN       sys.query_store_plan           AS p  ON p.query_id = q.query_id
-JOIN       sys.query_store_runtime_stats  AS rs ON rs.plan_id = p.plan_id
-LEFT JOIN  sys.objects                    AS ob ON ob.object_id = q.object_id
-GROUP BY q.query_id, q.object_id, LEFT(qt.query_sql_text, 500)
-ORDER BY SUM(rs.avg_duration * rs.count_executions) DESC
+LEFT JOIN  sys.objects                    AS ob ON ob.object_id = r.object_id
+ORDER BY c.rn, c.metric_order, c.query_id
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* A forced plan is a decision someone took, and force_failure_count is the
@@ -193,4 +249,106 @@ JOIN       sys.query_store_query      AS q  ON q.query_id = p.query_id
 JOIN       sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id
 WHERE p.is_forced_plan = 1 OR p.force_failure_count > 0
 ORDER BY p.plan_id
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* ───────── by_query_hash ─────────
+   The same ranking with query_hash as the key. A statement sent with literals
+   instead of parameters is one query_id per literal, and so are the variants
+   the 2022 parameter sensitive plan optimisation compiles for one statement:
+   each id alone can sit far down top_queries, or below its cap, while the
+   statement they share is the heaviest thing the database runs. Measured on
+   SQL Server 2025 CU7, 27 September 2026: one join sent twenty times with a
+   different literal gave twenty query_ids of about 13 ms each, ranked from
+   seventh to twenty-seventh on duration in top_queries, and one row here at
+   259 ms, third.
+
+   query_ids is how many ids the row folds together. The text is that of the
+   heaviest of them by duration, and sample_query_id says which. nested
+   follows the root's rule and is 1 only when every query of the hash is
+   nested, 0 only when none is and all resolve, null otherwise: two
+   procedures can run the same statement, so one hash can mix both kinds.
+   Placed last so the positions of the result sets above do not move. */
+WITH agg AS (
+    SELECT q.query_hash, q.query_id, q.object_id,
+           COUNT(DISTINCT p.plan_id)                                       AS plans,
+           SUM(rs.count_executions)                                        AS executions,
+           SUM(rs.avg_duration * rs.count_executions)                      AS total_duration,
+           SUM(rs.avg_cpu_time * rs.count_executions)                      AS total_cpu,
+           SUM(rs.avg_logical_io_reads * rs.count_executions)              AS total_reads,
+           SUM(CAST(rs.avg_logical_io_reads * rs.count_executions AS bigint)) AS total_reads_int,
+           MAX(rs.last_execution_time)                                     AS last_execution
+    FROM       sys.query_store_query         AS q
+    JOIN       sys.query_store_plan          AS p  ON p.query_id = q.query_id
+    JOIN       sys.query_store_runtime_stats AS rs ON rs.plan_id = p.plan_id
+    GROUP BY q.query_hash, q.query_id, q.object_id
+),
+perQuery AS (
+    SELECT a.*,
+           CASE WHEN a.object_id = 0 THEN 0
+                WHEN ob.type IN ('FN', 'TF', 'TR') THEN 1
+                WHEN ob.object_id IS NOT NULL THEN 0
+           END                                                            AS nested,
+           ROW_NUMBER() OVER (PARTITION BY a.query_hash
+                              ORDER BY a.total_duration DESC, a.query_id) AS heaviest
+    FROM agg AS a
+    LEFT JOIN sys.objects AS ob ON ob.object_id = a.object_id
+),
+hashAgg AS (
+    SELECT query_hash,
+           COUNT(*)                                                  AS query_ids,
+           SUM(plans)                                                AS plans,
+           SUM(executions)                                           AS executions,
+           SUM(total_duration)                                       AS total_duration,
+           SUM(total_cpu)                                            AS total_cpu,
+           SUM(total_reads)                                          AS total_reads,
+           SUM(total_reads_int)                                      AS total_reads_int,
+           MAX(last_execution)                                       AS last_execution,
+           MAX(CASE WHEN heaviest = 1 THEN query_id END)             AS sample_query_id,
+           CASE WHEN COUNT(nested) = COUNT(*) AND MIN(nested) = MAX(nested)
+                THEN MIN(nested) END                                 AS nested
+    FROM perQuery
+    GROUP BY query_hash
+),
+ranked AS (
+    SELECT h.*,
+           ROW_NUMBER() OVER (ORDER BY h.total_duration DESC, h.query_hash) AS rn_duration,
+           ROW_NUMBER() OVER (ORDER BY h.total_cpu      DESC, h.query_hash) AS rn_cpu,
+           ROW_NUMBER() OVER (ORDER BY h.total_reads    DESC, h.query_hash) AS rn_reads
+    FROM hashAgg AS h
+),
+best AS (
+    SELECT r.query_hash, m.metric_order, m.rn,
+           ROW_NUMBER() OVER (PARTITION BY r.query_hash ORDER BY m.rn, m.metric_order) AS dedupe
+    FROM ranked AS r
+    CROSS APPLY (VALUES (1, r.rn_duration), (2, r.rn_cpu), (3, r.rn_reads)) AS m(metric_order, rn)
+),
+capped AS (
+    SELECT TOP (50) query_hash, rn, metric_order
+    FROM best
+    WHERE dedupe = 1
+    ORDER BY rn, metric_order, query_hash
+)
+SELECT CONVERT(varchar(18), r.query_hash, 1)                      AS [query_hash],
+       r.query_ids                                                AS [query_ids],
+       r.plans                                                    AS [plans],
+       r.executions                                               AS [executions],
+       CAST(r.total_duration / 1000.0 AS DECIMAL(18,1))           AS [total.duration_ms],
+       CAST(r.total_cpu / 1000.0 AS DECIMAL(18,1))                AS [total.cpu_ms],
+       r.total_reads_int                                          AS [total.logical_reads],
+       CAST(r.total_duration
+            / NULLIF(r.executions, 0) / 1000.0 AS DECIMAL(18,1))  AS [per_execution.duration_ms],
+       CAST(r.total_reads
+            / NULLIF(r.executions, 0) AS DECIMAL(18,1))           AS [per_execution.logical_reads],
+       r.last_execution                                           AS [last_execution],
+       r.rn_duration                                              AS [rank.duration],
+       r.rn_cpu                                                   AS [rank.cpu],
+       r.rn_reads                                                 AS [rank.logical_reads],
+       r.nested                                                   AS [nested],
+       r.sample_query_id                                          AS [sample_query_id],
+       LEFT(qt.query_sql_text, 500)                               AS [text]
+FROM       capped                         AS c
+JOIN       ranked                         AS r  ON r.query_hash = c.query_hash
+JOIN       sys.query_store_query          AS q  ON q.query_id = r.sample_query_id
+JOIN       sys.query_store_query_text     AS qt ON qt.query_text_id = q.query_text_id
+ORDER BY c.rn, c.metric_order, c.query_hash
 OPTION (RECOMPILE, MAXDOP 1);

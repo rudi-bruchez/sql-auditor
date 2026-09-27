@@ -1,5 +1,5 @@
 -- @scope:       database
--- @resultsets:  by_query:array, by_object:array
+-- @resultsets:  by_query:array, by_object:array, by_query_hash:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     120
 -- @min_version: 13
@@ -14,9 +14,18 @@
 -- not in the Query Store.
 --
 -- This file carries no flag because the text is truncated to 500 characters,
--- the same trade 80.workload/020.query-store.sql makes and for the same
--- reason: enough to identify a statement, not enough to reconstruct a
--- payload. A row-by-row query is a few dozen characters anyway.
+-- the same trade 80.workload/020.query-store.sql makes and on the same terms:
+-- the cut keeps out the tail of a long statement, not its literals, and a
+-- short statement written with a password in it arrives whole. A row-by-row
+-- query is a few dozen characters anyway, so here the cut changes nothing.
+--
+-- by_query_hash folds the query_ids that share a query_hash. A loop that
+-- builds its statement with the value concatenated in, rather than passed as
+-- a parameter, is one query_id per value and one call each: by_query cannot
+-- see it at all, and this is where it shows, as one hash with thousands of
+-- query_ids. Measured on SQL Server 2025 CU7, 27 September 2026: twenty such
+-- calls gave twenty query_ids of one execution each and one row here at
+-- twenty. It is placed last so by_query and by_object keep their positions.
 --
 -- It aggregates the WHOLE RETAINED WINDOW, unlike 021.query-store-detail.sql:
 -- a loop that ran a million times last month is still the finding, and a
@@ -40,7 +49,7 @@
 --
 -- No root: this is a listing keyed by query and by object, not a single-row
 -- state. On a database whose Query Store is off, both joins below return no
--- rows and the file is two empty arrays — that is the decision, not an
+-- rows and the file is three empty arrays — that is the decision, not an
 -- oversight, and it is how the rest of the corpus already says "nothing
 -- here". Suppressing the file instead would make "the Query Store is off"
 -- indistinguishable from "this collector never ran".
@@ -140,4 +149,52 @@ JOIN       sys.query_store_runtime_stats           AS rs ON rs.plan_id = p.plan_
 JOIN       sys.query_store_runtime_stats_interval   AS i  ON i.runtime_stats_interval_id = rs.runtime_stats_interval_id
 GROUP BY q.object_id
 ORDER BY SUM(rs.count_executions) DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* ───────── by_query_hash ─────────
+   by_query again with query_hash as the key, TOP (50) by call count.
+   query_ids is how many ids the row folds together; the text is that of the
+   most executed of them, and sample_query_id says which. The window columns
+   are the union across the hash, as by_object's are across an object. */
+WITH perQuery AS (
+    SELECT q.query_hash, q.query_id, q.query_text_id,
+           SUM(rs.count_executions)                                   AS executions,
+           ROW_NUMBER() OVER (PARTITION BY q.query_hash
+                              ORDER BY SUM(rs.count_executions) DESC, q.query_id) AS most_executed
+    FROM       sys.query_store_query         AS q
+    JOIN       sys.query_store_plan          AS p  ON p.query_id = q.query_id
+    JOIN       sys.query_store_runtime_stats AS rs ON rs.plan_id = p.plan_id
+    GROUP BY q.query_hash, q.query_id, q.query_text_id
+)
+SELECT TOP (50)
+       CONVERT(varchar(18), q.query_hash, 1)                      AS [query_hash],
+       COUNT(DISTINCT q.query_id)                                 AS [query_ids],
+       SUM(rs.count_executions)                                   AS [executions],
+       CAST(SUM(rs.avg_duration * rs.count_executions)
+            / NULLIF(SUM(rs.count_executions), 0)
+            / 1000.0 AS DECIMAL(18,1))                            AS [per_execution.duration_ms],
+       CAST(SUM(rs.avg_cpu_time * rs.count_executions)
+            / NULLIF(SUM(rs.count_executions), 0)
+            / 1000.0 AS DECIMAL(18,1))                            AS [per_execution.cpu_ms],
+       CAST(SUM(rs.avg_logical_io_reads * rs.count_executions)
+            / NULLIF(SUM(rs.count_executions), 0) AS DECIMAL(18,1)) AS [per_execution.logical_reads],
+       CAST(SUM(rs.avg_duration * rs.count_executions) / 1000.0 AS DECIMAL(18,1)) AS [total.duration_ms],
+       CAST(SUM(rs.avg_cpu_time * rs.count_executions) / 1000.0 AS DECIMAL(18,1)) AS [total.cpu_ms],
+       MIN(i.start_time)                                          AS [window.since],
+       MAX(rs.last_execution_time)                                AS [window.last_execution],
+       DATEDIFF(SECOND, MIN(i.start_time), MAX(rs.last_execution_time)) AS [window.span_seconds],
+       COUNT(DISTINCT i.runtime_stats_interval_id)                AS [window.intervals],
+       CAST(SUM(rs.count_executions)
+            / NULLIF(DATEDIFF(SECOND, MIN(i.start_time), MAX(rs.last_execution_time)) / 3600.0, 0)
+            AS DECIMAL(18,1))                                     AS [executions_per_hour],
+       s.query_id                                                 AS [sample_query_id],
+       LEFT(qt.query_sql_text, 500)                               AS [text]
+FROM       sys.query_store_query                AS q
+JOIN       sys.query_store_plan                   AS p  ON p.query_id = q.query_id
+JOIN       sys.query_store_runtime_stats           AS rs ON rs.plan_id = p.plan_id
+JOIN       sys.query_store_runtime_stats_interval   AS i  ON i.runtime_stats_interval_id = rs.runtime_stats_interval_id
+JOIN       perQuery                               AS s  ON s.query_hash = q.query_hash AND s.most_executed = 1
+JOIN       sys.query_store_query_text             AS qt ON qt.query_text_id = s.query_text_id
+GROUP BY q.query_hash, s.query_id, LEFT(qt.query_sql_text, 500)
+ORDER BY SUM(rs.count_executions) DESC, q.query_hash
 OPTION (RECOMPILE, MAXDOP 1);

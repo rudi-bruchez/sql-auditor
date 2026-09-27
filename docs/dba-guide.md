@@ -672,6 +672,27 @@ is the same session, not a reconnect, and costs one round trip. Before this,
 `#log` for the rest of every collection, and a collector that failed halfway
 left whatever it had built.
 
+### Statement text in a default run
+
+The opt-ins below widen the archive, but a default run already carries some
+SQL text, cut to a fixed length rather than left out:
+
+| Collector | What it keeps |
+| --- | --- |
+| `80.workload/020.query-store.sql` | the first 500 characters of each listed Query Store query |
+| `80.workload/023.query-store-most-executed.sql` | the same |
+| `80.workload/024.query-store-rowcount.sql` | the same |
+| `80.workload/026.query-store-interrupted.sql` | the same |
+| `50.agent/020.job-steps.sql` | the first 200 characters of each T-SQL job step's command |
+
+The cut limits how much is taken, not what. A short statement fits whole, and a
+literal written into it comes with it: an `ALTER LOGIN ... WITH PASSWORD = '...'`
+captured by the Query Store, or a job step that connects with a password typed
+in clear, can land in the archive as it was written. This was weighed and kept,
+because the text is what identifies a statement, and `MANIFEST.txt` says it on
+every run. If it is wrong for a given server, leave those collectors out with a
+`--queries-dir` copy of the corpus.
+
 ### Limits that are known and not fixed
 
 Named here because a limit an operator can plan around is worth more than a
