@@ -215,4 +215,26 @@ func TestRunServerNameFallsBackToTheAddress(t *testing.T) {
 	if got := RunFolderName(RunServerName("", c), "", day); got != "sql01.example.com_SALESDB-2026-09-27" {
 		t.Errorf("fallback folder = %q", got)
 	}
+
+	// Codex review: sanitising is not one to one, and these two addresses were
+	// filed in the same folder. So were an address that runs past the length
+	// limit and its twin with one different character after it.
+	long := strings.Repeat("s", 100)
+	for _, pair := range [][2]string{
+		{`SQL01\PROD`, "SQL01_PROD"},
+		{"192.0.2.1,1433", "192.0.2.1_1433"},
+		{long + "1", long + "2"},
+	} {
+		x := RunFolderName(RunServerName("", &Config{Server: pair[0]}), "", day)
+		y := RunFolderName(RunServerName("", &Config{Server: pair[1]}), "", day)
+		if x == y {
+			t.Errorf("%q and %q share the run folder %q", pair[0], pair[1], x)
+		}
+		if again := RunFolderName(RunServerName("", &Config{Server: pair[0]}), "", day); again != x {
+			t.Errorf("%q: fallback not stable: %q then %q", pair[0], x, again)
+		}
+	}
+	if got := RunFolderName(RunServerName("", &Config{Server: "SQL01_PROD"}), "", day); got != "SQL01_PROD-2026-09-27" {
+		t.Errorf("an address that needs no sanitising was changed: %q", got)
+	}
 }

@@ -1,6 +1,8 @@
 package collect
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path"
 	"strings"
@@ -118,6 +120,14 @@ func ResolveDatabaseFolders(names []string) []DatabaseFolder {
 // database is added when one was named, because contained databases on one
 // logical server share its address.
 //
+// An address is not a folder name, and SafeFolderName is not one to one:
+// SQL01\PROD and SQL01_PROD both came out as SQL01_PROD, and so did any two
+// addresses that differ only by a port separator. When sanitising changed the
+// address, a short hash of it is appended, which keeps the name stable and the
+// two targets apart. The hash is placed within SafeFolderName's length limit,
+// so RunFolderName cannot cut it off. A name the server gave is left alone:
+// two servers do not call themselves by names that differ only there.
+//
 // Both the run and the wizard call this, and the wizard only predicts the
 // run's folder correctly as long as they do.
 func RunServerName(probed string, cfg *Config) string {
@@ -128,7 +138,16 @@ func RunServerName(probed string, cfg *Config) string {
 	if cfg.Database != "" && !strings.EqualFold(cfg.Database, "master") {
 		name += "_" + cfg.Database
 	}
-	return name
+	safe := SafeFolderName(name)
+	if safe == name {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	runes := []rune(safe)
+	if len(runes) > 100-7 {
+		runes = runes[:100-7]
+	}
+	return string(runes) + "_" + hex.EncodeToString(sum[:])[:6]
 }
 
 func RunFolderName(server, profile string, t time.Time) string {

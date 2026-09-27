@@ -678,8 +678,23 @@ func TestANamelessServerIsFiledUnderTheAddressByTheWizardToo(t *testing.T) {
 	s, o := probedAt(dir, now, false)
 	s.Verify.Server.Name = ""
 
-	want := collect.RunFolderFor(dir, s.Server, "", now, false)
+	want := collect.RunFolderFor(dir, collect.RunServerName("", o.Config), "", now, false)
 	if got := runFolderFor(s, o); got != want {
 		t.Fatalf("runFolderFor = %q, want %q", got, want)
+	}
+
+	// Two addresses that sanitise to the same name must get two folders in
+	// the wizard's prediction as they do in the run.
+	seen := map[string]string{}
+	for _, addr := range []string{`SQL01\PROD`, "SQL01_PROD"} {
+		s.Server, o.Config.Server = addr, addr
+		got := runFolderFor(s, o)
+		if got != collect.RunFolderFor(dir, collect.RunServerName("", o.Config), "", now, false) {
+			t.Errorf("%q: the wizard predicts %q, which is not the run's folder", addr, got)
+		}
+		if prev, ok := seen[got]; ok {
+			t.Errorf("%q and %q share the run folder %q", prev, addr, got)
+		}
+		seen[got] = addr
 	}
 }

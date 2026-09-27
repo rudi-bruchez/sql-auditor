@@ -786,7 +786,10 @@ Some Azure and contained configurations return no name at all. Such a run is
 filed under the address in `SQL_SERVER` instead, followed by `SQL_DATABASE`
 when that is not `master`: `sql01.example.com_SALESDB-<date>`. Up to 0.35.0
 every nameless target was filed as `_-<date>`, and two of them collected
-on the same day replaced each other.
+on the same day replaced each other. An address with a character a folder
+name cannot hold, such as `\` or the comma before a port, gets six hex digits
+of its hash as well: `SQL01\PROD` and `SQL01_PROD` would otherwise share
+`SQL01_PROD-<date>`.
 
 `check --grant-script` refuses a file that is already there, as `env init` and
 `queries export` do, and says so before connecting. Until 0.23.0 it replaced
