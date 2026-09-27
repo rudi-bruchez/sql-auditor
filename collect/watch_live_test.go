@@ -192,3 +192,39 @@ func (r *stmtRunner) exec(ctx context.Context, text string) error {
 }
 
 func (r *stmtRunner) close() { r.conn.Close() }
+
+// liveConfig is the instance the live tests run against, or a skip.
+func liveConfig(t *testing.T) *Config {
+	t.Helper()
+	server := os.Getenv("SQL_AUDITOR_LIVE_SERVER")
+	if server == "" {
+		t.Skip("SQL_AUDITOR_LIVE_SERVER is not set")
+	}
+	return &Config{
+		Server: server, User: os.Getenv("SQL_AUDITOR_LIVE_USER"),
+		Password: os.Getenv("SQL_AUDITOR_LIVE_PASSWORD"),
+		AppName:  "sql-auditor-live-test", Encrypt: true, TrustCert: true,
+		ConnectTimeout: 5 * time.Second,
+	}
+}
+
+// startBlockingWatch opens two connections on one handle. With the pool of
+// one that Open gives, the second waited out its deadline: the watch started
+// seven seconds late on the lab and never had an identity read.
+func TestLiveStartBlockingWatchOpensBothConnections(t *testing.T) {
+	cfg := liveConfig(t)
+	began := time.Now()
+	w, stop, reason := startBlockingWatch(context.Background(), cfg, map[string]bool{}, 1)
+	took := time.Since(began)
+	if w == nil {
+		t.Fatalf("the watch did not start: %s", reason)
+	}
+	defer stop()
+	if w.identify == nil {
+		t.Errorf("the watch started without its identity connection")
+	}
+	if took >= cfg.ConnectTimeout {
+		t.Errorf("the watch took %v to start: a connection waited out its deadline", took)
+	}
+	t.Logf("started in %v", took)
+}

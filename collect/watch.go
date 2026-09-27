@@ -379,6 +379,13 @@ func startBlockingWatch(ctx context.Context, cfg *Config, denied map[string]bool
 	if err != nil {
 		return nil, func() {}, "its connection could not be opened: " + err.Error()
 	}
+	// Open gives a pool of one, which is right for the collection and wrong
+	// here: the watch holds two connections at once, and with one allowed the
+	// second db.Conn waited out its whole deadline and failed. Measured on the
+	// lab before this line: every run started ConnectTimeout plus two seconds
+	// late and never identified a waiter.
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(2)
 	dctx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout+watchPollDeadline)
 	defer cancel()
 	c, err := db.Conn(dctx)
