@@ -296,6 +296,28 @@ func TestEveryKnownProfileHasACollector(t *testing.T) {
 	}
 }
 
+// A widening purpose nobody declares brings a database into the run that no
+// collector reads: MANIFEST.txt lists it as covered and the archive holds
+// nothing for it. The other direction, a declared value that is not known, is
+// already a lint error.
+func TestEveryKnownWideningHasACollector(t *testing.T) {
+	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	declared := map[string]bool{}
+	for _, s := range scripts {
+		if s.LintError == "" && s.Widened != "" {
+			declared[s.Widened] = true
+		}
+	}
+	for name := range collect.KnownWidened {
+		if !declared[name] {
+			t.Errorf("widening %q is known and no embedded collector declares it", name)
+		}
+	}
+}
+
 // The two collectors must choose the same tables, or the archive lists a table
 // whose columns are missing. The selection is written three times, once in
 // 010.objects and twice in 060.columns, and this keeps the copies identical.

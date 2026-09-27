@@ -2,11 +2,23 @@
 -- @resultsets:  root:object, principals:array, role_members:array, database_permissions:array, object_permissions:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION
 -- @timeout:     60
+-- @widened:     system_databases
 --
 -- Who exists inside this database, what they are members of, and what has been
 -- granted to them.
 --
--- Runs once per user database, with the connection context switched to it.
+-- Runs once per user database, and on master and msdb, with the connection
+-- context switched to it.
+--
+-- MASTER AND MSDB ARE READ BECAUSE THEIR PRINCIPALS ARE INSTANCE SECURITY. A
+-- member of msdb's SQLAgentOperatorRole can run every local job, a user in
+-- DatabaseMailUserRole can send mail as the instance, and a certificate user
+-- in master is how a signed module reaches a server permission. None of that
+-- is in 010.principals.sql, and the user-database-only loop never opened
+-- either database. The @widened directive above is what brings them in, and
+-- it brings them to this collector alone: the other database-scoped
+-- collectors are never offered them. model and tempdb are not read; a user
+-- added to model is copied into every new database and shows up there.
 --
 -- 010.principals.sql covers the server and says in its own header that
 -- database-level principals need their own database-scoped collector. This is

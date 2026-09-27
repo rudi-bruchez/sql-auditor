@@ -419,3 +419,70 @@ func TestSelectTargetsWidensOnlyForAPurpose(t *testing.T) {
 		t.Errorf("the publisher stays selected either way; Included = %v", without.Included)
 	}
 }
+
+// master and msdb are listed by CandidateDatabases so that the principals
+// collector can read them. The first pass must never include them, or every
+// database-scoped collector in the corpus would run there too, and without a
+// collector asking for them they must not appear in the manifest at all, not
+// even as skips.
+func TestSelectTargetsLeavesSystemDatabasesToTheirWidening(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "master", State: "ONLINE", HasAccess: true, IsSystem: true},
+		{Name: "msdb", State: "ONLINE", HasAccess: true, IsSystem: true},
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true},
+	}
+	sel, err := SelectTargets(cands, "", "", nil)
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	if !slices.Equal(sel.Included, []string{"SALESDB"}) {
+		t.Errorf("Included = %v, want only SALESDB", sel.Included)
+	}
+	if len(sel.Skipped) != 0 || len(sel.Widened) != 0 {
+		t.Errorf("system databases must leave no trace without the widening: "+
+			"Skipped = %v, Widened = %v", sel.Skipped, sel.Widened)
+	}
+}
+
+// With a collector declaring it, both come in, whatever DB_INCLUDE says, and
+// DB_EXCLUDE still wins.
+func TestSelectTargetsWidensToSystemDatabases(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "master", State: "ONLINE", HasAccess: true, IsSystem: true},
+		{Name: "msdb", State: "ONLINE", HasAccess: true, IsSystem: true},
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true},
+		{Name: "OTHERDB", State: "ONLINE", HasAccess: true},
+	}
+	widen := map[string]bool{"system_databases": true}
+	sel, err := SelectTargets(cands, "SALESDB", "", widen)
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	for _, name := range []string{"SALESDB", "master", "msdb"} {
+		if !slices.Contains(sel.Included, name) {
+			t.Errorf("%s should be included; Included = %v", name, sel.Included)
+		}
+	}
+	if slices.Contains(sel.Included, "OTHERDB") {
+		t.Errorf("DB_INCLUDE must still narrow the user databases; Included = %v", sel.Included)
+	}
+	for _, name := range []string{"master", "msdb"} {
+		if got := sel.Widened[name].Purpose; got != "system_databases" {
+			t.Errorf("%s widened for %q, want system_databases", name, got)
+		}
+	}
+	if _, ok := sel.Widened["SALESDB"]; ok {
+		t.Errorf("SALESDB was selected, not widened")
+	}
+
+	sel, err = SelectTargets(cands, "", "msdb", widen)
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	if slices.Contains(sel.Included, "msdb") {
+		t.Errorf("DB_EXCLUDE must win over the widening; Included = %v", sel.Included)
+	}
+	if !slices.Contains(sel.Skipped, SkipReason{"msdb", "matched by DB_EXCLUDE"}) {
+		t.Errorf("msdb should be recorded as excluded; Skipped = %v", sel.Skipped)
+	}
+}

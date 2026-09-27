@@ -118,6 +118,13 @@ type DatabaseInfo struct {
 	IsMergePublished bool
 	IsSubscribed     bool
 	IsDistributor    bool
+	// IsSystem marks master and msdb. They are listed so that a collector
+	// declaring @widened: system_databases can read them, and the first pass of
+	// SelectTargets never includes them, so every other database-scoped
+	// collector goes on seeing user databases only. model and tempdb are not
+	// listed at all: nothing in the corpus has a reason to read them per
+	// database.
+	IsSystem bool
 }
 
 // SkipNoAccess is the reason a database is left out because the login
@@ -367,8 +374,8 @@ func Probe(ctx context.Context, c *sql.Conn) (ServerInfo, error) {
 	return si, nil
 }
 
-// CandidateDatabases lists every user database with the facts SelectTargets
-// needs. It takes a *sql.Conn for the same reason Probe does.
+// CandidateDatabases lists every user database, and master and msdb flagged
+// IsSystem, with the facts SelectTargets needs. It takes a *sql.Conn for the same reason Probe does.
 func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error) {
 	rows, err := c.QueryContext(ctx, `
         SELECT d.name, d.state_desc,
@@ -378,9 +385,10 @@ func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error
                CONVERT(int, d.is_published),
                CONVERT(int, d.is_merge_published),
                CONVERT(int, d.is_subscribed),
-               CONVERT(int, d.is_distributor)
+               CONVERT(int, d.is_distributor),
+               CASE WHEN d.database_id IN (1, 4) THEN 1 ELSE 0 END
         FROM sys.databases AS d
-        WHERE d.database_id > 4
+        WHERE d.database_id > 4 OR d.database_id IN (1, 4)
         ORDER BY d.name`)
 	if err != nil {
 		return nil, err
@@ -389,10 +397,11 @@ func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error
 	var out []DatabaseInfo
 	for rows.Next() {
 		var d DatabaseInfo
-		var snap, acc, pub, merge, sub, dist int
-		if err := rows.Scan(&d.Name, &d.State, &snap, &acc, &d.UserAccess, &pub, &merge, &sub, &dist); err != nil {
+		var snap, acc, pub, merge, sub, dist, sys int
+		if err := rows.Scan(&d.Name, &d.State, &snap, &acc, &d.UserAccess, &pub, &merge, &sub, &dist, &sys); err != nil {
 			return nil, err
 		}
+		d.IsSystem = sys == 1
 		d.IsSnapshot, d.HasAccess = snap == 1, acc == 1
 		d.IsPublished, d.IsMergePublished = pub == 1, merge == 1
 		d.IsSubscribed, d.IsDistributor = sub == 1, dist == 1
@@ -422,6 +431,9 @@ func SelectTargets(c []DatabaseInfo, include, exclude string, widen map[string]b
 		return sel, err
 	}
 	for _, d := range c {
+		if d.IsSystem {
+			continue
+		}
 		switch {
 		case d.State != "ONLINE":
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, "state=" + d.State})
@@ -441,6 +453,8 @@ func SelectTargets(c []DatabaseInfo, include, exclude string, widen map[string]b
 			sel.Included = append(sel.Included, d.Name)
 		}
 	}
+
+	sel = widenSystem(sel, c, exc, widen)
 
 	// Second pass: keep the distribution database when a publisher survived
 	// the first one.
@@ -507,6 +521,60 @@ func SelectTargets(c []DatabaseInfo, include, exclude string, widen map[string]b
 		}
 	}
 	return sel, nil
+}
+
+// widenSystem brings master and msdb into the run for the collectors that
+// declare @widened: system_databases, and for nobody else.
+//
+// It is a widening and not an ordinary inclusion because the ordinary
+// inclusion is read by every database-scoped collector in the corpus, and
+// thirty of them have nothing to say about master or msdb, or would say it
+// wrongly: an index or statistics inventory of msdb is noise in a report about
+// the application. What the two databases do hold is security: the users and
+// roles of msdb decide who can own or run SQL Agent jobs, and a certificate
+// user in master is how module signing reaches server permissions. So the
+// principals collector reads them and the rest are never offered them.
+//
+// DB_INCLUDE does not narrow it, for the reason the distributor's widening
+// is not narrowed: the operator named application databases and these are not
+// one. DB_EXCLUDE still says no. A system database the login cannot read, or
+// one that is not online, is recorded as a skip, which the first pass leaves
+// to this one since it never looked at them.
+func widenSystem(sel Selection, c []DatabaseInfo, exc []string, widen map[string]bool) Selection {
+	if !widen["system_databases"] {
+		return sel
+	}
+	for _, d := range c {
+		if !d.IsSystem {
+			continue
+		}
+		reason := ""
+		switch {
+		case d.State != "ONLINE":
+			reason = "state=" + d.State
+		case d.UserAccess == "SINGLE_USER":
+			reason = SkipSingleUser
+		case !d.HasAccess && d.UserAccess == "RESTRICTED_USER":
+			reason = SkipRestrictedUser
+		case !d.HasAccess:
+			reason = SkipNoAccess
+		case matchAny(exc, d.Name):
+			reason = "matched by DB_EXCLUDE"
+		}
+		if reason != "" {
+			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, reason})
+			continue
+		}
+		sel.Included = append(sel.Included, d.Name)
+		if sel.Widened == nil {
+			sel.Widened = map[string]WidenedFor{}
+		}
+		sel.Widened[d.Name] = WidenedFor{
+			Purpose: "system_databases",
+			Reason:  "system database, read only by collectors declaring @widened: system_databases",
+		}
+	}
+	return sel
 }
 
 // checkPatterns validates each pattern once, up front, so a syntax error is

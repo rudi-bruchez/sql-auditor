@@ -3,6 +3,7 @@ package collect
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 )
@@ -301,6 +302,41 @@ func TestWidenedDatabaseSurvivesSelectionIntoUnits(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("the collector the widening was for must see both databases, got %v", got)
+	}
+}
+
+// The same chain for master and msdb: the principals collector reaches them,
+// an ordinary database-scoped collector does not.
+func TestSystemDatabasesReachOnlyTheirCollector(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "master", State: "ONLINE", HasAccess: true, IsSystem: true},
+		{Name: "msdb", State: "ONLINE", HasAccess: true, IsSystem: true},
+		{Name: "SALESDB", State: "ONLINE", HasAccess: true},
+	}
+	sel, err := SelectTargets(cands, "", "", map[string]bool{"system_databases": true})
+	if err != nil {
+		t.Fatalf("SelectTargets: %v", err)
+	}
+	folders := SelectedFolders(sel)
+
+	principals := Script{Path: "40.security/020.database-principals.sql", Scope: ScopeDatabase,
+		Widened: "system_databases", Results: []ResultSpec{{"root", ShapeObject}}}
+	ordinary := Script{Path: "70.schema/010.objects.sql", Scope: ScopeDatabase,
+		Results: []ResultSpec{{"root", ShapeObject}}}
+	units, _, errs := planUnits([]plannedScript{{Script: principals}, {Script: ordinary}}, folders, &Config{})
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	got := map[string][]string{}
+	for _, u := range units {
+		got[u.Script.Path] = append(got[u.Script.Path], u.Target.Name)
+	}
+	if p := got[principals.Path]; !slices.Contains(p, "master") || !slices.Contains(p, "msdb") ||
+		!slices.Contains(p, "SALESDB") {
+		t.Errorf("the principals collector should see master, msdb and SALESDB, got %v", p)
+	}
+	if o := got[ordinary.Path]; !slices.Equal(o, []string{"SALESDB"}) {
+		t.Errorf("an ordinary collector must see SALESDB only, got %v", o)
 	}
 }
 
