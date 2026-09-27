@@ -41,6 +41,13 @@ release workflow refuses a tag that disagrees with either this file or
   Server for Linux the pattern they read matched nothing: 063 reported a present
   and empty capture on an instance holding four reports, and 061 kept only what
   the ring buffer still held. Measured on SQL Server 2025 CU7 on Linux.
+- A database in `SINGLE_USER` mode is skipped with the reason
+  `user_access=SINGLE_USER`. With another session inside it, `HAS_DBACCESS`
+  answers 0, so it used to be skipped as `no access for this login`, and the
+  grant script offered a database user the login already had. With the slot
+  free it used to be collected; it is now left alone, since the mode says
+  somebody wants to be, and the mode stays visible in
+  `20.databases/010.all-databases`. Measured on SQL Server 2025 CU7.
 
 ## [0.34.0] - 2026-09-24
 

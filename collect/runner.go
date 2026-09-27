@@ -101,6 +101,10 @@ type DatabaseInfo struct {
 	Name, State string
 	IsSnapshot  bool
 	HasAccess   bool
+	// UserAccess is sys.databases.user_access_desc: MULTI_USER, SINGLE_USER
+	// or RESTRICTED_USER. Only SINGLE_USER changes what the run may do; see
+	// SkipSingleUser.
+	UserAccess string
 	// The replication roles, read from sys.databases in the same pass that
 	// lists the candidates. They are flags and not proof of activity: a
 	// database restored from a publisher keeps them set, which is why the
@@ -123,6 +127,22 @@ type DatabaseInfo struct {
 // fix it. A literal in both would drift and the fix would silently stop
 // being offered.
 const SkipNoAccess = "no access for this login"
+
+// SkipSingleUser is the reason a database in SINGLE_USER mode is left out.
+// Somebody put it there to be alone in it, usually a DBA in the middle of a
+// repair or a restore, and a run that walks in is not what they asked for.
+//
+// Measured on 17.0.4065.4, and the two cases are not equally strong. With
+// another session inside the database, HAS_DBACCESS answers 0 and the
+// database used to be skipped as SkipNoAccess, which the grant script then
+// offered to fix with a user the login already had: that was a wrong answer,
+// and testing this case before HasAccess is what corrects it. With the slot
+// free, the run collected the database, and a second connection trying to
+// enter it once a second was refused 0 times out of 53: each collector holds
+// the slot too briefly to be seen. Skipping the free case rests on the intent
+// the mode states, not on a measured harm. The mode itself stays visible in
+// 20.databases/010.all-databases, which runs at instance scope.
+const SkipSingleUser = "user_access=SINGLE_USER"
 
 // skipNotIncluded is the reason DB_INCLUDE did not name a database. It is a
 // constant for the same reason as the one above, and here the two places are
@@ -346,6 +366,7 @@ func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error
         SELECT d.name, d.state_desc,
                CASE WHEN d.source_database_id IS NULL THEN 0 ELSE 1 END,
                CASE WHEN HAS_DBACCESS(d.name) = 1 THEN 1 ELSE 0 END,
+               d.user_access_desc,
                CONVERT(int, d.is_published),
                CONVERT(int, d.is_merge_published),
                CONVERT(int, d.is_subscribed),
@@ -361,7 +382,7 @@ func CandidateDatabases(ctx context.Context, c *sql.Conn) ([]DatabaseInfo, error
 	for rows.Next() {
 		var d DatabaseInfo
 		var snap, acc, pub, merge, sub, dist int
-		if err := rows.Scan(&d.Name, &d.State, &snap, &acc, &pub, &merge, &sub, &dist); err != nil {
+		if err := rows.Scan(&d.Name, &d.State, &snap, &acc, &d.UserAccess, &pub, &merge, &sub, &dist); err != nil {
 			return nil, err
 		}
 		d.IsSnapshot, d.HasAccess = snap == 1, acc == 1
@@ -398,6 +419,8 @@ func SelectTargets(c []DatabaseInfo, include, exclude string, widen map[string]b
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, "state=" + d.State})
 		case d.IsSnapshot:
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, "database snapshot"})
+		case d.UserAccess == "SINGLE_USER":
+			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, SkipSingleUser})
 		case !d.HasAccess:
 			sel.Skipped = append(sel.Skipped, SkipReason{d.Name, SkipNoAccess})
 		case len(inc) > 0 && !matchAny(inc, d.Name):
@@ -449,7 +472,8 @@ func SelectTargets(c []DatabaseInfo, include, exclude string, widen map[string]b
 		}
 		// Everything except DB_INCLUDE still disqualifies it. DB_EXCLUDE in
 		// particular stays the operator's explicit way of saying no.
-		if d.State != "ONLINE" || d.IsSnapshot || !d.HasAccess || matchAny(exc, d.Name) {
+		if d.State != "ONLINE" || d.IsSnapshot || d.UserAccess == "SINGLE_USER" ||
+			!d.HasAccess || matchAny(exc, d.Name) {
 			continue
 		}
 		// The skip this supersedes has to go, or the manifest names the same

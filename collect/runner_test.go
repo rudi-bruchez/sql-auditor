@@ -39,6 +39,39 @@ func TestSelectTargetsWildcards(t *testing.T) {
 	}
 }
 
+// A database in SINGLE_USER mode is skipped for that reason, whether or not
+// its one slot is free. When it is taken HAS_DBACCESS answers 0, so the order
+// of the cases decides the reason: tested after HasAccess, the occupied one
+// came out as a missing grant and the grant script offered to fix it.
+func TestSelectTargetsSkipsSingleUser(t *testing.T) {
+	cands := []DatabaseInfo{
+		{Name: "Free", State: "ONLINE", HasAccess: true, UserAccess: "SINGLE_USER"},
+		{Name: "Taken", State: "ONLINE", HasAccess: false, UserAccess: "SINGLE_USER"},
+		{Name: "Restricted", State: "ONLINE", HasAccess: true, UserAccess: "RESTRICTED_USER"},
+		{Name: "Distrib", State: "ONLINE", HasAccess: true, UserAccess: "SINGLE_USER", IsDistributor: true},
+		{Name: "Pub", State: "ONLINE", HasAccess: true, UserAccess: "MULTI_USER", IsPublished: true},
+	}
+	got, err := SelectTargets(cands, "Free,Taken,Restricted,Pub", "", widenReplication)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasons := map[string]string{}
+	for _, s := range got.Skipped {
+		reasons[s.Name] = s.Reason
+	}
+	for _, name := range []string{"Free", "Taken"} {
+		if reasons[name] != SkipSingleUser {
+			t.Errorf("%s: reason = %q, want %q", name, reasons[name], SkipSingleUser)
+		}
+	}
+	if !slices.Contains(got.Included, "Restricted") {
+		t.Errorf("RESTRICTED_USER must still be collected; included = %v", got.Included)
+	}
+	if slices.Contains(got.Included, "Distrib") {
+		t.Errorf("the replication widening must not bring a SINGLE_USER distributor back; included = %v", got.Included)
+	}
+}
+
 func TestSelectTargetsEmptyIncludeMeansAll(t *testing.T) {
 	got, err := SelectTargets([]DatabaseInfo{{Name: "X", State: "ONLINE", HasAccess: true}}, "", "", widenReplication)
 	if err != nil {
