@@ -166,7 +166,7 @@ func ParseDotEnv(r io.Reader) (map[string]string, error) {
 		s = strings.TrimPrefix(s, "export ")
 		k, v, ok := strings.Cut(s, "=")
 		if !ok {
-			return nil, fmt.Errorf("line %d: expected KEY=VALUE, got %q", line, s)
+			return nil, malformedLine(line, s)
 		}
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
@@ -187,6 +187,24 @@ func ParseDotEnv(r io.Reader) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, sc.Err()
+}
+
+// malformedLine describes a line without "=" and never quotes it. The line
+// echoed whole put `SQL_PASSWORD secret`, a password with its "=" forgotten,
+// on the terminal and into whatever log captured it. The key is named only
+// when it is one this tool knows: a leading run of letters is not evidence of
+// a key, and a line that is nothing but a password would pass for one.
+func malformedLine(line int, s string) error {
+	end := strings.IndexFunc(s, func(r rune) bool {
+		return !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
+	})
+	if end < 0 {
+		end = len(s)
+	}
+	if key := s[:end]; knownKeys[key] || renamed[key] != "" {
+		return fmt.Errorf("line %d: %s has no \"=\": expected KEY=VALUE (the rest of the line is not shown, it may be a secret)", line, key)
+	}
+	return fmt.Errorf("line %d: expected KEY=VALUE (the line is not shown, it may be a secret)", line)
 }
 
 // UpdateDotEnv changes the supplied keys without disturbing comments, blank

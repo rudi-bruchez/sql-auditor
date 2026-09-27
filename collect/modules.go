@@ -229,14 +229,19 @@ func writeObjectDefinitions(req WriteRequest) (WriteResult, error) {
 // that make a directory name safe on Windows — reserved device names, illegal
 // characters, trailing dots — are exactly the rules that make a file name safe
 // there.
+//
+// used holds every name already handed out, upper-cased since the file systems
+// that matter fold case. A suffix is checked against it like any other name:
+// counting per stem gave two modules named p the files p and p~2, and a third
+// module really named p~2 the same p~2, so one definition overwrote another.
 func moduleFileName(schema, name string, used map[string]int) string {
 	stem := SafeFolderName(schema) + "." + SafeFolderName(name)
-	key := strings.ToUpper(stem)
-	used[key]++
-	if n := used[key]; n > 1 {
-		stem = fmt.Sprintf("%s~%d", stem, n)
+	file := stem
+	for n := 2; used[strings.ToUpper(file)] > 0; n++ {
+		file = fmt.Sprintf("%s~%d", stem, n)
 	}
-	return stem + ".sql"
+	used[strings.ToUpper(file)]++
+	return file + ".sql"
 }
 
 // writeModuleIndex writes _index.json last, so it describes what is on disk,

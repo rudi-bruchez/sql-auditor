@@ -41,6 +41,43 @@ INLINE=value # trailing comment
 	}
 }
 
+// A line without "=" is refused with its number, never with its text: the
+// commonest such line is a password whose "=" was forgotten.
+func TestParseDotEnvNeverEchoesAMalformedLine(t *testing.T) {
+	cases := []struct {
+		name, line, names string
+	}{
+		{"a known key", "SQL_PASSWORD hunter2-Secret", "SQL_PASSWORD"},
+		{"a known key after export", "export SQL_PASSWORD hunter2-Secret", "SQL_PASSWORD"},
+		{"a retired key", "SQL_LOGIN hunter2-Secret", "SQL_LOGIN"},
+		// A bare password is a run of letters too, and must not be taken
+		// for a key and shown.
+		{"a bare word", "hunter2Secret", ""},
+		{"an unknown key", "MY_TOKEN hunter2-Secret", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := ParseDotEnv(strings.NewReader("SQL_SERVER=SQL01\n\n" + c.line + "\n"))
+			if err == nil {
+				t.Fatal("a line without = was accepted")
+			}
+			msg := err.Error()
+			if strings.Contains(msg, "hunter2") || strings.Contains(msg, "Secret") {
+				t.Errorf("the error echoes the value: %s", msg)
+			}
+			if !strings.Contains(msg, "line 3") {
+				t.Errorf("the error does not give the line number: %s", msg)
+			}
+			if c.names != "" && !strings.Contains(msg, c.names) {
+				t.Errorf("the error does not name %s: %s", c.names, msg)
+			}
+			if c.names == "" && strings.Contains(msg, "MY_TOKEN") {
+				t.Errorf("the error names a key this tool does not know: %s", msg)
+			}
+		})
+	}
+}
+
 func TestResolvePrecedence(t *testing.T) {
 	// Flag beats .env beats process environment beats default.
 	flags := map[string]string{"SQL_SERVER": "from-flag"}

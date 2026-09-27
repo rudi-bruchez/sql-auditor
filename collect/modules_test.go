@@ -299,6 +299,46 @@ func TestModuleWriterKeepsCollidingNamesApart(t *testing.T) {
 	}
 }
 
+// A suffix is a name like any other. Two names that sanitise to rpt_daily and
+// a module really called rpt_daily~2 wrote two files named rpt_daily~2.sql, and
+// the second overwrote the first. Both orders: the real one first takes the
+// name the suffix would have given, the real one last finds it taken.
+func TestModuleWriterSuffixesSkipTakenNames(t *testing.T) {
+	row := func(name, body string, rank int64) []any {
+		return []any{"dbo", name, "VIEW", body, int64(len(body)), int64(0), rank, int64(3)}
+	}
+	orders := map[string][][]any{
+		"real one last":  {row("rpt/daily", "BODY slash", 1), row("rpt|daily", "BODY pipe", 2), row("rpt_daily~2", "BODY real", 3)},
+		"real one first": {row("rpt_daily~2", "BODY real", 1), row("rpt/daily", "BODY slash", 2), row("rpt|daily", "BODY pipe", 3)},
+	}
+	for name, rows := range orders {
+		t.Run(name, func(t *testing.T) {
+			sets := moduleSets()
+			sets[1].Set.Rows = rows
+			root, rel, res, _ := runModuleWriter(t, sets, maxRunBytes)
+			if res.DefinitionFiles != 3 {
+				t.Errorf("DefinitionFiles = %d, want 3", res.DefinitionFiles)
+			}
+			dir := filepath.Join(root, filepath.FromSlash(rel))
+			seen := map[string]string{}
+			for _, m := range readModuleIndex(t, root, rel).Modules {
+				if prev, dup := seen[strings.ToUpper(m.File)]; dup {
+					t.Errorf("%s and %s share the file %s", prev, m.Name, m.File)
+				}
+				seen[strings.ToUpper(m.File)] = m.Name
+				b, err := os.ReadFile(filepath.Join(dir, m.File))
+				if err != nil {
+					t.Fatalf("%s: %v", m.File, err)
+				}
+				want := map[string]string{"rpt/daily": "BODY slash", "rpt|daily": "BODY pipe", "rpt_daily~2": "BODY real"}[m.Name]
+				if string(b) != want {
+					t.Errorf("%s holds %q, the body of another module (want %q)", m.File, b, want)
+				}
+			}
+		})
+	}
+}
+
 // An exhausted run budget is a recorded omission, never a silent absence.
 func TestModuleWriterRecordsWhatTheBudgetRefused(t *testing.T) {
 	root, rel, res, _ := runModuleWriter(t, moduleSets(), 20)
