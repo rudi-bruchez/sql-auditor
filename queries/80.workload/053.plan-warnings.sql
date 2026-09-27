@@ -305,7 +305,21 @@ SELECT
     stmt.early_abort                                            AS [optimizer_early_abort],
     stmt.optm_level                                             AS [optimizer_level],
     cur.requested                                               AS [cursor_requested_type],
-    cur.actual                                                  AS [cursor_actual_type]
+    cur.actual                                                  AS [cursor_actual_type],
+    -- What the plan says about itself, read on the statements already kept
+    -- and NOT added to the prefilter: every plan of an instance at MAXDOP 1
+    -- carries NonParallelPlanReason="MaxDOPSetToOne", so filtering on it
+    -- would crowd the annotated statements out of the two hundred. The reason
+    -- is named so a reader can tell a code cause (a scalar function, a table
+    -- variable modified) from a setting. Measured on 17.0.4065.4 in cached
+    -- plans, 27 September 2026: MaxDOPSetToOne under OPTION (MAXDOP 1), the
+    -- compile figures on every plan, and TraceFlags with IsCompileTime under
+    -- QUERYTRACEON 9481.
+    qp.non_parallel_reason                                      AS [non_parallel_reason],
+    qp.compile_time_ms                                          AS [compile.time_ms],
+    qp.compile_cpu_ms                                           AS [compile.cpu_ms],
+    qp.compile_memory_kb                                        AS [compile.memory_kb],
+    tf.flags                                                    AS [compile_trace_flags]
 FROM @candidates AS a
 OUTER APPLY (SELECT TOP (1) 1 AS hit
              FROM a.[px].nodes('//Warnings[@NoJoinPredicate="1" or @NoJoinPredicate="true"]') AS w(n)) AS nojoin
@@ -320,6 +334,16 @@ OUTER APPLY (SELECT TOP (1) w.n.value('@ConvertIssue', 'varchar(60)') AS issue
 OUTER APPLY (SELECT TOP (1) s.n.value('@StatementOptmEarlyAbortReason', 'varchar(60)') AS early_abort,
                             s.n.value('@StatementOptmLevel', 'varchar(20)') AS optm_level
              FROM a.[px].nodes('//StmtSimple') AS s(n)) AS stmt
+OUTER APPLY (SELECT TOP (1) q.n.value('@NonParallelPlanReason', 'varchar(100)') AS non_parallel_reason,
+                            q.n.value('@CompileTime', 'int')              AS compile_time_ms,
+                            q.n.value('@CompileCPU', 'int')               AS compile_cpu_ms,
+                            q.n.value('@CompileMemory', 'int')            AS compile_memory_kb
+             FROM a.[px].nodes('//QueryPlan') AS q(n)) AS qp
+/* The trace flags in force when the plan was compiled, as a list. Only the
+   compile-time set: the execution-time one belongs to an actual plan. */
+OUTER APPLY (SELECT STUFF((SELECT ',' + t.n.value('@Value', 'varchar(10)')
+                           FROM a.[px].nodes('//QueryPlan/TraceFlags[@IsCompileTime="1" or @IsCompileTime="true"]/TraceFlag') AS t(n)
+                           FOR XML PATH('')), 1, 1, '') AS flags) AS tf
 OUTER APPLY (SELECT TOP (1) c.n.value('@CursorRequestedType', 'varchar(40)') AS requested,
                             c.n.value('@CursorActualType', 'varchar(40)') AS actual
              FROM a.[px].nodes('//CursorPlan') AS c(n)) AS cur

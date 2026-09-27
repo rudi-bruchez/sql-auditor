@@ -21,6 +21,15 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Added
 
+- `80.workload/053.plan-warnings.sql` says, for each statement it keeps, why
+  the plan is serial (`non_parallel_reason`), what compiling it cost
+  (`compile.time_ms`, `cpu_ms`, `memory_kb`) and which trace flags were in
+  force at compile time (`compile_trace_flags`). They are read on the
+  statements the warnings already selected and not added to the prefilter:
+  every plan of an instance at MAXDOP 1 carries a non-parallel reason, and
+  filtering on it would crowd out the annotated statements. Measured on SQL
+  Server 2025 CU7.
+
 - `10.system/049.open-transactions.sql`: the transactions open when the run
   happened, oldest first, with their begin time, whether the session is
   sleeping and for how long, and the log each holds in the databases it wrote
