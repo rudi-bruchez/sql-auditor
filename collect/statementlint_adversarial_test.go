@@ -80,6 +80,11 @@ func TestStatementLintRefusesTheAdversarialTable(t *testing.T) {
 		{"drop a user", `EXEC sp_dropuser 'x'`},
 		{"firewall rule", `EXEC sp_set_database_firewall_rule N'x', '0.0.0.0', '255.255.255.255'`},
 		{"procedure opening a batch run by sp_executesql", `EXEC sp_executesql N'msdb.dbo.sp_purge_jobhistory'`},
+		// codex review, 27 September 2026.
+		{"user procedure named like a sys one", `EXEC dbo.sp_readerrorlog`},
+		{"msdb procedure unqualified", `EXEC sp_help_jobhistory`},
+		{"permanent SELECT INTO beside a temp INSERT INTO", `SELECT name INTO dbo.AuditCopy FROM sys.databases; INSERT INTO #scratch SELECT 1`},
+		{"sequence advanced by a SELECT", `SELECT NEXT VALUE FOR dbo.audit_sequence AS value`},
 		{"procedure opening a batch run by EXEC()", `EXEC('sp_delete_backuphistory ''2030-01-01''')`},
 		{"procedure called with a return code", `EXEC @rc = msdb.dbo.sp_purge_jobhistory`},
 		{"procedure named by a variable", `DECLARE @p sysname = N'sp_purge_jobhistory'; EXEC @p`},

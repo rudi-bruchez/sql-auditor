@@ -68,7 +68,7 @@ var (
 	// messages, END CONVERSATION ... WITH CLEANUP discards them, and ADD
 	// SIGNATURE changes what a module may do. END alone ends a block and is
 	// ordinary, so only END CONVERSATION is named.
-	forbiddenOutright = regexp.MustCompile(`(?i)\b(ALTER|BACKUP|RESTORE|GRANT|REVOKE|DENY|KILL|MERGE|RECONFIGURE|SHUTDOWN|WRITETEXT|UPDATETEXT|OPENROWSET|OPENQUERY|OPENDATASOURCE|BULK\s+INSERT|SETUSER|CHECKPOINT|ENABLE|DISABLE|RECEIVE|SEND\s+ON|END\s+CONVERSATION|MOVE\s+CONVERSATION|BEGIN\s+DIALOG|GET\s+CONVERSATION|ADD\s+(COUNTER\s+)?SIGNATURE)\b`)
+	forbiddenOutright = regexp.MustCompile(`(?i)\b(ALTER|BACKUP|RESTORE|GRANT|REVOKE|DENY|KILL|MERGE|RECONFIGURE|SHUTDOWN|WRITETEXT|UPDATETEXT|OPENROWSET|OPENQUERY|OPENDATASOURCE|BULK\s+INSERT|SETUSER|CHECKPOINT|ENABLE|DISABLE|RECEIVE|SEND\s+ON|END\s+CONVERSATION|MOVE\s+CONVERSATION|BEGIN\s+DIALOG|GET\s+CONVERSATION|ADD\s+(COUNTER\s+)?SIGNATURE|NEXT\s+VALUE\s+FOR)\b`)
 
 	// EXECUTE AS switches the security context the rest of the batch runs
 	// under, which is the one thing that would make every other rule here
@@ -124,10 +124,13 @@ var (
 
 	// SELECT ... INTO creates a table, and a permanent one unless the target
 	// starts with #. INSERT INTO is the same word in a different statement, so
-	// the two are told apart by counting rather than by looking backwards.
+	// the two are told apart by counting rather than by looking backwards. An
+	// INSERT INTO a #temp table is already counted by intoTarget, so only the
+	// other INSERT INTO are added (the INSERT rule refuses those): counted
+	// twice, one INSERT INTO #scratch hid a SELECT INTO dbo.Copy beside it.
 	intoTarget   = regexp.MustCompile(`(?i)\bINTO\s+\[?[@#]`)
 	intoKeyword  = regexp.MustCompile(`(?i)\bINTO\b`)
-	insertIntoKw = regexp.MustCompile(`(?i)\bINSERT\s+INTO\b`)
+	insertIntoKw = regexp.MustCompile(`(?i)\bINSERT\s+INTO\s+\[?[^\s@#\[]`)
 
 	// THE PROCEDURES A COLLECTOR MAY CALL, BY NAME. The list above names the
 	// procedures that write, and a harm review of 27 September 2026 showed why
@@ -137,14 +140,19 @@ var (
 	// them a staple of the maintenance script this lint exists to stop on its
 	// way into a corpus directory. The shipped corpus calls four procedures, so
 	// the rule is turned round: a procedure is refused unless it is one of
-	// these. The name is compared on its last part, brackets removed, so
-	// msdb.dbo.sp_help_jobhistory and [sys].[sp_readerrorlog] are the same
-	// names as in the corpus.
+	// these. The name is compared whole, brackets removed: a codex review the
+	// same day passed dbo.sp_readerrorlog when only the last part was read, and
+	// that is a user procedure of the same name, which may write. Unqualified,
+	// a sys procedure wins over a user one; sp_help_jobhistory lives in msdb and
+	// is not a sys procedure, so it is accepted only fully qualified.
 	allowedProcedures = map[string]bool{
-		"sp_executesql":                        true,
-		"sp_readerrorlog":                      true,
-		"sp_estimate_data_compression_savings": true,
-		"sp_help_jobhistory":                   true,
+		"sp_executesql":                            true,
+		"sys.sp_executesql":                        true,
+		"sp_readerrorlog":                          true,
+		"sys.sp_readerrorlog":                      true,
+		"sp_estimate_data_compression_savings":     true,
+		"sys.sp_estimate_data_compression_savings": true,
+		"msdb.dbo.sp_help_jobhistory":              true,
 	}
 
 	// EXEC followed by a procedure name, possibly as EXEC @rc = name. The name
@@ -303,7 +311,7 @@ func procedureRule(code string) string {
 	if m := firstWord.FindStringSubmatch(code); m != nil {
 		w := strings.ToUpper(m[1])
 		if !statementStarts[w] {
-			if name := lastNamePart(m[1]); !allowedProcedures[name] {
+			if name := procedureName(m[1]); !allowedProcedures[name] {
 				return fmt.Sprintf("%s opens the batch, and a batch that opens with a name calls it as a procedure: a collector may only call %s", m[1], allowedProcedureList())
 			}
 		}
@@ -316,19 +324,21 @@ func procedureRule(code string) string {
 		if strings.HasPrefix(target, "@") {
 			return fmt.Sprintf("EXEC %s calls a procedure whose name is in a variable, which nobody can review: a collector may only call %s", target, allowedProcedureList())
 		}
-		if name := lastNamePart(target); !allowedProcedures[name] {
+		if name := procedureName(target); !allowedProcedures[name] {
 			return fmt.Sprintf("%s is not one of the procedures a collector may call (%s): a procedure is refused unless it is known to only return rows", target, allowedProcedureList())
 		}
 	}
 	return ""
 }
 
-// lastNamePart returns the last part of a multipart name, brackets removed and
+// procedureName returns a multipart name with its brackets and spaces removed,
 // lower-cased.
-func lastNamePart(name string) string {
+func procedureName(name string) string {
 	parts := strings.Split(name, ".")
-	last := strings.TrimSpace(parts[len(parts)-1])
-	return strings.ToLower(strings.Trim(last, "[]"))
+	for i, p := range parts {
+		parts[i] = strings.Trim(strings.TrimSpace(p), "[]")
+	}
+	return strings.ToLower(strings.Join(parts, "."))
 }
 
 func allowedProcedureList() string {
