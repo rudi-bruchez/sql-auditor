@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -826,5 +827,38 @@ func TestManifestListsTheTextTheDefaultRunCaptures(t *testing.T) {
 		if !strings.Contains(h, want) {
 			t.Errorf("MANIFEST.txt should disclose %q on the default path:\n%s", want, m.Human())
 		}
+	}
+}
+
+// 042.connection-security.sql groups the live connections by host, program
+// and login on every default run, to compare each application with the client's
+// pool size. Those three name the application servers and the accounts behind
+// them, so the collector must declare it and the manifest must print it: a
+// declaration dropped from the header would silently take the sentence out of
+// MANIFEST.txt while the names stayed in the archive.
+func TestConnectionPoolsAreDeclaredAndDisclosed(t *testing.T) {
+	scripts, err := Discover(os.DirFS(filepath.Join("..", "queries")), ".")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	found := false
+	for _, s := range scripts {
+		if s.Path != "10.system/042.connection-security.sql" {
+			continue
+		}
+		found = true
+		if !slices.Contains(s.Discloses, "connection_pools") {
+			t.Errorf("%s projects host, program and login names and must declare "+
+				"@discloses: connection_pools, got %v", s.Path, s.Discloses)
+		}
+	}
+	if !found {
+		t.Fatal("10.system/042.connection-security.sql is not in the corpus")
+	}
+	m := NewManifest("sql-auditor", "test", "abc")
+	m.Sources = map[string]SourceInfo{"queries": {From: "embedded", SHA256: "abc"}}
+	m.Disclosed = []string{"connection_pools"}
+	if h := flatten(m.Human()); !strings.Contains(h, "host names, program names and logins") {
+		t.Errorf("MANIFEST.txt should disclose the connection pool names:\n%s", m.Human())
 	}
 }

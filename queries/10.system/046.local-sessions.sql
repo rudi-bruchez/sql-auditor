@@ -25,11 +25,13 @@
 -- That is also why it is aggregated and why no login name, host name or
 -- session id is projected beside it.
 --
--- IT GOES IN ITS OWN FILE AND NOT INTO 042.connection-security.sql, which is
--- defined as an aggregate over sys.dm_exec_connections and explicitly refuses
+-- IT GOES IN ITS OWN FILE AND NOT INTO 042.connection-security.sql, whose
+-- connections set is an aggregate over sys.dm_exec_connections that refuses
 -- the join to sys.dm_exec_sessions. Adding program_name there would change the
 -- grouping key and contradict that file's own header two screens later — which
--- is what happens when one collector is specified in two places.
+-- is what happens when one collector is specified in two places. 042 now makes
+-- the join in a set of its own, pools, for a different question: how many
+-- connections each application holds, against the client's pool size.
 --
 -- The disclosure question is real and smaller than it looks. The corpus's
 -- invariant about session-derived text governs STATEMENT text, and the

@@ -693,6 +693,32 @@ because the text is what identifies a statement, and `MANIFEST.txt` says it on
 every run. If it is wrong for a given server, leave those collectors out with a
 `--queries-dir` copy of the corpus.
 
+### Connection failures the server may not have recorded
+
+An application that reports repeated connection failures while the server
+logged nothing is often waiting for a free connection in its own pool. That
+timeout is raised by the client library and never reaches SQL Server, so the
+server can only show the other side of it: how many connections each
+application holds.
+
+`10.system/042.connection-security.sql` does that in its `pools` result set. It
+groups the live connections of user sessions by host name, program name and
+login, and gives for each group the number of physical connections, the oldest
+and newest `connect_time`, and how many client addresses it came from. The 200
+largest groups are kept; the root says how many groups there were in all, and
+how many hold 100 connections or more.
+
+The 100 is the default `Max Pool Size` of ADO.NET and Microsoft.Data.SqlClient.
+It is a client-side default, not a server limit: the connection string can
+change it, and a pool exists per process and per connection string. A group is
+therefore coarser than a pool. A group sitting at exactly 100 is what one full
+pool looks like; a group well above 100 is several pools, several worker
+processes on one host or several connection strings.
+
+Host names, program names and logins name the application servers and the
+accounts they connect as, so the collector declares them and `MANIFEST.txt`
+lists them among what the archive names, on every run.
+
 ### Limits that are known and not fixed
 
 Named here because a limit an operator can plan around is worth more than a

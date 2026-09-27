@@ -1,7 +1,8 @@
 -- @scope:       instance
--- @resultsets:  root:object, connections:array
+-- @resultsets:  root:object, connections:array, pools:array
 -- @permissions: CONNECT, VIEW SERVER STATE
 -- @timeout:     60
+-- @discloses:   connection_pools
 --
 -- How sessions actually reach this instance: over what transport,
 -- authenticated how, encrypted or not — and whether the server demands it.
@@ -25,13 +26,53 @@
 --
 -- AGGREGATE, NEVER PER SESSION. One row per transport, scheme, encryption and
 -- protocol version, with a count. A per-session dump would carry client
--- addresses and host names into the archive for no analytical gain.
+-- addresses and host names into the archive for no analytical gain. The pools
+-- set below does carry host names, still aggregated, because the question it
+-- answers cannot be asked without them.
 --
 -- THE COUNT IS OF ADDRESSES, NOT HOSTS. sys.dm_exec_connections has
 -- client_net_address; host names live in sys.dm_exec_sessions and reaching
 -- them means a join, for a number that is less reliable — a host name is
--- client-supplied. That join is refused here and made, deliberately and for a
--- different question, in 046.local-sessions.sql.
+-- client-supplied. The connections set refuses that join. It is made twice
+-- elsewhere, each time for a question of its own: in 046.local-sessions.sql,
+-- and in the pools set below.
+--
+-- THE POOLS SET ANSWERS "IS AN APPLICATION'S POOL FULL?" A client that reports
+-- repeated connection failures while the server logged nothing is very often
+-- an application waiting for a free connection in its OWN pool: the timeout is
+-- raised in the client ("the timeout period elapsed prior to obtaining a
+-- connection from the pool") and never reaches the server, so no view and no
+-- log line here records it. What the server can show is how many connections
+-- each application holds right now, and that is what this set counts: live
+-- connections grouped by host_name, program_name and login_name, with the
+-- oldest and newest connect_time and the number of distinct client addresses.
+--
+-- The figure to compare each group with is 100, the default Max Pool Size of
+-- ADO.NET and Microsoft.Data.SqlClient. It is a CLIENT-SIDE default and not a
+-- server limit: nothing in SQL Server refuses the 101st connection, the
+-- connection string can raise or lower it, and a pool exists per process and
+-- per distinct connection string. A group here is coarser than a pool. Several
+-- worker processes on one host, or two connection strings for two databases,
+-- land in the same group, so a group well above 100 is several pools and a
+-- group sitting at exactly 100 is the signature of one pool that is full.
+-- counts.pool_groups_at_default_max at the root counts the groups at or above
+-- it, and nothing more is concluded here.
+--
+-- The count is of PHYSICAL connections. Under MARS a session carries one row
+-- per logical session beside its physical connection, with net_transport set
+-- to Session, and a pool holds physical connections, so those rows are left
+-- out. Only user sessions are kept.
+--
+-- WHAT IT DISCLOSES is declared with @discloses and printed in MANIFEST.txt: the
+-- host names of the application servers, the program names they report and
+-- the logins they connect as, a Windows login being a person's account as
+-- often as a service's. All three are client-supplied or client-chosen, which
+-- is why they are grouped and counted rather than listed per session, and no
+-- session id, statement or address is projected beside them.
+--
+-- THE LIST IS CAPPED AT 200 GROUPS, largest first, and the root carries the
+-- total number of groups: a truncated list that does not say so reads as a
+-- complete one.
 --
 -- THE COLLECTOR'S OWN SESSION IS IN THE RESULT and cannot honestly be excluded
 -- from it, so it is marked rather than filtered. The marking is a property of
@@ -92,6 +133,26 @@ SELECT @registry_rows = COUNT(*),
 FROM sys.dm_server_registry AS r
 OPTION (RECOMPILE, MAXDOP 1);
 
+/* The groups are built once, so that the root's totals and the capped list
+   below are the same snapshot rather than two reads of a view that changes
+   between them. */
+CREATE TABLE #pools (host_name nvarchar(128), program_name nvarchar(128),
+                     login_name nvarchar(128), connections int,
+                     oldest_connect_time datetime, newest_connect_time datetime,
+                     client_addresses int, contains_collector_session int);
+INSERT INTO #pools
+SELECT s.host_name, s.program_name, s.login_name,
+       COUNT(*),
+       MIN(c.connect_time),
+       MAX(c.connect_time),
+       COUNT(DISTINCT c.client_net_address),
+       MAX(CASE WHEN c.session_id = @@SPID THEN 1 ELSE 0 END)
+FROM sys.dm_exec_connections AS c
+JOIN sys.dm_exec_sessions AS s ON s.session_id = c.session_id
+WHERE s.is_user_process = 1
+  AND c.net_transport <> N'Session'
+GROUP BY s.host_name, s.program_name, s.login_name;
+
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                 AS [collected_at],
        CASE WHEN @registry_rows > 0 THEN 1 ELSE 0 END           AS [registry_readable],
        @force_encryption                                        AS [force_encryption],
@@ -100,7 +161,11 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                 AS [collected_at
        (SELECT COUNT(DISTINCT c.client_net_address)
         FROM sys.dm_exec_connections AS c)                      AS [counts.client_addresses],
        (SELECT COUNT(*) FROM sys.dm_exec_connections AS c
-        WHERE c.encrypt_option = 'TRUE')                        AS [counts.encrypted_connections]
+        WHERE c.encrypt_option = 'TRUE')                        AS [counts.encrypted_connections],
+       (SELECT COUNT(*) FROM #pools)                            AS [counts.pool_groups],
+       (SELECT COUNT(*) FROM #pools WHERE connections >= 100)   AS [counts.pool_groups_at_default_max],
+       200                                                      AS [pool_groups_kept],
+       100                                                      AS [client_default_max_pool_size]
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT c.net_transport                                          AS [net_transport],
@@ -113,4 +178,17 @@ SELECT c.net_transport                                          AS [net_transpor
 FROM sys.dm_exec_connections AS c
 GROUP BY c.net_transport, c.auth_scheme, c.encrypt_option, c.protocol_version
 ORDER BY COUNT(*) DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+SELECT TOP (200)
+       p.host_name                                              AS [host_name],
+       p.program_name                                           AS [program_name],
+       p.login_name                                             AS [login_name],
+       p.connections                                            AS [connections],
+       p.oldest_connect_time                                    AS [oldest_connect_time],
+       p.newest_connect_time                                    AS [newest_connect_time],
+       p.client_addresses                                       AS [client_addresses],
+       p.contains_collector_session                             AS [contains_collector_session]
+FROM #pools AS p
+ORDER BY p.connections DESC, p.host_name, p.program_name, p.login_name
 OPTION (RECOMPILE, MAXDOP 1);

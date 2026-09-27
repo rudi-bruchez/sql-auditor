@@ -572,6 +572,12 @@ var KnownDisclosures = map[string][]string{
 		"characters: the whole command, including any connection string or",
 		"password typed into a step rather than kept in a credential",
 	},
+	"connection_pools": {
+		"the host names, program names and logins of the applications connected",
+		"during collection, grouped with a count of connections each; they name",
+		"the application servers and the accounts they connect as, a Windows",
+		"login being a person's account as often as a service's",
+	},
 }
 
 func knownDisclosureNames() []string {
