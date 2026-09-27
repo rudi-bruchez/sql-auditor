@@ -630,14 +630,53 @@ func TestWatchFirstPollRetries(t *testing.T) {
 		t.Errorf("polls = %d, reconnects = %d, want %d and %d", *polls, *reconnects, watchRetries+1, watchRetries)
 	}
 
+	for _, denial := range []mssql.Error{
+		{Number: 300, Message: "VIEW SERVER PERFORMANCE STATE permission was denied"},
+		{Number: 229, Message: "The SELECT permission was denied on the object 'dm_os_waiting_tasks'"},
+	} {
+		w, _, reconnects = flakyWatch(0, waitSample{})
+		polls = new(int)
+		w.poll = func(ctx context.Context, spid int) (waitSample, error) {
+			*polls++
+			return waitSample{}, denial
+		}
+		if err := w.firstPoll(55); err == nil || *polls != 1 || *reconnects != 0 {
+			t.Errorf("firstPoll = %v, polls = %d, reconnects = %d: a denial was retried", err, *polls, *reconnects)
+		}
+	}
+
+	// What the lab answered without VIEW SERVER STATE: 300 then 297, and the
+	// driver reports the last one.
 	w, _, reconnects = flakyWatch(0, waitSample{})
 	polls = new(int)
 	w.poll = func(ctx context.Context, spid int) (waitSample, error) {
 		*polls++
-		return waitSample{}, mssql.Error{Number: 300, Message: "VIEW SERVER STATE permission was denied"}
+		first := mssql.Error{Number: 300, Message: "VIEW SERVER PERFORMANCE STATE permission was denied"}
+		last := mssql.Error{Number: 297, Message: "The user does not have permission to perform this action."}
+		last.All = []mssql.Error{first, last}
+		return waitSample{}, last
 	}
 	if err := w.firstPoll(55); err == nil || *polls != 1 || *reconnects != 0 {
-		t.Errorf("firstPoll = %v, polls = %d, reconnects = %d: a denial was retried", err, *polls, *reconnects)
+		t.Errorf("firstPoll = %v, polls = %d, reconnects = %d: a missing VIEW SERVER STATE was retried", err, *polls, *reconnects)
+	}
+
+	// A server error that is not a refusal is retried like a lost connection.
+	w, _, reconnects = flakyWatch(0, waitSample{})
+	polls = new(int)
+	w.poll = func(ctx context.Context, spid int) (waitSample, error) {
+		*polls++
+		if *polls == 1 {
+			return waitSample{}, mssql.Error{Number: 1205, Message: "chosen as the deadlock victim"}
+		}
+		return waitSample{}, nil
+	}
+	victim := w.poll
+	w.reconnect = func(ctx context.Context) (pollFunc, error) {
+		*reconnects++
+		return victim, nil
+	}
+	if err := w.firstPoll(55); err != nil || *polls != 2 || *reconnects != 1 {
+		t.Errorf("firstPoll = %v, polls = %d, reconnects = %d: a deadlock victim was not retried", err, *polls, *reconnects)
 	}
 }
 

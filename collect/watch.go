@@ -341,10 +341,12 @@ func (w *blockingWatch) retry(spid int, first error) (s waitSample, quiet bool, 
 // firstPoll proves the watch's query runs before anything relies on it, with
 // the same bounded retry as every later poll: a transient failure here would
 // otherwise leave the whole collection unwatched, where the same failure one
-// second later costs a few seconds of it. A server that answered with an error
-// is not retried. That is the DENY on sys.dm_os_waiting_tasks this poll exists
-// to catch, and asking again on a new connection gets the same answer three
-// seconds and three logins later.
+// second later costs a few seconds of it. A permission refusal is not retried.
+// That is the DENY on sys.dm_os_waiting_tasks, or the missing VIEW SERVER
+// STATE, this poll exists to catch, and asking again on a new connection gets
+// the same answer three seconds and three logins later. Any other error the
+// server answers with, a deadlock victim, a resource or throttling error, is
+// retried like a lost connection: it says nothing about tomorrow's poll.
 //
 // A recovery here is not recorded. The manifest's line for one says the
 // collector running then went unwatched, and no collector has started yet.
@@ -354,7 +356,7 @@ func (w *blockingWatch) firstPoll(spid int) error {
 		return nil
 	}
 	var answered mssql.Error
-	if errors.As(err, &answered) {
+	if errors.As(err, &answered) && permissionRefused(answered) {
 		return err
 	}
 	_, _, err = w.retry(spid, err)
@@ -363,6 +365,15 @@ func (w *blockingWatch) firstPoll(spid int) error {
 	w.mu.Unlock()
 	return err
 }
+
+// watchRefusals are the errors the watch's query raises when the login may
+// not read sys.dm_os_waiting_tasks. Measured on SQL Server 2025: without VIEW
+// SERVER STATE the batch fails with 300 then 297, and the driver reports the
+// last of them; with a DENY SELECT on the view it fails with 229. 300 is kept
+// for a server that stops at the first.
+var watchRefusals = map[int32]bool{229: true, 297: true, 300: true}
+
+func permissionRefused(e mssql.Error) bool { return watchRefusals[e.Number] }
 
 // identifyLocked reads one session's identity. It is called with mu held and
 // releases it for the query, which keeps the poll loop's lock discipline
