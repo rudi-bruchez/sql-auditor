@@ -19,6 +19,19 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Added
+
+- `10.system/049.open-transactions.sql`: the transactions open when the run
+  happened, oldest first, with their begin time, whether the session is
+  sleeping and for how long, and the log each holds in the databases it wrote
+  to. No login, host, program or statement text; the session id is kept to
+  join the blocking reports and deadlock graphs. `024.log-stats` could say a
+  log was held by an active transaction and not which one or since when. It
+  starts from the session rather than the request, because the case that
+  matters is a session that went to sleep with its transaction open, which has
+  no request: measured on SQL Server 2025 CU7, such a session holding 677 988
+  bytes of log is listed here as sleeping.
+
 ### Changed
 
 - `80.workload/020.query-store.sql` gives its root the totals of the retained

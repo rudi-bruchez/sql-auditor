@@ -15,6 +15,7 @@
 10.system/046.local-sessions.sql
 10.system/047.resource-pressure.sql
 10.system/048.security-errors.sql
+10.system/049.open-transactions.sql
 10.system/050.tempdb.sql @profiles: space
 10.system/051.version-store.sql @profiles: space
 10.system/052.session-text.sql
