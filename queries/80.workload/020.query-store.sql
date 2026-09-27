@@ -45,6 +45,25 @@
 -- request are not a duplication: the first is what tells an operator whether
 -- the second is worth asking for.
 --
+-- THE ROOT CARRIES THE WINDOW'S TOTALS, and they are not the sum of the rows a
+-- reader might add up. The top 50 is ranked by duration and says nothing about
+-- the share of the whole it represents; a finding that five queries carry half
+-- the CPU needs the denominator, which only this file can compute. The totals
+-- leave out the queries of scalar and multi-statement functions and of
+-- triggers, because each of those is recorded twice: once as its own query and
+-- once inside the statement that called it. Measured on SQL Server 2025 CU7,
+-- 27 September 2026: a scalar function whose body runs a query, called 300
+-- times from one SELECT, gave the caller 4 179 ms of CPU and the function's
+-- query 4 120 ms; an AFTER INSERT trigger gave the INSERT 741 ms and the
+-- trigger's own statement 616 ms. What was left out is projected beside the
+-- totals, so the reader can see how much it was.
+--
+-- counts.query_hashes beside counts.queries says how scattered the workload
+-- is. A statement sent with literals instead of parameters becomes one
+-- query_id per distinct literal and one query_hash for all of them, so a ratio
+-- far below one is the ad hoc workload the plan cache topics describe, visible
+-- here without reading a single text.
+--
 -- NO JUDGEMENT IS APPLIED. Nothing here is labelled a regression: comparing
 -- two intervals and deciding a plan got worse is analysis, and it needs the
 -- deployment calendar to be worth anything.
@@ -72,14 +91,40 @@ SELECT DB_NAME()                                                  AS [database],
        o.current_storage_size_mb                                  AS [config.storage_used_mb],
        o.max_storage_size_mb                                      AS [config.storage_max_mb],
        (SELECT COUNT(*) FROM sys.query_store_query)               AS [counts.queries],
+       (SELECT COUNT(DISTINCT query_hash) FROM sys.query_store_query) AS [counts.query_hashes],
        (SELECT COUNT(*) FROM sys.query_store_plan)                AS [counts.plans],
        (SELECT COUNT(*) FROM sys.query_store_plan WHERE is_forced_plan = 1) AS [counts.forced_plans],
        (SELECT COUNT(*) FROM sys.query_store_runtime_stats)       AS [counts.runtime_stat_rows],
        (SELECT MIN(i.start_time) FROM sys.query_store_runtime_stats_interval AS i) AS [window.oldest_interval],
        (SELECT MAX(i.end_time)   FROM sys.query_store_runtime_stats_interval AS i) AS [window.newest_interval],
        (SELECT COUNT(*) FROM sys.query_store_runtime_stats_interval)               AS [window.intervals],
+       tot.executions                                             AS [totals.executions],
+       CAST(tot.duration_us / 1000.0 AS DECIMAL(18,1))            AS [totals.duration_ms],
+       CAST(tot.cpu_us / 1000.0 AS DECIMAL(18,1))                 AS [totals.cpu_ms],
+       tot.logical_reads                                          AS [totals.logical_reads],
+       tot.nested_queries                                         AS [totals.excluded.nested_queries],
+       CAST(tot.nested_cpu_us / 1000.0 AS DECIMAL(18,1))          AS [totals.excluded.nested_cpu_ms],
        50                                                         AS [listing_cap]
 FROM sys.database_query_store_options AS o
+OUTER APPLY (
+    -- Nested means run from inside another statement that is recorded too:
+    -- scalar and table-valued multi-statement functions, and triggers. See the
+    -- header for the measurement.
+    SELECT SUM(CASE WHEN n.nested = 0 THEN rs.count_executions END)                    AS executions,
+           SUM(CASE WHEN n.nested = 0 THEN rs.avg_duration * rs.count_executions END)  AS duration_us,
+           SUM(CASE WHEN n.nested = 0 THEN rs.avg_cpu_time * rs.count_executions END)  AS cpu_us,
+           SUM(CASE WHEN n.nested = 0
+                    THEN CAST(rs.avg_logical_io_reads * rs.count_executions AS bigint) END) AS logical_reads,
+           COUNT(DISTINCT CASE WHEN n.nested = 1 THEN q.query_id END)                  AS nested_queries,
+           SUM(CASE WHEN n.nested = 1 THEN rs.avg_cpu_time * rs.count_executions END)  AS nested_cpu_us
+    FROM       sys.query_store_query         AS q
+    JOIN       sys.query_store_plan          AS p  ON p.query_id = q.query_id
+    JOIN       sys.query_store_runtime_stats AS rs ON rs.plan_id = p.plan_id
+    CROSS APPLY (SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.objects AS ob
+                                          WHERE ob.object_id = q.object_id
+                                            AND ob.type IN ('FN', 'TF', 'TR'))
+                             THEN 1 ELSE 0 END AS nested) AS n
+) AS tot
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* Aggregated across every interval the store still holds, so the ranking is

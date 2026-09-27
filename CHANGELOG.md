@@ -21,6 +21,18 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Changed
 
+- `80.workload/020.query-store.sql` gives its root the totals of the retained
+  window (`totals.executions`, `duration_ms`, `cpu_ms`, `logical_reads`) and
+  `counts.query_hashes` beside `counts.queries`. The top 50 is ranked by
+  duration and had no denominator, so no share of the workload could be drawn
+  from it. The totals leave out the queries of scalar and multi-statement
+  functions and of triggers, and say how much that was under
+  `totals.excluded`: each of them is recorded both as its own query and inside
+  the statement that ran it. Measured on SQL Server 2025 CU7, a function's
+  query at 4 120 ms of CPU inside a caller at 4 179, a trigger's at 616 inside
+  an INSERT at 741. On the lab database the naive sum of the top queries came
+  to 4 231 ms against 2 188 for the corrected total. Thirty statements sent
+  with literals gave 40 query ids for 11 query hashes.
 - `10.system/063.blocked-process-reports.sql` reads the fields that place a
   report in a blocking episode out of EVERY report in the capture, and the index
   gains `episodes[]`: blocked session and ownerId, blocking session, wait
