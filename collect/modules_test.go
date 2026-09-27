@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // moduleSets builds what 70.schema/080.modules.sql returns for one database:
@@ -97,6 +98,62 @@ func TestModuleWriterLaysOutOneDirectoryPerDatabase(t *testing.T) {
 	if res.PlanFiles != 0 || res.TextFiles != 0 {
 		t.Errorf("PlanFiles = %d, TextFiles = %d, want 0 and 0: those latch a different disclosure",
 			res.PlanFiles, res.TextFiles)
+	}
+}
+
+// The attributes the SQL projects beside the text reach the index. They were
+// all dropped until 27 September 2026, execute_as among them, so an archive
+// could not say which procedures run as their owner. A NULL stays a key with a
+// null value: absent would read like an archive from before the fix.
+func TestModuleWriterKeepsWhatTheModuleIs(t *testing.T) {
+	sets := moduleSets()
+	sets[1].Set = ResultSet{
+		Columns: []string{"schema", "name", "type", "definition", "definition_bytes",
+			"is_encrypted", "module.rank", "module.count", "create_date", "modify_date",
+			"uses_ansi_nulls", "uses_quoted_identifier", "is_schema_bound", "is_recompiled",
+			"execute_as"},
+		Types: []string{"NVARCHAR", "NVARCHAR", "NVARCHAR", "NVARCHAR", "BIGINT",
+			"INT", "BIGINT", "BIGINT", "DATETIME", "DATETIME",
+			"INT", "INT", "INT", "INT", "NVARCHAR"},
+		Rows: [][]any{
+			{"dbo", "p_owner", "SQL_STORED_PROCEDURE", "CREATE PROCEDURE p_owner WITH EXECUTE AS OWNER AS SELECT 1", int64(60),
+				int64(0), int64(1), int64(2), time.Date(2026, 9, 1, 8, 30, 0, 0, time.UTC), time.Date(2026, 9, 20, 17, 5, 9, 0, time.UTC),
+				int64(1), int64(0), int64(0), int64(1), "OWNER"},
+			{"dbo", "p_caller", "SQL_STORED_PROCEDURE", "CREATE PROCEDURE p_caller AS SELECT 1", int64(37),
+				int64(0), int64(2), int64(2), nil, nil, int64(1), int64(1), int64(0), int64(0), nil},
+		},
+	}
+	root, rel, _, _ := runModuleWriter(t, sets, maxRunBytes)
+	raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel), "_index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx struct {
+		Modules []map[string]json.RawMessage `json:"modules"`
+	}
+	if err := json.Unmarshal(raw, &idx); err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.Modules) != 2 {
+		t.Fatalf("modules = %d, want 2", len(idx.Modules))
+	}
+	want := []map[string]string{
+		{"execute_as": `"OWNER"`, "modify_date": `"2026-09-20T17:05:09"`, "is_recompiled": "1",
+			"uses_quoted_identifier": "0", "create_date": `"2026-09-01T08:30:00"`},
+		{"execute_as": "null", "modify_date": "null", "is_recompiled": "0",
+			"uses_ansi_nulls": "1", "is_schema_bound": "0"},
+	}
+	for i, fields := range want {
+		for k, v := range fields {
+			got, ok := idx.Modules[i][k]
+			if !ok {
+				t.Errorf("module %d: key %q absent from the index", i, k)
+				continue
+			}
+			if string(got) != v {
+				t.Errorf("module %d: %s = %s, want %s", i, k, got, v)
+			}
+		}
 	}
 }
 

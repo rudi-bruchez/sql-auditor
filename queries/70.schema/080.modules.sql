@@ -120,8 +120,15 @@ SELECT SCHEMA_NAME(o.schema_id)                                   AS [schema],
        CAST(m.is_schema_bound AS int)                             AS [is_schema_bound],
        CAST(m.is_recompiled AS int)                               AS [is_recompiled],
        /* WITH EXECUTE AS changes who the module's statements run as, which is a
-          privilege question an audit asks and which no other collector reports. */
-       USER_NAME(m.execute_as_principal_id)                       AS [execute_as]
+          privilege question an audit asks and which no other collector reports.
+
+          OWNER IS STORED AS -2, AND USER_NAME(-2) IS NULL. This column used to
+          be USER_NAME alone, so the most consequential case, a module that
+          runs as its owner, came out NULL exactly like a module with no
+          EXECUTE AS at all. Measured on 17.0.4065.4. SELF stores the creator's
+          id and resolves to a name like any named principal. */
+       CASE WHEN m.execute_as_principal_id = -2 THEN N'OWNER'
+            ELSE USER_NAME(m.execute_as_principal_id) END         AS [execute_as]
 FROM       sys.sql_modules AS m
 JOIN       sys.objects     AS o ON o.object_id = m.object_id
 JOIN       ranked          AS r ON r.object_id = m.object_id

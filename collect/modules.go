@@ -72,6 +72,21 @@ type indexedModule struct {
 	// omissions under the same schema and name — never inferred from the empty
 	// string, which cannot say which of four different things happened.
 	File string `json:"file,omitempty"`
+
+	// What the module is besides its text. The SQL has projected all of these
+	// since the collector was written, and until 27 September 2026 this writer
+	// dropped every one of them, while the comment on maxModules promised the
+	// dates. They are never omitted, a NULL included: an archive written before
+	// that day has no key at all, and "no EXECUTE AS" must not read the same as
+	// "not collected". ExecuteAs is "OWNER", a principal name, or null for the
+	// caller's own context.
+	CreateDate           json.RawMessage `json:"create_date"`
+	ModifyDate           json.RawMessage `json:"modify_date"`
+	UsesAnsiNulls        json.RawMessage `json:"uses_ansi_nulls"`
+	UsesQuotedIdentifier json.RawMessage `json:"uses_quoted_identifier"`
+	IsSchemaBound        json.RawMessage `json:"is_schema_bound"`
+	IsRecompiled         json.RawMessage `json:"is_recompiled"`
+	ExecuteAs            json.RawMessage `json:"execute_as"`
 }
 
 // moduleOmission is one definition the archive does not contain, and why.
@@ -153,6 +168,17 @@ func writeObjectDefinitions(req WriteRequest) (WriteResult, error) {
 		def, present := stringAt(modules, r, "definition")
 
 		entry := indexedModule{Schema: schema, Name: name, Type: typeDesc, Rank: rank, Bytes: size}
+		attr := func(col string) json.RawMessage {
+			if raw := encodedAt(modules, r, col, req.Warn); raw != nil {
+				return raw
+			}
+			return json.RawMessage("null")
+		}
+		entry.CreateDate, entry.ModifyDate = attr("create_date"), attr("modify_date")
+		entry.UsesAnsiNulls = attr("uses_ansi_nulls")
+		entry.UsesQuotedIdentifier = attr("uses_quoted_identifier")
+		entry.IsSchemaBound, entry.IsRecompiled = attr("is_schema_bound"), attr("is_recompiled")
+		entry.ExecuteAs = attr("execute_as")
 		file := moduleFileName(schema, name, used)
 
 		// FOUR reasons a definition is absent, and they are tested in this
