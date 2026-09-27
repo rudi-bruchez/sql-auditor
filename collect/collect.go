@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -471,7 +472,8 @@ func manifestInZip(path string) ([]byte, error) {
 
 // scopeLost names what prev collected that cur did not: an opt-in prev had
 // on and cur had off, every collector outside cur's profile when prev had
-// none or another, and each database prev read and cur did not. Empty means
+// none or another, a setting that let prev run more or return more
+// (settingsLost), and each database prev read and cur did not. Empty means
 // cur covers prev, and prev can go.
 //
 // A set comparison rather than a count: a run over two other databases than
@@ -494,6 +496,7 @@ func scopeLost(prev, cur runScope) []string {
 	if cur.Profile.Name != "" && prev.Profile.Name != cur.Profile.Name {
 		lost = append(lost, "the collectors outside --profile "+cur.Profile.Name)
 	}
+	lost = append(lost, settingsLost(prev.Config, cur.Config)...)
 	read := map[string]bool{}
 	for _, d := range cur.Targets.Databases {
 		read[d.Name] = true
@@ -504,6 +507,85 @@ func scopeLost(prev, cur runScope) []string {
 		}
 	}
 	return lost
+}
+
+// settingsLost names what the settings with a value, rather than an on/off
+// opt-in, let prev collect and cur not. They decide which units run and how
+// much each one returns, and none of them shows in the targets: the Query Store
+// units a QUERY_STORE_DB_INCLUDE drops are removed after the databases are
+// recorded, so two runs with identical targets.databases can differ by every
+// Query Store file. Where a comparison is not obvious, a difference counts as
+// a loss. Keeping a run that could have gone costs disk; deleting one that
+// held more costs a day's snapshot.
+//
+// A sliding window is compared by its length. A rerun of QUERY_STORE_DAYS=7 in
+// the afternoon starts a few hours after the morning's did, and treating those
+// hours as lost would keep every same-day run, which is --keep by another name.
+// A window with a typed bound is compared by its resolved instants.
+func settingsLost(prev, cur map[string]string) []string {
+	var lost []string
+	if prev["queries_dir"] != cur["queries_dir"] {
+		lost = append(lost, "the collectors of "+corpusName(prev["queries_dir"]))
+	}
+	if p, c := prev["query_store_db_include"], cur["query_store_db_include"]; c != "" && p != c {
+		// An empty value reads every collected database, so only a
+		// non-empty one on this run can narrow. Two different pattern lists
+		// are not compared by what they match: that depends on databases
+		// neither manifest lists.
+		lost = append(lost, "the Query Store databases outside QUERY_STORE_DB_INCLUDE="+c)
+	}
+	if countLost(prev["query_store_top"], cur["query_store_top"]) {
+		lost = append(lost, "the Query Store queries ranked past QUERY_STORE_TOP="+cur["query_store_top"])
+	}
+	if windowLost(prev, cur) {
+		lost = append(lost, "the Query Store window "+prev["query_store_from"]+" to "+prev["query_store_to"])
+	}
+	if p := prev["query_store_compare_at"]; p != "" && cur["query_store_compare_at"] != p {
+		lost = append(lost, "the Query Store comparison around "+p)
+	}
+	return lost
+}
+
+func corpusName(dir string) string {
+	if dir == "" {
+		return "the embedded corpus"
+	}
+	return "QUERIES_DIR " + dir
+}
+
+// countLost reports whether cur is a smaller count than prev. A prev that is
+// not a number is an older manifest with nothing to compare; a cur that is not
+// one cannot be shown to cover it.
+func countLost(prev, cur string) bool {
+	p, err := strconv.Atoi(prev)
+	if err != nil {
+		return false
+	}
+	c, err := strconv.Atoi(cur)
+	return err != nil || c < p
+}
+
+// windowLost reports whether cur's Query Store window leaves out part of
+// prev's. A prev window that was not resolved read nothing, so nothing of it
+// can be lost.
+func windowLost(prev, cur map[string]string) bool {
+	pFrom, err1 := time.Parse(time.RFC3339, prev["query_store_from"])
+	pTo, err2 := time.Parse(time.RFC3339, prev["query_store_to"])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	sliding := func(c map[string]string) bool {
+		return c["query_store_from_requested"] == "" && c["query_store_to_requested"] == ""
+	}
+	if sliding(prev) && sliding(cur) {
+		return countLost(prev["query_store_days"], cur["query_store_days"])
+	}
+	cFrom, err1 := time.Parse(time.RFC3339, cur["query_store_from"])
+	cTo, err2 := time.Parse(time.RFC3339, cur["query_store_to"])
+	if err1 != nil || err2 != nil {
+		return true
+	}
+	return cFrom.After(pFrom) || cTo.Before(pTo)
 }
 
 // previousRunLost is why a run that completed must still keep the run it

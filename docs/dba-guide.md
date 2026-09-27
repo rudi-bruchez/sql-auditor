@@ -567,8 +567,11 @@ Two things worth knowing:
 
   A rerun that completes still keeps the earlier run when it collected less:
   an option the earlier run had on and this one had off, a `--profile` the
-  earlier run did not use, or a database the earlier run read and this one
-  did not. Both runs' `_run.json` say what they covered, and a plain afternoon
+  earlier run did not use, a database the earlier run read and this one
+  did not, or a setting that lets fewer units run or return less: another
+  `QUERIES_DIR`, a `QUERY_STORE_DB_INCLUDE` this run set or changed, a lower
+  `QUERY_STORE_TOP`, a shorter `QUERY_STORE_DAYS`, a typed window that does
+  not cover the earlier one, or another comparison point. Both runs' `_run.json` say what they covered, and a plain afternoon
   `collect` does not delete the morning's `collect --all`. The collection
   names what was missing, on screen and in the manifest's warnings. If you
   find a `.superseded-` run lying around, either a run died or the one after

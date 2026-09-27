@@ -186,3 +186,59 @@ func TestAnUnreadablePreviousRunIsKept(t *testing.T) {
 		t.Errorf("with nothing set aside, previousRunLost = %q", why)
 	}
 }
+
+// Codex review: the settings with a value decide which units run and how much
+// they return without changing targets.databases, since queryStoreUnits drops
+// the Query Store units after the targets are recorded. A rerun that narrowed
+// one of them collected less.
+func TestARerunWithNarrowerSettingsKeepsThePreviousRun(t *testing.T) {
+	with := func(kv ...string) *Manifest {
+		m := scopeManifest("", nil, "SALESDB")
+		m.Config["query_store_days"] = "7"
+		m.Config["query_store_top"] = "50"
+		m.Config["query_store_from"] = "2026-09-20T09:00:00+02:00"
+		m.Config["query_store_to"] = "2026-09-27T09:00:00+02:00"
+		for i := 0; i < len(kv); i += 2 {
+			m.Config[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	// An afternoon rerun of the same sliding window.
+	later := []string{"query_store_from", "2026-09-20T15:00:00+02:00", "query_store_to", "2026-09-27T15:00:00+02:00"}
+	cases := []struct {
+		name      string
+		prev, cur *Manifest
+		lost      string // "" means the previous run may go
+	}{
+		{"same settings, later", with(), with(later...), ""},
+		{"QUERY_STORE_DB_INCLUDE set", with(), with("query_store_db_include", "SALES*"), "QUERY_STORE_DB_INCLUDE=SALES*"},
+		{"QUERY_STORE_DB_INCLUDE changed", with("query_store_db_include", "HR*"),
+			with("query_store_db_include", "SALES*"), "QUERY_STORE_DB_INCLUDE=SALES*"},
+		{"QUERY_STORE_DB_INCLUDE cleared", with("query_store_db_include", "HR*"), with(), ""},
+		{"QUERY_STORE_TOP lowered", with(), with("query_store_top", "20"), "QUERY_STORE_TOP=20"},
+		{"QUERY_STORE_TOP raised", with(), with("query_store_top", "200"), ""},
+		{"shorter sliding window", with(), with(append(later, "query_store_days", "3")...), "Query Store window"},
+		{"longer sliding window", with(), with(append(later, "query_store_days", "30")...), ""},
+		{"typed window inside the previous one", with(),
+			with("query_store_days", "0", "query_store_from_requested", "2026-09-26 14:00",
+				"query_store_from", "2026-09-26T14:00:00+02:00", "query_store_to", "2026-09-27T15:00:00+02:00"),
+			"Query Store window 2026-09-20T09:00:00+02:00"},
+		{"typed window covering the previous one", with(),
+			with("query_store_days", "0", "query_store_from_requested", "2026-09-01 00:00",
+				"query_store_from", "2026-09-01T00:00:00+02:00", "query_store_to", "2026-09-27T15:00:00+02:00"), ""},
+		{"previous window not resolved", with("query_store_from", "not resolved", "query_store_to", "not resolved"),
+			with("query_store_days", "1"), ""},
+		{"other queries_dir", with(), with("queries_dir", "/srv/corpus"), "the embedded corpus"},
+		{"other comparison point", with("query_store_compare_at", "2026-09-25T10:00:00+02:00/2026-09-25T11:00:00+02:00"),
+			with(), "comparison around 2026-09-25T10:00"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			aside := writeSetAside(t, c.prev, true, true)
+			why := previousRunLost(aside, c.cur)
+			if (why == "") != (c.lost == "") || !strings.Contains(why, c.lost) {
+				t.Errorf("previousRunLost = %q, want a reason naming %q", why, c.lost)
+			}
+		})
+	}
+}
