@@ -19,6 +19,20 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-09-27
+
+This release finishes the harm review of 27 September 2026 and makes the
+collector cheaper and harder to mislead on the instance it audits. The heap
+scan has a page budget, the physical reads skip a locked table instead of
+losing the list, the error log is measured before it is copied into tempdb,
+and every collector's temporary tables go when it does. A same-day rerun no
+longer deletes a wider run, and the blocking watch retries before it gives up.
+The plan search reads plans as text under a binary collation, about four times
+cheaper for the same matches. On the reading side: every statistic without a
+cap, Query Store queries folded by hash, connections counted per application
+against the client pool size, connection failures counted in the error log on
+a localised instance too, and the database principals of master and msdb.
+
 ### Added
 
 - `70.schema/090.statistics` emits `statistics_all`, one short row per statistic on every user table with no cap, so redundancy and staleness counts are no longer floors on wide schemas. The capped `statistics` detail is unchanged.
@@ -50,11 +64,13 @@ release workflow refuses a tag that disagrees with either this file or
 - README, the guide and `--help` said `--all` turns on ten options; it turns on eleven. The guide no longer says the 256 MB budget protects the disk.
 - The headers of 020 and 023 no longer claim that 500 characters are too few to rebuild a payload. `docs/dba-guide.md` lists which default collectors keep statement text and says a password written in one can reach the archive.
 - The `70.schema/090.statistics` header claimed the stats properties DMF returns no row for a never-populated statistic; on SQL Server 2025 it returns a row of NULLs.
-- A same-day rerun that narrowed QUERY_STORE_DB_INCLUDE, lowered QUERY_STORE_TOP, shortened the Query Store window, changed the comparison point or used another QUERIES_DIR now keeps the earlier run instead of replacing it.
+- A same-day rerun that narrowed QUERY_STORE_DB_INCLUDE, lowered QUERY_STORE_TOP, shortened the Query Store window or changed the comparison point now keeps the earlier run instead of replacing it.
+- A same-day rerun also keeps the earlier run when it did not plan a collector the earlier one ran, on any database both read. The comparison reads the collectors each run recorded rather than trusting `QUERIES_DIR`, which let a narrower corpus under the same setting, or a new binary with another embedded corpus, delete a wider run.
 - The blocking watch's first poll is retried on a new connection like later polls, so a transient failure at start no longer leaves the whole collection unwatched; a server's refusal still turns the watch off at once.
+- The blocking watch's first poll retries a transient server error (deadlock victim, resource, throttling) instead of turning the watch off for the whole collection; only permission refusals (229, 297, 300) stop it at once.
 - Each blocking watch reconnect is bounded to 3 seconds whatever SQL_CONNECT_TIMEOUT_SEC says, even against a server that accepts the connection and never answers; a collector is unwatched for 20.5 seconds at worst during a retry, down from about a minute.
 - The archive is no longer written through a symbolic link at its name in OUTPUT_DIR; a name already taken at archive time stops the archive and the run folder is kept.
-- A server whose SERVERPROPERTY('ServerName') is NULL is filed under the SQL_SERVER address, plus SQL_DATABASE when it is not master, instead of `_`, so two such targets collected the same day no longer replace each other.
+- A server whose SERVERPROPERTY('ServerName') is NULL is filed under the SQL_SERVER address, plus SQL_DATABASE when it is not master, instead of `_`, with a short hash of the address when it holds characters a folder name cannot, so two such targets collected the same day (`SQL01\PROD` and `SQL01_PROD` among them) no longer replace each other.
 - The page density header, the README and the guide state both lab measurements of what SAMPLED reads from a large allocation unit (about 1 percent, and 8 to 12 percent), and plan with the higher one.
 
 ## [0.35.0] - 2026-09-27
