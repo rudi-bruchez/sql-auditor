@@ -175,10 +175,10 @@ type blockingWatch struct {
 func newBlockingWatch(poll pollFunc, every, after time.Duration) *blockingWatch {
 	return &blockingWatch{poll: poll, every: every, after: after, deadline: watchPollDeadline,
 		identifyMax: watchIdentifyPerUnit,
-		retries:     watchRetries, backoff: watchRetryBackoff,
-		reconnectTimeout: watchPollDeadline, parent: context.Background(),
 		waiters:     map[int]waiterRecord{},
-		quit:        make(chan struct{}), done: make(chan struct{})}
+		quit:        make(chan struct{}), done: make(chan struct{}),
+		retries: watchRetries, backoff: watchRetryBackoff,
+		parent: context.Background(), reconnectTimeout: watchPollDeadline}
 }
 
 func (w *blockingWatch) start() { go w.loop() }
