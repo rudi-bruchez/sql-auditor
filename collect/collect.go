@@ -1915,6 +1915,14 @@ func Run(ctx context.Context, o Options) (int, error) {
 		o.Debugf("  %s on %s took %s, wrote %d byte(s)%s",
 			s.Path, target.Name, took.Round(time.Millisecond), wrote, failureNote(report))
 		if err == nil {
+			if conn, spid, err = recycleConn(ctx, db, conn, o.Config); err != nil {
+				if stopRequested(ctx, m) {
+					break
+				}
+				err = fmt.Errorf("session reset after %s failed: %w", s.Path, err)
+				m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+				return finishWith(runFolder, 1, err)
+			}
 			continue
 		}
 		if cancelled {
@@ -1961,6 +1969,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 			// A new connection is a new session: watching the old id would
 			// watch nothing. Zero, if it cannot be read, matches no waiter.
 			spid, _ = sessionID(ctx, conn, o.Config)
+		} else if conn, spid, err = recycleConn(ctx, db, conn, o.Config); err != nil {
+			if stopRequested(ctx, m) {
+				break
+			}
+			err = fmt.Errorf("session reset after %s failed: %w", s.Path, err)
+			m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
+			return finishWith(runFolder, 1, err)
 		}
 	}
 
@@ -2309,6 +2324,40 @@ func resetWithDeadline(ctx context.Context, c *sql.Conn, cfg *Config) error {
 	dctx, cancel := deadline(ctx, cfg)
 	defer cancel()
 	return ResetSession(dctx, c, cfg.Database)
+}
+
+// recycleConn hands the collection connection back to the pool and takes it
+// out again, which is what makes the next batch reset the session on the
+// server, as sp_reset_connection does for any pooled connection: temporary
+// tables dropped, the transaction rolled back, SET options and the database
+// back to what the login asked for.
+//
+// The run holds one connection from start to finish, so without this a
+// collector's #temp tables lived in tempdb until the end of the run. The
+// error log collector copies the whole current log into #log and never drops
+// it, and a collector that fails halfway cannot drop anything. ResetSession's
+// ROLLBACK and USE reset neither. Measured on SQL Server 2025: a #table left by
+// a successful unit and by one ended by error 245 were both still in tempdb
+// on the next unit. A unit cut off by its deadline was not, because the driver
+// closes a connection whose query it had to cancel, and the reconnect that
+// follows is a new session.
+//
+// The pool holds one connection, so this is the same session unless the
+// driver had marked it bad, and the reset costs nothing on the wire: database/
+// sql calls the driver's ResetSession, which sets a flag on the next packet.
+// That next packet is the @@SPID read, whose answer the blocking watch needs
+// when the pool did have to open a new connection.
+func recycleConn(ctx context.Context, db *sql.DB, conn *sql.Conn, cfg *Config) (*sql.Conn, int, error) {
+	conn.Close()
+	fresh, err := db.Conn(ctx)
+	if err != nil {
+		return conn, 0, err
+	}
+	spid, err := sessionID(ctx, fresh, cfg)
+	if err != nil {
+		return fresh, 0, err
+	}
+	return fresh, spid, nil
 }
 
 // connAlive distinguishes a dead connection from a query that merely failed.

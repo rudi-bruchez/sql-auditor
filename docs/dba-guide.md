@@ -644,24 +644,21 @@ of each database, LOB pages included. It is what tells a space question whether
 a rebuild would give anything back, and it is the operator's decision per
 instance.
 
-### Three limits that are known and not fixed
+A collector's `#temp` tables do not outlive it. The run holds one connection
+from start to finish, and after every collector, whether it succeeded or not,
+it hands that connection back to the pool and takes it out again: the next
+request carries the reset flag a pooled connection always carries, and SQL
+Server drops the session's temporary tables as `sp_reset_connection` does. It
+is the same session, not a reconnect, and costs one round trip. Before this,
+`10.system/040.error-log.sql` left its copy of the whole current error log in
+`#log` for the rest of every collection, and a collector that failed halfway
+left whatever it had built.
+
+### Limits that are known and not fixed
 
 Named here because a limit an operator can plan around is worth more than a
 limit nobody wrote down. Each was raised in the adversarial harm review of
 4 September 2026 and each was left alone on purpose.
-
-**A collector that fails keeps its temporary tables for the rest of the run.**
-The run holds one connection. `ResetSession` rolls back a leaked transaction
-and returns to the default database between units, and the connection is only
-replaced when it is *dead* — so a collector that fails on its own merits, a
-timeout or a missing permission, leaves its `#temp` tables in tempdb until the
-run ends. `10.system/040.error-log.sql` is the one that matters: it copies the
-whole current error log into `#log` before summarising it, so a timeout there
-can park hundreds of megabytes of tempdb for the rest of the collection.
-Recycling the connection after every failed unit would fix it and would also
-make every ordinary permission refusal cost a reconnect, which is the trade
-that has not been made. If it bites, the run is bounded: tempdb is released
-when the tool exits.
 
 **Result sets are materialised in memory before the size budget is consulted.**
 The 256 MB run budget protects the disk and never the RAM of the machine the
