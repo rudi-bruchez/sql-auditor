@@ -2,6 +2,7 @@ package collect
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -37,8 +38,23 @@ func Zip(runFolder, destZip string) (err error) {
 	// OpenFile rather than Create: Create is 0666 before umask and takes no
 	// argument to say otherwise, and this file is the whole run in the form
 	// that gets mailed onward.
-	out, err := os.OpenFile(destZip, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, filePerm)
+	//
+	// O_EXCL rather than O_TRUNC, because the archive sits directly in
+	// OUTPUT_DIR, and that directory may be shared. O_TRUNC follows a
+	// symbolic link: another account able to create a file there could put a
+	// link at the archive's name, dangling or not, and the run would truncate
+	// or create whatever file the link names with the operator's rights. O_EXCL
+	// refuses any existing name, a link included, without following it. Nothing
+	// legitimate is there by now: prepareRunFolder has set the previous archive
+	// aside, and --keep picked a free name, so what occupies the name appeared
+	// during the run and the right answer is to leave it alone. The run folder
+	// is still intact and readable when this refuses.
+	out, err := os.OpenFile(destZip, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm)
 	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("%s appeared during the run; not writing the archive through it. "+
+				"The results are in %s", destZip, runFolder)
+		}
 		return err
 	}
 	defer func() {

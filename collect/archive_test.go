@@ -284,3 +284,57 @@ func TestTheLockIsNotInsideTheArchive(t *testing.T) {
 		}
 	}
 }
+
+// The archive lands directly in OUTPUT_DIR, which may be shared. A link another
+// account left at the archive's name must not be written through: O_TRUNC
+// followed it and truncated whatever file it named, or created the file a
+// dangling link pointed at, with the operator's rights.
+func TestZipRefusesToWriteThroughASymlink(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sentinel bool // whether the link target exists before the run
+	}{
+		{"existing target", true},
+		{"dangling link", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			run := filepath.Join(dir, "run")
+			if err := os.MkdirAll(run, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(run, "_run.json"), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(dir, "operator-owned.txt")
+			const body = "do not touch"
+			if tc.sentinel {
+				if err := os.WriteFile(target, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dest := filepath.Join(dir, "run.zip")
+			if err := os.Symlink(target, dest); err != nil {
+				t.Skipf("cannot create a symlink here: %v", err)
+			}
+			if err := Zip(run, dest); err == nil {
+				t.Fatal("Zip wrote through a symlink at the archive's name")
+			}
+			got, err := os.ReadFile(target)
+			switch {
+			case tc.sentinel && err != nil:
+				t.Fatalf("sentinel gone: %v", err)
+			case tc.sentinel && string(got) != body:
+				t.Fatalf("sentinel changed to %q", got)
+			case !tc.sentinel && !os.IsNotExist(err):
+				t.Fatalf("the dangling link's target was created (err = %v)", err)
+			}
+			if fi, err := os.Lstat(dest); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("the link at the archive's name was removed or replaced (err = %v)", err)
+			}
+			if _, err := os.Stat(filepath.Join(run, "_run.json")); err != nil {
+				t.Errorf("run folder damaged: %v", err)
+			}
+		})
+	}
+}
