@@ -105,6 +105,32 @@ func ResolveDatabaseFolders(names []string) []DatabaseFolder {
 	return out
 }
 
+// RunServerName is the server name a run is filed under: what the server calls
+// itself, and the address the operator connected to when it will not say.
+//
+// SERVERPROPERTY('ServerName') comes back NULL on some Azure and contained
+// configurations, Probe turns that into "", and SafeFolderName turns "" into
+// "_". Every such target then ran as "_-<date>", so collecting two of them on
+// the same day set the first one's folder and archive aside as the previous
+// run of the same server and, once the second completed, deleted them. The
+// address is stable from one day to the next, which the same-day replacement
+// needs, and differs between targets, which is what the "_" lacked. The
+// database is added when one was named, because contained databases on one
+// logical server share its address.
+//
+// Both the run and the wizard call this, and the wizard only predicts the
+// run's folder correctly as long as they do.
+func RunServerName(probed string, cfg *Config) string {
+	if strings.TrimSpace(probed) != "" || cfg == nil {
+		return probed
+	}
+	name := cfg.Server
+	if cfg.Database != "" && !strings.EqualFold(cfg.Database, "master") {
+		name += "_" + cfg.Database
+	}
+	return name
+}
+
 func RunFolderName(server, profile string, t time.Time) string {
 	name := fmt.Sprintf("%s-%s", SafeFolderName(server), t.Format("2006-01-02"))
 	if profile != "" {

@@ -567,11 +567,13 @@ func (s State) writeGrantScript(outputDir, tool string, now time.Time) State {
 // collision prompt never appears and prepareRunFolder replaces the previous
 // run's folder and archive unannounced, and the final screen looks for the
 // archive where there is none and reports that no archive was produced.
+// The typed address is used only when the server returns no name at all, and
+// then by both sides through collect.RunServerName.
 //
 // keep is taken from the resolved Options because RunFolderFor's answer
 // depends on it: under --keep it suffixes until it finds a free name.
 func runFolderFor(s State, o collect.Options) string {
-	return collect.RunFolderFor(o.Config.OutputDir, s.Verify.Server.Name, s.Profile, o.Now, o.Keep)
+	return collect.RunFolderFor(o.Config.OutputDir, collect.RunServerName(s.Verify.Server.Name, o.Config), s.Profile, o.Now, o.Keep)
 }
 
 // collisionFor names what an earlier run of the same day already occupies, or

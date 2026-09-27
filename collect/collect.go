@@ -1944,7 +1944,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// collision, or a path the process may not create — so it exits 2 like the
 	// other configuration refusals rather than 1, which claims the instance was
 	// unreachable when it has in fact just been read successfully.
-	runFolder := RunFolderFor(o.Config.OutputDir, si.Name, o.Profile, o.Now, o.Keep)
+	runFolder := RunFolderFor(o.Config.OutputDir, RunServerName(si.Name, o.Config), o.Profile, o.Now, o.Keep)
 	// Before prepareRunFolder, because prepareRunFolder is where the previous
 	// run gets renamed aside: two runs reaching that together is exactly the
 	// collision the lock exists to stop.

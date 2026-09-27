@@ -184,3 +184,35 @@ func TestSafeForTerminalNeutralisesEscapes(t *testing.T) {
 		t.Errorf("rune count changed: %d in, %d out", len([]rune(in)), got)
 	}
 }
+
+// A server that will not say its name used to be filed as "_", so two such
+// targets collected on the same day were one run folder, and the second
+// replaced the first. The fallback must be distinct per target and stable per
+// target, and must not touch a server that did name itself.
+func TestRunServerNameFallsBackToTheAddress(t *testing.T) {
+	day := time.Date(2026, 9, 27, 9, 0, 0, 0, time.UTC)
+	a := &Config{Server: "sql01.example.com", Database: "master"}
+	b := &Config{Server: "sql02.example.com", Database: "master"}
+	c := &Config{Server: "sql01.example.com", Database: "SALESDB"}
+
+	if got := RunServerName(`SQL01\PROD`, a); got != `SQL01\PROD` {
+		t.Errorf("a named server was renamed to %q", got)
+	}
+	folders := map[string]string{}
+	for label, cfg := range map[string]*Config{"a": a, "b": b, "c": c} {
+		f := RunFolderName(RunServerName("", cfg), "", day)
+		if f == RunFolderName("", "", day) {
+			t.Errorf("%s: nameless server still filed as %q", label, f)
+		}
+		if prev, ok := folders[f]; ok {
+			t.Errorf("%s and %s share the run folder %q", prev, label, f)
+		}
+		folders[f] = label
+		if again := RunFolderName(RunServerName("", cfg), "", day); again != f {
+			t.Errorf("%s: fallback not stable: %q then %q", label, f, again)
+		}
+	}
+	if got := RunFolderName(RunServerName("", c), "", day); got != "sql01.example.com_SALESDB-2026-09-27" {
+		t.Errorf("fallback folder = %q", got)
+	}
+}

@@ -668,3 +668,18 @@ func TestTheGrantKeyOnScreenThreeWritesTheProfileScript(t *testing.T) {
 		t.Errorf("[g] on screen 3 without a profile wrote %q; the screen does not offer it", got.GrantPath)
 	}
 }
+
+// When the server returns no name, collect.Run files the run under the address
+// instead of "_", and the wizard has to predict that same path or its collision
+// question is about a folder no run will write.
+func TestANamelessServerIsFiledUnderTheAddressByTheWizardToo(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC)
+	s, o := probedAt(dir, now, false)
+	s.Verify.Server.Name = ""
+
+	want := collect.RunFolderFor(dir, s.Server, "", now, false)
+	if got := runFolderFor(s, o); got != want {
+		t.Fatalf("runFolderFor = %q, want %q", got, want)
+	}
+}
