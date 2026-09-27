@@ -154,17 +154,52 @@ END CATCH;
       avoids the two join traps around sys.syslanguages: langid and
       language_id are different things, and 1033 is carried by two rows.
 
-   The whole block costs 250 to 330 milliseconds for three numbers against a
+   A second list of numbers is derived for one question only, HOW MANY LINES:
+   the messages an audit needs when a client reports connection failures or
+   stalls that the server supposedly never saw. derived_patterns gives a count
+   for each, and a count of 0 is written out rather than left absent, because
+   "no line matched" is the answer to the question.
+
+     18456  login failed
+     17806  SSPI handshake failed (integrated security)
+     17809  maximum number of user connections reached
+     17830  network error while establishing a connection, login timers included
+     17187  not ready to accept new client connections
+     17189  failed to spawn a thread for a new login or connection
+       833  I/O requests taking longer than a threshold to complete
+     17883  a worker appears non-yielding on its scheduler
+     17884  new queries not picked up by a worker thread
+     17888  all schedulers on a node appear deadlocked
+     17890  a significant part of the process memory has been paged out
+
+   Each meaning was read from sys.messages, language 1033, before it went in.
+   17810 was considered and left out: it refuses a second DEDICATED ADMIN
+   connection, which says nothing about an application's connections.
+
+   The whole block cost 250 to 330 milliseconds for three numbers; with the
+   fourteen above and the header template of 18052 it costs about two seconds
+   on SQL Server 2025, and the whole collector 2.7 against 1.5, against a
    @timeout of 300 seconds. The cost that has to be watched is the uniqueness
-   check, which is one catalog scan per candidate fragment; copying the
-   retained language into #cat first is what keeps it at 100 ms rather than
-   scanning all twenty-two languages every time.
+   check, which is one catalog scan per candidate fragment and is now a
+   second of that; copying the retained language into #cat first is what
+   keeps it there rather than scanning all twenty-two languages every time.
    =========================================================================== */
 
 DECLARE @lang int = 1033;
 
 DECLARE @wanted TABLE (message_id int PRIMARY KEY);
-INSERT INTO @wanted (message_id) VALUES (9017), (3421), (17137);
+INSERT INTO @wanted (message_id) VALUES (9017), (3421), (17137),
+    (18456), (17806), (17809), (17830), (17187), (17189),
+    (833), (17883), (17884), (17888), (17890);
+
+/* The template of the line the engine writes BEFORE an error it logs:
+   "Error: 18456, Severity: 14, State: 8." in English, "Erreur : 18456,
+   Gravité : 14, État : 8." in French. It is split with the others so that
+   the two literals around its first parameter are known in the retained
+   language, and that is all it is used for: it takes no part in the language
+   vote and gets no row of its own in derived_patterns. See the note on 18456
+   above derived_patterns for why it is needed. */
+DECLARE @header int = 18052;
 
 /* The split. A marker is recognised by a grammar, not by a list:
      - % followed by digits and then "!" is a positional parameter, %27!
@@ -185,15 +220,22 @@ CREATE TABLE #frag (message_id int, language_id int, seq int, ordinal int, fstar
                     frag nvarchar(2048) COLLATE Latin1_General_BIN2,
                     esc  nvarchar(4000) COLLATE Latin1_General_BIN2);
 
-WITH tally AS (
-    SELECT TOP (2048) n = CONVERT(int, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)))
-    FROM sys.all_objects AS a CROSS JOIN sys.all_objects AS b),
-tpl AS (
+/* The numbers table is materialised. Written as a CTE it was rebuilt from
+   the cross join of sys.all_objects for every template, and with fifteen
+   templates in twenty-two languages the split alone took 2.5 seconds on
+   SQL Server 2025; from a table it takes a quarter of one. */
+CREATE TABLE #tally (n int PRIMARY KEY);
+INSERT INTO #tally (n)
+SELECT TOP (2048) CONVERT(int, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)))
+FROM sys.all_objects AS a CROSS JOIN sys.all_objects AS b;
+
+WITH tpl AS (
     SELECT m.message_id, m.language_id,
            tmpl = CONVERT(nvarchar(2048), m.text) COLLATE Latin1_General_BIN2,
            tlen = CONVERT(int, DATALENGTH(m.text) / 2)
     FROM sys.messages AS m
-    JOIN @wanted     AS w ON w.message_id = m.message_id),
+    JOIN (SELECT message_id FROM @wanted UNION SELECT @header) AS w
+      ON w.message_id = m.message_id),
 mk0 AS (
     SELECT t.message_id, t.language_id, t.tlen, pos = p.n,
            mlen = CASE WHEN o.isord = 1 THEN 1 + d.dig + 1 ELSE 1 + c.k + 1 + y.sym END,
@@ -204,7 +246,7 @@ mk0 AS (
               rows for the Dutch 3421 and a recovery time of NULL. */
            ord  = CASE WHEN o.isord = 1 THEN CONVERT(int, SUBSTRING(x.s, 1, d.dig)) ELSE NULL END
     FROM       tpl   AS t
-    JOIN       tally AS p ON p.n <= t.tlen
+    JOIN       #tally AS p ON p.n <= t.tlen
     CROSS APPLY (SELECT s = SUBSTRING(t.tmpl, p.n + 1, 48) + N'zz') AS x
     CROSS APPLY (SELECT dig = PATINDEX(N'%[^0-9]%', x.s) - 1) AS d
     CROSS APPLY (SELECT isord = CASE WHEN d.dig > 0 AND SUBSTRING(x.s, d.dig + 1, 1) = N'!'
@@ -254,7 +296,8 @@ SELECT @lang = COALESCE((
                  rn = ROW_NUMBER() OVER (PARTITION BY g.message_id, g.language_id
                                          ORDER BY DATALENGTH(g.frag) DESC)
           FROM #frag AS g
-          WHERE DATALENGTH(g.frag) > 0 AND CHARINDEX(N'%', g.frag) = 0) AS f
+          WHERE DATALENGTH(g.frag) > 0 AND CHARINDEX(N'%', g.frag) = 0
+            AND g.message_id <> @header) AS f
     JOIN #log AS l ON l.Txt COLLATE Latin1_General_BIN2 LIKE N'%' + f.esc + N'%' ESCAPE N'\'
     WHERE f.rn = 1
     GROUP BY f.language_id
@@ -281,6 +324,7 @@ SELECT f.message_id, f.seq, f.frag, f.esc,
        (SELECT COUNT(*) FROM #cat AS k WHERE k.txt LIKE N'%' + f.esc + N'%' ESCAPE N'\')
 FROM #frag AS f
 WHERE f.language_id = @lang
+  AND f.message_id <> @header
   AND DATALENGTH(f.frag) > 0
   AND CHARINDEX(N'%', f.frag) = 0;
 
@@ -310,10 +354,11 @@ DECLARE @derived TABLE (message_id int, language_id int, template nvarchar(2048)
                         catalog_matches int, param_ordinal int,
                         lit_left nvarchar(2048), pos_left int,
                         lit_right nvarchar(2048), pos_right int,
-                        refused nvarchar(200));
+                        refused nvarchar(200), severity int,
+                        header_pattern nvarchar(4000));
 INSERT INTO @derived (message_id, language_id, template, fragment, pattern,
                       catalog_matches, param_ordinal, lit_left, pos_left,
-                      lit_right, pos_right, refused)
+                      lit_right, pos_right, refused, severity, header_pattern)
 SELECT w.message_id, @lang, m.text, best.frag,
        CASE WHEN best.frag IS NULL THEN NULL
             ELSE CONVERT(nvarchar(4000), N'%' + best.esc + N'%') END,
@@ -324,7 +369,19 @@ SELECT w.message_id, @lang, m.text, best.frag,
             WHEN cand.n = 0
                  THEN N'every fragment of the template still carries a parameter marker after the split'
             ELSE N'no fragment of this message is unique in the catalog of the retained language'
-       END
+       END,
+       m.severity,
+       /* Anchored at the start of the line, which is where the header template
+          starts in all twenty-two languages, and closed by the literal that
+          follows the number, so 18456 cannot match 184560. Only for a message
+          above severity 10: an informational message is written as its
+          sentence alone, with no header line before it. */
+       CASE WHEN m.severity > 10 AND h.lit_right IS NOT NULL
+            THEN CONVERT(nvarchar(4000),
+                 REPLACE(REPLACE(REPLACE(REPLACE(h.lit_left,  N'\', N'\\'), N'%', N'\%'), N'_', N'\_'), N'[', N'\[')
+                 + CONVERT(nvarchar(12), w.message_id)
+                 + REPLACE(REPLACE(REPLACE(REPLACE(h.lit_right, N'\', N'\\'), N'%', N'\%'), N'_', N'\_'), N'[', N'\[')
+                 + N'%') END
 FROM @wanted AS w
 LEFT JOIN sys.messages AS m ON m.message_id = w.message_id AND m.language_id = @lang
 OUTER APPLY (SELECT n = COUNT(*) FROM #uniq AS u WHERE u.message_id = w.message_id) AS cand
@@ -332,7 +389,8 @@ OUTER APPLY (SELECT TOP (1) u.frag, u.esc, u.hits
              FROM #uniq AS u
              WHERE u.message_id = w.message_id AND u.hits = 1
              ORDER BY u.flen DESC, u.seq) AS best
-LEFT JOIN @bounds AS b ON b.message_id = w.message_id AND b.ordinal = 1;
+LEFT JOIN @bounds AS b ON b.message_id = w.message_id AND b.ordinal = 1
+LEFT JOIN @bounds AS h ON h.message_id = @header AND h.ordinal = 1;
 
 /* notable reads these two, and the recovery set below reads the delimiters of
    3421. Parameter 3 of 3421 is the elapsed seconds in every language: the
@@ -551,7 +609,26 @@ OPTION (RECOMPILE, MAXDOP 1);
    Message 18456 is where this mechanism stops, and it is worth knowing why:
    a unique fragment exists for it in only two languages out of twenty-two,
    because "Login failed for user '" appears in fifteen English messages. This
-   set is how that would be visible rather than silent. */
+   set is how that would be visible rather than silent, and it still is: 18456
+   is in @wanted, gets no pattern, and its row says refused.
+
+   It is COUNTED another way, which does not need a unique fragment. Every
+   error above severity 10 that the engine logs is preceded by a line of its
+   own carrying the number, message 18052, "Error: 18456, Severity: 14,
+   State: 8." in English. That line is derived like everything else here: the
+   two literals around its first parameter come from @bounds, in the retained
+   language, and the number goes between them. The number is what makes the
+   pattern unique, so no fragment of 18456 has to be. header_pattern and
+   header_matches carry that route, for every wanted message above severity
+   10. Measured on SQL Server 2025: five failed logins wrote five such lines
+   and five "Login failed" lines, and 17137, at severity 10, wrote 93 lines
+   and no header line at all.
+
+   occurrences is the one number to read, and counted_by says which route
+   gave it: the header line when the message has one, the fragment otherwise.
+   It is 0 when the log was read and nothing matched, which is an answer, and
+   NULL only when there is no answer: the log was not read (status says why,
+   the size guard included), or no pattern could be built by either route. */
 SELECT d.message_id                                                AS [message_id],
        d.language_id                                               AS [language_id],
        d.template                                                  AS [template],
@@ -559,10 +636,13 @@ SELECT d.message_id                                                AS [message_i
        d.pattern                                                   AS [pattern],
        CONVERT(nchar(1), N'\')                                     AS [escape_char],
        d.catalog_matches                                           AS [catalog_matches],
-       CASE WHEN d.pattern IS NULL THEN NULL ELSE
-            (SELECT COUNT(*) FROM #log AS l
-             WHERE l.Txt COLLATE Latin1_General_BIN2 LIKE d.pattern ESCAPE N'\')
-       END                                                         AS [log_matches],
+       c.log_matches                                               AS [log_matches],
+       d.severity                                                  AS [severity],
+       d.header_pattern                                            AS [header_pattern],
+       c.header_matches                                            AS [header_matches],
+       COALESCE(c.header_matches, c.log_matches)                   AS [occurrences],
+       CASE WHEN c.header_matches IS NOT NULL THEN 'error_header'
+            WHEN c.log_matches    IS NOT NULL THEN 'fragment' END  AS [counted_by],
        d.param_ordinal                                             AS [param_ordinal],
        d.lit_left                                                  AS [left_literal],
        d.pos_left                                                  AS [left_literal_pos],
@@ -570,6 +650,15 @@ SELECT d.message_id                                                AS [message_i
        d.pos_right                                                 AS [right_literal_pos],
        d.refused                                                   AS [refused]
 FROM @derived AS d
+/* A count of a log that was not read would be a 0 that means nothing, which
+   is the one reading of 0 this set must not allow. */
+CROSS APPLY (SELECT
+       log_matches = CASE WHEN @collected = 0 OR d.pattern IS NULL THEN NULL ELSE
+            (SELECT COUNT(*) FROM #log AS l
+             WHERE l.Txt COLLATE Latin1_General_BIN2 LIKE d.pattern ESCAPE N'\') END,
+       header_matches = CASE WHEN @collected = 0 OR d.header_pattern IS NULL THEN NULL ELSE
+            (SELECT COUNT(*) FROM #log AS l
+             WHERE l.Txt COLLATE Latin1_General_BIN2 LIKE d.header_pattern ESCAPE N'\') END) AS c
 ORDER BY d.message_id
 OPTION (RECOMPILE, MAXDOP 1);
 

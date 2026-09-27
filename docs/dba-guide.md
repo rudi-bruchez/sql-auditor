@@ -719,6 +719,26 @@ Host names, program names and logins name the application servers and the
 accounts they connect as, so the collector declares them and `MANIFEST.txt`
 lists them among what the archive names, on every run.
 
+What the server did record is counted by `10.system/040.error-log.sql`, in its
+`derived_patterns` result set: failed logins (18456), SSPI handshake failures
+(17806), the user connection limit reached (17809), network errors during login
+(17830), the server not ready to accept connections (17187) or unable to start a
+thread for one (17189), and, on the side of the server's own health, long I/O
+(833), non-yielding workers and schedulers (17883, 17884, 17888) and a process
+whose memory was paged out (17890). The log is written in the language of the
+instance, so none of these is searched for as English text: each is recognised
+from its template in `sys.messages`, in the language the log was found to be
+written in.
+
+Each message has one row, and `occurrences` is its count. A 0 means the log
+was read and no line matched, which is an answer. It is empty only when there
+is no answer: the log was not read, `status` says why, the 50 MB guard
+included. Failed logins are counted from the `Error: 18456, Severity: ...`
+line the engine writes before the message, because the message text itself is
+shared, in English, with fourteen other login failures; `counted_by` says which of the two
+routes gave the count. The window is the current error log only, from its
+oldest line to its newest, which the root of the same document gives.
+
 ### Limits that are known and not fixed
 
 Named here because a limit an operator can plan around is worth more than a
