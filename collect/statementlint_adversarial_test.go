@@ -82,6 +82,7 @@ func TestStatementLintRefusesTheAdversarialTable(t *testing.T) {
 		{"procedure opening a batch run by sp_executesql", `EXEC sp_executesql N'msdb.dbo.sp_purge_jobhistory'`},
 		// codex review, 27 September 2026.
 		{"user procedure named like a sys one", `EXEC dbo.sp_readerrorlog`},
+		{"user procedure named like the error log sizes", `EXEC dbo.sp_enumerrorlogs`},
 		{"msdb procedure unqualified", `EXEC sp_help_jobhistory`},
 		{"permanent SELECT INTO beside a temp INSERT INTO", `SELECT name INTO dbo.AuditCopy FROM sys.databases; INSERT INTO #scratch SELECT 1`},
 		{"sequence advanced by a SELECT", `SELECT NEXT VALUE FOR dbo.audit_sequence AS value`},
@@ -109,9 +110,10 @@ func TestStatementLintRefusesTheAdversarialTable(t *testing.T) {
 		{"table variable scratch", `DECLARE @t TABLE (a int); INSERT INTO @t SELECT 1; SELECT * FROM @t`},
 		{"select into a temp table", `SELECT * INTO #t FROM sys.databases`},
 		{"checkpoint inside an identifier", `SELECT ls.log_since_last_checkpoint_mb, ls.log_checkpoint_lsn FROM sys.dm_db_log_stats(1) ls`},
-		// The four procedures the shipped corpus calls, under the spellings it
+		// The five procedures the shipped corpus calls, under the spellings it
 		// uses. Turning the list round must not refuse them.
 		{"error log", `INSERT INTO #log EXEC sys.sp_readerrorlog 0`},
+		{"error log sizes", `INSERT INTO #logs (archive, log_date, size_bytes) EXEC sys.sp_enumerrorlogs`},
 		{"job history", `INSERT INTO @h EXEC msdb.dbo.sp_help_jobhistory @mode = 'FULL'`},
 		{"compression estimate", `INSERT INTO #s EXEC sys.sp_estimate_data_compression_savings @schema_name = N'dbo', @object_name = N'T', @index_id = NULL, @partition_number = NULL, @data_compression = N'PAGE'`},
 		{"guarded dynamic select", `EXEC sp_executesql N'SELECT name FROM sys.databases WHERE database_id = @id', N'@id int', @id = 1`},

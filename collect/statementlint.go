@@ -138,9 +138,10 @@ var (
 	// sp_purge_jobhistory, sp_control_plan_guide 'DROP ALL',
 	// sp_query_store_remove_query, sp_rename and a dozen more passed, each of
 	// them a staple of the maintenance script this lint exists to stop on its
-	// way into a corpus directory. The shipped corpus calls four procedures, so
+	// way into a corpus directory. The shipped corpus calls five procedures, so
 	// the rule is turned round: a procedure is refused unless it is one of
-	// these. The name is compared whole, brackets removed: a codex review the
+	// these. sp_enumerrorlogs lists the error log files and their sizes, under
+	// the same permission check as sp_readerrorlog, and nothing else. The name is compared whole, brackets removed: a codex review the
 	// same day passed dbo.sp_readerrorlog when only the last part was read, and
 	// that is a user procedure of the same name, which may write. Unqualified,
 	// a sys procedure wins over a user one; sp_help_jobhistory lives in msdb and
@@ -150,6 +151,8 @@ var (
 		"sys.sp_executesql":                        true,
 		"sp_readerrorlog":                          true,
 		"sys.sp_readerrorlog":                      true,
+		"sp_enumerrorlogs":                         true,
+		"sys.sp_enumerrorlogs":                     true,
 		"sp_estimate_data_compression_savings":     true,
 		"sys.sp_estimate_data_compression_savings": true,
 		"msdb.dbo.sp_help_jobhistory":              true,

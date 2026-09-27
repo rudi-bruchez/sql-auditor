@@ -35,7 +35,22 @@
 -- chaining: on the audited instance a read-only login could execute the first
 -- and not the second.
 --
--- SQL Server 2012 is the floor. sp_readerrorlog predates it.
+-- THE LOG IS MEASURED BEFORE IT IS READ. The whole current log goes into #log
+-- in tempdb, and an instance that never cycles its log can carry hundreds of
+-- megabytes of it. sys.sp_enumerrorlogs gives the size of every log file
+-- without reading any, under the same permission check as sp_readerrorlog,
+-- and above 50 MB the read is skipped: status then says collected = 0 with
+-- skipped_for_size = 1 and the size, and every other set is empty because the
+-- log was not read, not because nothing was logged. Measured on SQL Server
+-- 2025, a 107 KB log held 798 lines and took 155 KB of text in #log, so 50 MB
+-- is in the order of 400 000 lines and 70 MB of tempdb: a log that size has
+-- gone unrecycled for a long time, and the copy costs the instance more than
+-- the summary is worth. The remedy is sp_cycle_errorlog, which is the
+-- operator's to run, and the next collection reads the new, short log. If the
+-- size cannot be read, the log is read as before and status carries why the
+-- size is missing.
+--
+-- SQL Server 2012 is the floor. sp_readerrorlog and sp_enumerrorlogs predate it.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -43,12 +58,28 @@ SET LOCK_TIMEOUT 10000;
 
 DECLARE @collected bit = 1, @err int = 0, @msg nvarchar(2048) = N'';
 
+-- The size guard. See the header: 50 MB, in bytes.
+DECLARE @size_limit bigint = 52428800, @log_bytes bigint = NULL,
+        @skipped_for_size bit = 0, @size_msg nvarchar(2048) = N'';
+
+CREATE TABLE #logs (archive int, log_date nvarchar(64), size_bytes bigint);
+BEGIN TRY
+    INSERT INTO #logs (archive, log_date, size_bytes) EXEC sys.sp_enumerrorlogs;
+    SELECT @log_bytes = size_bytes FROM #logs WHERE archive = 0;
+END TRY
+BEGIN CATCH
+    SELECT @size_msg = ERROR_MESSAGE();
+END CATCH;
+
 CREATE TABLE #log (LogDate datetime, ProcessInfo nvarchar(100), Txt nvarchar(4000));
 
 /* The permission probe answers "may I", not "does it work". A denied EXEC, a
    log being rolled over mid-read, or a text column longer than the table
    accepts all fail here — and an empty summary must never be readable as
    "nothing was logged". status carries the difference. */
+IF @log_bytes > @size_limit
+    SELECT @collected = 0, @skipped_for_size = 1;
+ELSE
 BEGIN TRY
     INSERT INTO #log EXEC sys.sp_readerrorlog 0;
 END TRY
@@ -342,6 +373,10 @@ SELECT @collected                                                 AS [collected]
        @err                                                       AS [error_number],
        NULLIF(@msg, N'')                                          AS [error_message],
        0                                                          AS [log_file],
+       @log_bytes                                                 AS [log_size_bytes],
+       @size_limit                                                AS [log_size_limit_bytes],
+       @skipped_for_size                                          AS [skipped_for_size],
+       NULLIF(@size_msg, N'')                                     AS [size_error_message],
        80                                                         AS [grouping_prefix_length],
        40                                                         AS [top_messages_kept]
 OPTION (RECOMPILE, MAXDOP 1);

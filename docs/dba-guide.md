@@ -609,7 +609,7 @@ run scale with the size of the instance rather than with the number of objects:
 | What | Where | What it actually does |
 | --- | --- | --- |
 | Sampled page reads on heaps | `70.schema/050.heaps.sql` | `sys.dm_db_index_physical_stats(..., 'SAMPLED')` on the 50 largest heaps **in every collected database**. SAMPLED works allocation unit by allocation unit: a unit of 10,000 pages or more brings 8 to 12 % of its pages into the buffer pool, because each sample reads a whole extent, and a smaller one is read in full. On a 500 GB heap that is in the order of 40 to 60 GB of reads, not the 1 % the name suggests. |
-| The whole current error log | `10.system/040.error-log.sql` | copied into a `#temp` table before it is summarised. An instance that never cycles its log can carry hundreds of megabytes. |
+| The whole current error log | `10.system/040.error-log.sql` | copied into a `#temp` table before it is summarised. An instance that never cycles its log can carry hundreds of megabytes, so the log's size is read first with `sp_enumerrorlogs` and a log above 50 MB is not read at all: the collector's status says `skipped_for_size` and gives the size. Cycling the log with `sp_cycle_errorlog` is what brings it back. |
 | A string search over cached plans | `80.workload/030.implicit-conversions.sql`, `80.workload/053.plan-warnings.sql` | the 1 000 statements with the most reads (030) or CPU (053) are taken from `sys.dm_exec_query_stats` first, then each of their batch plans is cast to text and searched once — CPU, proportional to the size of those plans and not of the whole cache. Until 27 September 2026 every plan in the cache was searched before the cap applied. |
 
 The heap scan is the one to know about. **Neither guard in this corpus bounds
