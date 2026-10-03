@@ -419,3 +419,29 @@ func TestNoCollectorEmitsAQueryStatementHandle(t *testing.T) {
 		}
 	}
 }
+
+// The untrusted constraint list is capped at 200 rows per kind, and a TOP
+// without an ORDER BY keeps whichever rows the scan meets first: two runs over
+// the same catalog could list different constraints, and a capped list could
+// drop the disabled ones in favour of not-for-replication ones nobody can fix.
+// Each kind's TOP must carry its own ORDER BY, and that order must put the
+// disabled constraints first and the not-for-replication ones last.
+func TestUntrustedConstraintListIsOrderedBeforeItIsCapped(t *testing.T) {
+	b, err := sqlauditor.Queries.ReadFile("queries/70.schema/010.objects.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := collect.StripSQLComments(string(b))
+	re := regexp.MustCompile(`(?s)SELECT TOP \(200\)\s+'(FOREIGN_KEY|CHECK_CONSTRAINT)'.*?\) AS (fk|ck)`)
+	branches := re.FindAllStringSubmatch(sql, -1)
+	if len(branches) != 2 {
+		t.Fatalf("found %d capped constraint branches, want one per kind", len(branches))
+	}
+	order := regexp.MustCompile(`ORDER BY \w+\.is_disabled DESC,\s*\w+\.is_not_for_replication,`)
+	for _, br := range branches {
+		if !order.MatchString(br[0]) {
+			t.Errorf("the %s branch takes TOP (200) without ordering disabled first and "+
+				"not-for-replication last:\n%s", br[1], br[0])
+		}
+	}
+}

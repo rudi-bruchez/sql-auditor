@@ -36,14 +36,43 @@
 -- Tables are capped at the union of the 200 largest by row count and the 50
 -- largest by reserved pages, up to 250 tables in all, and both caps are
 -- reported: a database with 5 000 tables would otherwise produce an archive
--- nobody opens, and the tail of that list is empty tables. Constraints and
--- deprecated columns are capped at 200 by the same reasoning.
+-- nobody opens, and the tail of that list is empty tables. Constraints (200
+-- of each kind) and deprecated columns (200) are capped by the same reasoning.
 --
 -- is_not_trusted is the point of the constraints result set, and it is not a
 -- style question. A foreign key or check constraint left untrusted after a
 -- bulk load or a NOCHECK re-enable is ignored by the optimizer when it
 -- simplifies a plan — the constraint still enforces new rows, but it stops
 -- earning its keep in query plans, silently and permanently.
+--
+-- is_not_for_replication is what tells that defect from a design. A foreign
+-- key or check constraint created NOT FOR REPLICATION is untrusted from the
+-- moment it exists, and WITH CHECK CHECK CONSTRAINT succeeds on it without
+-- changing anything. Measured on 17.0.4065.4: one foreign key and one check
+-- constraint, both NOT FOR REPLICATION over rows that satisfied them, read
+-- is_disabled 0, is_not_trusted 1 after creation, and still 0, 1 after
+-- WITH CHECK CHECK CONSTRAINT, which returned no error. Without the flag the
+-- archive presents such a constraint as one to revalidate, and the fix it
+-- implies runs, succeeds and leaves the row exactly where it was.
+--
+-- WHAT THE TWO UNTRUSTED COUNTS COUNT. counts.untrusted_foreign_keys and
+-- counts.untrusted_check_constraints count every constraint that is untrusted
+-- OR disabled, and the not-for-replication ones among them. Their names are
+-- kept because archives already collected carry them and the analysis reads
+-- them. A disabled constraint is always untrusted as well, so the two filters
+-- select the same set, but a reader who takes the count for "enabled and
+-- untrusted" is wrong; split the states on the listed rows. The
+-- not-for-replication ones are counted apart, in
+-- counts.untrusted_foreign_keys_not_for_replication and
+-- counts.untrusted_check_constraints_not_for_replication, so the share a
+-- revalidation cannot fix is known even when the list is capped.
+--
+-- The list is capped at 200 rows PER KIND, foreign keys and check constraints
+-- separately, so it holds up to 400 rows. Within a kind the rows kept are the
+-- disabled ones first, then the enabled ones a revalidation could fix, then the
+-- not-for-replication ones, each by schema, table and constraint name, with
+-- object_id breaking ties: a capped list keeps what is worth acting on, and
+-- two runs over the same catalog keep the same rows.
 --
 -- text, ntext and image were replaced by varchar(max), nvarchar(max) and
 -- varbinary(max) in SQL Server 2005 and have been announced for removal ever
@@ -71,7 +100,8 @@ DECLARE @err_counts int = 0, @err_object_counts int = 0, @err_tables int = 0,
 
 DECLARE @n_schemas int, @n_tables int, @n_views int, @n_procedures int,
         @n_functions int, @n_triggers int, @n_heaps int, @n_no_pk int,
-        @n_untrusted_fk int, @n_untrusted_ck int, @n_deprecated_cols int;
+        @n_untrusted_fk int, @n_untrusted_ck int, @n_deprecated_cols int,
+        @n_nfr_fk int, @n_nfr_ck int;
 
 DECLARE @object_counts TABLE (
     [type]    nvarchar(60),
@@ -97,7 +127,11 @@ DECLARE @constraints TABLE (
     [table]           nvarchar(300) NULL,
     [constraint_name] sysname,
     [is_disabled]     int,
-    [is_not_trusted]  int);
+    [is_not_trusted]  int,
+    [is_not_for_replication] int,
+    [schema_name]     sysname NULL,
+    [table_name]      sysname NULL,
+    [object_id]       int);
 
 DECLARE @deprecated TABLE (
     [schema_name] sysname,
@@ -147,6 +181,14 @@ BEGIN TRY
 
     SELECT @n_untrusted_ck = COUNT(*) FROM sys.check_constraints AS k
     WHERE k.is_not_trusted = 1 OR k.is_disabled = 1
+    OPTION (RECOMPILE, MAXDOP 1);
+
+    SELECT @n_nfr_fk = COUNT(*) FROM sys.foreign_keys AS f
+    WHERE (f.is_not_trusted = 1 OR f.is_disabled = 1) AND f.is_not_for_replication = 1
+    OPTION (RECOMPILE, MAXDOP 1);
+
+    SELECT @n_nfr_ck = COUNT(*) FROM sys.check_constraints AS k
+    WHERE (k.is_not_trusted = 1 OR k.is_disabled = 1) AND k.is_not_for_replication = 1
     OPTION (RECOMPILE, MAXDOP 1);
 
     SELECT @n_deprecated_cols = COUNT(*) FROM sys.columns AS c
@@ -260,26 +302,45 @@ END CATCH
 
 /* Untrusted and disabled are reported separately because they are different
    states with different fixes: a disabled constraint enforces nothing at all,
-   an untrusted one enforces new rows but is ignored by the optimizer. */
+   an untrusted one enforces new rows but is ignored by the optimizer. A
+   not-for-replication one is a third case with no fix: it is untrusted by
+   construction, and revalidating it changes nothing. */
 BEGIN TRY
+    /* Each branch takes its own TOP inside a derived table so that it can carry
+       its own ORDER BY: a TOP in a UNION ALL branch without one keeps whichever
+       200 rows the scan meets first, which is a different sample on every run. */
     INSERT INTO @constraints
-    SELECT TOP (200)
-           'FOREIGN_KEY',
-           SCHEMA_NAME(f.schema_id) + '.' + OBJECT_NAME(f.parent_object_id),
-           f.name,
-           CAST(f.is_disabled AS int),
-           CAST(f.is_not_trusted AS int)
-    FROM sys.foreign_keys AS f
-    WHERE f.is_not_trusted = 1 OR f.is_disabled = 1
+    SELECT fk.* FROM (
+        SELECT TOP (200)
+               'FOREIGN_KEY' AS [kind],
+               SCHEMA_NAME(f.schema_id) + '.' + OBJECT_NAME(f.parent_object_id) AS [table],
+               f.name AS [constraint_name],
+               CAST(f.is_disabled AS int) AS [is_disabled],
+               CAST(f.is_not_trusted AS int) AS [is_not_trusted],
+               CAST(f.is_not_for_replication AS int) AS [is_not_for_replication],
+               SCHEMA_NAME(f.schema_id) AS [schema_name],
+               OBJECT_NAME(f.parent_object_id) AS [table_name],
+               f.object_id AS [object_id]
+        FROM sys.foreign_keys AS f
+        WHERE f.is_not_trusted = 1 OR f.is_disabled = 1
+        ORDER BY f.is_disabled DESC, f.is_not_for_replication,
+                 SCHEMA_NAME(f.schema_id), OBJECT_NAME(f.parent_object_id), f.name, f.object_id) AS fk
     UNION ALL
-    SELECT TOP (200)
-           'CHECK_CONSTRAINT',
-           SCHEMA_NAME(k.schema_id) + '.' + OBJECT_NAME(k.parent_object_id),
-           k.name,
-           CAST(k.is_disabled AS int),
-           CAST(k.is_not_trusted AS int)
-    FROM sys.check_constraints AS k
-    WHERE k.is_not_trusted = 1 OR k.is_disabled = 1
+    SELECT ck.* FROM (
+        SELECT TOP (200)
+               'CHECK_CONSTRAINT' AS [kind],
+               SCHEMA_NAME(k.schema_id) + '.' + OBJECT_NAME(k.parent_object_id) AS [table],
+               k.name AS [constraint_name],
+               CAST(k.is_disabled AS int) AS [is_disabled],
+               CAST(k.is_not_trusted AS int) AS [is_not_trusted],
+               CAST(k.is_not_for_replication AS int) AS [is_not_for_replication],
+               SCHEMA_NAME(k.schema_id) AS [schema_name],
+               OBJECT_NAME(k.parent_object_id) AS [table_name],
+               k.object_id AS [object_id]
+        FROM sys.check_constraints AS k
+        WHERE k.is_not_trusted = 1 OR k.is_disabled = 1
+        ORDER BY k.is_disabled DESC, k.is_not_for_replication,
+                 SCHEMA_NAME(k.schema_id), OBJECT_NAME(k.parent_object_id), k.name, k.object_id) AS ck
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
@@ -319,6 +380,8 @@ SELECT DB_NAME()                                                  AS [database],
        @n_no_pk                                                   AS [counts.tables_without_primary_key],
        @n_untrusted_fk                                            AS [counts.untrusted_foreign_keys],
        @n_untrusted_ck                                            AS [counts.untrusted_check_constraints],
+       @n_nfr_fk                                                  AS [counts.untrusted_foreign_keys_not_for_replication],
+       @n_nfr_ck                                                  AS [counts.untrusted_check_constraints_not_for_replication],
        @n_deprecated_cols                                         AS [counts.deprecated_type_columns],
        200                                                        AS [listing_cap],
        50                                                         AS [listing_cap_by_size],
@@ -356,8 +419,11 @@ FROM @tables AS t
 ORDER BY t.[rows] DESC, t.[object_id]
 OPTION (RECOMPILE, MAXDOP 1);
 
-SELECT c.[kind], c.[table], c.[constraint_name], c.[is_disabled], c.[is_not_trusted]
+SELECT c.[kind], c.[table], c.[constraint_name], c.[is_disabled], c.[is_not_trusted],
+       c.[is_not_for_replication]
 FROM @constraints AS c
+ORDER BY c.[kind] DESC, c.[is_disabled] DESC, c.[is_not_for_replication],
+         c.[schema_name], c.[table_name], c.[constraint_name], c.[object_id]
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT d.[table], d.[column], d.[type], d.[is_nullable]

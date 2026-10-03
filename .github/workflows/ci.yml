@@ -131,6 +131,18 @@ jobs:
           tools -Q "ALTER DATABASE ci_probe SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE, QUERY_CAPTURE_MODE = ALL);"
           tools -t 2 -Q "SELECT COUNT_BIG(*) FROM sys.all_columns AS a CROSS JOIN sys.all_columns AS b CROSS JOIN sys.all_columns AS c WHERE CHECKSUM(a.name, b.name, c.name) = 0 OPTION (MAXDOP 1);" || true
           tools -Q "SELECT 1 / (object_id - object_id) FROM sys.objects;" || true
+      # 70.schema/010.objects lists untrusted constraints with
+      # is_not_for_replication, which is what tells a constraint a
+      # revalidation can fix from one it cannot: NOT FOR REPLICATION makes a
+      # foreign key untrusted from birth. Without one planted, the list is
+      # empty and its shape is never seen.
+      - name: plant a NOT FOR REPLICATION foreign key
+        run: |
+          docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b -Q "
+              CREATE TABLE dbo.nfr_parent (id int NOT NULL PRIMARY KEY);
+              CREATE TABLE dbo.nfr_child (id int NOT NULL PRIMARY KEY, parent_id int NOT NULL
+                CONSTRAINT fk_nfr_child_parent REFERENCES dbo.nfr_parent (id) NOT FOR REPLICATION);"
       # --env /dev/null is not decoration. Configuration precedence is
       # flag > .env > process environment, so a .env file appearing in the
       # workspace — generated, or committed by accident — would outrank the
@@ -175,6 +187,23 @@ jobs:
           jq -e '[.skipped_scripts[]? | select(.script == "70.schema/021.missing-index-queries.sql")] | length >= 1' \
             "$run_dir/_run.json" \
             || { jq '[.skipped_scripts[]? | select(.script | test("021"))]' "$run_dir/_run.json"; exit 1; }
+      # The planted foreign key comes back untrusted and flagged, and is counted
+      # apart. 032 exports server trigger source and runs only under
+      # --include-object-definitions, which this run does not pass, so the run
+      # records the skip rather than an empty file.
+      - name: assert the not-for-replication flag and the server trigger gate
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          f="$run_dir/70.schema/ci_probe/010.objects.json"
+          jq -e '.counts.untrusted_foreign_keys_not_for_replication == 1
+                 and ([.untrusted_constraints[] | select(.constraint_name == "fk_nfr_child_parent")
+                       | .is_not_trusted == 1 and .is_not_for_replication == 1] == [true])
+                 and all(.untrusted_constraints[]; has("is_not_for_replication"))' "$f" \
+            || { jq '{counts, untrusted_constraints}' "$f"; exit 1; }
+          test ! -f "$run_dir/40.security/032.server-trigger-definitions.json"
+          jq -e '[.skipped_scripts[]? | select(.script == "40.security/032.server-trigger-definitions.sql")] | length == 1' \
+            "$run_dir/_run.json" \
+            || { jq '.skipped_scripts' "$run_dir/_run.json"; exit 1; }
       - name: assert the run is complete
         run: |
           run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"

@@ -173,8 +173,8 @@ func defineFlags(cmd string) *cliFlags {
 	// clear inside an OPENQUERY. Turning it on changes what MANIFEST.txt
 	// discloses, so the archive says so.
 	fs.BoolVar(&c.objectDefinitions, "include-object-definitions", false,
-		"also collect the source of views, procedures, functions and triggers — "+
-			"this is code written on this server and may contain credentials")
+		"also collect the source of views, procedures, functions and triggers, "+
+			"server triggers included — this is code written on this server and may contain credentials")
 	// Off by default, and the narrowest of the disclosure options: a
 	// deadlock graph carries the verbatim SQL of both victims.
 	// 060.system-health.sql collects the count and the timestamps by
@@ -1109,7 +1109,8 @@ Options (check, collect):
                               data. MANIFEST.txt discloses it when it is on.
   --include-object-definitions
                               also collect the source of views, procedures,
-                              functions and triggers, one file each. Off by
+                              functions and triggers, one file each, and of the
+                              server-scoped triggers. Off by
                               default: this is code written on this server and
                               can hold credentials inside an OPENQUERY.
                               MANIFEST.txt discloses it when it is on.
