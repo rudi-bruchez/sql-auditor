@@ -131,6 +131,19 @@ jobs:
           tools -Q "ALTER DATABASE ci_probe SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE, QUERY_CAPTURE_MODE = ALL);"
           tools -t 2 -Q "SELECT COUNT_BIG(*) FROM sys.all_columns AS a CROSS JOIN sys.all_columns AS b CROSS JOIN sys.all_columns AS c WHERE CHECKSUM(a.name, b.name, c.name) = 0 OPTION (MAXDOP 1);" || true
           tools -Q "SELECT 1 / (object_id - object_id) FROM sys.objects;" || true
+      # 80.workload/029 leaves out of its totals the queries of scalar and
+      # multi-statement functions and of triggers, each recorded twice, and
+      # reports per interval what it left out. A scalar function whose body
+      # runs a query, called once per row, plants such a query. GETDATE() in
+      # the body keeps the 2019 inlining away on the 2022 leg (is_inlineable
+      # 0, checked on SQL Server 2025), since an inlined function records no
+      # query of its own; the 2017 leg never inlines.
+      - name: plant a nested function query
+        run: |
+          tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b "$@"; }
+          tools -Q "CREATE FUNCTION dbo.ci_nested (@n int) RETURNS int AS BEGIN DECLARE @c int; SELECT @c = COUNT(*) FROM sys.objects WHERE object_id > @n AND create_date < GETDATE(); RETURN @c; END;"
+          tools -Q "SELECT SUM(dbo.ci_nested(object_id)) FROM sys.objects;"
       # 70.schema/010.objects lists untrusted constraints with
       # is_not_for_replication, which is what tells a constraint a
       # revalidation can fix from one it cannot: NOT FOR REPLICATION makes a
@@ -379,7 +392,7 @@ jobs:
           # all stayed green. A guard that names the one column it expects to
           # be absent guards against that column. Comparing the whole key set
           # refuses ANY column nobody declared, which is the property wanted
-          # here: this is the only Query Store collector without @discloses.
+          # here: this was the first Query Store collector without @discloses.
           #
           # The sys exclusion is asserted the same way. On this probe database
           # statistics_used is legitimately empty, so the clause is vacuous
@@ -405,6 +418,34 @@ jobs:
                  and all(.statistics_used[]; .schema != "sys" and (.table | startswith("sys.") | not))' \
             "$run_dir/80.workload/ci_probe/027.query-store-stats-usage.json" \
             || { jq 'del(.statistics_used)' "$run_dir/80.workload/ci_probe/027.query-store-stats-usage.json"; exit 1; }
+          # 029 is the second Query Store collector without @discloses, so its
+          # key sets are asserted exactly for the reason given for 027 above:
+          # a text or query id column added to either result set fails here.
+          # The store of ci_probe was switched on in this job and has run
+          # statements since, so at least one interval is listed, none is
+          # longer than the store's own grain, and the listing respects its
+          # cap. The function planted above must show as left out.
+          jq -e '(keys_unsorted | sort) == (["collected_at","config","database","intervals",
+                     "listing_cap","state","window"] | sort)
+                 and (.state | keys_unsorted | sort) == (["actual","capture_mode","desired"] | sort)
+                 and (.config | keys_unsorted | sort) == (["interval_minutes","stale_threshold_days"] | sort)
+                 and (.window | keys_unsorted | sort) == (["intervals","newest_interval","oldest_interval"] | sort)
+                 and .listing_cap == 1488
+                 and .state.actual == "READ_WRITE"
+                 and .window.intervals >= 1
+                 and (.intervals | type) == "array"
+                 and (.intervals | length) >= 1
+                 and (.intervals | length) <= .listing_cap
+                 and all(.intervals[]; (keys_unsorted | sort) == (["cpu_ms","duration_ms","end_time",
+                     "excluded","executions","logical_reads","logical_writes","minutes","open",
+                     "physical_reads","start_time"] | sort)
+                     and (.executions | keys_unsorted | sort) == (["aborted","exception","regular"] | sort)
+                     and .minutes >= 1 and .minutes <= 1440)
+                 and ([.intervals[].executions.regular] | add) >= 1
+                 and ([.intervals[].excluded.nested_executions] | add) >= 1' \
+            "$run_dir/80.workload/ci_probe/029.query-store-load-profile.json" \
+            || { jq 'del(.intervals)' "$run_dir/80.workload/ci_probe/029.query-store-load-profile.json"
+                 jq -c '.intervals[-3:]' "$run_dir/80.workload/ci_probe/029.query-store-load-profile.json"; exit 1; }
           # An `if`, not `cmd && { ... }`: this step runs under `set -e`, and a
           # grep that finds nothing exits 1, so the && form would turn the step
           # red exactly when the file is clean.
