@@ -125,8 +125,8 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 /* ───────── intervals ─────────
    The nested class is decided once per query, with 020's predicate verbatim,
-   and the runtime rows are folded per interval before the interval table is
-   joined. The cap picks the newest intervals; the rows come out oldest first,
+   and only the runtime rows of the capped intervals are folded, so a store
+   retained beyond the cap is not aggregated for intervals never returned. The cap picks the newest intervals; the rows come out oldest first,
    in the order a profile is read. An interval the store holds with no
    runtime row is listed with zeros: seen on the lab for the interval that
    had just opened when the collector ran. An hour in which nothing ran at
@@ -140,6 +140,11 @@ WITH cls AS (
            END                                                    AS nested
     FROM sys.query_store_query AS q
     LEFT JOIN sys.objects AS ob ON ob.object_id = q.object_id
+),
+capped AS (
+    SELECT TOP (1488) i.runtime_stats_interval_id, i.start_time, i.end_time
+    FROM sys.query_store_runtime_stats_interval AS i
+    ORDER BY i.start_time DESC
 ),
 perInterval AS (
     SELECT rs.runtime_stats_interval_id                           AS interval_id,
@@ -159,12 +164,8 @@ perInterval AS (
     FROM sys.query_store_runtime_stats AS rs
     JOIN sys.query_store_plan          AS p ON p.plan_id = rs.plan_id
     LEFT JOIN cls                      AS c ON c.query_id = p.query_id
+    WHERE rs.runtime_stats_interval_id IN (SELECT runtime_stats_interval_id FROM capped)
     GROUP BY rs.runtime_stats_interval_id
-),
-capped AS (
-    SELECT TOP (1488) i.runtime_stats_interval_id, i.start_time, i.end_time
-    FROM sys.query_store_runtime_stats_interval AS i
-    ORDER BY i.start_time DESC
 )
 SELECT c.start_time                                               AS [start_time],
        c.end_time                                                 AS [end_time],
