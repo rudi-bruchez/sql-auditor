@@ -59,8 +59,45 @@
 -- That belongs in the analysis, not here; this file reports the count and the
 -- size.
 --
--- SQL Server 2012 is the floor. forwarded_record_count predates it. Not
--- collected for that reason: nothing.
+-- COMPRESSED_PAGE_COUNT SAYS HOW MUCH OF A PAGE HEAP IS COMPRESSED NOW. The
+-- SAMPLED call above already returns it, so projecting it reads nothing more:
+-- the candidates, the page budget and the pages read are unchanged. A heap set
+-- to PAGE compresses its pages when it is rebuilt or loaded WITH (TABLOCK);
+-- pages that ordinary inserts add stay row-only. 70.schema/030.index-operational
+-- sees that only through its counters, which a rebuild, a restart or an
+-- eviction of the metadata starts again, and none of which says how many
+-- pages are compressed at present. Measured through both files on
+-- 17.0.4065.4, 4 October 2026, on one database:
+--
+--   ordinary inserts only         0 attempts,   0 successes,   0 of 3062 compressed
+--   rebuilt                     420 attempts, 228 successes, 217 of 218 compressed
+--   random rows, rebuilt        526 attempts,   0 successes,   0 of 527 compressed
+--   rebuilt, then inserts       422 attempts, 228 successes, 217 of 539 compressed
+--
+-- The fourth is the case this column exists for: in 030 it reads like the
+-- second, and the 322 pages its inserts added since the rebuild are row-only.
+-- The rows of the two files meet on the database, the table (schema.name in
+-- both), this file's partition against 030's partition_number, and index_id
+-- 0, which this file does not project because every row here is a heap.
+--
+-- data_compression is projected beside it, taken from sys.partitions with the
+-- candidate, which reads past a locked heap. A zero says something only on a
+-- PAGE heap: the same rows rebuilt under ROW read 0 of 3063, as every ROW or
+-- NONE heap will.
+--
+-- ON A HEAP ABOVE 10,000 PAGES THE COUNT IS THE SAMPLE'S, SCALED UP, and so is
+-- page_count beside it. A heap loaded WITH (TABLOCK) read 14,700 of 14,700 in
+-- SAMPLED and 14,603 of 14,603 in DETAILED. Read it as a share of page_count,
+-- not as an exact number of pages.
+--
+-- It covers the heaps this file reads and no others: the 50 largest
+-- partitions above 128 used pages that fit the page budget. A smaller PAGE
+-- heap has no row here; 030 counts the row-only shape of all of them at its
+-- root, in page_partitions.heaps_without_attempts.
+--
+-- SQL Server 2012 is the floor. forwarded_record_count predates it, and so do
+-- compressed_page_count and sys.partitions.data_compression_desc, both from
+-- SQL Server 2008. Not collected for that reason: nothing.
 --
 -- IT IS BLOCKABLE, AND THE READS ARE THEREFORE BUFFERED. This file had no
 -- TRY/CATCH at all, so one lock timeout anywhere lost the whole document: the
@@ -122,7 +159,8 @@ DECLARE @err_counts int = 0, @err_heaps int = @replica_err, @msg nvarchar(2048) 
 DECLARE @top int = 50, @page_budget bigint = 200000, @pages_spent bigint = 0,
         @batch_started datetime2 = SYSDATETIME(), @budget_sec int = 240,
         @measured int = 0, @skipped_locked int = 0, @skipped_budget int = 0,
-        @i int = 1, @obj int, @pid bigint, @part int, @est_pages bigint;
+        @i int = 1, @obj int, @pid bigint, @part int, @est_pages bigint,
+        @compression nvarchar(60);
 
 /* The heap partitions to read, largest first, with what each is expected to
    cost. The reference joins sys.allocation_units on the hobt id for in-row and
@@ -136,7 +174,8 @@ DECLARE @candidates TABLE (
     [partition_id]     bigint NOT NULL,
     [partition_number] int    NOT NULL,
     [used_pages]       bigint NOT NULL,
-    [est_pages]        bigint NOT NULL);
+    [est_pages]        bigint NOT NULL,
+    [data_compression] nvarchar(60) NOT NULL);
 
 DECLARE @heaps TABLE (
     [table]                     nvarchar(300),
@@ -151,7 +190,9 @@ DECLARE @heaps TABLE (
     [records_scanned]           bigint,
     [nonclustered_indexes]      int,
     [partition_count]           int,
-    [filegroup]                 sysname NULL);
+    [filegroup]                 sysname NULL,
+    [data_compression]          nvarchar(60),
+    [compressed_page_count]     bigint);
 
 BEGIN TRY
     -- Every heap, whether or not it was sampled below.
@@ -189,9 +230,9 @@ IF @readable_secondary = 0
 BEGIN
 BEGIN TRY
     INSERT INTO @candidates ([object_id], [partition_id], [partition_number],
-                             [used_pages], [est_pages])
+                             [used_pages], [est_pages], [data_compression])
     SELECT TOP (@top) p.object_id, p.partition_id, p.partition_number,
-           a.used_pages, a.est_pages
+           a.used_pages, a.est_pages, p.data_compression_desc
     FROM sys.partitions AS p
     JOIN sys.objects AS o ON o.object_id = p.object_id
     CROSS APPLY (SELECT SUM(au.used_pages) AS used_pages,
@@ -213,7 +254,7 @@ WHILE @err_heaps = 0
       AND DATEDIFF(second, @batch_started, SYSDATETIME()) < @budget_sec
 BEGIN
     SELECT @obj = [object_id], @pid = [partition_id], @part = [partition_number],
-           @est_pages = [est_pages]
+           @est_pages = [est_pages], @compression = [data_compression]
     FROM @candidates
     WHERE [n] = @i;
     SET @i += 1;
@@ -288,7 +329,13 @@ SELECT
     (SELECT TOP (1) ds.name
        FROM sys.allocation_units AS au
        JOIN sys.data_spaces      AS ds ON ds.data_space_id = au.data_space_id
-      WHERE au.container_id = h.partition_id AND au.type = 1) AS [filegroup]
+      WHERE au.container_id = h.partition_id AND au.type = 1) AS [filegroup],
+    -- Read with the candidate from sys.partitions, which reads past a locked
+    -- heap; see the header for why it travels with the next column.
+    @compression                                                AS [data_compression],
+    -- Returned by the SAMPLED call already made for forwarded_record_count, so
+    -- it costs no read. What it settles is in the header.
+    ips.compressed_page_count                                   AS [compressed_page_count]
 -- The row count comes from sys.dm_db_partition_stats for this one partition,
 -- inside the per-heap TRY: read for the whole list it blocks on any locked heap.
 -- The object_id predicate is what confines it. Filtered on partition_id alone,
@@ -362,7 +409,8 @@ OPTION (RECOMPILE, MAXDOP 1);
 SELECT h.[table], h.[partition], h.[rows], h.[used_mb], h.[page_count],
        h.[forwarded_records], h.[forwarded_percent_of_rows], h.[fragmentation_pct],
        h.[page_fullness_pct], h.[records_scanned], h.[nonclustered_indexes],
-       h.[partition_count], h.[filegroup]
+       h.[partition_count], h.[filegroup], h.[data_compression],
+       h.[compressed_page_count]
 FROM @heaps AS h
 ORDER BY h.[forwarded_records] DESC, h.[used_mb] DESC
 OPTION (RECOMPILE, MAXDOP 1);

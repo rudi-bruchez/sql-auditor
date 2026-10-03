@@ -127,12 +127,35 @@
 -- this collector does not do and 70.schema/055.page-density projects, behind
 -- --measure-page-density, for the largest index partitions: its row for the
 -- same table, index_id and partition_number says how many leaf pages are
--- compressed. Without it, an estimate from 041.compression-savings. Zero
+-- compressed. For heaps 70.schema/050.heaps projects it by default, for the
+-- 50 largest, on table and partition. Without it, an estimate from 041.compression-savings. Zero
 -- successes on many attempts is a question to ask, not a finding.
 --
--- A rebuild starts the counters again and counts itself: after each of two
--- rebuilds the repetitive table read 54 and 27 again, with leaf_inserts at 0,
--- which is how a row describing a rebuild rather than DML reads. TRUNCATE
+-- A REBUILD STARTS EVERY COUNTER AGAIN, AND WHAT IT THEN COUNTS OF ITSELF
+-- DEPENDS ON WHAT IS REBUILT AND HOW. The rebuilt partition gets a new hobt_id
+-- and its row starts from zero: forwarded fetches, updates, deletes, ghosts,
+-- lookups, lock counts, all of them. What the rebuild adds was measured on
+-- 17.0.4065.4, 4 October 2026, on a PAGE heap and a PAGE clustered index of
+-- the same 20,000 repetitive rows, each with one nonclustered index, after
+-- 2,000 updates and 1,000 deletes (the online pair after 100 more inserts):
+--
+--   offline, clustered index  leaf_inserts      0, attempts 66, successes 44
+--   offline, heap             leaf_inserts 19,000, attempts 57, successes 32
+--   online, clustered index   leaf_inserts 19,100, attempts 81, successes 27
+--   online, heap              leaf_inserts 19,100, attempts 59, successes 30
+--
+-- Where leaf_inserts is not 0 it is the number of rows the rebuild wrote, not
+-- a count carried over: 19,000 is the 20,000 inserted less the 1,000 deleted,
+-- and a second offline rebuild of the heap read 19,100 again, not twice that.
+-- So attempts with no leaf_inserts describe an offline index rebuild (the
+-- repetitive table of the measurements above read 54 and 27 again after each
+-- of two), while a heap rebuilt, or any partition rebuilt ONLINE, reads as
+-- though its rows had just been inserted. Nothing in the row tells that apart
+-- from a load, and the heaps listing above shows the same leaf_inserts.
+-- ALTER TABLE ... REBUILD on a heap rebuilds its nonclustered indexes too,
+-- whose rows start again; on a table with a clustered index it rebuilds that
+-- index alone, and the nonclustered rows kept their counts. ALTER INDEX ALL
+-- on a heap left the heap's row as it was. TRUNCATE
 -- TABLE does not reset them, measured over three reloads of one table,
 -- although the reference says a truncated partition leaves the function; that
 -- was not measured with TRUNCATE ... WITH (PARTITIONS). Closing the database (OFFLINE then ONLINE
@@ -147,6 +170,9 @@
 -- after ALTER TABLE ... REBUILD took 28, with 54 attempts and 27 successes.
 -- An INSERT ... WITH (TABLOCK) compressed them as it went. A heap row here
 -- with leaf_inserts and no attempts is a heap whose new pages are row-only.
+-- A heap rebuilt and then filled by ordinary inserts reads like a heap only
+-- rebuilt, attempts and successes and all, though its new pages are row-only
+-- too; 70.schema/050.heaps says how many of its pages are compressed.
 --
 -- A failed attempt is cheap. 200 000 random binary(200) rows into a PAGE
 -- clustered index and into a ROW one, three times each: PAGE cost 13 to 31 ms
@@ -168,9 +194,10 @@
 -- of them are for that heap: page_partitions.heaps counts the PAGE heap
 -- partitions from sys.partitions, and page_partitions.heaps_without_attempts
 -- those whose counter row shows leaf inserts and no attempt, the row-only
--- shape described above. They are counted here rather than in
--- 055.page-density because that file measures no heap, and here they cost a
--- CASE in two counts already made. A heap with no counter row is in neither
+-- shape described above. They are counted here although 050.heaps now
+-- projects compressed_page_count per heap, because that file reads only the
+-- 50 largest heaps above 128 pages, and here they cost a CASE in two counts
+-- already made. A heap with no counter row is in neither
 -- the second count nor the listing, only in the gap between total and
 -- reporting. Its cost is the same kind as the other
 -- areas: counters already in memory, joined to sys.partitions and
