@@ -303,7 +303,10 @@ The same goes for `RESTRICTED_USER` when the login is not `db_owner`,
 reason is `user_access=RESTRICTED_USER`.
 
 The generated script writes this section for you, one block per database the run
-reported as skipped. What it emits is a user and nothing else:
+reported as skipped. It leaves the section out when no collector of the corpus
+or profile runs inside a database, for instance a `--queries-dir` holding only
+instance-scoped files: access that nothing would use is not asked for. What it
+emits is a user and nothing else:
 
 ```sql
 USE AppDb;
