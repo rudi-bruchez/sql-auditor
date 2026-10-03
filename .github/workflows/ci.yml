@@ -189,6 +189,22 @@ jobs:
           # zero modified pages: the "no base" case, which is the one to keep
           # running on both legs.
           test -f "$run_dir/60.backup/ci_probe/030.differential-base.json"
+          # 042 projects every cost band, empty ones included, in a fixed
+          # order: a band that vanished when empty would make "nothing cost
+          # this much" and "this band was not computed" look alike, and the
+          # unknown band is the one a careless rewrite drops. Statements
+          # examined never exceed the cap, and the bands account for all of
+          # them, whatever the runner's cache holds. And some statement got a
+          # cost: without the showplan namespace every path read returns NULL
+          # and all of them land in unknown, which the sums alone accept.
+          jq -e '([.bands[].band] == ["lt_5","5_25","25_50","50_100","100_500","ge_500","unknown"])
+                 and .examined.statements <= .examined.cap
+                 and ([.bands[] | select(.band != "unknown") | .statements] | add) > 0
+                 and ([.bands[].statements] | add) == .examined.statements
+                 and (.unknown.no_plan + .unknown.not_xml + .unknown.no_cost)
+                       == (.bands[] | select(.band == "unknown") | .statements)' \
+            "$run_dir/80.workload/042.parallel-cost-distribution.json" \
+            || { jq '.' "$run_dir/80.workload/042.parallel-cost-distribution.json"; exit 1; }
           # 025 ran on the user database, with its span resolved and the two
           # sides in its root, whatever the state of the store there.
           jq -e 'has("side_minutes") and has("before") and has("after")' \
