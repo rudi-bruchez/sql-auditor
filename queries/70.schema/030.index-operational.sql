@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, heaps:array, contention:array, page_compression:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     120
+-- @profiles:    space
 --
 -- Forwarded records on heaps, where lock and latch waits actually land, and
 -- whether partitions set to PAGE compression actually get it.
@@ -148,6 +149,12 @@
 -- clustered index and into a ROW one, three times each: PAGE cost 13 to 31 ms
 -- more CPU over about 850 ms, for 5 263 failed attempts. What PAGE fails to
 -- deliver on such a partition is the space, not a CPU budget it burns.
+--
+-- This listing is why the file belongs to the space profile. A partition set
+-- to PAGE that never compresses is space the database was expected to give
+-- back and did not, and a space run that left this file out could not say so.
+-- The rest of the file comes along: it is cheap, and splitting it would cost a
+-- second pass over the same view.
 --
 -- The listing keeps the 200 partitions with the most attempts, the same cap as
 -- the two others, so listing_cap still describes all three. Attempts order it
