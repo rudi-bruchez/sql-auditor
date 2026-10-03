@@ -471,3 +471,21 @@ func TestNoAccessSectionUnderAProfileNeedsADatabaseScopedScript(t *testing.T) {
 		t.Errorf("without a profile the section is written as today:\n%s", unchanged)
 	}
 }
+
+// A corpus from disk restricted to a few files declares only some of the
+// capabilities, while the probes stay the same for every corpus. A denied
+// capability none of those files declares still gets its section, and the
+// empty collector list must say that this is expected there rather than only
+// calling it a bug: measured with a corpus of one file, five msdb sections
+// told the DBA to report a bug that did not exist.
+func TestAnUndeclaredGrantExplainsARestrictedCorpus(t *testing.T) {
+	in := baseInput("agent_alerts")
+	body, _ := BuildGrantScript(in)
+	section := body[strings.Index(body, "Read whether anyone is told"):]
+	if !strings.Contains(section, "--queries-dir") || !strings.Contains(section, "can then be left out") {
+		t.Errorf("an empty collector list must name the restricted corpus as a cause:\n%s", section)
+	}
+	if !strings.Contains(section, "With the embedded") || !strings.Contains(section, "worth reporting as a bug") {
+		t.Errorf("and must still call it a bug with the embedded corpus:\n%s", section)
+	}
+}

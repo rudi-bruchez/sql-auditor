@@ -624,12 +624,23 @@ func anyDatabaseScoped(scripts []Script) bool {
 }
 
 // indentList renders the collector paths as comment lines, or says plainly
-// that none declared the capability. An empty list here means the corpus and
-// the preflight have drifted apart, and printing nothing would hide that.
+// that none declared the capability. Printing nothing would hide it.
+//
+// An empty list has two causes, and the file cannot tell them apart because it
+// is not told where the corpus came from. With the embedded corpus every probe
+// is declared by some collector, so an empty list there means the preflight
+// and the corpus have drifted apart. With a corpus from disk restricted to a
+// few files, it is the expected outcome: the probes are the same for every
+// corpus, and a capability none of those files declares is still probed and
+// still reported. The sentence names both, so that the second case does not
+// send a DBA to report a bug that is not one.
 func indentList(paths []string) []string {
 	if len(paths) == 0 {
-		return []string{"  (no collector in this corpus declares it — the preflight and the",
-			"  corpus disagree, which is worth reporting as a bug)"}
+		return []string{"  (no collector in this corpus declares it. Expected when the corpus",
+			"  was given with --queries-dir or QUERIES_DIR and holds only some of",
+			"  the collectors: this grant can then be left out. With the embedded",
+			"  corpus it means the preflight and the corpus disagree, which is",
+			"  worth reporting as a bug.)"}
 	}
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
