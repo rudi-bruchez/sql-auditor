@@ -69,6 +69,41 @@
 -- index, and LOB and row-overflow pages are not repacked by a rebuild the same
 -- way, so mixing them in would describe no real operation.
 --
+-- COMPRESSED_PAGE_COUNT SAYS WHETHER A PAGE PARTITION GOT WHAT IT ASKED FOR.
+-- The SAMPLED call already returns it (LIMITED returns NULL), so projecting it
+-- reads nothing more: what this file scans is unchanged. It is here because
+-- 70.schema/030.index-operational cannot settle its own zero. Its
+-- page_compression listing counts attempts and successes per PAGE partition,
+-- and a page split from a compressed page comes out compressed without
+-- counting a success, so "the data resists PAGE" and "the key is random and
+-- every page is compressed" read alike there. Measured through both files on
+-- 17.0.4065.4, 3 October 2026, on one database:
+--
+--   increasing key, repetitive rows  559 attempts, 280 successes, 280 of 280 compressed
+--   increasing key, random rows      526 attempts,   0 successes,   0 of 527 compressed
+--   random GUID key, repetitive rows 201 attempts,   1 success,   201 of 201 compressed
+--   random GUID key, random rows     821 attempts,   0 successes,   0 of 822 compressed
+--
+-- The third and fourth have leaf allocations close to their attempts (201
+-- and 822), which is all 030 can offer, and only the count here tells them
+-- apart. The two files' rows meet on the database, table, index_id and
+-- partition_number, which both project in the same form.
+--
+-- data_compression is projected beside it, from sys.partitions, because a
+-- zero says something only on a PAGE partition: a ROW partition of the same
+-- repetitive rows read 0 of 527, as every ROW or NONE partition will.
+--
+-- ON A PARTITION ABOVE 10,000 PAGES THE COUNT IS THE SAMPLE'S, SCALED UP. A
+-- 16,667-page clustered index, every leaf page compressed after a TABLOCK
+-- load, read 16,600 in SAMPLED and 16,667 in DETAILED, like record_count
+-- beside it (298,800 against 300,000). Read it as a share of page_count, not
+-- as an exact number of pages.
+--
+-- It covers what this file measures and nothing else: indexes, not heaps,
+-- and only partitions above 128 used in-row pages among the 50 largest. A
+-- PAGE heap, or a small PAGE partition, has no row here to join to; 030 counts
+-- PAGE heaps at its root for that reason.
+--
 -- SQL Server 2012 is the floor. Every column read here is documented before
 -- it; the file has been executed on SQL Server 2025 only.
 
@@ -118,6 +153,7 @@ DECLARE @candidates TABLE (
     [index_name]       sysname NULL,
     [index_type]       nvarchar(60) NOT NULL,
     [fill_factor]      tinyint NOT NULL,
+    [data_compression] nvarchar(60) NOT NULL,
     [reserved_pages]   bigint NOT NULL,
     [in_row_reserved_pages] bigint NOT NULL,
     [lob_reserved_pages]    bigint NOT NULL
@@ -129,13 +165,15 @@ DECLARE @density TABLE (
     index_type        nvarchar(60)  NOT NULL,
     partition_number  int           NOT NULL,
     fill_factor       tinyint       NOT NULL,
+    data_compression  nvarchar(60)  NOT NULL,
     reserved_mb       decimal(18,1) NOT NULL,
     in_row_reserved_mb decimal(18,1) NOT NULL,
     lob_reserved_mb   decimal(18,1) NOT NULL,
     page_count        bigint        NULL,
     page_fullness_pct decimal(5,2)  NULL,
     fragmentation_pct decimal(5,2)  NULL,
-    record_count      bigint        NULL
+    record_count      bigint        NULL,
+    compressed_page_count bigint    NULL
 );
 
 /* Read inside TRY/CATCH into a table variable, and emitted unconditionally
@@ -162,12 +200,12 @@ BEGIN TRY
     DECLARE @sizes TABLE (
         [object_id] int, [index_id] int, [partition_number] int,
         [index_name] sysname NULL, [index_type] nvarchar(60), [fill_factor] tinyint,
-        [reserved_pages] bigint, [in_row_reserved_pages] bigint,
+        [data_compression] nvarchar(60), [reserved_pages] bigint, [in_row_reserved_pages] bigint,
         [lob_reserved_pages] bigint);
 
     INSERT INTO @sizes
     SELECT p.object_id, p.index_id, p.partition_number,
-           i.name, i.type_desc, i.fill_factor,
+           i.name, i.type_desc, i.fill_factor, p.data_compression_desc,
            a.reserved_pages, a.in_row_reserved_pages, a.lob_reserved_pages
     FROM sys.partitions AS p
     JOIN sys.indexes AS i ON i.object_id = p.object_id AND i.index_id = p.index_id
@@ -186,11 +224,11 @@ BEGIN TRY
     SELECT @eligible = COUNT(*) FROM @sizes;
 
     INSERT INTO @candidates ([object_id], [index_id], [partition_number],
-                             [index_name], [index_type], [fill_factor],
+                             [index_name], [index_type], [fill_factor], [data_compression],
                              [reserved_pages], [in_row_reserved_pages], [lob_reserved_pages])
     SELECT TOP (@top)
            [object_id], [index_id], [partition_number],
-           [index_name], [index_type], [fill_factor],
+           [index_name], [index_type], [fill_factor], [data_compression],
            [reserved_pages], [in_row_reserved_pages], [lob_reserved_pages]
     FROM @sizes
     ORDER BY [in_row_reserved_pages] DESC, [object_id], [index_id], [partition_number]
@@ -221,13 +259,15 @@ BEGIN
                c.index_type,
                c.partition_number,
                c.fill_factor,
+               c.data_compression,
                CAST(c.reserved_pages * 8 / 1024.0 AS decimal(18,1)),
                CAST(c.in_row_reserved_pages * 8 / 1024.0 AS decimal(18,1)),
                CAST(c.lob_reserved_pages * 8 / 1024.0 AS decimal(18,1)),
                ips.page_count,
                CAST(ips.avg_page_space_used_in_percent AS decimal(5,2)),
                CAST(ips.avg_fragmentation_in_percent AS decimal(5,2)),
-               ips.record_count
+               ips.record_count,
+               ips.compressed_page_count
         FROM sys.dm_db_index_physical_stats(DB_ID(), @obj, @idx, @part, 'SAMPLED') AS ips
         JOIN @candidates AS c ON c.[n] = @i
         WHERE ips.index_level = 0
@@ -265,7 +305,9 @@ SELECT DB_NAME()                                   AS [database],
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT [table], index_name, index_id, index_type, partition_number, fill_factor,
-       reserved_mb, in_row_reserved_mb, lob_reserved_mb, page_count, page_fullness_pct, fragmentation_pct, record_count
+       data_compression,
+       reserved_mb, in_row_reserved_mb, lob_reserved_mb, page_count, page_fullness_pct, fragmentation_pct, record_count,
+       compressed_page_count
 FROM @density
 ORDER BY in_row_reserved_mb DESC, [table], index_id, partition_number
 OPTION (RECOMPILE, MAXDOP 1);
