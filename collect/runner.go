@@ -345,7 +345,7 @@ func Connect(ctx context.Context, db *sql.DB, cfg *Config) (*sql.Conn, error) {
 	defer cancel()
 	c, err := connWithin(cctx, db)
 	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
-		return nil, fmt.Errorf("the server took the connection but did not complete the login within %s", budget)
+		return nil, fmt.Errorf("the server took the connection but did not complete the login within %s (twice SQL_CONNECT_TIMEOUT_SEC)", budget)
 	}
 	return c, err
 }
