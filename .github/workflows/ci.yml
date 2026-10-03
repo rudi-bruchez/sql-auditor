@@ -137,13 +137,17 @@ jobs:
       # runs a query, called once per row, plants such a query. GETDATE() in
       # the body keeps the 2019 inlining away on the 2022 leg (is_inlineable
       # 0, checked on SQL Server 2025), since an inlined function records no
-      # query of its own; the 2017 leg never inlines.
+      # query of its own; the 2017 leg never inlines. It is called once per
+      # row of sys.all_columns, some ten thousand rows, so its executions
+      # outnumber everything else ci_probe runs before 029 reads the store
+      # (12,803 against 172 on SQL Server 2025, the whole corpus included, in
+      # under four seconds), and a total that counted them would show it.
       - name: plant a nested function query
         run: |
           tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
             /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b "$@"; }
           tools -Q "CREATE FUNCTION dbo.ci_nested (@n int) RETURNS int AS BEGIN DECLARE @c int; SELECT @c = COUNT(*) FROM sys.objects WHERE object_id > @n AND create_date < GETDATE(); RETURN @c; END;"
-          tools -Q "SELECT SUM(dbo.ci_nested(object_id)) FROM sys.objects;"
+          tools -Q "SELECT SUM(dbo.ci_nested(object_id)) FROM sys.all_columns;"
 
       # 80.workload/027 lists the indexes the stored plans READ, and the whole
       # point is what it leaves out: an index that is only maintained. Its
@@ -516,7 +520,9 @@ jobs:
           # The store of ci_probe was switched on in this job and has run
           # statements since, so at least one interval is listed, none is
           # longer than the store's own grain, and the listing respects its
-          # cap. The function planted above must show as left out.
+          # cap. The function planted above must show as left out, and as left
+          # out of the totals: its executions outnumber all the others (see the
+          # plant), so totals that counted them would reach the excluded count.
           jq -e '(keys_unsorted | sort) == (["collected_at","config","database","intervals",
                      "listing_cap","state","window"] | sort)
                  and (.state | keys_unsorted | sort) == (["actual","capture_mode","desired"] | sort)
@@ -534,7 +540,9 @@ jobs:
                      and (.executions | keys_unsorted | sort) == (["aborted","exception","regular"] | sort)
                      and .minutes >= 1 and .minutes <= 1440)
                  and ([.intervals[].executions.regular] | add) >= 1
-                 and ([.intervals[].excluded.nested_executions] | add) >= 1' \
+                 and ([.intervals[].excluded.nested_executions] | add) >= 1
+                 and ([.intervals[].executions | .regular + .aborted + .exception] | add)
+                     < ([.intervals[].excluded.nested_executions] | add)' \
             "$run_dir/80.workload/ci_probe/029.query-store-load-profile.json" \
             || { jq 'del(.intervals)' "$run_dir/80.workload/ci_probe/029.query-store-load-profile.json"
                  jq -c '.intervals[-3:]' "$run_dir/80.workload/ci_probe/029.query-store-load-profile.json"; exit 1; }
