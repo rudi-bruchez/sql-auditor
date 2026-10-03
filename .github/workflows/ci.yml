@@ -594,3 +594,30 @@ jobs:
                  and (.blocking_watch.waits.items | length) == 0
                  and .blocking_watch.waits.truncated == false' "$run_dir/_run.json" \
             || { jq '.blocking_watch' "$run_dir/_run.json"; exit 1; }
+      # 064 names the longest pending I/O of each ioSubsystem round, and no
+      # instance has yet been seen filling that element: on 17.0.4065.4 it
+      # comes as an empty <longestPendingRequests/> on every round, so the
+      # columns are NULL in every collection and a misspelt path would read
+      # NULL in silence for ever. The expressions of the ioSubsystem branch
+      # are therefore taken from the file as written and run against a filled
+      # payload. The element and attribute names are the ones SQLWATCH reads
+      # (pendingRequest, @duration, @filePath); this pins the file to them and
+      # checks that the longest request's file is the one returned, but it
+      # cannot confirm the engine's own spelling, which no round has shown.
+      - name: read 064's pending I/O paths against a filled payload
+        run: |
+          tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -b "$@"; }
+          f=queries/10.system/064.server-diagnostics.sql
+          cols=$(grep -A1 "= 'ioSubsystem'" "$f" | grep -o "THEN n\.value('[^']*', '[a-z0-9()]*')" \
+                 | sed 's/^THEN //' | paste -sd, -)
+          echo "expressions read: $cols"
+          got=$(tools -I -h -1 -W -Q "SET NOCOUNT ON;
+            DECLARE @x xml = N'<ioSubsystem ioLatchTimeouts=''0''><longestPendingRequests>
+              <pendingRequest duration=''12'' filePath=''/data/a.mdf''/>
+              <pendingRequest duration=''40'' filePath=''/log/a_log.ldf''/>
+              <pendingRequest duration=''7'' filePath=''/data/tempdb.mdf''/>
+              </longestPendingRequests></ioSubsystem>';
+            SELECT CONCAT_WS('|', $cols) FROM @x.nodes('/ioSubsystem') AS t(n);")
+          echo "read back: $got"
+          test "$got" = "3|40|/log/a_log.ldf"
