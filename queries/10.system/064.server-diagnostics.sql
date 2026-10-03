@@ -109,7 +109,8 @@
 -- them carrying only the SYSTEM columns and half only the others, which looked
 -- plausible enough in a report to have shipped. Measured on both versions: the
 -- spread inside one round is at most 1 millisecond, and truncating the timestamp
--- to the second groups the four correctly, 298 buckets of exactly four on
+-- to the second groups the four correctly (truncating, not CONVERT to
+-- datetime2(0), which rounds: .499 and .500 would land a second apart), 298 buckets of exactly four on
 -- 16.0.4265.3 and 299 on 17.0.4065.4. The one or two buckets holding fewer are
 -- the edges of the ring, where the oldest round was partly overwritten. That is
 -- why components is projected per row: a row of three is a real edge case and
@@ -269,7 +270,9 @@ BEGIN TRY
            MAX(s.[avail_phys]),      MAX(s.[avail_page]),
            MAX(s.[working_set]),     MAX(s.[alloc_potential])
     FROM (
-        SELECT CONVERT(datetime2(0), x.value('@timestamp', 'datetime2(3)'))  AS [bucket],
+        SELECT CONVERT(datetime2(0), DATEADD(millisecond,
+                   -DATEPART(millisecond, x.value('@timestamp', 'datetime2(3)')),
+                   x.value('@timestamp', 'datetime2(3)')))                    AS [bucket],
                x.value('(data[@name="state"]/text)[1]', 'varchar(30)')       AS [state],
                /* Every read below is a bare attribute off n, never a path.
                   That is the point: .value() with a path re-walks the document
@@ -365,8 +368,9 @@ BEGIN TRY
     SELECT z.[list], z.[wait_type], COUNT(DISTINCT z.[bucket]), SUM(z.[waits]),
            MAX(z.[avg_ms]), MAX(z.[max_ms])
     FROM (
-        SELECT CONVERT(datetime2(0),
-                       x.value('@timestamp', 'datetime2(3)'))        AS [bucket],
+        SELECT CONVERT(datetime2(0), DATEADD(millisecond,
+                       -DATEPART(millisecond, x.value('@timestamp', 'datetime2(3)')),
+                       x.value('@timestamp', 'datetime2(3)')))       AS [bucket],
                w.n.value('local-name(../..)', 'varchar(20)') + '_'
                  + w.n.value('local-name(..)', 'varchar(20)')        AS [list],
                w.n.value('@waitType', 'varchar(60)')                 AS [wait_type],
