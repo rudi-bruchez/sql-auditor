@@ -333,6 +333,23 @@ func Open(cfg *Config) (*sql.DB, error) {
 	return db, nil
 }
 
+// Connect takes a connection from db within twice cfg.ConnectTimeout: one
+// ConnectTimeout for the dial, which the driver bounds itself, and the same
+// again for the pre-login and login that follow it, which it does not. Without
+// this a server that accepts the socket and never answers held the run for as
+// long as the socket lived: measured with a 3 s context and a 20 s dial
+// timeout, still waiting after two minutes.
+func Connect(ctx context.Context, db *sql.DB, cfg *Config) (*sql.Conn, error) {
+	budget := 2 * cfg.ConnectTimeout
+	cctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	c, err := connWithin(cctx, db)
+	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("the server took the connection but did not complete the login within %s", budget)
+	}
+	return c, err
+}
+
 // Probe reads the server's identity and clock offset. It takes a *sql.Conn,
 // not a *sql.DB: the pool allows exactly one connection, so a caller holding a
 // Conn that also passed the DB here would deadlock until its context expired.

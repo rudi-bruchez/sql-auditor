@@ -1953,7 +1953,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// so any call handed the *sql.DB while this is held blocks until its
 	// context expires — reproduced as "context deadline exceeded", which is
 	// not a diagnosis anybody would arrive at from the message.
-	conn, err := db.Conn(ctx)
+	conn, err := Connect(ctx, db, o.Config)
 	if err != nil {
 		if advice := certificateAdvice(o.Config, err); advice != "" {
 			err = fmt.Errorf("cannot reach the instance: %w\n\n%s", err, advice)
@@ -2262,7 +2262,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		if !connAlive(ctx, conn, o.Config) {
 			fmt.Fprintln(o.progress(), "connection lost; attempting one reconnect")
 			conn.Close()
-			fresh, cerr := db.Conn(ctx)
+			fresh, cerr := Connect(ctx, db, o.Config)
 			if cerr != nil {
 				cerr = fmt.Errorf("reconnect failed: %w", cerr)
 				m.Errors = append(m.Errors, ErrorEntry{Message: cerr.Error()})
@@ -2669,7 +2669,7 @@ func resetWithDeadline(ctx context.Context, c *sql.Conn, cfg *Config) error {
 // when the pool did have to open a new connection.
 func recycleConn(ctx context.Context, db *sql.DB, conn *sql.Conn, cfg *Config) (*sql.Conn, int, error) {
 	conn.Close()
-	fresh, err := db.Conn(ctx)
+	fresh, err := Connect(ctx, db, cfg)
 	if err != nil {
 		return conn, 0, err
 	}

@@ -549,7 +549,7 @@ func startBlockingWatch(ctx context.Context, cfg *Config, denied map[string]bool
 	db.SetMaxIdleConns(2)
 	dctx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout+watchPollDeadline)
 	defer cancel()
-	c, err := db.Conn(dctx)
+	c, err := connWithin(dctx, db)
 	if err != nil {
 		db.Close()
 		return nil, func() {}, "its connection could not be opened: " + err.Error()
@@ -560,7 +560,7 @@ func startBlockingWatch(ctx context.Context, cfg *Config, denied map[string]bool
 	// slow identity read stop the watch: measured, the next poll on the same
 	// connection returns "driver: bad connection" and then "connection is
 	// already closed". Failing to open it costs the identity, not the watch.
-	idConn, idErr := db.Conn(dctx)
+	idConn, idErr := connWithin(dctx, db)
 	w := newBlockingWatch(poll, watchPollEvery, watchCancelAfter)
 	if idErr == nil {
 		w.identify = sqlIdentify(idConn)

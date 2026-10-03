@@ -496,9 +496,7 @@ func (r *runner) connect(ctx context.Context, s State) {
 		return
 	}
 	defer db.Close()
-	cctx, cancel := context.WithTimeout(ctx, o.Config.ConnectTimeout)
-	defer cancel()
-	conn, err := db.Conn(cctx)
+	conn, err := collect.Connect(ctx, db, o.Config)
 	if err != nil {
 		if ctx.Err() != nil {
 			// The operator cancelled; the refusal is ours, not the server's,

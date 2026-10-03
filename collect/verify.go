@@ -131,7 +131,7 @@ func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
 	}
 	defer db.Close()
 
-	conn, err := db.Conn(ctx)
+	conn, err := Connect(ctx, db, o.Config)
 	if err != nil {
 		v.ConnErr = err
 		return err

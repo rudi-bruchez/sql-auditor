@@ -1212,7 +1212,9 @@ settings below and the per-collector `@timeout` further down.
 task.
 
 **`SQL_CONNECT_TIMEOUT_SEC`** defaults to 15 seconds and covers establishing the
-connection, and nothing after it. Raise it if the instance is behind a slow link
+connection, and nothing after it. It bounds the dial, and the same budget again
+bounds the login that follows: a server that accepts the socket and never
+answers is given up on after twice the setting, 30 seconds by default. Raise it if the instance is behind a slow link
 or a failover cluster that takes its time answering.
 
 **`SQL_QUERY_TIMEOUT_SEC`** defaults to 60 seconds. It bounds every round trip

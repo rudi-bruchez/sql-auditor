@@ -19,6 +19,10 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Fixed
+
+- The first connection of a collection, of `check` and of the assistant, the blocking watch's two connections, and the collection's reconnects now give up on a server that accepts the socket and never completes the login. The driver bounds only the dial, so such a server held the run until the socket died: measured, still waiting after two minutes. The budget is `SQL_CONNECT_TIMEOUT_SEC` for the dial and the same again for the login.
+
 ## [0.36.0] - 2026-09-27
 
 This release finishes the harm review of 27 September 2026 and makes the
