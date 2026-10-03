@@ -278,8 +278,15 @@ jobs:
             "$run_dir/20.databases/ci_probe/020.properties.json"
           # ci_probe never has a full backup, so the file carries a NULL base and
           # zero modified pages: the "no base" case, which is the one to keep
-          # running on both legs.
-          test -f "$run_dir/60.backup/ci_probe/030.differential-base.json"
+          # running on both legs. The allocated pages are required too, since
+          # zero modified out of zero allocated would not tell the two
+          # columns apart.
+          jq -e '.base.time == null and .base.lsn == null and .base.guid == null
+                 and .base.backup_found == 0
+                 and .extents.allocated_pages > 0 and .extents.modified_pages == 0
+                 and .counts.files_without_base == .counts.data_files' \
+            "$run_dir/60.backup/ci_probe/030.differential-base.json" \
+            || { jq . "$run_dir/60.backup/ci_probe/030.differential-base.json"; exit 1; }
           # 042 projects every cost band, empty ones included, in a fixed
           # order: a band that vanished when empty would make "nothing cost
           # this much" and "this band was not computed" look alike, and the
