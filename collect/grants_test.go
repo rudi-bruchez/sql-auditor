@@ -162,6 +162,79 @@ func TestErrorLogNeedsNoSeparateGrantBefore2022(t *testing.T) {
 	}
 }
 
+// securityInput is baseInput with a collector that declares the security half
+// of the server state, the way 40.security/040.encryption-certificates.sql does.
+func securityInput(version string, denied ...string) GrantScriptInput {
+	in := baseInput(denied...)
+	in.Version = version
+	in.Scripts = append(in.Scripts, Script{
+		Path:        "queries/40.security/040.encryption-certificates.sql",
+		Permissions: []string{"connect", "view_any_definition", "view_server_security_state", "msdb_read"},
+	})
+	return in
+}
+
+// From 2022 the grant for the performance counters is VIEW SERVER PERFORMANCE
+// STATE, and sys.dm_database_encryption_keys is refused under it with Msg 300.
+// A login built from this script lost the database keys in silence until the
+// security half had a grant of its own.
+func TestSecurityStateHasItsOwnGrantFrom2022(t *testing.T) {
+	for _, v := range []string{"16.0.4035.4", "17.0.4065.4"} {
+		body, has := BuildGrantScript(securityInput(v, "view_server_security_state"))
+		if !has {
+			t.Fatalf("%s: a denied security state must produce a statement", v)
+		}
+		stmts := statements(body)
+		if !strings.Contains(stmts, "GRANT VIEW SERVER SECURITY STATE TO [svc_audit];") {
+			t.Errorf("%s: missing the narrow grant for the encryption keys:\n%s", v, stmts)
+		}
+		for _, unwanted := range []string{"GRANT VIEW SERVER STATE TO", "PERFORMANCE STATE"} {
+			if strings.Contains(stmts, unwanted) {
+				t.Errorf("%s: granted %q, which was not denied:\n%s", v, unwanted, stmts)
+			}
+		}
+		if !strings.Contains(body, "--   queries/40.security/040.encryption-certificates.sql") {
+			t.Errorf("%s: the section must name the collector that declared it:\n%s", v, body)
+		}
+	}
+
+	// Both halves refused: two grants, the narrow one each.
+	body, _ := BuildGrantScript(securityInput("16.0.4035.4", "view_server_state", "view_server_security_state"))
+	stmts := statements(body)
+	for _, want := range []string{
+		"GRANT VIEW SERVER PERFORMANCE STATE TO [svc_audit];",
+		"GRANT VIEW SERVER SECURITY STATE TO [svc_audit];",
+	} {
+		if !strings.Contains(stmts, want) {
+			t.Errorf("both halves denied on 2022, missing %q:\n%s", want, stmts)
+		}
+	}
+}
+
+// Before 2022, and when the version is unknown, VIEW SERVER SECURITY STATE
+// does not exist to be granted: the encryption keys ride on VIEW SERVER STATE,
+// as the error log does, and are granted once with it.
+func TestSecurityStateRidesOnViewServerStateBefore2022(t *testing.T) {
+	for _, v := range []string{"15.0.4000.1", "11.0.7001.0", ""} {
+		for _, denied := range [][]string{
+			{"view_server_security_state"},
+			{"view_server_state", "view_server_security_state"},
+		} {
+			body, _ := BuildGrantScript(securityInput(v, denied...))
+			stmts := statements(body)
+			if n := strings.Count(stmts, "GRANT VIEW SERVER STATE TO [svc_audit];"); n != 1 {
+				t.Errorf("version %q, denied %v: want VIEW SERVER STATE granted once, got %d:\n%s", v, denied, n, stmts)
+			}
+			if strings.Contains(stmts, "SECURITY STATE") || strings.Contains(stmts, "PERFORMANCE STATE") {
+				t.Errorf("version %q, denied %v: named a permission this version does not have:\n%s", v, denied, stmts)
+			}
+			if !strings.Contains(body, "--   queries/40.security/040.encryption-certificates.sql") {
+				t.Errorf("version %q, denied %v: the section must name the collector that needs the keys:\n%s", v, denied, body)
+			}
+		}
+	}
+}
+
 // msdb permissions are database-scoped, so they need a user and a context
 // switch. Granting in the wrong database is the classic way this fails.
 func TestMsdbGrantsRunInMsdbAndCreateTheUserFirst(t *testing.T) {
@@ -396,5 +469,23 @@ func TestNoAccessSectionUnderAProfileNeedsADatabaseScopedScript(t *testing.T) {
 	unchanged, _ := BuildGrantScript(noProfile)
 	if !strings.Contains(statements(unchanged), "SALESDB") {
 		t.Errorf("without a profile the section is written as today:\n%s", unchanged)
+	}
+}
+
+// A corpus from disk restricted to a few files declares only some of the
+// capabilities, while the probes stay the same for every corpus. A denied
+// capability none of those files declares still gets its section, and the
+// empty collector list must say that this is expected there rather than only
+// calling it a bug: measured with a corpus of one file, five msdb sections
+// told the DBA to report a bug that did not exist.
+func TestAnUndeclaredGrantExplainsARestrictedCorpus(t *testing.T) {
+	in := baseInput("agent_alerts")
+	body, _ := BuildGrantScript(in)
+	section := body[strings.Index(body, "Read whether anyone is told"):]
+	if !strings.Contains(section, "--queries-dir") || !strings.Contains(section, "can then be left out") {
+		t.Errorf("an empty collector list must name the restricted corpus as a cause:\n%s", section)
+	}
+	if !strings.Contains(section, "With the embedded") || !strings.Contains(section, "worth reporting as a bug") {
+		t.Errorf("and must still call it a bug with the embedded corpus:\n%s", section)
 	}
 }

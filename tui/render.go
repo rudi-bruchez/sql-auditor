@@ -338,7 +338,7 @@ func serverBlock(s State, width int) []string {
 	}
 }
 
-// permissionBlock lists ALL nine capabilities, in the order Capabilities()
+// permissionBlock lists EVERY capability, in the order Capabilities()
 // probes them, with the total derived from that same slice rather than written
 // down here. Writing "9" would be a number this screen invented, and the
 // repository's rule is that nothing on screen is invented: it would also

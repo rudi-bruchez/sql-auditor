@@ -224,15 +224,22 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 	// are decided together rather than emitted twice.
 	wantState := denied["view_server_state"]
 	wantErrorLog := denied["error_log"]
+	// The encryption keys too: below 2022 sys.dm_database_encryption_keys asks
+	// for VIEW SERVER STATE, and VIEW SERVER SECURITY STATE does not exist
+	// there to be granted. An unknown version (major 0) takes this branch as
+	// well, since VIEW SERVER STATE is the one that exists everywhere.
+	wantSecurity := denied["view_server_security_state"]
 
-	if wantState || (wantErrorLog && major < 16) {
+	if wantState || (wantErrorLog && major < 16) || (wantSecurity && major < 16) {
 		s := grantSection{title: "Read performance counters"}
 		if major >= 16 {
 			s.statement = []string{fmt.Sprintf("GRANT VIEW SERVER PERFORMANCE STATE TO %s;", login)}
 			s.why = append(s.why,
 				"This instance is SQL Server 2022 or later, where VIEW SERVER PERFORMANCE",
 				"STATE covers the dynamic management views without also opening the",
-				"security-related ones. VIEW SERVER STATE would work and would grant more.")
+				"security-related ones. VIEW SERVER STATE would work and would grant more.",
+				"The one security-related view the collectors read, if it was refused,",
+				"has its own section below.")
 		} else {
 			s.statement = []string{fmt.Sprintf("GRANT VIEW SERVER STATE TO %s;", login)}
 			s.why = append(s.why,
@@ -248,9 +255,39 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 				"On this version it is also what sys.sp_readerrorlog requires, so the",
 				"error log needs no separate grant.")
 		}
+		if wantSecurity && major < 16 {
+			s.why = append(s.why,
+				"On this version it is also what sys.dm_database_encryption_keys",
+				"requires, so the database encryption keys need no separate grant.")
+		}
 		s.why = append(s.why, "", "Collectors that need it:")
 		s.why = append(s.why, indentList(collectorsFor(in.Scripts, "view_server_state"))...)
+		if wantSecurity && major < 16 {
+			s.why = append(s.why, "", "Collectors that need it for the database encryption keys:")
+			s.why = append(s.why, indentList(collectorsFor(in.Scripts, "view_server_security_state"))...)
+		}
 		sections = append(sections, s)
+	}
+
+	if wantSecurity && major >= 16 {
+		sections = append(sections, grantSection{
+			title: "Read the database encryption keys",
+			why: append([]string{
+				"From SQL Server 2022 sys.dm_database_encryption_keys asks for VIEW",
+				"SERVER SECURITY STATE, which VIEW SERVER PERFORMANCE STATE does not",
+				"include. Without it the collectors below are skipped, and the archive",
+				"cannot say which certificate protects each database encrypted with",
+				"TDE, nor whether that certificate's private key was ever backed up.",
+				"VIEW SERVER STATE would also cover it, and would grant more.",
+				"",
+				"It opens the security-related dynamic management views of the",
+				"instance, audit status and encryption keys among them. It does not",
+				"open any key, certificate or data.",
+				"",
+				"Collectors that need it:",
+			}, indentList(collectorsFor(in.Scripts, "view_server_security_state"))...),
+			statement: []string{fmt.Sprintf("GRANT VIEW SERVER SECURITY STATE TO %s;", login)},
+		})
 	}
 
 	if wantErrorLog && major >= 16 {
@@ -587,12 +624,23 @@ func anyDatabaseScoped(scripts []Script) bool {
 }
 
 // indentList renders the collector paths as comment lines, or says plainly
-// that none declared the capability. An empty list here means the corpus and
-// the preflight have drifted apart, and printing nothing would hide that.
+// that none declared the capability. Printing nothing would hide it.
+//
+// An empty list has two causes, and the file cannot tell them apart because it
+// is not told where the corpus came from. With the embedded corpus every probe
+// is declared by some collector, so an empty list there means the preflight
+// and the corpus have drifted apart. With a corpus from disk restricted to a
+// few files, it is the expected outcome: the probes are the same for every
+// corpus, and a capability none of those files declares is still probed and
+// still reported. The sentence names both, so that the second case does not
+// send a DBA to report a bug that is not one.
 func indentList(paths []string) []string {
 	if len(paths) == 0 {
-		return []string{"  (no collector in this corpus declares it — the preflight and the",
-			"  corpus disagree, which is worth reporting as a bug)"}
+		return []string{"  (no collector in this corpus declares it. Expected when the corpus",
+			"  was given with --queries-dir or QUERIES_DIR and holds only some of",
+			"  the collectors: this grant can then be left out. With the embedded",
+			"  corpus it means the preflight and the corpus disagree, which is",
+			"  worth reporting as a bug.)"}
 	}
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
