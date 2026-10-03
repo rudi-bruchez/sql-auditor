@@ -1,11 +1,13 @@
 -- @scope:       database
--- @resultsets:  root:object, statistics_used:array
+-- @resultsets:  root:object, statistics_used:array, indexes_read:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     300
 -- @min_version: 14
+-- @profiles:    space
 --
--- Which statistics the optimizer actually loaded, read out of the plans the
--- Query Store already holds.
+-- Which statistics the optimizer actually loaded, and which indexes the plans
+-- read, both out of the plans the Query Store already holds and in one pass
+-- over them.
 --
 -- THE LIST IS A VETO, NEVER A HIT LIST. Presence proves use; absence proves
 -- nothing. A statistics object missing from this result may belong to a query
@@ -15,6 +17,67 @@
 -- it contradicts. An analysis that presents this as "statistics never used"
 -- has inverted it, and will one day recommend dropping the one histogram a
 -- quarterly close depends on.
+--
+-- indexes_read IS THE SAME VETO, FOR INDEXES, and it exists because the DMV
+-- indexes do have is not enough. sys.dm_db_index_usage_stats is emptied when
+-- the instance restarts and when the database is closed or detached, so an
+-- index read by a monthly report looks unused on the 29th day of an uptime of
+-- 28 days, and the topic that proposes drops from that DMV has nothing to
+-- refuse them with. A plan in the store that reads the index survives the
+-- restart. The same rule holds: an index absent from indexes_read proves
+-- nothing, and one present must not be dropped on the strength of the usage
+-- DMV alone. forced_plans is the hardest form of it: a forced plan that reads
+-- an index stops being forceable when the index is dropped.
+--
+-- WHAT COUNTS AS READ is //RelOp/IndexScan/Object, never //Object. Every index
+-- an INSERT, UPDATE, DELETE or MERGE maintains is named as an Object child of
+-- the plan's Update element, and so is the index a CREATE INDEX builds; read
+-- through //Object, an index whose only activity is being kept up to date
+-- would veto its own drop, and it is exactly the index a cleanup is after.
+-- Measured on SQL Server 2025 with an index that an UPDATE maintained and no
+-- query read: //Object listed it, //RelOp/IndexScan/Object
+-- did not. IndexScan is the element of every index seek, index scan, key
+-- lookup and columnstore scan, verified on the same build: Index Seek,
+-- Clustered Index Seek, Index Scan and a nonclustered columnstore scan
+-- (PhysicalOp "Index Scan", Storage "ColumnStore") all carry it. A key lookup
+-- is a Clustered Index Seek whose IndexScan has Lookup="1", so it names the
+-- clustered index and never a nonclustered one; the nonclustered index that
+-- drove it appears as its own seek. A heap is left out by Object[@Index]: a
+-- Table Scan has a TableScan element, and a RID Lookup an Object with no Index
+-- attribute.
+--
+-- THE INDEX NAME IS THE JOIN KEY, unbracketed and unescaped as the statistic
+-- name is (below), so it matches sys.indexes.name, and the column is called
+-- index_name because 70.schema/020.index-usage and 070.index-columns call it
+-- that: the three join on (table, index_name) without renaming anything.
+-- A plan compiled before an index was renamed names the old name, and one
+-- compiled before a drop and re-create under the same name names the new
+-- index; the store keeps names, not index ids.
+--
+-- WHAT THE INDEX LIST CANNOT SEE, each a reason absence proves nothing:
+-- plans evicted by the store's own cleanup, by age past
+-- state.stale_threshold_days or by size when state.cleanup_mode is AUTO and
+-- the store reaches its maximum; queries never captured, because under
+-- QUERY_CAPTURE_MODE AUTO a query that runs rarely and cheaply is not stored
+-- at all, which is the profile of the monthly report this veto is for (CUSTOM
+-- has the same effect by its thresholds, NONE captures nothing new); plans
+-- beyond the cap, since only the @cap most recent are read and
+-- window.oldest_execution says how far back that reached, which on a busy
+-- store is hours rather than the retention; and every database whose store is
+-- off. It sees too much in one direction, deliberately: a plan names every
+-- index it may read, including one on a branch that never ran, such as the
+-- unexecuted side of an adaptive join or a startup filter. For a veto that is
+-- the safe error.
+--
+-- THE FILE BELONGS TO THE SPACE PROFILE because of indexes_read. A space run
+-- proposes to disable or drop the indexes the usage DMV calls unread, and it
+-- is the run that most needs the veto; without this file in the profile, the
+-- deliverable that acts on unread indexes would be the one never to see it.
+-- The price is this file's scan, measured below, added to a space run.
+--
+-- A FORCED PLAN IS NOT SEEN BECAUSE IT IS FORCED. It is read like any other
+-- plan, so one whose query has not run since the cap was reached is outside
+-- the scan; forced_plans counts only the forced plans inside it.
 --
 -- WHY THERE IS NO DMV TO READ INSTEAD. Indexes have
 -- sys.dm_db_index_usage_stats. Statistics have no equivalent, in any version.
@@ -28,14 +91,14 @@
 -- gigabytes of XML. 021.query-store-detail rescues fifty plans per database as
 -- files; this reads thousands and keeps none of them.
 --
--- NO @discloses. The projection carries object names and statistic names,
--- never query text and never the plan. This is the one Query Store collector
+-- NO @discloses. The projection carries object names, statistic names and
+-- index names, never query text and never the plan. This is the one Query Store collector
 -- that can run on a client who refuses QUERY TEXT disclosure, and every column
 -- added here has to keep it that way.
 --
 -- Read that sentence narrowly, because a reviewer read it broadly and was
--- right to. It says nothing about identifiers. A database, schema, table or
--- statistic name can itself carry a client's name, an account reference or an
+-- right to. It says nothing about identifiers. A database, schema, table,
+-- statistic or index name can itself carry a client's name, an account reference or an
 -- email address, and this file copies all four verbatim, as every schema
 -- collector in the corpus does. @discloses is about query text and plans; an
 -- operator who cannot transfer object names is not served by any of them.
@@ -122,6 +185,11 @@
 -- excluded rather than never found. The schema name is the whole test: sys is
 -- reserved, so no user object can hide behind it.
 --
+-- The index list drops the same catalog rows, and also every index in tempdb
+-- or on a table variable (whose Object has no Database attribute): temporary
+-- tables, the collector's own table variables among them, are not drop
+-- candidates. They are counted in root as temporary_indexes_excluded.
+--
 -- THE CAP IS 2 000 AND THE SPEC SAID 5 000. Measured here at 12 to 17 ms per
 -- plan, 5 000 plans is one to one and a half minutes of client CPU per
 -- database, and the corpus runs this against every database that has a store.
@@ -132,6 +200,28 @@
 -- thousand recent plans answer the same question for a third of the cost, and
 -- truncated says when the cap bit so nobody reads a partial scan as a complete
 -- one.
+--
+-- The per-plan figure follows plan size. On a lab store of 2 600 plans
+-- averaging 37 KB of nvarchar each (SQL Server 2025, 4 October 2026), the scan
+-- of 2 000 took 113 s, 56 ms a plan, of which the cast to xml alone was 46 ms.
+-- At that size the cap stays within the 300 s timeout; plans about two and a
+-- half times larger on average would not.
+--
+-- THE INDEX LIST SHARES THE PASS, AND THE MEASUREMENT CHOSE THAT OVER A FILE
+-- OF ITS OWN. On the same lab store, the cast is most of the cost and a second
+-- file would pay it again: reading 100 plans for the statistics took 5.6 s,
+-- and reading them a second time for the indexes 11.5 s in all, double. Asking
+-- one .query() for both paths took 6.2 to 6.4 s, and the whole collector
+-- through this tool 126 s against 113 s for the statistics alone, so the
+-- index list costs about an eighth more and not a second scan.
+-- Two cheaper-looking refinements were measured and refused. Splitting reads
+-- into seek, scan and lookup needs an element constructor per access, which
+-- cost 8.7 to 18.9 s for the same 100 plans, two to three times the scan; and
+-- keeping the whole IndexScan element, which would carry the Lookup flag and
+-- the seek predicates for 6.2 s, made the fragment four times larger with no
+-- bound, since IndexScan holds one column reference per column read. The
+-- Object element alone is a few hundred bytes. The fragments at the cap went
+-- from about 2.4 MB to 4.5 MB of tempdb on that store.
 --
 -- THE CAP IS A CONSTANT AND NOT AN OPTION, which the spec left open. The
 -- corpus has no directive for a per-collector parameter, and the collectors
@@ -151,7 +241,9 @@
 -- corpus gates on a major version rather than on a service pack. THIS HAS NOT
 -- BEEN MEASURED ON A 2016 SP2 INSTANCE. Until it is, a 2016 instance is
 -- skipped with a reason rather than returning a silently empty array, which is
--- the failure mode worth more than the coverage.
+-- the failure mode worth more than the coverage. The index list would work on
+-- a 2016 store, IndexScan being much older than that; it shares the floor
+-- because it shares the pass, and a 2016 instance gets neither.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -161,21 +253,25 @@ DECLARE @cap   int = 2000;
 DECLARE @chunk int = 100;
 
 DECLARE @scan TABLE (
-    rn           int    PRIMARY KEY,
-    plan_id      bigint NOT NULL UNIQUE,
-    query_id     bigint         NOT NULL,
-    last_compile datetimeoffset NULL
+    rn             int    PRIMARY KEY,
+    plan_id        bigint NOT NULL UNIQUE,
+    query_id       bigint         NOT NULL,
+    last_compile   datetimeoffset NULL,
+    last_execution datetimeoffset NULL,
+    is_forced      bit            NOT NULL
 );
 
-/* One row per plan scanned, carrying only its OptimizerStatsUsage element.
-   frag is empty rather than absent for a plan that loaded no statistics, so
-   the row count here is the number of plans read and not the number that had
-   something to say. */
+/* One row per plan scanned, carrying only its OptimizerStatsUsage element
+   and the Object element of each index access, a few hundred bytes each. frag is empty rather than
+   absent for a plan that had neither, so the row count here is the number of
+   plans read and not the number that had something to say. */
 DECLARE @frag TABLE (
-    plan_id      bigint PRIMARY KEY,
-    query_id     bigint         NOT NULL,
-    last_compile datetimeoffset NULL,
-    frag         xml            NULL
+    plan_id        bigint PRIMARY KEY,
+    query_id       bigint         NOT NULL,
+    last_compile   datetimeoffset NULL,
+    last_execution datetimeoffset NULL,
+    is_forced      bit            NOT NULL,
+    frag           xml            NULL
 );
 
 DECLARE @usage TABLE (
@@ -191,20 +287,38 @@ DECLARE @usage TABLE (
     modifications bigint         NULL
 );
 
+DECLARE @reads TABLE (
+    [database]     nvarchar(300)  NULL,
+    [schema]       nvarchar(300)  NULL,
+    [table_name]   nvarchar(300)  NULL,
+    [table]        nvarchar(600)  NULL,
+    [index]        nvarchar(300)  NULL,
+    index_kind     nvarchar(60)   NULL,
+    storage        nvarchar(60)   NULL,
+    plan_id        bigint         NOT NULL,
+    query_id       bigint         NOT NULL,
+    last_compile   datetimeoffset NULL,
+    last_execution datetimeoffset NULL,
+    is_forced      bit            NOT NULL
+);
+
 /* ───────── the scan set, pinned ─────────
    The plans this run is answerable for, chosen once so that every count below
    is about the same set of plans and not about whatever the store held a
    second later. */
-INSERT INTO @scan (rn, plan_id, query_id, last_compile)
+INSERT INTO @scan (rn, plan_id, query_id, last_compile, last_execution, is_forced)
 SELECT ROW_NUMBER() OVER (ORDER BY t.last_execution_time DESC),
        t.plan_id,
        t.query_id,
-       t.last_compile_start_time
+       t.last_compile_start_time,
+       t.last_execution_time,
+       t.is_forced_plan
 FROM (SELECT TOP (@cap + 1)
              p.plan_id,
              p.query_id,
              p.last_compile_start_time,
-             p.last_execution_time
+             p.last_execution_time,
+             p.is_forced_plan
       FROM sys.query_store_plan AS p
       WHERE p.query_plan IS NOT NULL
       ORDER BY p.last_execution_time DESC) AS t
@@ -222,12 +336,15 @@ DECLARE @plans_selected bigint = (SELECT COUNT_BIG(*) FROM @scan);
 DECLARE @plans_total    bigint = (SELECT COUNT_BIG(*) FROM sys.query_store_plan);
 
 /* ───────── the fragments, a hundred plans at a time ─────────
-   One XML parse per plan, keeping only the OptimizerStatsUsage element. The
-   whole plan is never stored: 279 plans on a lab instance carried 14 MB of
-   showplan and 738 KB of fragment, a twentieth; a reviewer measured a
-   sixteenth on 2 000 plans of a different shape. The ratio follows the
-   workload, and what matters is the magnitude it settles at: about 1.5 MB of
-   tempdb at the cap, which no client instance notices.
+   One XML parse per plan, keeping only the OptimizerStatsUsage element and
+   the Object of each index read, both from the same .query() call so the plan
+   is parsed once for the two lists. The whole plan is never stored: 279 plans
+   on a lab instance carried 14 MB of showplan and 738 KB of fragment, a
+   twentieth; a reviewer measured a sixteenth on 2 000 plans of a different
+   shape. The ratio follows the workload, and what matters is the magnitude it
+   settles at: about 1.5 MB of tempdb at the cap before the index reads were
+   added, 4.5 MB with them on a store of larger plans, which no client
+   instance notices.
 
    TRY_CAST and not CAST. query_plan is nvarchar(max), and a plan the engine
    truncated on the way into the store is not well-formed XML; CAST would fail
@@ -251,11 +368,13 @@ DECLARE @lo int = 1;
 WHILE @lo <= @plans_selected
 BEGIN
     WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')
-    INSERT INTO @frag (plan_id, query_id, last_compile, frag)
+    INSERT INTO @frag (plan_id, query_id, last_compile, last_execution, is_forced, frag)
     SELECT s.plan_id,
            s.query_id,
            s.last_compile,
-           px.x.query('//OptimizerStatsUsage')
+           s.last_execution,
+           s.is_forced,
+           px.x.query('(//OptimizerStatsUsage, //RelOp/IndexScan/Object[@Index])')
     FROM       @scan                AS s
     JOIN       sys.query_store_plan AS p ON p.plan_id = s.plan_id
     CROSS APPLY (SELECT TRY_CAST(p.query_plan AS xml) AS x) AS px
@@ -329,6 +448,56 @@ CROSS APPLY (VALUES (
      )) AS unq(db, sch, tbl, st)
 OPTION (RECOMPILE, MAXDOP 1);
 
+/* ───────── the index reads ─────────
+   Same stored column, same reason, and no second parse of any plan: the
+   Object elements were kept by the one .query() call above that also kept
+   OptimizerStatsUsage, so the plan was parsed once for both.
+
+   //RelOp/IndexScan/Object and never //Object. Every index an INSERT, UPDATE,
+   DELETE or MERGE maintains is named as an Object child of the Update element
+   of its plan, and so is the index a CREATE INDEX builds; //Object would read
+   that maintenance as use and veto the drop of an index whose only activity is
+   being kept up to date, which is the very index a cleanup is looking for.
+   IndexScan is the element of every index seek, index scan, key lookup and
+   columnstore scan: verified on SQL Server 2025 plans, where an Index Seek, a
+   Clustered Index Seek, an Index Scan, a Clustered Index Scan and a
+   nonclustered columnstore scan (PhysicalOp "Index Scan", Storage
+   "ColumnStore") all carry it. A key lookup is a Clustered Index Seek whose
+   IndexScan has Lookup="1", so it names the CLUSTERED index, never a
+   nonclustered one; the nonclustered index that drove it shows as its own
+   seek. Object[@Index] leaves out the heap: a Table Scan has a TableScan
+   element and a RID Lookup an Object with no Index attribute, and a heap is
+   not an index anyone drops. */
+WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')
+INSERT INTO @reads ([database], [schema], [table_name], [table], [index], index_kind, storage,
+                    plan_id, query_id, last_compile, last_execution, is_forced)
+SELECT unq.db,
+       unq.sch,
+       unq.tbl,
+       CASE WHEN unq.sch IS NULL OR unq.sch = '' THEN unq.tbl
+            ELSE unq.sch + '.' + unq.tbl END,
+       unq.ix,
+       ir.n.value('@IndexKind', 'nvarchar(60)'),
+       ir.n.value('@Storage',   'nvarchar(60)'),
+       f.plan_id,
+       f.query_id,
+       f.last_compile,
+       f.last_execution,
+       f.is_forced
+FROM       @frag AS f
+CROSS APPLY f.frag.nodes('/Object') AS ir(n)
+CROSS APPLY (VALUES (ir.n.value('@Database', 'nvarchar(300)'),
+                     ir.n.value('@Schema',   'nvarchar(300)'),
+                     ir.n.value('@Table',    'nvarchar(300)'),
+                     ir.n.value('@Index',    'nvarchar(300)'))) AS raw(db, sch, tbl, ix)
+CROSS APPLY (VALUES (
+        CASE WHEN LEFT(raw.db, 1)  = '[' AND RIGHT(raw.db, 1)  = ']' THEN REPLACE(SUBSTRING(raw.db,  2, LEN(raw.db)  - 2), ']]', ']') ELSE raw.db  END,
+        CASE WHEN LEFT(raw.sch, 1) = '[' AND RIGHT(raw.sch, 1) = ']' THEN REPLACE(SUBSTRING(raw.sch, 2, LEN(raw.sch) - 2), ']]', ']') ELSE raw.sch END,
+        CASE WHEN LEFT(raw.tbl, 1) = '[' AND RIGHT(raw.tbl, 1) = ']' THEN REPLACE(SUBSTRING(raw.tbl, 2, LEN(raw.tbl) - 2), ']]', ']') ELSE raw.tbl END,
+        CASE WHEN LEFT(raw.ix, 1)  = '[' AND RIGHT(raw.ix, 1)  = ']' THEN REPLACE(SUBSTRING(raw.ix,  2, LEN(raw.ix)  - 2), ']]', ']') ELSE raw.ix  END
+     )) AS unq(db, sch, tbl, ix)
+OPTION (RECOMPILE, MAXDOP 1);
+
 /* ───────── root ─────────
    The honest half. Every count below is what the analysis needs to know how
    much of the store was read before it reads anything else, and the store's
@@ -348,11 +517,31 @@ SELECT DB_NAME()                                                      AS [databa
        (SELECT COUNT_BIG(*)
         FROM (SELECT DISTINCT u.[database], u.[schema], u.[table_name], u.[statistic]
               FROM @usage AS u WHERE u.[schema] = 'sys') AS d)         AS [catalog_statistics_excluded],
+       (SELECT COUNT(DISTINCT r.plan_id) FROM @reads AS r)            AS [plans_with_index_reads],
+       (SELECT COUNT_BIG(*)
+        FROM (SELECT DISTINCT r.[database], r.[schema], r.[table_name], r.[index]
+              FROM @reads AS r
+              WHERE ISNULL(r.[schema], N'') <> 'sys'
+                AND ISNULL(r.[database], N'tempdb') <> 'tempdb') AS d)  AS [indexes_named],
+       (SELECT COUNT_BIG(*)
+        FROM (SELECT DISTINCT r.[database], r.[schema], r.[table_name], r.[index]
+              FROM @reads AS r WHERE r.[schema] = 'sys') AS d)         AS [catalog_indexes_excluded],
+       (SELECT COUNT_BIG(*)
+        FROM (SELECT DISTINCT r.[database], r.[schema], r.[table_name], r.[index]
+              FROM @reads AS r
+              WHERE ISNULL(r.[schema], N'') <> 'sys'
+                AND ISNULL(r.[database], N'tempdb') = 'tempdb') AS d)  AS [temporary_indexes_excluded],
        CAST(@truncated AS int)                                        AS [truncated],
+       (SELECT MIN(s.last_execution) FROM @scan AS s)                 AS [window.oldest_execution],
+       (SELECT MAX(s.last_execution) FROM @scan AS s)                 AS [window.newest_execution],
        CAST((SELECT actual_state_desc
              FROM sys.database_query_store_options) AS nvarchar(60))   AS [state.actual],
        CAST((SELECT query_capture_mode_desc
-             FROM sys.database_query_store_options) AS nvarchar(60))   AS [state.capture_mode]
+             FROM sys.database_query_store_options) AS nvarchar(60))   AS [state.capture_mode],
+       (SELECT stale_query_threshold_days
+        FROM sys.database_query_store_options)                        AS [state.stale_threshold_days],
+       CAST((SELECT size_based_cleanup_mode_desc
+             FROM sys.database_query_store_options) AS nvarchar(60))   AS [state.cleanup_mode]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* ───────── statistics_used ─────────
@@ -372,4 +561,27 @@ FROM @usage AS u
 WHERE ISNULL(u.[schema], N'') <> 'sys'
 GROUP BY u.[database], u.[schema], u.[table_name], u.[table], u.[statistic]
 ORDER BY COUNT(DISTINCT u.query_id) DESC, COUNT(DISTINCT u.plan_id) DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* ───────── indexes_read ─────────
+   The same veto as statistics_used, for indexes, and the same ordering for
+   the same reason. forced_plans is the strongest form of the veto: a forced
+   plan names the index it requires, and dropping that index makes the forcing
+   fail. */
+SELECT r.[database]                                                   AS [database],
+       r.[schema]                                                     AS [schema],
+       r.[table]                                                      AS [table],
+       r.[index]                                                      AS [index_name],
+       MAX(r.index_kind)                                              AS [index_kind],
+       MAX(r.storage)                                                 AS [storage],
+       COUNT(DISTINCT r.plan_id)                                      AS [plans],
+       COUNT(DISTINCT r.query_id)                                     AS [queries],
+       COUNT(DISTINCT CASE WHEN r.is_forced = 1     THEN r.plan_id END) AS [forced_plans],
+       MAX(r.last_execution)                                          AS [last_execution],
+       MAX(r.last_compile)                                            AS [last_compile]
+FROM @reads AS r
+WHERE ISNULL(r.[schema], N'') <> 'sys'
+  AND ISNULL(r.[database], N'tempdb') <> 'tempdb'
+GROUP BY r.[database], r.[schema], r.[table_name], r.[table], r.[index]
+ORDER BY COUNT(DISTINCT r.query_id) DESC, COUNT(DISTINCT r.plan_id) DESC
 OPTION (RECOMPILE, MAXDOP 1);

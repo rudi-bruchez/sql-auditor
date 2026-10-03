@@ -475,9 +475,10 @@ contains is the fact that matters and how briefly it was requested is not.
 the databases on this instance larger than they need to be, and what could be
 given back without buying disk. That is about a quarter of the corpus: index usage and
 size, compression, page fullness, files and volumes, the transaction log,
-tempdb, the Agent jobs and maintenance plans a scheduled shrink hides in, and
-the restore history, without which an unread index cannot be given the period
-it was not read over.
+tempdb, the Agent jobs and maintenance plans a scheduled shrink hides in, the
+restore history, without which an unread index cannot be given the period
+it was not read over, and the indexes the Query Store's plans read, which
+refuse the drop of an index the usage counters call unread.
 
 A profile only removes collectors. It never adds one: the two collectors of the
 space profile that are opt-in still need their option.

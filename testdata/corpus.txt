@@ -87,7 +87,7 @@
 80.workload/024.query-store-rowcount.sql
 80.workload/025.query-store-compare.sql
 80.workload/026.query-store-interrupted.sql
-80.workload/027.query-store-stats-usage.sql
+80.workload/027.query-store-stats-usage.sql @profiles: space
 80.workload/028.query-store-resources.sql
 80.workload/029.query-store-load-profile.sql
 80.workload/030.implicit-conversions.sql
