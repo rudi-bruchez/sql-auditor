@@ -5,11 +5,22 @@ import (
 	"testing"
 )
 
+// withDatabaseScoped adds one collector that runs inside each database. The
+// per-database section is written only when such a collector is planned, and
+// baseInput has none, so every test about that section starts here.
+func withDatabaseScoped(in GrantScriptInput) GrantScriptInput {
+	in.Scripts = append(append([]Script(nil), in.Scripts...), Script{
+		Path:  "queries/70.schema/020.index-usage.sql",
+		Scope: ScopeDatabase, Permissions: []string{"connect"},
+	})
+	return in
+}
+
 // The gap the probes cannot see. Every capability can be "ok" while the
 // per-database collectors are all skipped, so the script has to offer the fix
 // even when nothing was denied.
 func TestGrantScriptOffersDatabaseAccessEvenWhenNothingWasDenied(t *testing.T) {
-	in := baseInput() // every probe ok
+	in := withDatabaseScoped(baseInput()) // every probe ok
 	in.NoAccessDatabases = []string{"SALES", "ARCHIVE"}
 	body, has := BuildGrantScript(in)
 	if !has {
@@ -35,7 +46,7 @@ func TestGrantScriptOffersDatabaseAccessEvenWhenNothingWasDenied(t *testing.T) {
 // Databases are sorted so two runs of the same instance produce the same file,
 // which is what makes the script reviewable in a diff.
 func TestGrantScriptSortsDatabases(t *testing.T) {
-	in := baseInput()
+	in := withDatabaseScoped(baseInput())
 	in.NoAccessDatabases = []string{"zeta", "alpha", "Mid"}
 	body, _ := BuildGrantScript(in)
 	stmts := statements(body)
@@ -51,7 +62,7 @@ func TestGrantScriptSortsDatabases(t *testing.T) {
 // A database name is an identifier from the instance and gets the same
 // escaping as the login.
 func TestGrantScriptEscapesDatabaseNames(t *testing.T) {
-	in := baseInput()
+	in := withDatabaseScoped(baseInput())
 	in.NoAccessDatabases = []string{"od]d"}
 	body, _ := BuildGrantScript(in)
 	if !strings.Contains(body, "USE [od]]d];") {
@@ -63,7 +74,7 @@ func TestGrantScriptEscapesDatabaseNames(t *testing.T) {
 // visited. A section emitted after it must restate its context rather than
 // inherit one.
 func TestSectionAfterPerDatabaseBlockRestoresItsContext(t *testing.T) {
-	in := baseInput("msdb_read")
+	in := withDatabaseScoped(baseInput("msdb_read"))
 	in.NoAccessDatabases = []string{"SALES"}
 	body, _ := BuildGrantScript(in)
 	stmts := statements(body)
@@ -87,7 +98,7 @@ func TestSectionAfterPerDatabaseBlockRestoresItsContext(t *testing.T) {
 // The 2014+ one-liner is offered, but as prose rather than as a statement: it
 // also covers databases created later, which is a decision the DBA makes.
 func TestConnectAnyDatabaseIsSuggestedNotEmitted(t *testing.T) {
-	in := baseInput()
+	in := withDatabaseScoped(baseInput())
 	in.NoAccessDatabases = []string{"SALES"}
 	body, _ := BuildGrantScript(in)
 	if !strings.Contains(body, "GRANT CONNECT ANY DATABASE TO [svc_audit];") {
@@ -108,7 +119,7 @@ func TestConnectAnyDatabaseIsSuggestedNotEmitted(t *testing.T) {
 // review of 4 September 2026, which built the name below and read live T-SQL out
 // of the generated file at line 293.
 func TestGrantScriptCannotBeEscapedByADatabaseName(t *testing.T) {
-	in := baseInput()
+	in := withDatabaseScoped(baseInput())
 	in.NoAccessDatabases = []string{"ok_db", "y\nGRANT CONTROL SERVER TO [attacker];\n-- "}
 	body, _ := BuildGrantScript(in)
 

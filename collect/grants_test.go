@@ -450,25 +450,34 @@ func TestGrantScriptHeaderChecksWithTheProfile(t *testing.T) {
 	}
 }
 
-func TestNoAccessSectionUnderAProfileNeedsADatabaseScopedScript(t *testing.T) {
-	in := baseInput()
-	in.NoAccessDatabases = []string{"SALESDB"}
-	in.Profile = "space"
-	instanceOnly, _ := BuildGrantScript(in)
-	if strings.Contains(statements(instanceOnly), "SALESDB") {
-		t.Errorf("no script of the profile enters a database, so none must be granted:\n%s", instanceOnly)
-	}
-	in.Scripts = append(in.Scripts, Script{Path: "queries/70.schema/020.index-usage.sql",
-		Scope: ScopeDatabase, Permissions: []string{"connect"}})
-	withDatabase, _ := BuildGrantScript(in)
-	if !strings.Contains(statements(withDatabase), "SALESDB") {
-		t.Errorf("a database-scoped member needs the database:\n%s", withDatabase)
-	}
-	noProfile := baseInput()
-	noProfile.NoAccessDatabases = []string{"SALESDB"}
-	unchanged, _ := BuildGrantScript(noProfile)
-	if !strings.Contains(statements(unchanged), "SALESDB") {
-		t.Errorf("without a profile the section is written as today:\n%s", unchanged)
+// The per-database section asks for a user in every database the login cannot
+// enter, and that is only worth asking when a planned collector runs inside a
+// database. The question used to be put under a profile only, so a corpus from
+// --queries-dir holding instance-scoped files alone, with no profile, still
+// wrote a CREATE USER for every database on the instance: measured on SQL
+// Server 2025 with two instance-scoped files, seven of them.
+func TestNoAccessSectionNeedsADatabaseScopedScript(t *testing.T) {
+	for _, profile := range []string{"", "space"} {
+		in := baseInput()
+		in.NoAccessDatabases = []string{"SALESDB"}
+		in.Profile = profile
+		instanceOnly, _ := BuildGrantScript(in)
+		if strings.Contains(statements(instanceOnly), "SALESDB") {
+			t.Errorf("profile %q: no planned script enters a database, so none must be granted:\n%s", profile, instanceOnly)
+		}
+		in.Scripts = append(in.Scripts, Script{Path: "queries/70.schema/020.index-usage.sql",
+			Scope: ScopeDatabase, Permissions: []string{"connect"}})
+		withDatabase, _ := BuildGrantScript(in)
+		if !strings.Contains(statements(withDatabase), "SALESDB") {
+			t.Errorf("profile %q: a database-scoped script needs the database:\n%s", profile, withDatabase)
+		}
+		// A database-scoped file that failed lint is not planned, and does not
+		// count either.
+		in.Scripts[len(in.Scripts)-1].LintError = "refused"
+		linted, _ := BuildGrantScript(in)
+		if strings.Contains(statements(linted), "SALESDB") {
+			t.Errorf("profile %q: a script refused by lint will not run, so it needs no database:\n%s", profile, linted)
+		}
 	}
 }
 

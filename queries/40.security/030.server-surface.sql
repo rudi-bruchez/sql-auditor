@@ -85,6 +85,21 @@
 -- the shape of error that survives review because the number is small and
 -- plausible.
 --
+-- THE ONE READ OUTSIDE MASTER IS GUARDED, AND NOT DECLARED. The proxy count
+-- of each credential comes from msdb.dbo.sysproxies, and on a default msdb
+-- only TargetServersRole holds SELECT on it: no permission the preflight
+-- probes covers it, not MSDB READ (SELECT on backupset), not the Agent roles
+-- the grant script offers. Declaring MSDB READ would therefore have skipped
+-- the whole file for a login without backupset and still let it fail for a
+-- login built from the grant script. So the read runs first, inside TRY, and
+-- the rest of the file does not depend on it: a refusal leaves agent_proxies
+-- NULL on every credential, never 0, and the root says why in
+-- agent_proxies.readable, error_number and error_message. Measured on SQL
+-- Server 2025 with a login holding VIEW ANY DEFINITION and VIEW SERVER STATE
+-- and no msdb grant: before, the file failed whole with "The SELECT
+-- permission was denied on the object 'sysproxies'"; now every array is
+-- collected and the root carries error 229.
+--
 -- NO JUDGEMENT IS APPLIED. A linked server is how distributed reporting is
 -- built, a credential is how a job reaches a file share, and an instance with
 -- no audit is the normal case outside regulated estates. What each of them
@@ -103,6 +118,27 @@
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
+
+DECLARE @proxy_err int = 0,
+        @proxy_msg nvarchar(2048) = N'';
+
+DECLARE @proxies TABLE (
+    [credential_id] int NOT NULL,
+    [proxies]       int NOT NULL);
+
+/* Deferred and caught: see the header. Read before the root so the root can
+   say whether it ran; nothing else in the file depends on it. */
+BEGIN TRY
+    INSERT INTO @proxies ([credential_id], [proxies])
+    EXEC sys.sp_executesql
+        N'SELECT p.credential_id, COUNT(*)
+          FROM msdb.dbo.sysproxies AS p
+          GROUP BY p.credential_id
+          OPTION (RECOMPILE, MAXDOP 1)';
+END TRY
+BEGIN CATCH
+    SELECT @proxy_err = ERROR_NUMBER(), @proxy_msg = ERROR_MESSAGE();
+END CATCH
 
 SELECT
     CONVERT(sysname, SERVERPROPERTY('ServerName'))              AS [instance],
@@ -139,7 +175,13 @@ SELECT
     (SELECT COUNT(*) FROM sys.server_audits)                    AS [counts.audits],
     (SELECT COUNT(*) FROM sys.server_audits WHERE is_state_enabled = 1)
                                                                 AS [counts.audits_running],
-    (SELECT COUNT(*) FROM sys.server_audit_specifications)      AS [counts.audit_specifications]
+    (SELECT COUNT(*) FROM sys.server_audit_specifications)      AS [counts.audit_specifications],
+    -- Whether the msdb proxy read ran. readable = 0 means agent_proxies is
+    -- NULL on every credential because this login may not look, not because
+    -- no proxy uses it.
+    CAST(CASE WHEN @proxy_err = 0 THEN 1 ELSE 0 END AS bit)     AS [agent_proxies.readable],
+    NULLIF(@proxy_err, 0)                                       AS [agent_proxies.error_number],
+    NULLIF(@proxy_msg, N'')                                     AS [agent_proxies.error_message]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* Linked servers, the loopback row excluded. provider and data_source say
@@ -233,9 +275,12 @@ SELECT
     CONVERT(varchar(23), c.modify_date, 126)                    AS [modified_at],
     -- Which Agent proxies run under it, because a credential nobody uses is
     -- inert and one behind a proxy is an execution path. 50.agent/020.job-steps
-    -- says which steps use which proxy.
-    (SELECT COUNT(*) FROM msdb.dbo.sysproxies AS p
-      WHERE p.credential_id = c.credential_id)                  AS [agent_proxies]
+    -- says which steps use which proxy. NULL when msdb refused the read, so
+    -- that "not allowed to look" never reads as "no proxy".
+    CASE WHEN @proxy_err = 0
+         THEN ISNULL((SELECT p.proxies FROM @proxies AS p
+                       WHERE p.credential_id = c.credential_id), 0)
+    END                                                         AS [agent_proxies]
 FROM sys.credentials AS c
 ORDER BY c.name
 OPTION (RECOMPILE, MAXDOP 1);

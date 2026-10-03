@@ -498,7 +498,13 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 
 	// --- per-database access ------------------------------------------------
 
-	if len(in.NoAccessDatabases) > 0 && (in.Profile == "" || anyDatabaseScoped(in.Scripts)) {
+	// Only when something would actually run inside a database. This used to
+	// be asked only under a profile, so a corpus from --queries-dir holding
+	// nothing but instance-scoped files still got a CREATE USER in every
+	// database it could not enter: rights granted for collectors that were
+	// never going to use them. The embedded corpus always has database-scoped
+	// members, so its script is unchanged.
+	if len(in.NoAccessDatabases) > 0 && anyDatabaseScoped(in.Scripts) {
 		dbs := append([]string(nil), in.NoAccessDatabases...)
 		// Case-insensitive, because most instances are, and a byte sort puts
 		// every capitalised name before every lower-case one — which reads as
