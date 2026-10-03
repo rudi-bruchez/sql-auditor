@@ -146,8 +146,8 @@ to know before running anything.
 
 ### The rights, and what each one costs when missing
 
-The login must be able to connect. Beyond that there are nine rights the
-collector uses, and **none of them is required**: it probes each one before it
+The login must be able to connect. Beyond that there are the rights below,
+and **none of them is required**: it probes each one before it
 starts and carries on without whatever it was refused, recording the omission.
 
 The wording below is the same string the tool prints and writes into the
@@ -158,6 +158,7 @@ archive.
 | Connect to the instance | `CONNECT SQL` | nothing can run |
 | Read server and database metadata | `VIEW ANY DEFINITION` (server level) | instance configuration and database file layout not collected |
 | Read performance counters | `VIEW SERVER STATE`, or `VIEW SERVER PERFORMANCE STATE` on SQL Server 2022 and later | wait statistics, schedulers, memory and tempdb usage not collected |
+| Read the database encryption keys | `VIEW SERVER STATE`, or `VIEW SERVER SECURITY STATE` on SQL Server 2022 and later | which certificate protects each encrypted database not collected; the report must not read this as 'no database is encrypted' |
 | Read backup history | `SELECT` on `msdb.dbo.backupset` | backup history not collected — the report must not read this as 'no backups exist' |
 | Read the Agent job inventory | `SQLAgentReaderRole` in msdb | Agent jobs not collected — the report must not read this as 'no jobs' or 'no failing jobs' |
 | Read the Agent job steps | `SELECT` on `msdb.dbo.sysjobsteps` | job steps not collected — the report can say a job exists but not what it runs |
@@ -179,17 +180,16 @@ There is deliberately no new grant to ask for here. If your organisation would
 have to raise the audit login's rights to collect this, run without it and read
 the error numbers.
 
-**The database encryption keys need one right the script does not grant, from
-SQL Server 2022 on.** `40.security/040.encryption-certificates.sql` resolves each
-database encrypted with TDE to the certificate that protects it through
+**The database encryption keys are a right of their own from SQL Server 2022
+on.** `40.security/040.encryption-certificates.sql` resolves each database
+encrypted with TDE to the certificate that protects it through
 `sys.dm_database_encryption_keys`, and from 2022 that view asks for
 `VIEW SERVER SECURITY STATE`, which `VIEW SERVER PERFORMANCE STATE` does not
-include. The script grants the narrower right on purpose, so on those versions
-the read is refused and the collector says so in its root
-(`encryption_keys.readable` false, error 300) while the certificates, the dates
-their private keys were last backed up and the encrypted backups are still
-collected. Grant `VIEW SERVER SECURITY STATE` as well if the link between each
-database and its certificate is wanted; `VIEW SERVER STATE` covers both.
+include. `check` probes it with a read of that view, and the generated script
+grants it by name on those versions. Before 2022 the permission does not exist
+and the script asks for nothing more: `VIEW SERVER STATE`, which it grants for
+the performance counters, covers the view there. A login refused it does not
+run that collector, and the archive says so.
 
 ### Three of those deserve a second look
 
@@ -219,7 +219,9 @@ it:
 **On SQL Server 2022 and later** the generated script asks for `VIEW SERVER
 PERFORMANCE STATE` rather than `VIEW SERVER STATE`. It covers the dynamic
 management views the collector reads without also opening the security-related
-ones, and it is the narrower of the two.
+ones, and it is the narrower of the two. The one security-related view the
+corpus reads, `sys.dm_database_encryption_keys`, gets `VIEW SERVER SECURITY
+STATE` on a line of its own, written only when the probe found it refused.
 
 **Maintenance plan tasks are read directly, not through a role.** The
 `db_ssis*` roles are deliberately not offered: `db_ssisoperator` can execute
@@ -257,7 +259,9 @@ sql-auditor check --user sqlauditor --grant-script grants.sql
 
 The generated file grants:
 
-- `VIEW ANY DEFINITION` and `VIEW SERVER STATE` at the server;
+- `VIEW ANY DEFINITION` and `VIEW SERVER STATE` at the server (from SQL
+  Server 2022, `VIEW SERVER PERFORMANCE STATE` and `VIEW SERVER SECURITY STATE`
+  in its place);
 - a user in msdb;
 - `SELECT` on `msdb.dbo.backupset` and on `msdb.dbo.sysjobsteps`, plus
   `SQLAgentReaderRole`.

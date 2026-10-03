@@ -1,6 +1,6 @@
 -- @scope:       instance
 -- @resultsets:  root:object, certificates:array, encrypted_databases:array, backup_encryptors:array
--- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE, MSDB READ
+-- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER SECURITY STATE, MSDB READ
 -- @timeout:     60
 --
 -- The certificates in master, whether their private key was ever backed up,
@@ -44,20 +44,30 @@
 -- master is filtered by metadata visibility, and VIEW ANY DEFINITION makes
 -- every row visible, pvt_key_last_backup_date included. The database keys are
 -- another matter. From SQL Server 2022, sys.dm_database_encryption_keys asks
--- for VIEW SERVER SECURITY STATE, and the grant script of this tool grants
--- VIEW SERVER PERFORMANCE STATE on those versions, which does not include it.
--- The read is therefore guarded: refused, it leaves encrypted_databases empty
--- and the root says so in encryption_keys.error_number and _message, rather
--- than failing the whole file and taking the certificate list with it.
--- Measured on SQL Server 2025 with a login built from check --grant-script:
--- every certificate came back with its backup date, the backup history was
--- read, and the key read failed with Msg 300, "VIEW SERVER SECURITY STATE
--- permission was denied on object 'server'". The databases encrypted with
--- TDE are still named by 20.databases/010.all-databases from sys.databases,
--- which needs no server state; what is lost is which certificate protects
--- each one. On the same instance a login granted VIEW SERVER SECURITY STATE
--- alone, and another granted VIEW SERVER STATE alone, both read the view
--- without error.
+-- for VIEW SERVER SECURITY STATE, which VIEW SERVER PERFORMANCE STATE does not
+-- include, and a login holding only the latter is refused the view with Msg
+-- 300, "VIEW SERVER SECURITY STATE permission was denied on object 'server'".
+-- That is why this file declares VIEW SERVER SECURITY STATE rather than VIEW
+-- SERVER STATE: check probes it with a read of the same view, and the grant
+-- script grants it by that name from 2022 and as VIEW SERVER STATE before,
+-- where the narrower permission does not exist. A login built from the script
+-- reads the view; measured on SQL Server 2025, with exactly the server-level
+-- grants the script wrote, encryption_keys.readable came back true. A login
+-- the probe finds without it does not run this file at all, and the manifest
+-- says why. VIEW SERVER STATE alone, or VIEW SERVER SECURITY STATE alone,
+-- reads the view on the same instance.
+--
+-- The read stays guarded. A refusal the probe did not see (a DENY on the view
+-- itself, a corpus run by an older binary whose preflight does not know this
+-- permission) leaves encrypted_databases empty and says so in
+-- encryption_keys.error_number and _message, rather than failing the whole
+-- file and taking the certificate list with it. Measured on SQL Server 2025
+-- with a login built from the grant script of the previous release, which
+-- granted VIEW SERVER PERFORMANCE STATE only: every certificate came back with
+-- its backup date, the backup history was read, and the key read failed with
+-- Msg 300. The databases encrypted with TDE are still named by
+-- 20.databases/010.all-databases from sys.databases, which needs no server
+-- state; what is lost is which certificate protects each one.
 --
 -- TEMPDB IS LEFT OUT OF encrypted_databases. As soon as one database on the
 -- instance is encrypted, the engine encrypts tempdb too, and tempdb is
@@ -131,8 +141,9 @@ DECLARE @bak TABLE (
     [last_backup]          datetime      NULL);
 
 /* Deferred and caught, because the refusal is a runtime error on 2022 and
-   later for a login that holds VIEW SERVER PERFORMANCE STATE only: see the
-   header. The certificate list below does not depend on it. */
+   later for a login that holds VIEW SERVER PERFORMANCE STATE only, which the
+   preflight normally catches first: see the header. The certificate list
+   below does not depend on it. */
 BEGIN TRY
     INSERT INTO @dek ([database_id], [encryption_state], [key_algorithm],
                       [key_length], [encryptor_thumbprint], [encryptor_type],

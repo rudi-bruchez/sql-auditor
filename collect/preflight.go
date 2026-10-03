@@ -79,6 +79,30 @@ func Capabilities() []Capability {
 		{Name: "view_server_state", Label: "Read performance counters (VIEW SERVER STATE)",
 			SQL:    "SELECT TOP 1 wait_type FROM sys.dm_os_wait_stats",
 			Impact: "wait statistics, schedulers, memory and tempdb usage not collected"},
+		// The security half of the server state, probed apart from the
+		// performance half because SQL Server 2022 split them. From 2022,
+		// VIEW SERVER PERFORMANCE STATE reads sys.dm_os_wait_stats, so the probe
+		// above comes back ok, and is refused sys.dm_database_encryption_keys
+		// with Msg 300, "VIEW SERVER SECURITY STATE permission was denied".
+		// Measured on SQL Server 2025, TOP 0 included: the refusal is raised
+		// whether or not a row would be returned. Before 2022 the same read
+		// asks for VIEW SERVER STATE, by the documentation of the dynamic
+		// management views (not measured: no instance older than 2025 was at
+		// hand), so the probe needs no version branch and answers the question
+		// the collector will actually meet. It is a read
+		// rather than HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER SECURITY
+		// STATE'), which before 2022 names a permission that does not exist.
+		// The documentation says the function then returns NULL, "when the
+		// securable class or permission is not valid"; measured on 2025 with
+		// an invented permission name, it does. A NULL is not a refusal, and
+		// a probe that read it as one would ask a 2019 instance to grant
+		// something it cannot.
+		//
+		// Deliberately not NeedsRows: an instance with no encrypted database
+		// has an empty view, and that is an answer.
+		{Name: "view_server_security_state", Label: "Read the database encryption keys (sys.dm_database_encryption_keys)",
+			SQL:    "SELECT TOP 0 database_id FROM sys.dm_database_encryption_keys",
+			Impact: "which certificate protects each encrypted database not collected; the report must not read this as 'no database is encrypted'"},
 		// Each probe names the object it actually reads, because the label is
 		// what a reader generalises from. "Read backup history from msdb"
 		// invited the conclusion that msdb was readable; SQLAgentReaderRole

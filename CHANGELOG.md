@@ -38,6 +38,7 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Fixed
 
+- On SQL Server 2022 and later, a login built from `check --grant-script` could not read `sys.dm_database_encryption_keys`, and nothing said so before the run. The script grants `VIEW SERVER PERFORMANCE STATE` there rather than `VIEW SERVER STATE`, and that view asks for `VIEW SERVER SECURITY STATE`, which the narrower permission does not include: `40.security/040.encryption-certificates.sql` came back with `encryption_keys.readable` false and error 300. `@permissions` now accepts `VIEW SERVER SECURITY STATE`, 040 declares it in place of `VIEW SERVER STATE`, `check` probes it with a read of the view (`view_server_security_state`), and the grant script grants it by that name from 2022, and before 2022 folds it into `VIEW SERVER STATE`, the only permission that covers the view there. Measured on SQL Server 2025 with exactly the server-level grants the script wrote: the keys read. A login refused it now skips 040 with the reason in the manifest, as a login refused any other declared permission does.
 - The first connection of a collection, of `check` and of the assistant, the blocking watch's two connections, and the collection's reconnects now give up on a server that accepts the socket and never completes the login. The driver bounds only the dial, so such a server held the run until the socket died: measured, still waiting after two minutes. The budget is `SQL_CONNECT_TIMEOUT_SEC` for the dial and the same again for the login.
 
 ## [0.36.0] - 2026-09-27
