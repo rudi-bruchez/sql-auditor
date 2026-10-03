@@ -39,36 +39,41 @@
 -- the fragment holds the measured statement and nothing else.
 --
 -- Two. sys.dm_exec_text_query_plan returns text, and a plan nested deeper
--- than the 128 levels the xml type allows does not convert. TRY_CAST turns
--- that into a NULL, and the statement goes to the band "unknown", which is
--- always projected and never folded into another: up to 35 of 500 statements
--- on one client instance. Reproduced on the lab with a join of 80 tables
--- under FORCE ORDER: a 335 KB fragment that TRY_CAST returns as NULL. The
--- root says why each unknown is unknown.
+-- than the 128 levels the xml type allows does not convert to xml: up to 35
+-- of 500 statements on one client instance were lost that way when this file
+-- converted each fragment. Reproduced on the lab with a join of 80 tables
+-- under FORCE ORDER, a 335 KB fragment. The fragment is no longer converted:
+-- the one attribute this file needs is found by a text search, which reads
+-- such a plan like any other. unknown.not_xml is kept in the root for the
+-- shape of the archive and is now always 0.
 --
--- THE SHOWPLAN NAMESPACE IS DECLARED. Without WITH XMLNAMESPACES, the path
--- //StmtSimple/@StatementSubTreeCost matches nothing in a showplan document
--- and every statement lands in "unknown". Measured on 17.0.4065.4: seven
--- statements, seven NULL costs without the declaration, seven costs with it.
--- The path read is rooted, Statements/*, so it reads the measured
--- statement's own cost whatever its kind (StmtSimple, StmtCond, StmtCursor)
--- and never descends into the operators.
+-- THE COST IS FOUND, NOT PARSED. Converting each fragment to xml cost about
+-- 115 ms per megabyte of plan, and the 500 fragments are bounded in number,
+-- not in bytes: on the lab, a cache holding wide plans put 74 MB behind the
+-- 500 statements and the conversion took 8 s, a cost that grows with the
+-- client's plans rather than with anything this file controls. A harm review
+-- of 4 October 2026 named it. StatementSubTreeCost is an attribute of the
+-- first statement element of the fragment, so the first occurrence of
+-- 'StatementSubTreeCost="' in the text is the measured statement's own cost;
+-- the search stops there and reads a few bytes past it.
 --
 -- THE TOP IS CHOSEN BEFORE ANY PLAN IS READ. The 500 statements are taken
 -- from sys.dm_exec_query_stats into a table variable first, without touching a
--- plan, and only those 500 fragments are fetched and converted. A harm review
--- of 27 September 2026 found two default collectors that converted the whole
--- cache before applying their TOP; this one cannot, by construction.
+-- plan, and only those 500 fragments are fetched. A harm review of 27
+-- September 2026 found two default collectors that converted the whole cache
+-- before applying their TOP; this one cannot, by construction.
 --
--- COST, MEASURED ON 17.0.4065.4 (22 schedulers, Linux, lab caches of 768
--- and 1 024 statements): 500 fragments holding 8.8 MB of plan text were
--- fetched and converted in 1.1 s, and 21.3 MB in 2.5 s, about 115 ms per
--- megabyte. examined.plan_kb and examined.duration_ms project both figures
+-- COST, MEASURED ON 17.0.4065.4 (22 schedulers, Linux), 4 October 2026, on a
+-- lab cache of 1 934 statements whose 500 costliest held 75 MB of plan text:
+-- the converting version took 8.2 s twice, this one 1.7 s twice, with the
+-- same bands. What remains is fetching the fragments, which still grows with
+-- their size; examined.plan_kb and examined.duration_ms project both figures
 -- on every run, so the cost on a client instance is read from its own
--- archive. On client instances running SQL Server 2019 the same reading took
--- from 1.6 to 5.9 s. The cost grows with the size of the 500 fragments, not
--- with the size of the cache, which only the DMV sort and the cache.* totals
--- read in full.
+-- archive. Over every statement of that cache (1 945 fragments), the text
+-- search and the xml path gave the same cost 1 921 times, a different one
+-- never, and both nothing 24 times. No plan deeper than the xml limit was in
+-- the cache that night, so the statements the search now costs and the
+-- conversion could not were not reproduced again.
 --
 -- WHAT A BAND IS. A statement is in the band of the StatementSubTreeCost of
 -- its cached plan, in the optimizer's units: [0, 5), [5, 25), [25, 50),
@@ -150,23 +155,28 @@ FROM sys.dm_exec_query_stats AS qs
 ORDER BY qs.total_worker_time DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* One fragment per statement of the window, converted once. OUTER APPLY so a
-   statement whose plan the engine no longer returns is counted, not lost. */
-WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')
+/* One fragment per statement of the window, searched as text, never parsed.
+   OUTER APPLY so a statement whose plan the engine no longer returns is
+   counted, not lost. The cost is the first StatementSubTreeCost attribute of
+   the fragment: the first statement element, which is the measured statement
+   itself (StmtSimple, or the StmtCond or StmtCursor that holds the others).
+   A double quote cannot appear unescaped inside an attribute value, so the
+   search cannot match inside the statement text. */
 INSERT INTO @costed
 SELECT w.execution_count, w.total_worker_time, w.max_dop, w.creation_time,
        DATALENGTH(tp.query_plan),
        CASE WHEN tp.query_plan IS NULL THEN 1
-            WHEN x.px IS NULL THEN 2
             WHEN c.cost IS NULL THEN 3
             ELSE 0 END,
        c.cost
 FROM @window AS w
 OUTER APPLY sys.dm_exec_text_query_plan(w.plan_handle, w.statement_start_offset,
                                         w.statement_end_offset) AS tp
-CROSS APPLY (SELECT TRY_CAST(tp.query_plan AS xml) AS px) AS x
-CROSS APPLY (SELECT x.px.value('(/ShowPlanXML/BatchSequence/Batch/Statements/*/@StatementSubTreeCost)[1]',
-                               'float') AS cost) AS c
+CROSS APPLY (SELECT CHARINDEX(N'StatementSubTreeCost="', tp.query_plan) + 22 AS v) AS k
+CROSS APPLY (SELECT CASE WHEN k.v > 22
+                         THEN TRY_CAST(SUBSTRING(tp.query_plan, k.v,
+                                  CHARINDEX(N'"', tp.query_plan, k.v) - k.v) AS float)
+                    END AS cost) AS c
 OPTION (RECOMPILE, MAXDOP 1);
 
 DECLARE @finished datetime2(3) = SYSDATETIME();
@@ -192,9 +202,9 @@ SELECT
     (SELECT CAST(ISNULL(SUM(c.plan_bytes), 0) / 1024.0 AS decimal(18,1)) FROM @costed AS c)
                                                                 AS [examined.plan_kb],
     DATEDIFF(millisecond, @started, @finished)                  AS [examined.duration_ms],
-    /* Why the unknown band is unknown. not_xml is the nesting limit; no_plan
-       is a plan the engine no longer returns; no_cost a fragment that holds
-       no statement cost. */
+    /* Why the unknown band is unknown. no_plan is a plan the engine no longer
+       returns; no_cost a fragment that holds no statement cost. not_xml,
+       the nesting limit of the xml type, can no longer happen and stays 0. */
     (SELECT COUNT(*) FROM @costed WHERE plan_state = 1)         AS [unknown.no_plan],
     (SELECT COUNT(*) FROM @costed WHERE plan_state = 2)         AS [unknown.not_xml],
     (SELECT COUNT(*) FROM @costed WHERE plan_state = 3)         AS [unknown.no_cost]
