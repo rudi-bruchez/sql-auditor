@@ -409,6 +409,7 @@ Queries (38):
   80.workload/024.query-store-rowcount.sql   per database, SQL Server 14+
   80.workload/025.query-store-compare.sql    per database, SQL Server 13+, --query-store-compare-at (off)
   80.workload/026.query-store-interrupted.sql per database, SQL Server 13+
+  80.workload/028.query-store-resources.sql  per database, SQL Server 14+
   80.workload/030.implicit-conversions.sql
   80.workload/040.plan-cache.sql
   80.workload/042.parallel-cost-distribution.sql SQL Server 13+
@@ -717,6 +718,7 @@ SQL text, cut to a fixed length rather than left out:
 | `80.workload/020.query-store.sql` | the first 500 characters of each listed Query Store query |
 | `80.workload/023.query-store-most-executed.sql` | the same |
 | `80.workload/024.query-store-rowcount.sql` | the same |
+| `80.workload/028.query-store-resources.sql` | the same |
 | `80.workload/026.query-store-interrupted.sql` | the same |
 | `50.agent/020.job-steps.sql` | the first 200 characters of each T-SQL job step's command |
 
@@ -1268,7 +1270,7 @@ one, across seven tiers:
 | 30 s | 9 |
 | 60 s | 53 |
 | 120 s | 27 |
-| 180 s | 2 |
+| 180 s | 3 |
 | 300 s | 15 |
 | 600 s | 1 |
 | 1800 s | 2 |
