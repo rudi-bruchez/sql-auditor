@@ -3,6 +3,7 @@
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     300
 -- @min_version: 14
+-- @profiles:    space
 --
 -- Which statistics the optimizer actually loaded, and which indexes the plans
 -- read, both out of the plans the Query Store already holds and in one pass
@@ -67,6 +68,12 @@
 -- index it may read, including one on a branch that never ran, such as the
 -- unexecuted side of an adaptive join or a startup filter. For a veto that is
 -- the safe error.
+--
+-- THE FILE BELONGS TO THE SPACE PROFILE because of indexes_read. A space run
+-- proposes to disable or drop the indexes the usage DMV calls unread, and it
+-- is the run that most needs the veto; without this file in the profile, the
+-- deliverable that acts on unread indexes would be the one never to see it.
+-- The price is this file's scan, measured below, added to a space run.
 --
 -- A FORCED PLAN IS NOT SEEN BECAUSE IT IS FORCED. It is read like any other
 -- plan, so one whose query has not run since the cap was reached is outside
