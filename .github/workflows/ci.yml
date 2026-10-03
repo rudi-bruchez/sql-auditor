@@ -147,7 +147,7 @@ jobs:
             --query-store-compare-at "$(date -u -d yesterday +%F)"
       # collect exits 0 on a clean run, but an empty run also exits 0 if the
       # corpus somehow produced nothing. Assert on the artefacts instead: the
-      # six per-database results are the ones a missing fixture would drop.
+      # per-database results below are the ones a missing fixture would drop.
       # 70.schema/021 is @min_version 15, so it exists on one leg of this
       # matrix and not the other, and the assertion has to say which rather
       # than guess: added to the block below, which asserts files present on
@@ -185,6 +185,10 @@ jobs:
           for f in 020.properties 021.properties-2014 022.query-store 023.log-vlf 025.fragmentation 027.resumable-operations; do
             test -f "$run_dir/20.databases/ci_probe/$f.json"
           done
+          # ci_probe never has a full backup, so the file carries a NULL base and
+          # zero modified pages: the "no base" case, which is the one to keep
+          # running on both legs.
+          test -f "$run_dir/60.backup/ci_probe/030.differential-base.json"
           # 025 ran on the user database, with its span resolved and the two
           # sides in its root, whatever the state of the store there.
           jq -e 'has("side_minutes") and has("before") and has("after")' \

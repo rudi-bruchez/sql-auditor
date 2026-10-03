@@ -377,6 +377,7 @@ Queries (38):
   50.agent/020.job-steps.sql
   60.backup/010.history.sql
   60.backup/020.restore-history.sql
+  60.backup/030.differential-base.sql        per database, SQL Server 13.0.5026+
   70.schema/010.objects.sql                  per database
   70.schema/020.index-usage.sql              per database
   70.schema/030.index-operational.sql        per database
@@ -528,6 +529,11 @@ output/
         025.fragmentation.json
         026.persisted-sku-features.json
         027.resumable-operations.json
+    60.backup/
+      010.history.json
+      020.restore-history.json
+      AppDb/
+        030.differential-base.json
     70.schema/
       AppDb/
         010.objects.json
@@ -1239,11 +1245,11 @@ one, across seven tiers:
 
 | `@timeout` | Files |
 | --- | --- |
-| 30 s | 7 |
-| 60 s | 42 |
-| 120 s | 22 |
+| 30 s | 8 |
+| 60 s | 52 |
+| 120 s | 26 |
 | 180 s | 2 |
-| 300 s | 12 |
+| 300 s | 15 |
 | 600 s | 1 |
 | 1800 s | 2 |
 

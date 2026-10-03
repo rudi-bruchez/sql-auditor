@@ -19,6 +19,10 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Added
+
+- `60.backup/030.differential-base.sql` says, per database, how big a differential backup taken now would be and which full backup it would be taken against, from SQL Server 2016 SP2 on. It reads `modified_extent_page_count` from `sys.dm_db_file_space_usage`, the differential bitmap rather than the data, and `differential_base_time`, `_lsn` and `_guid` from `sys.database_files`, and looks the base up in msdb to say whether it was a snapshot, a copy-only or a virtual-device backup, or is missing from this instance's history. Measured on SQL Server 2025, the modified pages times 8 KB matched the differential's recorded size to within 2 MB, and one index rebuild produced a differential larger than its full. A database that never had a full backup reports a NULL base and zero modified pages, which is no base rather than no change.
+
 ### Fixed
 
 - The first connection of a collection, of `check` and of the assistant, the blocking watch's two connections, and the collection's reconnects now give up on a server that accepts the socket and never completes the login. The driver bounds only the dial, so such a server held the run until the socket died: measured, still waiting after two minutes. The budget is `SQL_CONNECT_TIMEOUT_SEC` for the dial and the same again for the login.
