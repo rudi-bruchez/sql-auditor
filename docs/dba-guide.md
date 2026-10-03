@@ -180,6 +180,15 @@ There is deliberately no new grant to ask for here. If your organisation would
 have to raise the audit login's rights to collect this, run without it and read
 the error numbers.
 
+**The Agent proxy count of each credential asks for no right either.**
+`40.security/030.server-surface.sql` counts, per credential, the Agent proxies
+that run under it, from `msdb.dbo.sysproxies`. On a default msdb only
+`TargetServersRole` may read that table, and no line of the generated script
+grants it. The read is guarded: refused, it leaves `agent_proxies` NULL on
+every credential and records the error in the root under `agent_proxies`,
+while the linked servers, triggers, credentials and audits are collected as
+usual. NULL there means "not allowed to look", never "no proxy".
+
 **The database encryption keys are a right of their own from SQL Server 2022
 on.** `40.security/040.encryption-certificates.sql` resolves each database
 encrypted with TDE to the certificate that protects it through
