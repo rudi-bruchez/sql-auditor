@@ -547,6 +547,14 @@ func startBlockingWatch(ctx context.Context, cfg *Config, denied map[string]bool
 	// late and never identified a waiter.
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(2)
+	return startWatchOn(ctx, db, cfg, spid)
+}
+
+// startWatchOn is startBlockingWatch from the pool on: it takes the watch's two
+// connections from db, and owns db from here, closing it on every path that
+// returns no watch. It is apart so that a test can hand it a pool whose second
+// connection never opens, which no server reachable from a test does.
+func startWatchOn(ctx context.Context, db *sql.DB, cfg *Config, spid int) (*blockingWatch, func(), string) {
 	dctx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout+watchPollDeadline)
 	defer cancel()
 	c, err := connWithin(dctx, db)

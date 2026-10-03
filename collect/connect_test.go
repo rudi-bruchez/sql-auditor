@@ -2,8 +2,13 @@ package collect
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -82,5 +87,81 @@ func TestTheWatchGivesUpOnAServerThatNeverAnswersTheLogin(t *testing.T) {
 	})
 	if w != nil || !strings.Contains(reason, "could not be opened") {
 		t.Errorf("watch %v, reason %q; want no watch and a connection that could not be opened", w, reason)
+	}
+}
+
+// recycleConn hands the run's connection back between collectors and takes a
+// fresh one, which opens a new session whenever the driver had marked the old
+// one bad. The connection given back here comes from a fake driver, the pool
+// from the silent server.
+func TestRecycleConnGivesUpOnAServerThatNeverAnswersTheLogin(t *testing.T) {
+	t.Parallel()
+	addr, _ := hangingInstance(t)
+	cfg := &Config{Server: addr, ConnectTimeout: silentConnectTimeout, QueryTimeout: 5 * time.Second}
+	db, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	old, _ := openFake(t, nil)
+	var rerr error
+	within(t, 10*silentConnectTimeout, func() {
+		_, _, rerr = recycleConn(context.Background(), db, old, cfg)
+	})
+	if rerr == nil || !strings.Contains(rerr.Error(), "did not complete the login") {
+		t.Errorf("err = %v; want a login that never completed", rerr)
+	}
+}
+
+// stallingDriver opens its first connection and then stalls every later open
+// until released, ignoring the context, as go-mssqldb does after the dial. It
+// is what the watch's identity connection meets when the server answers one
+// login and hangs on the next.
+type stallingDriver struct {
+	first   *fakeDriver
+	opened  atomic.Int32
+	release chan struct{}
+}
+
+func (d *stallingDriver) Open(name string) (driver.Conn, error) {
+	if d.opened.Add(1) > 1 {
+		<-d.release
+		return nil, errors.New("stallingDriver: released")
+	}
+	return d.first.Open(name)
+}
+
+// The watch opens a second connection to read who a waiter is, and a failure
+// to open it costs the identity, not the watch and never the run. The poll
+// connection answers (no waiter), the identity connection never opens: the
+// watch must start without it, within the poll connection's own deadline.
+func TestTheWatchGivesUpOnAnIdentityConnectionThatNeverOpens(t *testing.T) {
+	t.Parallel()
+	d := &stallingDriver{
+		first:   &fakeDriver{answers: map[string]fakeAnswer{watchQuery: {}}},
+		release: make(chan struct{}),
+	}
+	name := fmt.Sprintf("watch-stall-%d", fakeSeq.Add(1))
+	sql.Register(name, d)
+	db, err := sql.Open(name, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(2)
+	cfg := &Config{ConnectTimeout: silentConnectTimeout}
+	var w *blockingWatch
+	var stop func()
+	var reason string
+	within(t, 10*silentConnectTimeout, func() {
+		w, stop, reason = startWatchOn(context.Background(), db, cfg, 55)
+	})
+	close(d.release)
+	stop()
+	if w == nil {
+		t.Fatalf("no watch (%q); a lost identity connection must not cost the watch", reason)
+	}
+	if w.identify != nil {
+		t.Error("the watch claims an identity connection that never opened")
 	}
 }
