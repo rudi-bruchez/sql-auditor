@@ -410,6 +410,7 @@ Queries (38):
   80.workload/025.query-store-compare.sql    per database, SQL Server 13+, --query-store-compare-at (off)
   80.workload/026.query-store-interrupted.sql per database, SQL Server 13+
   80.workload/028.query-store-resources.sql  per database, SQL Server 14+
+  80.workload/029.query-store-load-profile.sql per database, SQL Server 13+
   80.workload/030.implicit-conversions.sql
   80.workload/040.plan-cache.sql
   80.workload/042.parallel-cost-distribution.sql SQL Server 13+
@@ -1268,8 +1269,8 @@ one, across seven tiers:
 | `@timeout` | Files |
 | --- | --- |
 | 30 s | 9 |
-| 60 s | 53 |
-| 120 s | 27 |
+| 60 s | 54 |
+| 120 s | 28 |
 | 180 s | 3 |
 | 300 s | 15 |
 | 600 s | 1 |
@@ -1929,6 +1930,37 @@ A blocked statement that waited more than 30 seconds on a lock may also be in
 the statement text, and `10.system/060.system-health.sql` counts them per kind.
 A statement cut at the usual 30-second timeout crosses that threshold only
 just, so read that as a second witness, not a complete one.
+
+## When the load happens
+
+Maintenance has to go somewhere, and "at night" is a guess until the load says
+where night is. `80.workload/029.query-store-load-profile.sql` returns, per
+database, one row per Query Store interval over the whole retained history:
+executions (finished, aborted and failed apart), duration, CPU, logical and
+physical reads and logical writes. No query text and no query id leave the
+server. The other histories in the corpus are hours long; the Query Store
+keeps thirty days by default, which is what places a peak hour and a quiet one
+on a given day of the week.
+
+Read it with three things in mind:
+
+- The grain is the database's `INTERVAL_LENGTH_MINUTES`, given in the root and
+  on every row, since a change of the option leaves older intervals at their
+  old length. A store kept at one-day intervals can say which day, never which
+  hour.
+- The listing keeps the 1 488 newest intervals, 62 days of hourly ones. At
+  shorter intervals that is less history, and the first row says where it
+  starts.
+- Times are as stored, `datetimeoffset` with the offset they were recorded in.
+  A change of daylight saving time shows as a change of offset in the rows.
+
+The totals leave out the queries that belong to scalar and multi-statement
+functions and to triggers, by the rule `020.query-store.sql` uses for its
+totals: each of them is recorded twice, once on its own and once inside the
+statement that called it. What was left out is given beside each interval.
+Under capture mode `AUTO` a light ad hoc workload is undercounted, and work
+that is not a query (a backup, `DBCC CHECKDB`) is not in the store at all, so a
+quiet hour here is quiet for the applications, not for the instance.
 
 ## `--query-store-compare-at`
 
