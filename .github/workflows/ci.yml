@@ -271,6 +271,24 @@ jobs:
                                else [($p / 2 | floor), 16] | min end))' \
             "$run_dir/10.system/014.cpu-topology.json" \
             || { jq '.' "$run_dir/10.system/014.cpu-topology.json"; exit 1; }
+          # 010 sums failed_to_create_worker over the visible schedulers, and a
+          # fresh container has created every worker it asked for: zero, not
+          # null, which is what a dropped column or a lost cast would give.
+          jq -e '.schedulers.failed_to_create_worker == 0' \
+            "$run_dir/10.system/010.properties.json" \
+            || { jq '.schedulers' "$run_dir/10.system/010.properties.json"; exit 1; }
+          # 064 reads the worker pool out of every queryProcessing payload. The
+          # engine posts a round within seconds of starting, so the ring is not
+          # expected to be empty; where it holds rounds, the worker attributes
+          # must have been read, and the peak must sit inside the pool. A
+          # misspelled attribute reads NULL in silence, which only this sees.
+          jq -e '.session.intervals == 0
+                 or (any(.intervals[]; .max_workers > 0 and .workers_created > 0
+                                       and .workers_created <= .max_workers)
+                     and .session.max_workers > 0
+                     and .session.workers_created_peak <= .session.max_workers)' \
+            "$run_dir/10.system/064.server-diagnostics.json" \
+            || { jq 'del(.waits)' "$run_dir/10.system/064.server-diagnostics.json"; exit 1; }
           # 078 carries the counters no other collector reads: a file that
           # lost whole objects fails the object checks, and one that dropped
           # its zeros, as 075 does on purpose, fails the zero check. Its root

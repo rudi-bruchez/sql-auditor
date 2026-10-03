@@ -21,7 +21,7 @@
 -- It is a separate file for the reason 20.databases/025.fragmentation.sql
 -- states: a cancelled batch returns none of its result sets however well the
 -- areas inside it were guarded. 060 is three cheap shreds of one attribute
--- each; this is twenty-odd shreds over four megabytes of XML, about five
+-- each; this is thirty-odd shreds over four megabytes of XML, about five
 -- seconds of CPU against a tenth of one, and it is the expensive read of the
 -- pair. Together they would put the deadlock inventory at
 -- the mercy of the XML parse. Apart, a timeout here costs this file only.
@@ -54,7 +54,31 @@
 --
 -- Long I/O. ioLatchTimeouts is the 845 family and totalLongIos is the 833
 -- family, both per interval. 030.file-io.sql gives cumulative latency per file;
--- neither it nor anything else says when the long I/Os happened.
+-- neither it nor anything else says when the long I/Os happened. Each round
+-- also names the file of its longest pending I/O and how long it had been
+-- pending (longestPendingRequests/pendingRequest, @filePath and @duration),
+-- which says whether the log, a data file or tempdb was the one waiting. That
+-- element is empty on a round without a pending I/O, and it was empty on every
+-- round measured on 17.0.4065.4, 283 of them in September 2026, so the columns
+-- are read as the SQLWATCH monitor reads them and have never been seen
+-- carrying a value. The unit of @duration is taken to be milliseconds on the
+-- same unverified ground.
+--
+-- Worker exhaustion with a date on it. 010.properties.sql reads the scheduler
+-- queue once, at the moment it runs, and 80.workload/010.wait-stats.sql has
+-- THREADPOOL cumulative since startup; neither can say when the instance ran
+-- out of workers. queryProcessing carries, per round, maxWorkers,
+-- workersCreated, workersIdle, pendingTasks (tasks queued for a worker) and
+-- oldestPendingTaskWaitingTime, so the window holds a day of the worker pool's
+-- shape: how close workers_created came to max_workers, and in which rounds
+-- tasks queued. hasUnresolvableDeadlockOccurred and
+-- hasDeadlockedSchedulersOccurred flag a round in which the deadlock monitor
+-- could not resolve a cycle or every scheduler stopped making progress, an
+-- incident nothing else here keeps. Measured present on 17.0.4065.4, with
+-- workers_created moving between rounds and every other value at zero; the
+-- behaviour under real exhaustion was not reproduced, and the unit of
+-- oldestPendingTaskWaitingTime is not documented, so the column keeps the
+-- engine's raw value and no unit in its name.
 --
 -- NO STATEMENT TEXT IS COLLECTED, AND THAT RULES OUT ONE COMPONENT ON PURPOSE.
 -- The queryProcessing payload carries a blockingTasks section holding full
@@ -147,6 +171,15 @@ DECLARE @intervals TABLE (
     [long_ios_total]            int           NULL,
     [pending_io_requests]       int           NULL,
     [blocking_chains]           int           NULL,
+    [longest_pending_io_ms]     bigint        NULL,
+    [longest_pending_io_file]   nvarchar(260) NULL,
+    [max_workers]               int           NULL,
+    [workers_created]           int           NULL,
+    [workers_idle]              int           NULL,
+    [pending_tasks]             int           NULL,
+    [oldest_pending_task_wait]  bigint        NULL,
+    [unresolvable_deadlock]     int           NULL,
+    [deadlocked_schedulers]     int           NULL,
     [available_physical_bytes]  bigint        NULL,
     [available_paging_bytes]    bigint        NULL,
     [working_set_bytes]         bigint        NULL,
@@ -194,7 +227,7 @@ BEGIN TRY
        for free, which is why the waits query below is shaped as it is.
 
        The aggregation needs no CASE on the component. One event carries one
-       component, so twenty of the twenty-two columns are NULL on any given row,
+       component, so most of the columns are NULL on any given row,
        and MAX over the bucket picks out the one value each column has. A
        component absent from a round leaves its columns NULL rather than zero,
        so a reader can tell "reported healthy" from "did not report". */
@@ -205,6 +238,9 @@ BEGIN TRY
         [bad_pages_detected], [bad_pages_fixed],
         [io_latch_timeouts], [long_ios_interval], [long_ios_total],
         [pending_io_requests], [blocking_chains],
+        [longest_pending_io_ms], [longest_pending_io_file],
+        [max_workers], [workers_created], [workers_idle], [pending_tasks],
+        [oldest_pending_task_wait], [unresolvable_deadlock], [deadlocked_schedulers],
         [available_physical_bytes], [available_paging_bytes],
         [working_set_bytes], [page_alloc_potential])
     SELECT s.[bucket],
@@ -226,6 +262,10 @@ BEGIN TRY
            MAX(s.[bad_detected]),    MAX(s.[bad_fixed]),
            MAX(s.[latch_timeouts]),  MAX(s.[long_io_int]),    MAX(s.[long_io_tot]),
            MAX(s.[pending_io]),      MAX(s.[blocking]),
+           MAX(s.[pending_io_ms]),   MAX(s.[pending_io_file]),
+           MAX(s.[max_workers]),     MAX(s.[workers_created]), MAX(s.[workers_idle]),
+           MAX(s.[pending_tasks]),   MAX(s.[oldest_pending]),
+           MAX(s.[unresolvable_dl]), MAX(s.[deadlocked_sched]),
            MAX(s.[avail_phys]),      MAX(s.[avail_page]),
            MAX(s.[working_set]),     MAX(s.[alloc_potential])
     FROM (
@@ -253,6 +293,17 @@ BEGIN TRY
                n.value('@ioLatchTimeouts', 'int')                            AS [latch_timeouts],
                n.value('@intervalLongIos', 'int')                            AS [long_io_int],
                n.value('@totalLongIos', 'int')                               AS [long_io_tot],
+               /* The worker side of queryProcessing, seven more bare
+                  attributes off the same root. They cost lookups, not walks,
+                  which is why reading them leaves the bound of this file where
+                  it was. */
+               n.value('@maxWorkers', 'int')                                 AS [max_workers],
+               n.value('@workersCreated', 'int')                             AS [workers_created],
+               n.value('@workersIdle', 'int')                                AS [workers_idle],
+               n.value('@pendingTasks', 'int')                               AS [pending_tasks],
+               n.value('@oldestPendingTaskWaitingTime', 'bigint')            AS [oldest_pending],
+               n.value('@hasUnresolvableDeadlockOccurred', 'int')            AS [unresolvable_dl],
+               n.value('@hasDeadlockedSchedulersOccurred', 'int')            AS [deadlocked_sched],
                /* The three counts below are paths, and they have to be: they
                   ask how many children exist. They run on one component each,
                   so a quarter of the rows, and they descend one or two levels
@@ -260,6 +311,20 @@ BEGIN TRY
                CASE WHEN n.value('local-name(.)', 'varchar(30)') = 'ioSubsystem'
                     THEN n.value('count(longestPendingRequests/pendingRequest)', 'int')
                END                                                           AS [pending_io],
+               /* The longest of them, and the file it waits on: the log, a
+                  data file or tempdb are three different diagnoses that the
+                  count alone cannot tell apart. Taken by max(@duration)
+                  rather than by position, because nothing documents the
+                  order of the list; SQLWATCH reads the first element and
+                  would be right only if the engine sorts it. The element is
+                  empty on a round without a pending I/O, so both columns are
+                  NULL there, which is the common case. */
+               CASE WHEN n.value('local-name(.)', 'varchar(30)') = 'ioSubsystem'
+                    THEN n.value('max(longestPendingRequests/pendingRequest/@duration)', 'bigint')
+               END                                                           AS [pending_io_ms],
+               CASE WHEN n.value('local-name(.)', 'varchar(30)') = 'ioSubsystem'
+                    THEN n.value('(longestPendingRequests/pendingRequest[@duration = max(../pendingRequest/@duration)]/@filePath)[1]', 'nvarchar(260)')
+               END                                                           AS [pending_io_file],
                -- Counted, never read. See the header: a blocked-process report
                -- carries verbatim SQL.
                CASE WHEN n.value('local-name(.)', 'varchar(30)') = 'queryProcessing'
@@ -343,6 +408,16 @@ SELECT
            FROM @intervals) AS d WHERE g IS NOT NULL)            AS [session.median_gap_seconds],
     (SELECT COUNT(*) FROM @intervals WHERE [states] <> 'CLEAN')  AS [session.intervals_not_clean],
     (SELECT COUNT(*) FROM @intervals WHERE [blocking_chains] > 0) AS [session.intervals_with_blocking],
+    -- Worker exhaustion over the window. pending_tasks above zero is a round
+    -- in which tasks were queued waiting for a worker, which is THREADPOOL
+    -- with a date on it; the peak of workers_created against max_workers says
+    -- how close the instance came without queueing.
+    (SELECT COUNT(*) FROM @intervals WHERE [pending_tasks] > 0)  AS [session.intervals_with_pending_tasks],
+    (SELECT MAX([workers_created]) FROM @intervals)              AS [session.workers_created_peak],
+    (SELECT MAX([max_workers]) FROM @intervals)                  AS [session.max_workers],
+    (SELECT COUNT(*) FROM @intervals WHERE [unresolvable_deadlock] > 0
+                                        OR [deadlocked_schedulers] > 0)
+                                                                AS [session.intervals_with_scheduler_deadlock],
     CONVERT(varchar(23), (SELECT sqlserver_start_time FROM sys.dm_os_sys_info), 126)
                                                                 AS [session.instance_start],
     CASE WHEN @err_diag = 0 THEN 1 ELSE 0 END                   AS [collected.diagnostics],
@@ -351,7 +426,7 @@ SELECT
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* One row per interval, newest first. The cap is generous because the rows are
-   integers and the window is the point: three hundred rows of twenty integers
+   integers and the window is the point: three hundred rows of thirty integers
    is smaller than one execution plan. */
 SELECT TOP (400)
     CONVERT(varchar(23), i.[event_time], 126)                   AS [at_utc],
@@ -374,6 +449,15 @@ SELECT TOP (400)
     i.[long_ios_total]                                          AS [long_ios_cumulative],
     i.[pending_io_requests]                                     AS [pending_io_requests],
     i.[blocking_chains]                                         AS [blocking_chains],
+    i.[longest_pending_io_ms]                                   AS [longest_pending_io_ms],
+    i.[longest_pending_io_file]                                 AS [longest_pending_io_file],
+    i.[max_workers]                                             AS [max_workers],
+    i.[workers_created]                                         AS [workers_created],
+    i.[workers_idle]                                            AS [workers_idle],
+    i.[pending_tasks]                                           AS [pending_tasks],
+    i.[oldest_pending_task_wait]                                AS [oldest_pending_task_wait],
+    i.[unresolvable_deadlock]                                   AS [unresolvable_deadlock],
+    i.[deadlocked_schedulers]                                   AS [deadlocked_schedulers],
     i.[available_physical_bytes] / 1048576                       AS [available_physical_mb],
     i.[available_paging_bytes] / 1048576                         AS [available_paging_mb],
     i.[working_set_bytes] / 1048576                              AS [working_set_mb],

@@ -93,7 +93,7 @@ SELECT
     -- SCHEDULER PRESSURE, an instantaneous snapshot: runnable_tasks_count
     -- and work_queue_count are gauges of the moment the query runs, not
     -- rates, and a single read catches that moment and nothing else. All
-    -- four aggregates cover the 'VISIBLE ONLINE' schedulers only, the same
+    -- aggregates below cover the 'VISIBLE ONLINE' schedulers only, the same
     -- convention as 050.tempdb.sql; the hidden and offline schedulers carry
     -- no workload to judge. visible_count is the divisor, and it is
     -- indispensable: the worker-exhaustion rule judges the AVERAGE load
@@ -109,6 +109,13 @@ SELECT
        WHERE status = 'VISIBLE ONLINE')                             AS [schedulers.runnable_tasks_max],
     (SELECT SUM(work_queue_count) FROM sys.dm_os_schedulers
        WHERE status = 'VISIBLE ONLINE')                             AS [schedulers.work_queue],
+    -- A state, not a gauge: failed_to_create_worker is set on a scheduler
+    -- that could not create a new worker, generally for lack of memory, and
+    -- it says so in a single snapshot where work_queue needs luck. The
+    -- column is a nullable bit, hence the cast before the sum; it carries
+    -- no "applies to" note in the reference and is read on the 2012 floor.
+    (SELECT SUM(CAST(failed_to_create_worker AS int)) FROM sys.dm_os_schedulers
+       WHERE status = 'VISIBLE ONLINE')                             AS [schedulers.failed_to_create_worker],
 
     /* ───────── memory ───────── */
     CAST(pm.physical_memory_in_use_kb   / 1024.0 AS DECIMAL(12,1))  AS [memory.sql_ram_in_use_mb],
