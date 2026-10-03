@@ -1268,7 +1268,7 @@ expires, the instance is in trouble rather than merely busy.
 And it is the one you probably came here for. **Each collector declares its own
 timeout in the query file, and a declared timeout wins over
 `SQL_QUERY_TIMEOUT_SEC` outright.** Every file in the shipped corpus declares
-one, across seven tiers:
+one, in these tiers:
 
 | `@timeout` | Files |
 | --- | --- |
