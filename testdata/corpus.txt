@@ -52,6 +52,7 @@
 40.security/020.database-principals.sql
 40.security/030.server-surface.sql
 40.security/031.database-protections.sql
+40.security/032.server-trigger-definitions.sql
 50.agent/010.jobs.sql @profiles: space
 50.agent/020.job-steps.sql @profiles: space
 50.agent/021.job-step-commands.sql

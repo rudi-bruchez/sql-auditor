@@ -1862,3 +1862,93 @@ vanish at the next restart without anybody noticing.
 What closes it. `DBCC TRACESTATUS(-1)` into a table variable, projected as an
 array of flag number, global status and session status. No permission beyond
 what the collector already requires.
+
+## Gaps recorded on 27 September 2026
+
+Both came out of writing two topics of the private corpus, whose authors could
+not cite a `gap:` for want of a slug here. Each was a field the topic needed to
+tell a finding from a non-finding, and the archive did not carry. The third
+section is about how a pair of existing fields reads, and was found while
+closing the first.
+
+### 26. A not-for-replication constraint reads as one to revalidate — closed
+
+slug: constraint-not-for-replication
+
+`70.schema/010.objects.sql` listed every untrusted or disabled foreign key and
+check constraint with `is_disabled` and `is_not_trusted`, and nothing else
+about it. A constraint created `NOT FOR REPLICATION` is untrusted from the
+moment it exists. Measured on 17.0.4065.4, one foreign key and one check
+constraint, both `NOT FOR REPLICATION` over rows that satisfied them, read
+`is_disabled` 0 and `is_not_trusted` 1 after creation, and still 0 and 1 after
+`ALTER TABLE ... WITH CHECK CHECK CONSTRAINT`, which returned no error. The
+same held for a foreign key created on an empty table.
+
+So the archive presented such a constraint exactly as it presented one left
+untrusted by a bulk load, and the fix that the second calls for runs, succeeds
+and changes nothing on the first. The topic on untrusted constraints had to
+tell the reader that the archive could not separate them, and to send them to
+a live query.
+
+Closed on 3 October 2026. Each row of `untrusted_constraints` carries
+`is_not_for_replication`, and the root counts those constraints apart in
+`counts.untrusted_foreign_keys_not_for_replication` and
+`counts.untrusted_check_constraints_not_for_replication`, so the share no
+revalidation can fix is known even when the list is capped.
+
+### 27. The body of a server trigger is collected nowhere — closed
+
+slug: server-trigger-source
+
+`40.security/030.server-surface.sql` lists the server-scoped triggers with
+their events, whether each is enabled and when it was last modified, on every
+run. It does not read `sys.server_sql_modules`, deliberately, since a body is
+code written on the client's side. No other collector read it either:
+`70.schema/080.modules.sql` exports module source under
+`--include-object-definitions`, but it runs per database and reads
+`sys.sql_modules`, where server triggers are not.
+
+That left the question a LOGON trigger raises unanswerable from the archive.
+Whether one is a hazard depends on what it reads and whether it can fail, and a
+LOGON trigger that fails refuses every connection to the instance. The topic on
+server triggers had to carry `manual` as evidence for it.
+
+Closed on 3 October 2026 by `40.security/032.server-trigger-definitions.sql`,
+behind the same `--include-object-definitions`. It is a separate file because
+the gate is a property of a whole file, and putting the body in 030 would have
+hidden the rest of 030 behind the flag. Each row carries the trigger's events,
+the identity it runs as (`execute_as`: `CALLER`, `OWNER` or a principal), the
+body, and a `source_state` saying whether the body is there (`sql`), withheld
+(`encrypted`), in an assembly (`clr`) or above the 1 MiB cap (`above_cap`). The
+file declares `@discloses: server_trigger_source`, because MANIFEST.txt's
+paragraph on object definitions is latched from the per-database module files,
+and a run whose databases hold no module would otherwise carry a trigger body
+and not say so. Verified on 17.0.4065.4 with a DDL trigger on `CREATE_DATABASE`
+created for the purpose and dropped in the same invocation: with the option the
+body came back whole, and without it the file was reported not run. No LOGON
+trigger was created on the shared lab instance to verify it, because one that
+fails locks out every other session; both kinds share the catalog read.
+
+### 28. What the untrusted constraint counts count, and which rows the cap keeps — closed
+
+slug: untrusted-counts-scope
+
+`counts.untrusted_foreign_keys` and `counts.untrusted_check_constraints` count
+every constraint that is untrusted or disabled, and the not-for-replication
+ones with them. A disabled constraint is always untrusted, so the filter selects
+the same set as `is_not_trusted = 1` alone, but the names read as "enabled and
+untrusted" and a reader who takes them that way overstates what a revalidation
+would fix. The listing beside them was capped at 200 per kind by a `TOP` in each
+branch of a `UNION ALL` with no `ORDER BY`, so on a database past the cap two
+runs could list different constraints, and the disabled ones, which matter most,
+could be the ones left out.
+
+Closed on 3 October 2026 without renaming. The two fields are read by the
+private analysis and carried by every archive already collected, so a rename
+would have broken the reading of those archives for a clearer name. The
+collector's header now says what they count, and each kind's `TOP` takes its own
+`ORDER BY`: disabled constraints first, then the enabled ones a revalidation
+could fix, then the not-for-replication ones, each by schema, table and name.
+Measured on 17.0.4065.4 with 208 untrusted check constraints, 206 of them not
+for replication: the 200 listed kept the disabled one and the one enabled
+untrusted constraint whose name sorted last, and two runs listed the same rows.

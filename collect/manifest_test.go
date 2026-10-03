@@ -862,3 +862,41 @@ func TestConnectionPoolsAreDeclaredAndDisclosed(t *testing.T) {
 		t.Errorf("MANIFEST.txt should disclose the connection pool names:\n%s", m.Human())
 	}
 }
+
+// 40.security/032.server-trigger-definitions.sql exports the body of every
+// server trigger under --include-object-definitions. MANIFEST.txt's paragraph on
+// object definitions is latched from the files 080.modules.sql writes, so a run
+// whose databases hold no module would carry a trigger body and say nothing of
+// it. The declaration is what closes that, and it must not quietly leave the
+// header.
+func TestServerTriggerSourceIsGatedAndDisclosed(t *testing.T) {
+	scripts, err := Discover(os.DirFS(filepath.Join("..", "queries")), ".")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	const path = "40.security/032.server-trigger-definitions.sql"
+	found := false
+	for _, s := range scripts {
+		if s.Path != path {
+			continue
+		}
+		found = true
+		if s.RequiresFlag != FlagObjectDefinitions {
+			t.Errorf("%s exports trigger source and must declare @requires_flag: %s, got %q",
+				s.Path, FlagObjectDefinitions, s.RequiresFlag)
+		}
+		if !slices.Contains(s.Discloses, "server_trigger_source") {
+			t.Errorf("%s exports trigger source and must declare "+
+				"@discloses: server_trigger_source, got %v", s.Path, s.Discloses)
+		}
+	}
+	if !found {
+		t.Fatalf("%s is not in the corpus", path)
+	}
+	m := NewManifest("sql-auditor", "test", "abc")
+	m.Sources = map[string]SourceInfo{"queries": {From: "embedded", SHA256: "abc"}}
+	m.Disclosed = []string{"server_trigger_source"}
+	if h := flatten(m.Human()); !strings.Contains(h, "server-scoped trigger") {
+		t.Errorf("MANIFEST.txt should disclose the server trigger source:\n%s", m.Human())
+	}
+}

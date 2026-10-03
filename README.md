@@ -434,7 +434,7 @@ Exactly three cases.
 | --- | --- |
 | `--all` | turn on all eleven options below at once: the nine off for disclosure and the two off for cost. See the note under these tables |
 | `--include-session-text` | also collect the SQL text, and the login, host and program names, of the five longest-running snapshot transactions |
-| `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database |
+| `--include-object-definitions` | also collect the source of views, procedures, functions and triggers, one `.sql` file each, per database, and the source of the server-scoped triggers (LOGON and DDL) for the instance |
 | `--include-deadlock-graphs` | also collect the deadlock reports `system_health` still holds, one `.xdl` file each |
 | `--include-blocked-process-reports` | also collect the blocked process reports an Extended Events session captured, one `.xml` file each |
 | `--include-default-trace` | also collect the retained rows of the default trace, not only the aggregate that is always made. The rows name the login, host and database of each event |
@@ -587,6 +587,11 @@ has opened in years, which is precisely the kind an audit goes looking for.
 
 Encrypted modules are listed but their source is not, because the server does
 not return it.
+
+The same option collects the source of the server-scoped triggers, LOGON and
+DDL alike, once for the instance (`40.security/032.server-trigger-definitions.sql`).
+A LOGON trigger runs on every connection and refuses all of them when it fails,
+so its body is what an audit needs to read.
 
 ### `--include-deadlock-graphs`
 

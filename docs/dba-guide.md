@@ -82,6 +82,7 @@ They produce nothing unless you ask for them:
 | `10.system/052.session-text.sql` | `--include-session-text` |
 | `10.system/061.deadlock-graphs.sql` | `--include-deadlock-graphs` |
 | `10.system/063.blocked-process-reports.sql` | `--include-blocked-process-reports` |
+| `40.security/032.server-trigger-definitions.sql` | `--include-object-definitions` |
 | `50.agent/021.job-step-commands.sql` | `--include-job-step-commands` |
 | `70.schema/041.compression-savings.sql` | `--estimate-compression` |
 | `70.schema/055.page-density.sql` | `--measure-page-density` |
@@ -884,7 +885,9 @@ line to it:
   whole instance rather than only the databases listed above.
 - **`--include-object-definitions`** discloses the source of the views,
   procedures, functions and triggers, and says that this is code written on your
-  side which can name linked servers and carry a credential in clear.
+  side which can name linked servers and carry a credential in clear. The
+  source of the server-scoped triggers has a line of its own, because it is
+  collected once for the instance rather than per database.
 - **`--include-deadlock-graphs`** discloses the deadlock reports, and says that
   each one carries the SQL of both victims.
 - **`--include-blocked-process-reports`** discloses the blocked process reports,
@@ -1994,6 +1997,17 @@ reads `sys.sql_modules` and writes one `.sql` file per view, stored procedure,
 function and trigger, under `70.schema/<database>/080.modules/`, with an
 `_index.json` listing every module, including the ones whose source is not
 there.
+
+And one runs for the instance: `40.security/032.server-trigger-definitions.sql`
+reads `sys.server_sql_modules`, the source of the server-scoped triggers, LOGON
+and DDL alike, which no database holds. They go into one JSON file rather than
+one `.sql` each, because an instance carries a handful of them at most. The
+body is what says whether a LOGON trigger can fail, and a LOGON trigger that
+fails refuses every connection to the instance; `40.security/030.server-surface.sql`
+lists the same triggers on every run, without their source. Each row says
+whether the source is there (`sql`), withheld (`encrypted`), held in an assembly
+(`clr`) or above the 1 MiB cap (`above_cap`), and under which identity the
+trigger runs (`execute_as`).
 
 ### Why it is off by default
 

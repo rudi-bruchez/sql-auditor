@@ -199,8 +199,9 @@ ORDER BY s.name, ll.local_principal_id
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* Server-scoped triggers, LOGON and DDL alike. The definition is not read
-   here: 70.schema/080.modules.sql is where module source belongs, and a
-   server trigger's body can embed the literals its author used. */
+   here: a server trigger's body can embed the literals its author used, so it
+   is 032.server-trigger-definitions.sql's, behind --include-object-definitions
+   like the module source of 70.schema/080.modules.sql. */
 SELECT
     t.name                                                      AS [name],
     t.parent_class_desc                                         AS [scope],
