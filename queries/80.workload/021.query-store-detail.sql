@@ -64,7 +64,8 @@
 -- SQL Server 2016 is the floor for this file, which is above the corpus floor
 -- of 2012 — the Query Store does not exist before it. Not collected for that
 -- reason:
---   sys.query_store_wait_stats            (2017)
+--   sys.query_store_wait_stats            (2017; the per-query totals are in
+--                                          028.query-store-resources.sql)
 --   sys.query_store_query_hints           (2022)
 --   sys.query_store_plan_feedback         (2022)
 

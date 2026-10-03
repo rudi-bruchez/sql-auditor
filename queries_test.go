@@ -107,8 +107,10 @@ func TestEmbeddedCorpusHasNoTopLevelKeyCollision(t *testing.T) {
 	// blockable collectors use: they read into @tables inside TRY/CATCH and
 	// emit from them at the bottom, so the emitting statements are the ones
 	// selecting FROM a table variable and the buffering ones return nothing.
+	// An INSERT into a #temp table is the same thing: 028 decides its retained
+	// queries once, into #retained, so that two listings read one population.
 	assignment := regexp.MustCompile(`(?is)\bSELECT\s+@\w+\s*=`)
-	buffering := regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+@\w+`)
+	buffering := regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+[@#]\w+`)
 
 	for _, s := range scripts {
 		rootAt := -1
