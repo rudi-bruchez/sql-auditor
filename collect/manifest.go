@@ -687,7 +687,16 @@ What is in here that names things:
 		fmt.Fprintln(b, "    their execution plans in XML, and their runtime statistics per")
 		fmt.Fprintln(b, "    interval. A plan carries the compiled parameter values, the literal")
 		fmt.Fprintln(b, "    predicates and the name of every object the query touches.")
-		fmt.Fprintln(b, "    Collected because --query-store-detail was passed.")
+		// The disclosure also latches when a default collector's query text
+		// carries the Showplan namespace (see discloseWrites), and then the
+		// option was not passed: saying it was would be false in the archive.
+		if m.Config[FlagQueryStoreDetail] == "true" {
+			fmt.Fprintln(b, "    Collected because --query-store-detail was passed.")
+		} else {
+			fmt.Fprintln(b, "    Declared without --query-store-detail: a file of this archive carries")
+			fmt.Fprintln(b, "    the Showplan XML namespace, which may be collected query text that")
+			fmt.Fprintln(b, "    mentions it rather than a plan. The warnings in _run.json name the files.")
+		}
 	}
 	if m.Collected.QueryStoreProfiledPlans {
 		fmt.Fprintln(b, "  - For those same queries, the last plan the engine still holds with")

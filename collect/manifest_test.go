@@ -691,6 +691,24 @@ func TestManifestTextDisclosesQueryStoreDetail(t *testing.T) {
 	}
 }
 
+// The disclosure latches on the Showplan namespace in any payload, and default
+// collectors copy query text that may carry it. Measured on a lab instance on
+// 4 October 2026: a default run's MANIFEST.txt said the option was passed when
+// it was not. The sentence now follows the recorded option.
+func TestManifestTextNamesTheReasonForTheQueryStoreDisclosure(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "abc")
+	m.Collected.QueryStoreDetail = true
+	m.Config = map[string]string{FlagQueryStoreDetail: "false"}
+	if got := m.Human(); strings.Contains(got, "because --query-store-detail was passed") ||
+		!strings.Contains(got, "without --query-store-detail") {
+		t.Errorf("MANIFEST.txt credits an option that was not passed:\n%s", got)
+	}
+	m.Config[FlagQueryStoreDetail] = "true"
+	if got := m.Human(); !strings.Contains(got, "because --query-store-detail was passed") {
+		t.Errorf("MANIFEST.txt does not credit the option that was passed:\n%s", got)
+	}
+}
+
 func TestManifestTextSilentWithoutQueryStoreDetail(t *testing.T) {
 	m := NewManifest("sql-auditor", "test", "abc")
 	got := strings.ToLower(m.Human())
