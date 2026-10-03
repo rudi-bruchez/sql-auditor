@@ -27,8 +27,9 @@ each with its interpretation written beside it:
 
 Some facts the other counters carry reach the archive through other views:
 `80.workload/010.wait-stats.sql` reads `sys.dm_os_wait_stats`, and
-`70.schema/030.index-operational.sql` reads per-index lock, latch and
-forwarded-record figures from `sys.dm_db_index_operational_stats`. What no
+`70.schema/030.index-operational.sql` reads per-index lock, latch,
+forwarded-record and page compression figures from
+`sys.dm_db_index_operational_stats`. What no
 file carries is the counters themselves: `Access Methods` (`Full Scans/sec`,
 `Page Splits/sec`, `Worktables Created/sec`), `Locks` per lock type (waits,
 timeouts, deadlocks), `Latches`, `SQL Errors`, `Plan Cache` per cache type,

@@ -483,6 +483,7 @@ them are behind flags.
 | `70.schema/010.objects.sql` | table sizes, data and indexes apart, creation and modification dates |
 | `70.schema/020.index-usage.sql` | the size and usage counters of every index, uncapped |
 | `70.schema/040.compression.sql` | what is compressed today |
+| `70.schema/030.index-operational.sql` | added in October 2026: whether the partitions set to PAGE compression actually get it, in `page_compression`. Left out until then, because the write profile the space question needs is `user_updates` in `020.index-usage` |
 | `70.schema/041.compression-savings.sql` | estimated savings, only with `--estimate-compression` |
 | `70.schema/050.heaps.sql` | page fullness and forwarded records on the 50 largest heaps |
 | `70.schema/055.page-density.sql` | new: page fullness on the 50 largest rowstore index partitions, indexed views included, only with `--measure-page-density` |
@@ -500,7 +501,6 @@ it costs, so the operator decides per instance.
 
 | Collector | Why |
 | --- | --- |
-| `70.schema/030.index-operational.sql` | the write profile the space question needs is `user_updates` in `020.index-usage` |
 | `70.schema/090.statistics.sql`, `091.statistics-density.sql` | statistics occupy negligible space |
 | `80.workload/*` | about time spent, not space occupied |
 | `10.system/020.host-services.sql` | instant file initialisation decides how fast a file grows, not how large it is |
