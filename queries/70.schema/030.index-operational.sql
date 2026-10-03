@@ -124,8 +124,11 @@
 -- gave 839 and 0, with 0 of 840 compressed. The two partitions look alike
 -- here, and leaf_allocations, projected with them, is close to the attempts
 -- in both. What settles it is compressed_page_count from a SAMPLED scan, which
--- this collector does not do, or an estimate from 041.compression-savings.
--- Zero successes on many attempts is a question to ask, not a finding.
+-- this collector does not do and 70.schema/055.page-density projects, behind
+-- --measure-page-density, for the largest index partitions: its row for the
+-- same table, index_id and partition_number says how many leaf pages are
+-- compressed. Without it, an estimate from 041.compression-savings. Zero
+-- successes on many attempts is a question to ask, not a finding.
 --
 -- A rebuild starts the counters again and counts itself: after each of two
 -- rebuilds the repetitive table read 54 and 27 again, with leaf_inserts at 0,
@@ -161,7 +164,15 @@
 -- because they are the volume of compression work the partition asked for.
 -- Partitions with none come last, by leaf inserts, which is where a PAGE heap
 -- filled by ordinary inserts sits: past 200 partitions with attempts, such a
--- heap falls off the listing. The totals at the root are not capped. Its cost is the same kind as the other
+-- heap falls off the listing. The totals at the root are not capped, and two
+-- of them are for that heap: page_partitions.heaps counts the PAGE heap
+-- partitions from sys.partitions, and page_partitions.heaps_without_attempts
+-- those whose counter row shows leaf inserts and no attempt, the row-only
+-- shape described above. They are counted here rather than in
+-- 055.page-density because that file measures no heap, and here they cost a
+-- CASE in two counts already made. A heap with no counter row is in neither
+-- the second count nor the listing, only in the gap between total and
+-- reporting. Its cost is the same kind as the other
 -- areas: counters already in memory, joined to sys.partitions and
 -- sys.dm_db_partition_stats. On a database holding 10 017 PAGE partitions the
 -- whole file took about 0.3 s longer than without this area, 1.0 s against
@@ -182,7 +193,8 @@ DECLARE @instance_start datetime, @seconds_since int,
         @rows_reporting int, @forwarded_total bigint, @heaps_forwarded int,
         @lock_wait_ms bigint, @lock_escalations bigint,
         @page_partitions int, @page_partitions_reporting int,
-        @page_attempts bigint, @page_successes bigint;
+        @page_attempts bigint, @page_successes bigint,
+        @page_heaps int, @page_heaps_without_attempts int;
 
 DECLARE @heaps TABLE (
     [table]             nvarchar(300),
@@ -333,7 +345,8 @@ END CATCH
    back only once touched. See the header for what the ratio can and cannot
    say. */
 BEGIN TRY
-    SELECT @page_partitions = COUNT(*)
+    SELECT @page_partitions = COUNT(*),
+           @page_heaps      = COUNT(CASE WHEN p.index_id = 0 THEN 1 END)
     FROM sys.partitions AS p
     JOIN sys.objects AS o ON o.object_id = p.object_id AND o.type = 'U'
     WHERE p.data_compression = 2
@@ -341,7 +354,11 @@ BEGIN TRY
 
     SELECT @page_partitions_reporting = COUNT(*),
            @page_attempts             = SUM(os.page_compression_attempt_count),
-           @page_successes            = SUM(os.page_compression_success_count)
+           @page_successes            = SUM(os.page_compression_success_count),
+           @page_heaps_without_attempts =
+               COUNT(CASE WHEN os.index_id = 0
+                           AND os.page_compression_attempt_count = 0
+                           AND os.leaf_insert_count > 0 THEN 1 END)
     FROM       sys.dm_db_index_operational_stats(DB_ID(), NULL, NULL, NULL) AS os
     JOIN       sys.partitions AS p
             ON p.object_id = os.object_id AND p.index_id = os.index_id
@@ -382,7 +399,8 @@ BEGIN CATCH
     -- read as an answer.
     SELECT @err_page = ERROR_NUMBER(), @msg = ERROR_MESSAGE(),
            @page_partitions = NULL, @page_partitions_reporting = NULL,
-           @page_attempts = NULL, @page_successes = NULL;
+           @page_attempts = NULL, @page_successes = NULL,
+           @page_heaps = NULL, @page_heaps_without_attempts = NULL;
 END CATCH
 
 SELECT DB_NAME()                                            AS [database],
@@ -398,6 +416,8 @@ SELECT DB_NAME()                                            AS [database],
        @page_partitions_reporting                           AS [page_partitions.reporting],
        @page_attempts                                       AS [page_partitions.attempts],
        @page_successes                                      AS [page_partitions.successes],
+       @page_heaps                                          AS [page_partitions.heaps],
+       @page_heaps_without_attempts                         AS [page_partitions.heaps_without_attempts],
        200                                                  AS [listing_cap],
        CASE WHEN @err_counts     = 0 THEN 1 ELSE 0 END      AS [collected.counts],
        CASE WHEN @err_heaps      = 0 THEN 1 ELSE 0 END      AS [collected.heaps],
