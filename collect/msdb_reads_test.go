@@ -27,7 +27,7 @@ func TestUndeclaredMsdbReadsAreGuarded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	msdb := regexp.MustCompile(`(?i)\bmsdb\s*\.`)
+	msdb := regexp.MustCompile(`(?i)(\bmsdb|\[msdb\])\s*\.`)
 	begin := regexp.MustCompile(`(?i)\bBEGIN\s+TRY\b`)
 	end := regexp.MustCompile(`(?i)\bEND\s+TRY\b`)
 	checked := 0
