@@ -178,6 +178,18 @@ There is deliberately no new grant to ask for here. If your organisation would
 have to raise the audit login's rights to collect this, run without it and read
 the error numbers.
 
+**The database encryption keys need one right the script does not grant, from
+SQL Server 2022 on.** `40.security/040.encryption-certificates.sql` resolves each
+database encrypted with TDE to the certificate that protects it through
+`sys.dm_database_encryption_keys`, and from 2022 that view asks for
+`VIEW SERVER SECURITY STATE`, which `VIEW SERVER PERFORMANCE STATE` does not
+include. The script grants the narrower right on purpose, so on those versions
+the read is refused and the collector says so in its root
+(`encryption_keys.readable` false, error 300) while the certificates, the dates
+their private keys were last backed up and the encrypted backups are still
+collected. Grant `VIEW SERVER SECURITY STATE` as well if the link between each
+database and its certificate is wanted; `VIEW SERVER STATE` covers both.
+
 ### Three of those deserve a second look
 
 **`SQLAgentReaderRole` implies `SQLAgentUserRole`**, whose members can create and
@@ -361,6 +373,7 @@ Queries (38):
   10.system/051.version-store.sql            SQL Server 13.0.5026+
   10.system/052.session-text.sql             --include-session-text (off)
   10.system/060.system-health.sql
+  10.system/080.loaded-modules.sql
   20.databases/010.all-databases.sql
   20.databases/011.all-databases-2014.sql    SQL Server 12+
   20.databases/012.all-databases-query-store.sql SQL Server 13+
@@ -373,6 +386,7 @@ Queries (38):
   20.databases/026.persisted-sku-features.sql per database
   20.databases/027.resumable-operations.sql  per database, SQL Server 14+
   40.security/010.principals.sql
+  40.security/040.encryption-certificates.sql
   50.agent/010.jobs.sql
   50.agent/020.job-steps.sql
   60.backup/010.history.sql
@@ -1248,8 +1262,8 @@ one, across seven tiers:
 
 | `@timeout` | Files |
 | --- | --- |
-| 30 s | 8 |
-| 60 s | 52 |
+| 30 s | 9 |
+| 60 s | 53 |
 | 120 s | 27 |
 | 180 s | 2 |
 | 300 s | 15 |

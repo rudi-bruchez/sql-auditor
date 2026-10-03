@@ -35,6 +35,7 @@
 10.system/077.fulltext.sql
 10.system/078.performance-counters.sql
 10.system/079.telemetry.sql
+10.system/080.loaded-modules.sql
 10.system/095.master-user-objects.sql
 20.databases/010.all-databases.sql @profiles: space
 20.databases/011.all-databases-2014.sql
@@ -52,6 +53,7 @@
 40.security/020.database-principals.sql
 40.security/030.server-surface.sql
 40.security/031.database-protections.sql
+40.security/040.encryption-certificates.sql
 50.agent/010.jobs.sql @profiles: space
 50.agent/020.job-steps.sql @profiles: space
 50.agent/021.job-step-commands.sql
