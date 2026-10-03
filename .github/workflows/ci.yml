@@ -131,6 +131,24 @@ jobs:
           tools -Q "ALTER DATABASE ci_probe SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE, QUERY_CAPTURE_MODE = ALL);"
           tools -t 2 -Q "SELECT COUNT_BIG(*) FROM sys.all_columns AS a CROSS JOIN sys.all_columns AS b CROSS JOIN sys.all_columns AS c WHERE CHECKSUM(a.name, b.name, c.name) = 0 OPTION (MAXDOP 1);" || true
           tools -Q "SELECT 1 / (object_id - object_id) FROM sys.objects;" || true
+      # 80.workload/027 lists the indexes the stored plans READ, and the whole
+      # point is what it leaves out: an index that is only maintained. Its
+      # name appears in the UPDATE's plan as an Object of the Update element,
+      # so a shred through //Object would list it as read and veto its own
+      # drop. One index is sought and one only updated, so the assertion on
+      # 027 below can require the first and refuse the second; an empty list
+      # would make both clauses vacuous.
+      - name: plant an index read and an index only maintained
+        run: |
+          docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b -Q "
+              CREATE TABLE dbo.ix_probe (id int NOT NULL PRIMARY KEY, r int NOT NULL, w int NOT NULL);
+              INSERT dbo.ix_probe (id, r, w)
+                SELECT TOP (1000) ROW_NUMBER() OVER (ORDER BY (SELECT 1)), 0, 0 FROM sys.all_columns;
+              CREATE INDEX ix_probe_read ON dbo.ix_probe (r);
+              CREATE INDEX ix_probe_written ON dbo.ix_probe (w);
+              EXEC sys.sp_executesql N'SELECT id FROM dbo.ix_probe WHERE r = 5;';
+              EXEC sys.sp_executesql N'UPDATE dbo.ix_probe SET w = w + 1 WHERE id = 7;';"
       # 70.schema/010.objects lists untrusted constraints with
       # is_not_for_replication, which is what tells a constraint a
       # revalidation can fix from one it cannot: NOT FOR REPLICATION makes a
@@ -407,13 +425,21 @@ jobs:
             || { jq -c '.results[] | select(.script == "80.workload/026.query-store-interrupted.sql")' "$run_dir/_run.json"
                  jq '{executions, aborted: [.aborted[]?.text], exceptions: [.exceptions[]?.text]}' \
                    "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json"; exit 1; }
-          # 027 shreds OptimizerStatsUsage out of the stored plans. ci_probe has
-          # no user tables, so statistics_used is expected to be EMPTY here and
-          # an assertion on its contents would assert nothing — what is checked
-          # instead is that the shred ran: plans were examined, and the catalog
-          # statistics the corpus's own queries load were found and excluded.
-          # That number being zero means the XML never parsed, which is the way
-          # this collector fails silently.
+          # 027 shreds OptimizerStatsUsage out of the stored plans. ci_probe's
+          # few user tables are barely queried, so statistics_used may be empty
+          # here and an assertion on its contents would assert nothing. What is
+          # checked instead is that the shred ran: plans were examined, and the
+          # catalog statistics the corpus's own queries load were found and
+          # excluded. That number being zero means the XML never parsed, which
+          # is the way this collector fails silently.
+          #
+          # indexes_read is asserted on its contents, because one index was
+          # planted read and one only maintained (above): the first must be
+          # listed and the second must not, which is what fails if the shred
+          # ever reads //Object instead of //RelOp/IndexScan/Object. Catalog
+          # indexes are excluded and counted like catalog statistics, and
+          # temporary ones (tempdb, table variables, the collector's own among
+          # them) never reach the list.
           #
           # plans_examined must not exceed plans_total. The first version of the
           # file reported 116 against 115, because it counted the store twice a
@@ -435,10 +461,14 @@ jobs:
           # statistics_used is legitimately empty, so the clause is vacuous
           # while the filter works and fails the moment it is removed, which is
           # the case it exists for.
-          jq -e '(keys_unsorted | sort) == (["cap","catalog_statistics_excluded","collected_at",
-                     "database","plans_examined","plans_selected","plans_total","plans_unparsed",
-                     "plans_with_usage","state","statistics_named","statistics_used","truncated"] | sort)
-                 and (.state | keys_unsorted | sort) == (["actual","capture_mode"] | sort)
+          jq -e '(keys_unsorted | sort) == (["cap","catalog_indexes_excluded","catalog_statistics_excluded",
+                     "collected_at","database","indexes_named","indexes_read","plans_examined",
+                     "plans_selected","plans_total","plans_unparsed","plans_with_index_reads",
+                     "plans_with_usage","state","statistics_named","statistics_used",
+                     "temporary_indexes_excluded","truncated","window"] | sort)
+                 and (.state | keys_unsorted | sort) == (["actual","capture_mode","cleanup_mode",
+                     "stale_threshold_days"] | sort)
+                 and (.window | keys_unsorted | sort) == (["newest_execution","oldest_execution"] | sort)
                  and .plans_total >= 1
                  and .plans_selected >= 1
                  and .plans_examined <= .plans_selected
@@ -452,9 +482,20 @@ jobs:
                  and all(.statistics_used[]; (keys_unsorted | sort) == (["database","last_compile",
                      "max_modification_count","min_sampling_percent","plans","queries","schema",
                      "statistic","table"] | sort))
-                 and all(.statistics_used[]; .schema != "sys" and (.table | startswith("sys.") | not))' \
+                 and all(.statistics_used[]; .schema != "sys" and (.table | startswith("sys.") | not))
+                 and .catalog_indexes_excluded >= 1
+                 and .plans_with_index_reads >= 1
+                 and (.indexes_read | type) == "array"
+                 and all(.indexes_read[]; (keys_unsorted | sort) == (["database","forced_plans","index_kind",
+                     "index_name","last_compile","last_execution","plans","queries","schema",
+                     "storage","table"] | sort))
+                 and all(.indexes_read[]; .schema != "sys" and .database != null and .database != "tempdb")
+                 and any(.indexes_read[]; .database == "ci_probe" and .schema == "dbo"
+                         and .table == "dbo.ix_probe" and .index_name == "ix_probe_read")
+                 and all(.indexes_read[]; .index_name != "ix_probe_written")' \
             "$run_dir/80.workload/ci_probe/027.query-store-stats-usage.json" \
-            || { jq 'del(.statistics_used)' "$run_dir/80.workload/ci_probe/027.query-store-stats-usage.json"; exit 1; }
+            || { jq 'del(.statistics_used, .indexes_read) + {indexes_read: [.indexes_read[]? | .table + " " + .index_name]}' \
+                   "$run_dir/80.workload/ci_probe/027.query-store-stats-usage.json"; exit 1; }
           # An `if`, not `cmd && { ... }`: this step runs under `set -e`, and a
           # grep that finds nothing exits 1, so the && form would turn the step
           # red exactly when the file is clean.
