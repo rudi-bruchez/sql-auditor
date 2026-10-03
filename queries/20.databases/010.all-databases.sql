@@ -44,6 +44,21 @@
 -- older than 2016 SP2 the property is unknown and returns NULL — TRY_CAST
 -- keeps the column silent rather than failing — so the first collection on a
 -- 2012/2014 instance confirms the gap by itself.
+--
+-- local_cursor_default is CURSOR_DEFAULT, which decides the scope of a
+-- DECLARE CURSOR that names neither LOCAL nor GLOBAL. Without it, a cursor
+-- declared that way in a module body (70.schema/080.modules) cannot be
+-- qualified. Measured on SQL Server 2025: under the default GLOBAL, a
+-- procedure that leaves its cursor open by an early RETURN fails on its next
+-- call in the same session with error 16915, "A cursor with the name ...
+-- already exists", while under LOCAL the same procedure, unchanged and not
+-- recreated, runs twice cleanly. The setting read is that of the module's own
+-- database, not the caller's: a procedure in a LOCAL database called from
+-- master left nothing behind. A pooled connection that the driver resets
+-- between checkouts clears the leftover cursor, so the failure lands on a
+-- session held across calls. model is in this list for the usual reason: its
+-- value is copied to every database created afterwards. The column is 2005,
+-- below the 2012 floor, so it needs no gated variant.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -70,6 +85,7 @@ SELECT
     d.is_trustworthy_on                                          AS [trustworthy],
     d.is_broker_enabled                                          AS [broker],
     d.is_db_chaining_on                                          AS [cross_db_chaining],
+    d.is_local_cursor_default                                    AS [local_cursor_default],
     d.target_recovery_time_in_seconds                            AS [target_recovery_sec],
     d.containment_desc                                           AS [containment],
     d.log_reuse_wait_desc                                        AS [log_reuse_wait],

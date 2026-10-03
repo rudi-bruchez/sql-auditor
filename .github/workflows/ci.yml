@@ -185,6 +185,15 @@ jobs:
           for f in 020.properties 021.properties-2014 022.query-store 023.log-vlf 025.fragmentation 027.resumable-operations; do
             test -f "$run_dir/20.databases/ci_probe/$f.json"
           done
+          # CURSOR_DEFAULT is what qualifies a DECLARE CURSOR without LOCAL or
+          # GLOBAL in a module body, and nothing else in the archive carries
+          # it. A boolean on every row, model included, and in the per-database
+          # root: a renamed alias would leave the key absent and type null.
+          jq -e '(.databases | length) > 0
+                 and all(.databases[]; (.local_cursor_default | type) == "boolean")' \
+            "$run_dir/20.databases/010.all-databases.json"
+          jq -e '(.database.local_cursor_default | type) == "boolean"' \
+            "$run_dir/20.databases/ci_probe/020.properties.json"
           # ci_probe never has a full backup, so the file carries a NULL base and
           # zero modified pages: the "no base" case, which is the one to keep
           # running on both legs.

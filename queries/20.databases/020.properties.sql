@@ -44,6 +44,9 @@
 --   sys.databases.delayed_durability_desc              (2014)
 --   sys.databases.is_auto_create_stats_incremental_on  (2014)
 -- containment_desc and target_recovery_time_in_seconds are both 2012, kept.
+-- database.local_cursor_default is CURSOR_DEFAULT, the scope of a cursor
+-- declared without LOCAL or GLOBAL; 20.databases/010.all-databases.sql says
+-- what it was measured to decide.
 -- sys.dm_db_log_space_usage is 2012; log_space_in_bytes_since_last_backup is
 -- 2014 and is not projected.
 
@@ -64,7 +67,7 @@ DECLARE @db_name sysname, @db_id int, @db_create_date datetime,
         @db_rcsi bit, @db_auto_create_stats bit, @db_auto_update_stats bit,
         @db_auto_update_stats_async bit, @db_auto_close bit, @db_auto_shrink bit,
         @db_read_only bit, @db_tde bit, @db_trustworthy bit, @db_broker bit,
-        @db_chaining bit;
+        @db_chaining bit, @db_local_cursor_default bit;
 
 DECLARE @data_allocated_mb decimal(14,1), @data_used_mb decimal(14,1),
         @log_size_mb decimal(14,1), @log_used_mb decimal(14,1),
@@ -175,6 +178,7 @@ BEGIN TRY
         @db_trustworthy             = CAST(d.is_trustworthy_on               AS BIT),
         @db_broker                  = CAST(d.is_broker_enabled               AS BIT),
         @db_chaining                = CAST(d.is_db_chaining_on               AS BIT),
+        @db_local_cursor_default    = CAST(d.is_local_cursor_default         AS BIT),
 
         /* ───────── space summary ───────── */
         -- The cast to BIGINT is before the SUM and not after it. sys.database_files.size
@@ -378,6 +382,7 @@ SELECT @db_name                     AS [database.name],
        @db_trustworthy              AS [database.trustworthy],
        @db_broker                   AS [database.broker_enabled],
        @db_chaining                 AS [database.cross_db_chaining],
+       @db_local_cursor_default     AS [database.local_cursor_default],
        @data_allocated_mb           AS [space.data_allocated_mb],
        @data_used_mb                AS [space.data_used_mb],
        @log_size_mb                 AS [space.log_size_mb],
