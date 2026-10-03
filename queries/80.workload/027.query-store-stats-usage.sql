@@ -212,8 +212,11 @@
 -- file would pay it again: reading 100 plans for the statistics took 5.6 s,
 -- and reading them a second time for the indexes 11.5 s in all, double. Asking
 -- one .query() for both paths took 6.2 to 6.4 s, and the whole collector
--- through this tool 126 s against 113 s for the statistics alone, so the
--- index list costs about an eighth more and not a second scan.
+-- through this tool 126 s against 113 s for the statistics alone, an eighth
+-- more and not a second scan. The share grows with the plans: a harm review
+-- of 4 October measured 26.7 s against 18.3 s on a store of 577 plans of
+-- 69 KB on average, 46 % more, twice each. The timeout margin below is the
+-- one to watch.
 -- Two cheaper-looking refinements were measured and refused. Splitting reads
 -- into seek, scan and lookup needs an element constructor per access, which
 -- cost 8.7 to 18.9 s for the same 100 plans, two to three times the scan; and
