@@ -143,6 +143,23 @@ jobs:
               CREATE TABLE dbo.nfr_parent (id int NOT NULL PRIMARY KEY);
               CREATE TABLE dbo.nfr_child (id int NOT NULL PRIMARY KEY, parent_id int NOT NULL
                 CONSTRAINT fk_nfr_child_parent REFERENCES dbo.nfr_parent (id) NOT FOR REPLICATION);"
+
+      # 095 lists the procedures master runs at startup and 40.security/040
+      # resolves each database key to the certificate that protects it. Both
+      # arrays are empty on a fresh container, and an empty array is also what
+      # a broken join or a misspelt column returns, so one of each is planted:
+      # a procedure flagged with sp_procoption, and a database key on ci_probe
+      # under a certificate whose private key was never backed up. Encryption
+      # is not turned on, which would encrypt tempdb; the key alone puts the
+      # row in sys.dm_database_encryption_keys. The container dies with the job.
+      - name: plant a startup procedure and a database encryption key
+        run: |
+          tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -b "$@"; }
+          tools -d master -Q "CREATE PROCEDURE dbo.ci_startup_probe AS SET NOCOUNT ON;"
+          tools -d master -Q "EXEC sp_procoption N'dbo.ci_startup_probe', 'startup', 'on';"
+          tools -d master -Q "CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'Ci!MasterKey0'; CREATE CERTIFICATE ci_tde_probe WITH SUBJECT = 'ci tde probe';"
+          tools -d ci_probe -Q "CREATE DATABASE ENCRYPTION KEY WITH ALGORITHM = AES_256 ENCRYPTION BY SERVER CERTIFICATE ci_tde_probe;"
       # --env /dev/null is not decoration. Configuration precedence is
       # flag > .env > process environment, so a .env file appearing in the
       # workspace — generated, or committed by accident — would outrank the
@@ -243,6 +260,39 @@ jobs:
                        == (.bands[] | select(.band == "unknown") | .statements)' \
             "$run_dir/80.workload/042.parallel-cost-distribution.json" \
             || { jq '.' "$run_dir/80.workload/042.parallel-cost-distribution.json"; exit 1; }
+          # 040 read the database keys and the backup history inside TRY
+          # blocks, so a typo in either dynamic statement would land in the
+          # CATCH and leave an empty array that looks like an instance with
+          # nothing encrypted. sa holds every permission, so both reads must
+          # report success here, and the planted key must come back resolved
+          # to its certificate with no private key backup. Each count must
+          # agree with its array.
+          jq -e '.encryption_keys.readable == true
+                 and .backup_history.source == "backupset"
+                 and .counts.certificates == (.certificates | length)
+                 and .counts.database_keys == (.encrypted_databases | length)
+                 and .counts.backup_encryptors == (.backup_encryptors | length)
+                 and .counts.private_key_never_backed_up >= 1
+                 and any(.encrypted_databases[]; .database == "ci_probe"
+                         and .encryptor == "ci_tde_probe"
+                         and (.encryptor_type | test("^CERTIFICATE"))
+                         and .private_key_last_backup == null
+                         and .encryption_state_desc == "UNENCRYPTED")
+                 and all(.encrypted_databases[]; .database != "tempdb")' \
+            "$run_dir/40.security/040.encryption-certificates.json" \
+            || { jq '.' "$run_dir/40.security/040.encryption-certificates.json"; exit 1; }
+          # 095 found the planted startup procedure, and its count agrees.
+          jq -e '.startup_procedures_total == (.startup_procedures | length)
+                 and any(.startup_procedures[]; .name == "ci_startup_probe")' \
+            "$run_dir/10.system/095.master-user-objects.json" \
+            || { jq '.' "$run_dir/10.system/095.master-user-objects.json"; exit 1; }
+          # 080 lists what its root says is not Microsoft Corporation's, and
+          # the two counts in the root account for every loaded module.
+          jq -e '.counts.loaded > 0
+                 and .counts.loaded == .counts.microsoft + .counts.other
+                 and (.modules | length) == ([.counts.other, .listing_cap] | min)' \
+            "$run_dir/10.system/080.loaded-modules.json" \
+            || { jq '.' "$run_dir/10.system/080.loaded-modules.json"; exit 1; }
           # 025 ran on the user database, with its span resolved and the two
           # sides in its root, whatever the state of the store there.
           jq -e 'has("side_minutes") and has("before") and has("after")' \
