@@ -173,9 +173,9 @@ FROM @window AS w
 OUTER APPLY sys.dm_exec_text_query_plan(w.plan_handle, w.statement_start_offset,
                                         w.statement_end_offset) AS tp
 CROSS APPLY (SELECT CHARINDEX(N'StatementSubTreeCost="', tp.query_plan) + 22 AS v) AS k
-CROSS APPLY (SELECT CASE WHEN k.v > 22
-                         THEN TRY_CAST(SUBSTRING(tp.query_plan, k.v,
-                                  CHARINDEX(N'"', tp.query_plan, k.v) - k.v) AS float)
+CROSS APPLY (SELECT CASE WHEN k.v > 22 THEN CHARINDEX(N'"', tp.query_plan, k.v) END AS e) AS q
+CROSS APPLY (SELECT CASE WHEN q.e > k.v
+                         THEN TRY_CAST(SUBSTRING(tp.query_plan, k.v, q.e - k.v) AS float)
                     END AS cost) AS c
 OPTION (RECOMPILE, MAXDOP 1);
 
