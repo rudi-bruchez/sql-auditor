@@ -808,17 +808,34 @@ func renderDone(s State, width int) []string {
 	// A cancelled run still produces its archive, and it says so. A run stopped
 	// after three minutes is still worth sending, and the DBA must not discover
 	// its partiality at the other end.
-	if s.Cancelled {
+	switch {
+	case s.ZipPath == "":
+		// Nothing to send, and no sentence announcing a file: "This archive
+		// is partial:" above "no archive" contradicted itself on every stop
+		// during the preamble.
+		if s.Cancelled {
+			out = append(out, pad+"Collection stopped. No archive was written by this run.")
+		} else {
+			out = append(out, pad+"No archive was written by this run.")
+		}
+	case s.Cancelled:
 		out = append(out, pad+"Collection stopped. This archive is partial:")
-	} else {
+	default:
 		// The recipient is not named: this repository is public, and "whoever
 		// requested the audit" is the only correct wording.
 		out = append(out, pad+"Send this file to whoever requested the audit:")
 	}
 	out = append(out, "")
 	if s.ZipPath == "" {
-		// Nothing to select, so say why rather than print an empty indent.
-		out = append(out, fieldPad+"  no archive was produced")
+		if s.PreviousZip != "" {
+			// Named with its time, and never under "Send this file": a
+			// same-day rerun that failed early leaves the earlier archive at
+			// the very name this run would have used, and an operator who
+			// sees that name alone sends it believing it is today's.
+			out = append(out, fieldPad+"  the file at this name is from an earlier run, written "+
+				s.PreviousZipTime.Format("15:04 on 2006-01-02")+":")
+			out = append(out, fieldPad+"  "+s.PreviousZip)
+		}
 	} else {
 		// The path ALONE on its line, indented: this is what a DBA drags with
 		// the mouse to paste into a mail, and anything else on the line comes

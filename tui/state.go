@@ -206,7 +206,12 @@ type State struct {
 	// The final screen.
 	ZipPath  string
 	ZipBytes int64
-	Total    time.Duration
+	// PreviousZip is an earlier run's archive found at this run's name when
+	// this run wrote none, and PreviousZipTime its modification time. It is
+	// shown so the operator can tell it apart, never offered as the result.
+	PreviousZip     string
+	PreviousZipTime time.Time
+	Total           time.Duration
 	// Stopping is set the moment Ctrl-C is pressed during the collection and
 	// stays set: collect.Run keeps going until it has written its manifest and
 	// its archive, and the screen has to say what it is doing meanwhile.
