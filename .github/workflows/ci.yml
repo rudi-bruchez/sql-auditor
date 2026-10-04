@@ -482,11 +482,19 @@ jobs:
           # refuses ANY column nobody declared, which is the property wanted
           # here: this was the first Query Store collector without @discloses.
           #
+          # The byte budget is asserted for its bookkeeping, since ci_probe's
+          # plans are a few kilobytes and never reach it: every pinned plan is
+          # either read or skipped, nothing is skipped here, the bytes read are
+          # counted and stay under the budget, and plans_unparsed is now what
+          # was read and did not parse, not what was pinned and did not parse.
+          # A collector that forgot to count the plans it read, or stopped
+          # before the budget, fails one of these.
+          #
           # The sys exclusion is asserted the same way. On this probe database
           # statistics_used is legitimately empty, so the clause is vacuous
           # while the filter works and fails the moment it is removed, which is
           # the case it exists for.
-          jq -e '(keys_unsorted | sort) == (["cap","catalog_indexes_excluded","catalog_statistics_excluded",
+          jq -e '(keys_unsorted | sort) == (["budget","cap","catalog_indexes_excluded","catalog_statistics_excluded",
                      "collected_at","database","indexes_named","indexes_read","plans_examined",
                      "plans_selected","plans_total","plans_unparsed","plans_with_index_reads",
                      "plans_with_usage","state","statistics_named","statistics_used",
@@ -494,6 +502,15 @@ jobs:
                  and (.state | keys_unsorted | sort) == (["actual","capture_mode","cleanup_mode",
                      "stale_threshold_days"] | sort)
                  and (.window | keys_unsorted | sort) == (["newest_execution","oldest_execution"] | sort)
+                 and (.budget | keys_unsorted | sort) == (["bytes","bytes_read","duration_ms","plans_read",
+                     "plans_skipped"] | sort)
+                 and .budget.bytes == 209715200
+                 and .budget.plans_read + .budget.plans_skipped == .plans_selected
+                 and .budget.plans_skipped == 0
+                 and .budget.bytes_read >= 1
+                 and .budget.bytes_read <= .budget.bytes
+                 and .budget.duration_ms >= 0
+                 and .plans_unparsed == .budget.plans_read - .plans_examined
                  and .plans_total >= 1
                  and .plans_selected >= 1
                  and .plans_examined <= .plans_selected
