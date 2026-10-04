@@ -1502,13 +1502,20 @@ review of the change checks that the `USE`'s error goes through it.
 - The wizard forgives an earned failure on a stop: a wizard run in which a
   collector failed and that the operator then stopped exits 0 today, as the
   README says. Version 5 does not let the bound do the same. Should the stop
-  keep that exemption, now that the two differ?
+  keep that exemption, now that the two differ? Decided by the owner on
+  5 October 2026: the stop keeps it. The operator who stops is looking at the
+  screen; the bound has no one watching.
 - The wizard's "N collected" over-count exists without the bound, for the
   watch's skips, for every failed unit and for a unit the operator
   interrupted. Should `Verdict.Collected` and `CollectedUnits` land on their
   own, before this feature, as `archiveOf` did?
 - Should the blocking watch's start run under the bound too? It would need its
   connections and first poll on one context and its lifetime on another.
+
+The owner also accepted, on 5 October 2026, the price of recording the
+bound as a fact: a refused login or a step's own timeout landing within
+milliseconds of the bound is filed as the bound and exits 2 rather than 1,
+with the step's words quoted in the bound's warning.
 
 ## Review of 4 October 2026
 
