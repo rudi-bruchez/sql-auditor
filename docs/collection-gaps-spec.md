@@ -1959,7 +1959,7 @@ Opened by a topic of the private corpus on an asynchronous statistics update
 queued behind a long index REORGANIZE, whose detection could not read the one
 record of how long each REORGANIZE ran.
 
-### 29. The maintenance solution's own log is collected nowhere
+### 29. The maintenance solution's own log is collected nowhere — closed
 
 slug: commandlog-history
 
@@ -1989,3 +1989,23 @@ What closes it. A per-database collector that looks the table up by
 `OBJECT_ID`, checks its columns, and reads a bounded window by `ID`; the
 command text, the error message and the `ExtendedInfo` document stay on the
 server.
+
+Closed on 4 October 2026 by `50.agent/050.commandlog.sql`. It is a
+per-database file: an instance file looping over `sys.databases` was written
+first and refused by the corpus lint, which admits neither a procedure called
+through a variable nor dynamic SQL built by concatenation, and those are the
+only ways to name another database's table. master is reached through
+`@widened: system_databases`, whose manifest notice now names the log beside
+the principals; a utility database is read when the run collects it, so a run
+narrowed by DB_INCLUDE to application databases does not see a log kept
+elsewhere. The window is 30 days by `StartTime`, found by a binary search over
+`ID` (20 seeks for a million rows) and read by `ID` range up to 100 000 rows.
+Measured on SQL Server 2025 against the published table definition holding one
+million synthetic rows (470 MB): the window's 74 000 rows read 4 459 pages by
+range where a filter on `StartTime` read 61 041, and the whole file read 36 029
+pages in 1.2 s. The listing keeps the index and statistics commands without an
+end, failed, or longest (25 per type), each with the later commands of the same
+database and the other runs of the same target, which together tell a command
+cut off from a slow one. Reading needs `SELECT` on the table, which the grant
+script cannot give for a database it does not know; a refusal is recorded as
+error 229 and the file completes.
