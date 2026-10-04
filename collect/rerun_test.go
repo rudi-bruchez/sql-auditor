@@ -415,6 +415,26 @@ func TestARerunThatPlannedFewerCollectorsKeepsThePreviousRun(t *testing.T) {
 			}(), []string{"collector " + srv + " (skipped: a reason added later)"}, nil},
 		{"a database not read is named once", run(both, full...), run([]string{"SALESDB"}, full[:2]...),
 			[]string{"database HRDB"}, []string{"collector"}},
+		// The same database dropped while this run read it: still among this
+		// run's databases, since some of its collectors ran, and its other
+		// collectors skipped. What the previous run had on it is lost as it
+		// is for a database dropped between the two runs, and it is named
+		// once, with the reason, rather than once per collector.
+		{"a database dropped during the run is named once", run(both, full...),
+			func() *Manifest {
+				m := run(both, full[:2]...)
+				m.Skipped = []SkippedScript{{Script: db, Target: "HRDB", Reason: skipDroppedDuringRun}}
+				return m
+			}(), []string{"database HRDB (" + skipDroppedDuringRun + ")"}, []string{"collector"}},
+		// The incident this was written for: a database another job created
+		// and dropped while the run was going, which the previous run never
+		// read. Nothing it had is lost.
+		{"a database created and dropped during the run loses nothing", run([]string{"SALESDB"}, full[:2]...),
+			func() *Manifest {
+				m := run(both, full[:2]...)
+				m.Skipped = []SkippedScript{{Script: db, Target: "HRDB", Reason: skipDroppedDuringRun}}
+				return m
+			}(), nil, nil},
 		{"a collector that failed before", func() *Manifest {
 			m := run(both, full[1:]...)
 			m.Errors = []ErrorEntry{{Script: srv, Message: "timeout"}}

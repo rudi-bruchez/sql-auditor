@@ -1069,8 +1069,30 @@ func (m *Manifest) writeNotRun(b *strings.Builder) {
 				profiled, m.Profile.Name)
 		}
 	}
+	// A database dropped during the run took every collector left on it, for
+	// one reason. One entry per database says it; the reason under each
+	// collector would say it eleven times.
+	dropped := map[string]int{}
+	for _, s := range m.Skipped {
+		if s.Reason == skipDroppedDuringRun {
+			dropped[s.Target]++
+		}
+	}
 	for _, s := range m.Skipped {
 		if profiled > 0 && s.Reason == ProfileSkipReason(m.Profile.Name) {
+			continue
+		}
+		if s.Reason == skipDroppedDuringRun {
+			// Written where the database's first skip falls, and only there.
+			if n := dropped[s.Target]; n > 0 {
+				noun := "collectors"
+				if n == 1 {
+					noun = "collector"
+				}
+				fmt.Fprintf(b, "  - %d %s on %s, each listed in _run.json\n      %s\n",
+					n, noun, s.Target, s.Reason)
+				dropped[s.Target] = 0
+			}
 			continue
 		}
 		if s.Target != "" {
