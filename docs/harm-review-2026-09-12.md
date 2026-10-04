@@ -193,6 +193,12 @@ findings a harm review usually comes back with.
   their header comments, explaining what those commands do and why the
   collector does not use them. Comments are stripped before the lint runs, so a
   file explaining what it does not do is not refused for saying so.
+  Correct at the top level of a file only, as a review of 4 October 2026
+  found: the dynamic SQL a file executes kept its comments, so a comment
+  before a procedure name, or between `EXECUTE` and `AS`, walked past the
+  rules, and a line comment ended by a bare carriage return hid the code after
+  it from the lint while the server ran it. Stripping now happens at every
+  level, with the carriage return ending the comment as it does on the server.
 - **The permission script asks for the narrower right where one exists**,
   preferring `VIEW SERVER PERFORMANCE STATE` on SQL Server 2022 and later and
   explaining what the wider one would have added.

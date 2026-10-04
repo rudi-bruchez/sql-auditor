@@ -831,7 +831,13 @@ func classifySQL(sql string) []byte {
 		case lineComment:
 			// The newline that ends the comment is code, so stripping keeps
 			// the line structure of the file.
-			if c == '\n' {
+			//
+			// A carriage return on its own ends it too, because it does on
+			// the server. Measured on SQL Server 2025 on 4 October 2026:
+			// "-- note<CR>EXEC msdb.dbo.sp_purge_jobhistory" runs the call.
+			// Ending the comment at \n alone hid everything after a bare CR
+			// from every lint in this package, statementLint included.
+			if c == '\n' || c == '\r' {
 				state = code
 			} else {
 				cls[i] = clsComment

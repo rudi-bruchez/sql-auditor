@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // The statement-class rule, and why it exists.
@@ -206,8 +208,9 @@ const maxDynamicDepth = 3
 
 // statementLint refuses a collector that could change the server.
 //
-// sql must already have had its comments stripped, or a file explaining why it
-// drops nothing would be refused for saying so.
+// Comments are stripped before any rule reads the text, at every level of
+// dynamic SQL, or a file explaining why it drops nothing would be refused for
+// saying so and a comment could stand where a rule expects a space.
 //
 // It runs over the same text twice. Once over the code with literals blanked,
 // which is where a foreign script writes its statements plainly; and once over
@@ -220,7 +223,22 @@ func statementLint(sql string) string {
 	return statementLintDepth(sql, 0)
 }
 
+// statementLintDepth is where every level of the recursion passes, so the text
+// is made into what the rules can read here rather than by each caller.
+//
+// COMMENTS ARE STRIPPED AT EVERY LEVEL, not only by lint at the top. The text
+// of an executed literal used to arrive with its comments in place, and every
+// rule that reads a word followed by a separator, or the first word of a
+// batch, read the comment instead: EXEC('/* x */ msdb.dbo.sp_delete_backuphistory')
+// was accepted where the same call without the comment was refused, and
+// EXEC/**/AS, END/**/CONVERSATION and EXEC/**/( went through the same way.
+// Found by the harm review of 4 October 2026; the server treats a comment as a
+// separator wherever one may stand, nested block comments included.
+//
+// The separators the server accepts and \s does not are made spaces for the
+// same reason; see normalizeSeparators.
 func statementLintDepth(sql string, depth int) string {
+	sql = normalizeSeparators(StripSQLComments(sql))
 	if msg := scanStatements(BlankSQLStrings(sql)); msg != "" {
 		return msg
 	}
@@ -234,6 +252,44 @@ func statementLintDepth(sql string, depth int) string {
 		}
 	}
 	return ""
+}
+
+// normalizeSeparators turns into a plain space every character the server
+// reads as a token separator and a regular expression's \s does not.
+//
+// Measured on SQL Server 2025 on 4 October 2026: the control characters, the
+// no-break space, every Unicode space and the zero-width space all separate
+// tokens. EXECUTE<U+00A0>AS LOGIN = 'sa' runs as EXECUTE AS and passed the
+// impersonation rule; EXEC<U+00A0>msdb.dbo.sp_purge_jobhistory passed the
+// procedure rule; a batch opened by one of them hid its first word. A no-break
+// space is what a statement copied from a web page or a word processor
+// carries, which is the accident this lint exists for.
+//
+// The whole formatting category is included, though the server rejects two of
+// its members (U+FEFF and U+2060): making a character a space can only let a
+// rule match where it did not, and a statement the server rejects runs nothing.
+//
+// \n and \r are kept as they are. They end a line comment, and the text of a
+// literal executed one level down has its comments stripped there: turned into
+// spaces here, they would let a "--" in that literal swallow the code after it.
+func normalizeSeparators(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			b.WriteByte(s[i])
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteRune(r)
+		case unicode.IsControl(r) || unicode.IsSpace(r) || unicode.Is(unicode.Cf, r):
+			b.WriteByte(' ')
+		default:
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
 }
 
 // scanStatements applies the rules to one piece of code whose literals have
