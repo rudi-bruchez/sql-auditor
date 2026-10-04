@@ -171,14 +171,25 @@ END CATCH;
      17884  new queries not picked up by a worker thread
      17888  all schedulers on a node appear deadlocked
      17890  a significant part of the process memory has been paged out
+      9002  the transaction log of a database is full
 
    Each meaning was read from sys.messages, language 1033, before it went in.
+   9002 is the outage a log that cannot grow ends in, and the only record of it
+   once the moment has passed is this log: sys.databases says why a log waits
+   now, never that it filled last week. It is severity 17 and logged in all
+   twenty-two languages, so it is counted by its header line. Measured on SQL
+   Server 2025 by filling a 4 MB log that could not grow under an open
+   transaction: one header line and one message line naming the database and
+   ACTIVE_TRANSACTION, and occurrences of 1. Its text there ends on the holdup
+   LSN, which older versions do not write; the derivation reads the template
+   of the instance it runs on, so either text is matched.
    17810 was considered and left out: it refuses a second DEDICATED ADMIN
    connection, which says nothing about an application's connections.
 
    The whole block cost 250 to 330 milliseconds for three numbers; with the
    fourteen above and the header template of 18052 it costs about two seconds
-   on SQL Server 2025, and the whole collector 2.7 against 1.5, against a
+   on SQL Server 2025 (still two with 9002 added as a fifteenth), and the
+   whole collector 2.7 against 1.5, against a
    @timeout of 300 seconds. The cost that has to be watched is the uniqueness
    check, which is one catalog scan per candidate fragment and is now a
    second of that; copying the retained language into #cat first is what
@@ -190,7 +201,7 @@ DECLARE @lang int = 1033;
 DECLARE @wanted TABLE (message_id int PRIMARY KEY);
 INSERT INTO @wanted (message_id) VALUES (9017), (3421), (17137),
     (18456), (17806), (17809), (17830), (17187), (17189),
-    (833), (17883), (17884), (17888), (17890);
+    (833), (17883), (17884), (17888), (17890), (9002);
 
 /* The template of the line the engine writes BEFORE an error it logs:
    "Error: 18456, Severity: 14, State: 8." in English, "Erreur : 18456,

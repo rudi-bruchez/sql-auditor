@@ -782,8 +782,8 @@ What the server did record is counted by `10.system/040.error-log.sql`, in its
 (17806), the user connection limit reached (17809), network errors during login
 (17830), the server not ready to accept connections (17187) or unable to start a
 thread for one (17189), and, on the side of the server's own health, long I/O
-(833), non-yielding workers and schedulers (17883, 17884, 17888) and a process
-whose memory was paged out (17890). The log is written in the language of the
+(833), non-yielding workers and schedulers (17883, 17884, 17888), a process
+whose memory was paged out (17890) and a transaction log that filled (9002). The log is written in the language of the
 instance, so none of these is searched for as English text: each is recognised
 from its template in `sys.messages`, in the language the log was found to be
 written in.

@@ -260,6 +260,18 @@ jobs:
           jq -e '[.skipped_scripts[]? | select(.script == "20.databases/013.all-databases-2019.sql")] | length >= 1' \
             "$run_dir/_run.json" \
             || { jq '[.skipped_scripts[]? | select(.script | test("013"))]' "$run_dir/_run.json"; exit 1; }
+      # 9002, the log-full outage, is counted by its header line on both legs.
+      # A row with a pattern and a numeric count is the whole contract: a
+      # number dropped from @wanted loses the row, and a header literal that
+      # failed to derive leaves occurrences null.
+      - name: assert the log-full count in the error log summary
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          f="$run_dir/10.system/040.error-log.json"
+          jq -e '[.derived_patterns[] | select(.message_id == 9002)]
+                 | length == 1 and (.[0].header_pattern | type) == "string"
+                   and (.[0].occurrences | type) == "number"' "$f" \
+            || { jq '.derived_patterns' "$f"; exit 1; }
       # The planted foreign key comes back untrusted and flagged, and is counted
       # apart. 032 exports server trigger source and runs only under
       # --include-object-definitions, which this run does not pass, so the run
