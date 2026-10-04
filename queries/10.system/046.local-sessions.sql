@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, local_sessions:array
 -- @permissions: CONNECT, VIEW SERVER STATE
 -- @timeout:     60
+-- @discloses:   local_sessions
 --
 -- Which sessions originate on the server itself, and what they call themselves.
 --
@@ -36,8 +37,12 @@
 -- The disclosure question is real and smaller than it looks. The corpus's
 -- invariant about session-derived text governs STATEMENT text, and the
 -- manifest's disclosure is driven by the read of sys.dm_exec_sql_text, which
--- this file does not make. A client-supplied program name is not that, and
--- saying so here is the whole reconciliation.
+-- this file does not make. A client-supplied program name is not that, but it
+-- is still a name that leaves on the default path, beside the transport and
+-- the loopback address of each group, so it is declared with @discloses:
+-- local_sessions and MANIFEST.txt lists it. Until 4 October 2026 it was only
+-- argued here, in a comment no reader of the archive sees. It is a name and
+-- not application text: it cannot quote a row.
 --
 -- The collector's own session is local whenever the tool runs on the server,
 -- so it is marked rather than filtered, the way 042 marks its own group.

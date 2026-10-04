@@ -636,12 +636,56 @@ var KnownDisclosures = map[string][]string{
 		"code written on this server and can name tables, logins and hosts and",
 		"embed the literals its author used",
 	},
+	// 046.local-sessions.sql. The address is always a loopback one or
+	// "<local>", by the file's own WHERE, so it is the program name that
+	// tells the reader something.
+	"local_sessions": {
+		"the program names of the sessions opened from the server itself, over",
+		"Shared Memory or a loopback address, grouped with their transport and a",
+		"count of sessions each; a program name is whatever the client chose to",
+		"send, and it names the tools and applications running on the host",
+	},
 	"connection_pools": {
 		"the host names, program names and logins of the applications connected",
 		"during collection, grouped with a count of connections each; they name",
 		"the application servers and the accounts they connect as, a Windows",
 		"login being a person's account as often as a service's",
 	},
+}
+
+// DisclosureFamily sorts the @discloses tokens by what the text in question
+// can hold, which is what decides the last paragraph of MANIFEST.txt.
+type DisclosureFamily int
+
+const (
+	// DisclosesNames is a name or a piece of metadata the server or a client
+	// supplied: a host, a program, a login. It identifies things and people,
+	// and it cannot quote a row.
+	DisclosesNames DisclosureFamily = iota + 1
+	// DisclosesApplicationText is text an application, a job, an agent or a
+	// person wrote: statements, messages, definitions. It can quote the values
+	// it was written with or about, personal data among them.
+	DisclosesApplicationText
+)
+
+// disclosureFamilies classifies every key of KnownDisclosures. A key missing
+// here would leave MANIFEST.txt unable to say whether the archive can hold
+// personal data, so TestEveryDisclosureHasAFamily refuses one. Until 4 October
+// 2026 there was no such split, and a default run that declared Query Store
+// text, job messages and error log lines still closed on "That is metadata
+// about the estate rather than the data held in it".
+var disclosureFamilies = map[string]DisclosureFamily{
+	"connection_pools":      DisclosesNames,
+	"local_sessions":        DisclosesNames,
+	"query_text":            DisclosesApplicationText,
+	"job_messages":          DisclosesApplicationText,
+	"replication_messages":  DisclosesApplicationText,
+	"log_shipping_messages": DisclosesApplicationText,
+	"schema_expressions":    DisclosesApplicationText,
+	"job_step_text":         DisclosesApplicationText,
+	"error_log":             DisclosesApplicationText,
+	"job_step_command":      DisclosesApplicationText,
+	"server_trigger_source": DisclosesApplicationText,
 }
 
 func knownDisclosureNames() []string {

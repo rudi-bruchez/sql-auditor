@@ -796,14 +796,14 @@ the window and per-database limits the Query Store extraction was given; any
 setting whose name marks it as a password, token or other secret is replaced
 with "(redacted)" before that block is written.
 `)
-	if m.Collected.SessionText || m.Collected.QueryStoreDetail || m.Collected.QueryStoreProfiledPlans ||
-		m.Collected.ObjectDefinitions || m.Collected.DeadlockGraphs ||
-		m.Collected.BlockedProcessReports {
+	if m.holdsApplicationText() {
 		b.WriteString(`
 Most of this is metadata about the estate rather than the data held in it,
-but the captured statement text can carry values copied from application
-tables, and the login names are attributable to people. Treat this archive
-as potentially containing personal data and handle it on that basis.
+but the texts listed above that an application, a job, an agent or a person
+wrote (statements, plans, messages, definitions) can quote values copied
+from application tables, personal data among them, and the login names are
+attributable to people. Treat this archive as potentially containing
+personal data and handle it on that basis.
 `)
 	} else {
 		b.WriteString(`
@@ -813,6 +813,30 @@ infrastructure documentation rather than public material.
 `)
 	}
 	m.writeCorpusProvenance(b)
+}
+
+// holdsApplicationText reports whether the archive carries text that someone
+// other than the server wrote, which is what makes "metadata about the estate"
+// false. It reads the optional collections that were actually written and the
+// @discloses tokens of the default path, by family: a token that only names
+// things (a host, a program) leaves the sentence true.
+//
+// PlanCachePlans was missing from the list until 4 October 2026, so a run
+// whose only addition was --plan-cache-plans would have closed on metadata
+// while holding plans and literal statement text.
+func (m *Manifest) holdsApplicationText() bool {
+	c := m.Collected
+	if c.SessionText || c.QueryStoreDetail || c.QueryStoreProfiledPlans ||
+		c.ObjectDefinitions || c.DeadlockGraphs || c.BlockedProcessReports ||
+		c.PlanCachePlans {
+		return true
+	}
+	for _, name := range m.Disclosed {
+		if disclosureFamilies[name] == DisclosesApplicationText {
+			return true
+		}
+	}
+	return false
 }
 
 // writeReadOnlyClaim is the sentence the whole document is read for, and the

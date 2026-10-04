@@ -983,6 +983,11 @@ func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
 	gated := Script{Path: "80.workload/021.query-store-detail.sql",
 		RequiresFlag: FlagQueryStoreDetail, Writer: "query-store-detail"}
 
+	// The choke point sees a plan and not where it came from. This subtest
+	// writes it from the Query Store writer, which is the case the
+	// QueryStoreDetail disclosure is for; until 4 October 2026 it held for
+	// every writer, the plan cache's included, and the next subtest is the
+	// one that says otherwise.
 	t.Run("a plan seen by the choke point", func(t *testing.T) {
 		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20)
 		rw.sawShowplan = true
@@ -992,6 +997,31 @@ func TestDiscloseWritesFollowsWhatWasWritten(t *testing.T) {
 		}
 		if len(m.Warnings) != 0 {
 			t.Errorf("a gated collector emitting plans is expected, not a warning: %v", m.Warnings)
+		}
+		if rw.sawShowplan {
+			t.Error("the flag was not consumed, so the next unit inherits this one's plan")
+		}
+	})
+
+	// Measured on SQL Server 2025 on 4 October 2026: a run with
+	// --plan-cache-plans alone wrote 78 .sqlplan files and MANIFEST.txt
+	// announced the Query Store detail, "declared without
+	// --query-store-detail", pointing at warnings that named no file. Those
+	// plans came from the plan cache and are disclosed as such.
+	t.Run("a plan from the plan cache writer", func(t *testing.T) {
+		m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20)
+		rw.sawShowplan = true
+		s := Script{Path: "80.workload/041.plan-cache-plans.sql",
+			RequiresFlag: FlagPlanCachePlans, Writer: "plan-cache-plans"}
+		discloseWrites(m, rw, s, WriteResult{CachedPlanFiles: 2})
+		if m.Collected.QueryStoreDetail {
+			t.Error("plans from the plan cache were disclosed as Query Store plans")
+		}
+		if !m.Collected.PlanCachePlans {
+			t.Error("plans from the plan cache went to disk and the manifest denies them")
+		}
+		if len(m.Warnings) != 0 {
+			t.Errorf("a gated writer emitting its own plans is expected, not a warning: %v", m.Warnings)
 		}
 		if rw.sawShowplan {
 			t.Error("the flag was not consumed, so the next unit inherits this one's plan")
