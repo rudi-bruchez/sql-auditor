@@ -479,7 +479,7 @@ them are behind flags.
 | `50.agent/010.jobs.sql` | the jobs a scheduled shrink runs in |
 | `50.agent/020.job-steps.sql` | the step text, where a `DBCC SHRINKFILE` in a T-SQL job shows |
 | `50.agent/040.maintenance-plans.sql` | shrink tasks in maintenance plans |
-| `60.backup/010.history.sql` | how far back msdb history goes, log backup cadence |
+| `60.backup/010.history.sql` | how far back msdb history goes, log backup cadence, and since October 2026 the ten most recent full backups of each database in `fulls`, which `030.differential-base` is read against |
 | `70.schema/010.objects.sql` | table sizes, data and indexes apart, creation and modification dates |
 | `70.schema/020.index-usage.sql` | the size and usage counters of every index, uncapped |
 | `70.schema/040.compression.sql` | what is compressed today |

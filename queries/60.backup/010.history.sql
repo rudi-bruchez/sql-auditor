@@ -1,5 +1,5 @@
 -- @scope:       instance
--- @resultsets:  root:object, per_database:array, devices:array, recent:array, growth:array
+-- @resultsets:  root:object, per_database:array, devices:array, recent:array, growth:array, fulls:array
 -- @permissions: CONNECT, MSDB READ
 -- @timeout:     120
 -- @profiles:    space
@@ -346,4 +346,108 @@ JOIN fulls AS n ON n.database_name = o.database_name
                AND n.newest_first = 1
 WHERE o.oldest_first = 1
 ORDER BY o.database_name
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* The identity of every full backup that can carry a restore chain, per
+   database: the ten most recent fulls of each database in the window, copy-only
+   and snapshot ones included, newest first.
+
+   WHY recent CANNOT CARRY IT. recent is the last 200 backups of the instance,
+   all databases and all types together. On an instance with a hundred
+   databases and log backups every quarter of an hour, 200 rows cover the last
+   few hours, so the full a differential depends on, taken last Sunday, is
+   simply not in the archive, and neither is the copy-only full someone took on
+   Wednesday. The aggregate in per_database counts them and cannot say which
+   one the base is. This set is scoped by database instead of by instance, so a
+   busy neighbour cannot push a quiet database's fulls out of it.
+
+   WHAT IDENTIFIES A CHAIN. backup_set_uuid is what
+   sys.database_files.differential_base_guid points at, and 030.differential-
+   base looks the base up by it: the analysis joins the two to say whether the
+   base is the latest full or an older one, and what was taken in between.
+   first_lsn is what a differential's differential_base_lsn equals;
+   checkpoint_lsn is where redo starts on restore; database_backup_lsn is the
+   first_lsn of the latest full that was not copy-only before this one, which
+   links the fulls to each other: measured, a copy-only full and a snapshot
+   full both pointed at the conventional full before them, skipping the
+   copy-only ones in between. They are cast to text explicitly, as
+   030.differential-base casts its base.lsn: an LSN is numeric(25,0), wider
+   than a double, and the comparison between the two files has to be string
+   to string whatever a driver does with a numeric.
+
+   COPY_ONLY AND SNAPSHOT ARE LISTED, not filtered, because they are the
+   finding. Measured on SQL Server 2025 (17.0.4065.4): a T-SQL snapshot backup
+   (SUSPEND_FOR_SNAPSHOT_BACKUP then BACKUP ... WITH METADATA_ONLY) given
+   COPY_ONLY on the BACKUP statement was recorded with is_copy_only = 0 and
+   became the differential base, because the bitmap is cleared at the suspend
+   and only SUSPEND_FOR_SNAPSHOT_BACKUP = ON (MODE = COPY_ONLY) leaves it
+   alone, which recorded is_copy_only = 1 and left the base where it was. The
+   flag in msdb is what the engine did, not what the job asked for.
+
+   TEN PER DATABASE, and why ten. The cap bounds the archive on an instance
+   with hundreds of databases or a snapshot agent taking a full every hour,
+   where 30 days could hold 720 fulls per database. Ten covers more than a
+   week of nightly fulls, so the base of a weekly differential schedule and
+   the full before it are both in reach, and ten weekly fulls are more than the
+   window holds. What it can miss is a base older than ten later fulls, all of
+   them copy-only, since any other full would have moved the base: the
+   analysis compares the rows here with per_database's count of fulls and says
+   so rather than concluding the base is absent. Measured: after eight more
+   copy-only fulls, fifteen fulls in the window, per_database counted 15, this
+   set held ranks 1 to 10, and the base sat at the eleventh, outside it. The
+   window is the same thirty
+   days as everything above except growth.
+
+   COST. The rows are read from the same backupset the result sets above
+   already read in the window, plus one backupmediafamily lookup per row kept,
+   so no part of msdb is read that the file did not read already. */
+WITH fulls AS (
+    SELECT bs.database_name,
+           bs.backup_set_uuid,
+           bs.media_set_id,
+           bs.first_lsn,
+           bs.checkpoint_lsn,
+           bs.database_backup_lsn,
+           bs.is_copy_only,
+           bs.is_snapshot,
+           bs.backup_finish_date,
+           bs.backup_size,
+           bs.compressed_backup_size,
+           ROW_NUMBER() OVER (PARTITION BY bs.database_name
+                              ORDER BY bs.backup_finish_date DESC,
+                                       bs.backup_set_id DESC) AS newest_first
+    FROM msdb.dbo.backupset AS bs
+    WHERE bs.type = 'D'
+      AND bs.backup_finish_date >= @since
+)
+SELECT
+    f.database_name                                             AS [database],
+    f.newest_first                                              AS [rank],
+    CAST(f.backup_set_uuid AS varchar(36))                      AS [backup_set_uuid],
+    CAST(f.first_lsn AS varchar(30))                            AS [first_lsn],
+    CAST(f.checkpoint_lsn AS varchar(30))                       AS [checkpoint_lsn],
+    CAST(f.database_backup_lsn AS varchar(30))                  AS [database_backup_lsn],
+    CAST(f.is_copy_only AS bit)                                 AS [is_copy_only],
+    CAST(f.is_snapshot AS bit)                                  AS [is_snapshot],
+    -- A virtual device is a third-party agent or a VSS requestor writing
+    -- through the backup API, as in 030.differential-base.
+    (SELECT TOP (1)
+            CASE bmf.device_type
+                 WHEN 2   THEN 'disk'
+                 WHEN 5   THEN 'tape'
+                 WHEN 7   THEN 'virtual_device'
+                 WHEN 9   THEN 'azure_storage'
+                 WHEN 105 THEN 'permanent_disk'
+                 WHEN 106 THEN 'permanent_tape'
+                 WHEN 107 THEN 'permanent_virtual_device'
+                 ELSE CAST(bmf.device_type AS varchar(10)) END
+     FROM msdb.dbo.backupmediafamily AS bmf
+     WHERE bmf.media_set_id = f.media_set_id
+     ORDER BY bmf.family_sequence_number)                       AS [device_type],
+    CONVERT(varchar(19), f.backup_finish_date, 126)             AS [finish],
+    CAST(f.backup_size / 1048576.0 AS DECIMAL(18,1))            AS [mb],
+    CAST(f.compressed_backup_size / 1048576.0 AS DECIMAL(18,1)) AS [compressed_mb]
+FROM fulls AS f
+WHERE f.newest_first <= 10
+ORDER BY f.database_name, f.newest_first
 OPTION (RECOMPILE, MAXDOP 1);
