@@ -202,27 +202,35 @@ jobs:
       # REORGANIZE that finished, the same REORGANIZE started an hour ago and
       # never ended, and a statistics update logged after it, which is what
       # tells a command cut off from one still running.
+      # One statement per sqlcmd call: the 2017 mssql-tools image corrupts a
+      # -Q string near 1 KB, and the whole plant in one call failed there.
       - name: plant a maintenance solution CommandLog
         run: |
-          docker run --rm --network host mcr.microsoft.com/mssql-tools \
-            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b -Q "
+          tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b "$@"; }
+          tools -Q "
               CREATE TABLE dbo.CommandLog (ID int IDENTITY(1,1) NOT NULL, DatabaseName sysname NULL,
                 SchemaName sysname NULL, ObjectName sysname NULL, ObjectType char(2) NULL,
                 IndexName sysname NULL, IndexType tinyint NULL, StatisticsName sysname NULL,
                 PartitionNumber int NULL, ExtendedInfo xml NULL, Command nvarchar(max) NOT NULL,
                 CommandType nvarchar(60) NOT NULL, StartTime datetime2(7) NOT NULL,
                 EndTime datetime2(7) NULL, ErrorNumber int NULL, ErrorMessage nvarchar(max) NULL,
-                CONSTRAINT PK_CommandLog PRIMARY KEY CLUSTERED (ID ASC));
+                CONSTRAINT PK_CommandLog PRIMARY KEY CLUSTERED (ID ASC));"
+          tools -Q "
               INSERT dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName,
                 IndexType, PartitionNumber, ExtendedInfo, Command, CommandType, StartTime, EndTime, ErrorNumber)
               VALUES (N'ci_probe', N'dbo', N'ix_probe', 'U', N'ix_probe_read', 2, 1,
                 N'<ExtendedInfo><PageCount>50000</PageCount><Fragmentation>12.5</Fragmentation></ExtendedInfo>',
                 N'ALTER INDEX [ix_probe_read] ON [ci_probe].[dbo].[ix_probe] REORGANIZE WITH (LOB_COMPACTION = ON)',
-                N'ALTER_INDEX', DATEADD(HOUR, -26, SYSDATETIME()), DATEADD(HOUR, -25, SYSDATETIME()), 0),
-                (N'ci_probe', N'dbo', N'ix_probe', 'U', N'ix_probe_read', 2, 1,
+                N'ALTER_INDEX', DATEADD(HOUR, -26, SYSDATETIME()), DATEADD(HOUR, -25, SYSDATETIME()), 0);"
+          tools -Q "
+              INSERT dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName,
+                IndexType, PartitionNumber, ExtendedInfo, Command, CommandType, StartTime, EndTime, ErrorNumber)
+              VALUES (N'ci_probe', N'dbo', N'ix_probe', 'U', N'ix_probe_read', 2, 1,
                 N'<ExtendedInfo><PageCount>50000</PageCount><Fragmentation>12.5</Fragmentation></ExtendedInfo>',
                 N'ALTER INDEX [ix_probe_read] ON [ci_probe].[dbo].[ix_probe] REORGANIZE WITH (LOB_COMPACTION = ON)',
-                N'ALTER_INDEX', DATEADD(HOUR, -2, SYSDATETIME()), NULL, NULL);
+                N'ALTER_INDEX', DATEADD(HOUR, -2, SYSDATETIME()), NULL, NULL);"
+          tools -Q "
               INSERT dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, StatisticsName,
                 Command, CommandType, StartTime, EndTime, ErrorNumber)
               VALUES (N'ci_probe', N'dbo', N'ix_probe', 'U', N'ix_probe_written',
