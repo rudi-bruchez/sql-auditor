@@ -27,17 +27,21 @@ import (
 // The SAME NUMBER is a literal in 041, and
 // TestPlanCacheCapsAreTheSameNumbersInTheCorpus fails on any drift, for the
 // reason the deadlock and module caps have the same test: a Go constant raised
-// above a stale SQL literal would make plan 101 arrive NULL and be reported as
+// above a stale SQL literal would make plan 201 arrive NULL and be reported as
 // a plan the cache does not hold — a false fact about the server.
-const maxPlanCachePlans = 100
+const maxPlanCachePlans = 200
 
 // maxPlanCachePerMetric is how deep each of the four rankings reaches in 041 —
 // total CPU, total duration, total reads and execution count. Four times this
 // is maxPlanCachePlans, and a plan ranking well on several metrics is selected
-// once, so the hundred is a ceiling rather than a quota. It is carried into the
-// index because "the top 25 by four measures" and "the top 100 by CPU" are
+// once, so the two hundred is a ceiling rather than a quota. It is carried into
+// the index because "the top 50 by four measures" and "the top 200 by CPU" are
 // different selections and a reader comparing two archives has to know which.
-const maxPlanCachePerMetric = 25
+//
+// It was 25 until 4 October 2026, when three real collections had selected
+// 41, 41 and 56 plans with it (2.6 to 4.6 MB); fifty puts them near 5 to 9 MB,
+// and maxPlanCachePlans moved with it to stay four times this.
+const maxPlanCachePerMetric = 50
 
 // maxPlanCacheBytes bounds one plan. A plan for an ordinary statement is a few
 // kilobytes; one reaching four megabytes belongs to a statement with hundreds

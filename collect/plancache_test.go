@@ -240,3 +240,16 @@ func TestPlanCacheCapsAreTheSameNumbersInTheCorpus(t *testing.T) {
 		}
 	}
 }
+
+// The ceiling is four times the depth: four rankings, each at most
+// maxPlanCachePerMetric deep, can select at most that many plans. A depth
+// raised alone would let the ceiling cut a selection the root reports whole,
+// as the plans past it would arrive named as omitted; a ceiling raised alone
+// would promise plans no ranking can select. Both moved together on
+// 4 October 2026 (25 and 100 to 50 and 200).
+func TestPlanCacheCeilingIsFourRankingsDeep(t *testing.T) {
+	if maxPlanCachePlans != 4*maxPlanCachePerMetric {
+		t.Errorf("maxPlanCachePlans is %d, want four times maxPlanCachePerMetric (%d)",
+			maxPlanCachePlans, 4*maxPlanCachePerMetric)
+	}
+}
