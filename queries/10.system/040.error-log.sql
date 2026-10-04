@@ -431,10 +431,10 @@ FROM @bounds WHERE message_id = 9017 AND ordinal = 2;
 
 /* The lines notable emits further down, kept here first and in full, so that
    status can say how many matched before the cap: notable_matched against
-   notable_cap. The text is already cut at 400 characters, like the sample in
+   notable_cap. The text is already cut at 1 000 characters, like the sample in
    top_messages; the filter is explained where the set is emitted. */
 CREATE TABLE #notable (LogDate datetime, ProcessInfo nvarchar(100),
-                       Txt nvarchar(400), occurrences int);
+                       Txt nvarchar(1000), occurrences int);
 
 WITH frequence AS (
     /* Un motif notable peut aussi être bavard. « Configuration option 'user
@@ -445,7 +445,7 @@ WITH frequence AS (
     SELECT LEFT(RTRIM(Txt), 80) AS prefixe, COUNT(*) AS n
     FROM #log GROUP BY LEFT(RTRIM(Txt), 80))
 INSERT INTO #notable (LogDate, ProcessInfo, Txt, occurrences)
-SELECT l.LogDate, RTRIM(l.ProcessInfo), LEFT(RTRIM(l.Txt), 400), f.n
+SELECT l.LogDate, RTRIM(l.ProcessInfo), LEFT(RTRIM(l.Txt), 1000), f.n
 FROM       #log AS l
 JOIN       frequence AS f ON f.prefixe = LEFT(RTRIM(l.Txt), 80)
 WHERE f.n <= 20
@@ -541,16 +541,16 @@ OPTION (RECOMPILE, MAXDOP 1);
    prefix, a count and a sample of the same length, so the disclosure this
    file declares does not change with the number.
 
-   THE SAMPLE STAYS AT 400 CHARACTERS, and that is a decision rather than an
-   oversight. Raising it to 1 000 was proposed with the 200, for the engine
-   messages that run past 400 (a filegroup-full message is 403, the TLS line
-   600). But not every line of this log is the engine's: RAISERROR ... WITH LOG
-   and xp_logevent write an application's own text, up to 2 047 characters,
-   and trace flags 1204 and 1222 write deadlock graphs, statement text
-   included. 400 characters of such a line are already carried, and 1 000
-   would carry statement text and literals that 400 cuts off. That is a
-   disclosure decision, not a size one, and it is left to whoever owns the
-   disclosure list. */
+   THE SAMPLE AND THE NOTABLE TEXT ARE CUT AT 1 000 CHARACTERS, up from 400,
+   for the engine messages that run past 400 (a filegroup-full message is 403,
+   the TLS line 600). Not every line of this log is the engine's: RAISERROR
+   ... WITH LOG and xp_logevent write an application's own text, up to 2 047
+   characters, and trace flags 1204 and 1222 write deadlock graphs, statement
+   text included. At 400 the archive already carried the start of such lines;
+   at 1 000 it carries more of their statement text and literals. That is a
+   disclosure decision, not a size one: taken by Rudi on 4 October 2026, by
+   default, for the sake of what an audit can read in the engine's own long
+   messages. */
 --
 -- POURQUOI UN CLASSEMENT PAR FRÉQUENCE NE SUFFIT PAS.
 --
@@ -578,7 +578,7 @@ SELECT TOP (200)
        COUNT(*)                                                   AS [occurrences],
        MIN(l.LogDate)                                             AS [first_seen],
        MAX(l.LogDate)                                             AS [last_seen],
-       MIN(LEFT(l.Txt, 400))                                      AS [sample]
+       MIN(LEFT(l.Txt, 1000))                                     AS [sample]
 FROM #log AS l
 GROUP BY LEFT(l.Txt, 80)
 ORDER BY COUNT(*) DESC

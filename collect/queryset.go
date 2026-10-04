@@ -594,7 +594,9 @@ var KnownDisclosures = map[string][]string{
 	},
 	"error_log": {
 		"samples of the SQL Server error log, which name logins, databases,",
-		"file paths and client addresses",
+		"file paths and client addresses, and, in lines an application",
+		"(RAISERROR WITH LOG) or a trace flag (1204, 1222) wrote, statement",
+		"text and literals, up to 1 000 characters a line",
 	},
 	"job_step_command": {
 		"the COMPLETE text of every Transact-SQL job step, not the first 200",
