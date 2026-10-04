@@ -19,6 +19,20 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-04
+
+This release lets a collector lose one guarded part instead of the whole
+document. A permission can now be declared optional: a login refused it keeps
+the rest, and the manifest says what was left out. Four collectors use it
+already. A same-day rerun that loses a collector to a missing right keeps the
+earlier run, and the first connection gives up on a server that accepts the
+socket and never answers. New collectors read Ola Hallengren's CommandLog, the
+size and base of the next differential backup, the Query Store load profile
+and resources per query, the spread of cached plan costs against the
+parallelism threshold, server trigger sources, encryption certificates and
+loaded modules. The backup history now carries each database's recent full
+backups, so a differential base can be placed in its chain.
+
 ### Added
 
 - A collector can declare a permission it uses without requiring it, in a new `@optional_permissions` directive with the same closed vocabulary and the same lint as `@permissions`. `check` probes it and notes it on the query's line (`runs without ... if refused`), the grant script asks for it and marks the collector under it as optional, and under a profile it counts as needed. A refused optional permission never skips the collector: it runs, the part that needs the permission is read inside `TRY` and reports the refusal in the document's root, and the manifest lists the collector under `reduced_scripts` in `_run.json` (script, capability, reason) and under "Queries run without an optional permission" in MANIFEST.txt. Lint refuses `CONNECT` as optional and a permission declared both ways. Until now a permission was all or nothing, so a login refused the one right a single guarded read needed lost the whole document. Measured on SQL Server 2025 with a login holding `VIEW ANY DEFINITION` and `VIEW SERVER PERFORMANCE STATE` only: `40.security/040.encryption-certificates.sql` was skipped whole before, and now runs with `encryption_keys.readable` false and error 300, while the grant script still asks for `VIEW SERVER SECURITY STATE`.
