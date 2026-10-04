@@ -459,7 +459,7 @@ jobs:
           # cost: without the showplan namespace every path read returns NULL
           # and all of them land in unknown, which the sums alone accept.
           jq -e '([.bands[].band] == ["lt_5","5_25","25_50","50_100","100_500","ge_500","unknown"])
-                 and .examined.statements <= .examined.cap
+                 and .examined.cap == 1000 and .examined.statements <= .examined.cap
                  and ([.bands[] | select(.band != "unknown") | .statements] | add) > 0
                  and ([.bands[].statements] | add) == .examined.statements
                  and (.unknown.no_plan + .unknown.not_xml + .unknown.no_cost)

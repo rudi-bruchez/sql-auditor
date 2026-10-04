@@ -15,7 +15,7 @@
 -- 50 changes anything depends on where the parallel work sits on the cost
 -- axis, and nothing in this archive said: 040.plan-cache says what the cache
 -- is made of, 041.plan-cache-plans extracts plans behind a flag, and neither
--- crosses cost with degree of parallelism. Here the 500 statements with the
+-- crosses cost with degree of parallelism. Here the 1 000 statements with the
 -- most CPU are put in cost bands, and each band says how many of them ran in
 -- parallel, how often, and with how much CPU.
 --
@@ -48,18 +48,18 @@
 -- shape of the archive and is now always 0.
 --
 -- THE COST IS FOUND, NOT PARSED. Converting each fragment to xml cost about
--- 115 ms per megabyte of plan, and the 500 fragments are bounded in number,
--- not in bytes: on the lab, a cache holding wide plans put 74 MB behind the
--- 500 statements and the conversion took 8 s, a cost that grows with the
+-- 115 ms per megabyte of plan, and the fragments are bounded in number, not
+-- in bytes: on the lab, a cache holding wide plans put 74 MB behind 500
+-- statements and the conversion took 8 s, a cost that grows with the
 -- client's plans rather than with anything this file controls. A harm review
 -- of 4 October 2026 named it. StatementSubTreeCost is an attribute of the
 -- first statement element of the fragment, so the first occurrence of
 -- 'StatementSubTreeCost="' in the text is the measured statement's own cost;
 -- the search stops there and reads a few bytes past it.
 --
--- THE TOP IS CHOSEN BEFORE ANY PLAN IS READ. The 500 statements are taken
--- from sys.dm_exec_query_stats into a table variable first, without touching a
--- plan, and only those 500 fragments are fetched. A harm review of 27
+-- THE TOP IS CHOSEN BEFORE ANY PLAN IS READ. The @examined statements are
+-- taken from sys.dm_exec_query_stats into a table variable first, without
+-- touching a plan, and only their fragments are fetched. A harm review of 27
 -- September 2026 found two default collectors that converted the whole cache
 -- before applying their TOP; this one cannot, by construction.
 --
@@ -75,6 +75,19 @@
 -- the cache that night, so the statements the search now costs and the
 -- conversion could not were not reproduced again.
 --
+-- THE WINDOW IS 1 000 STATEMENTS since 4 October 2026; it was 500. On the lab
+-- the 500 held 99 % of the cache's CPU and took 2.2 s, against 5.4 s for the
+-- whole cache, which said the window was cheap rather than that it was wide
+-- enough: the band a threshold decision turns on, [5, 25), is made of cheap
+-- statements, the kind a ranking by CPU reaches last. Measured again the same
+-- day through the collector on a cache of 5 700 statements: 500 held 97.5 %
+-- of the CPU, 62 MB of fragments and 1.9 s, and put 13 statements in
+-- [5, 25); 1 000 held 97.6 to 98.9 %, 145 MB and 4.2 s, and put 40 there.
+-- The file stays the same size, bands and counts only. On a client the price
+-- is read afterwards from examined.plan_kb and examined.duration_ms, and a
+-- reader that calls a cache thin when it holds fewer statements than the
+-- window should compare with examined.cap, not with a number of its own.
+--
 -- WHAT A BAND IS. A statement is in the band of the StatementSubTreeCost of
 -- its cached plan, in the optimizer's units: [0, 5), [5, 25), [25, 50),
 -- [50, 100), [100, 500), [500, +inf), and unknown. Parallel means max_dop > 1.
@@ -87,7 +100,7 @@
 -- The cache sees only the plans it still holds. Under memory pressure it is
 -- emptied continuously: one client instance held 114 plans in all. cache.*
 -- says how many statements the cache held, from when, and what share of the
--- cache's CPU the 500 represent; a small cache or a recent oldest_creation is
+-- cache's CPU the window represents; a small cache or a recent oldest_creation is
 -- the finding, and the distribution is then too thin to choose a threshold.
 -- The cache is also emptied by a restart, by most sp_configure changes, and
 -- by an explicit flush.
@@ -124,7 +137,7 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-DECLARE @examined int = 500;
+DECLARE @examined int = 1000;
 DECLARE @started datetime2(3) = SYSDATETIME();
 
 DECLARE @window TABLE (
@@ -185,7 +198,7 @@ SELECT
     CONVERT(varchar(23), SYSDATETIME(), 126)                    AS [collected_at],
     CONVERT(varchar(23), (SELECT sqlserver_start_time FROM sys.dm_os_sys_info), 126)
                                                                 AS [instance_start],
-    /* The whole cache, read from the DMV alone: what the 500 are a sample
+    /* The whole cache, read from the DMV alone: what the window is a sample
        of. The parallel totals need no plan, so they cover every statement. */
     agg.statements                                              AS [cache.statements],
     agg.executions                                              AS [cache.executions],

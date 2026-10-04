@@ -39,6 +39,11 @@ var workloadCaps = []workloadCap{
 	{"026.query-store-interrupted.sql", "@listing_cap", 200, 2, []string{"listing_cap"}},
 	{"028.query-store-resources.sql", "@listing_cap", 200, 1, []string{"listing_cap"}},
 	{"060.spills.sql", "@listing_cap", 200, 1, []string{"listing_cap"}},
+	{"042.parallel-cost-distribution.sql", "@examined", 1000, 1, []string{"examined.cap"}},
+	{"030.implicit-conversions.sql", "@examined", 2500, 1, []string{"bounds.examined_cap"}},
+	{"030.implicit-conversions.sql", "@candidate_cap", 1000, 1, []string{"bounds.candidate_cap"}},
+	{"053.plan-warnings.sql", "@examined", 1000, 1, []string{"bounds.examined_cap"}},
+	{"053.plan-warnings.sql", "@candidate_cap", 500, 1, []string{"bounds.candidate_cap"}},
 }
 
 var (
