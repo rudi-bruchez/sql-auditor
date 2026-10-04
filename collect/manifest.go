@@ -39,6 +39,8 @@ type ServerBlock struct {
 	Edition          string `json:"edition"`
 	Auth             string `json:"auth"`
 	UTCOffsetMinutes int    `json:"utc_offset_minutes"`
+	Address          string `json:"address"`
+	Database         string `json:"database"`
 }
 
 // SourceInfo records where a corpus came from and what it hashed to, so an
@@ -677,7 +679,8 @@ and backup metadata.
 	m.writeReadOnlyClaim(b)
 	b.WriteString(`
 What is in here that names things:
-  - this server's name, version, edition and file paths
+  - this server's name, version, edition and file paths, and the address
+    and database the run was pointed at (SQL_SERVER and SQL_DATABASE)
   - database, schema and object names
   - the Windows or SQL login names of database owners
 `)

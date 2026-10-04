@@ -699,6 +699,16 @@ Two things worth knowing:
   new run beside it under a name suffixed with the time (`-HHMM`). If you
   find a `.superseded-` run lying around, either a run died or the one after
   it was narrower: it is earlier work, not a duplicate of anything.
+
+  It also keeps the earlier run when that run was of another target filed
+  under the same folder: a server giving another name, or one connected to at
+  another address or with another `SQL_DATABASE` (`master` and none count as
+  the same). The address is compared as `SQL_SERVER` is read, so `SQL01,1433`,
+  `tcp:sql01:1433` and `sql01,1433` are one address, but `SQL01` and
+  `sql01.example.com` are two, and a rerun that changes the spelling that way
+  keeps the morning's run, with the reason on screen. A `_run.json` without
+  `server.address`, written before the address was recorded, is compared by
+  server name only.
 - **Runs are quick.** On a small instance the whole collection finishes in about
   a second; on a large estate the per-database collectors dominate, so budget by
   database count.
@@ -895,13 +905,15 @@ the same instance, not from 256 MB.
 
 **The run folder is named from the server's own answer.** A same-day rerun
 replaces the previous run of the same name, and that name is what
-`SERVERPROPERTY` reported — not something this tool can authenticate. Two
-cloned instances that kept one name will therefore replace each other's
-archives with no attacker involved, and under
-`SQL_TRUST_SERVER_CERTIFICATE=true` anything answering on the address can claim
-the name. Validating the certificate is what closes the second case, which is
-why the default was changed and why `MANIFEST.txt` now records whether it
-happened. Use `--keep`, or a different `OUTPUT_DIR`, when two instances
+`SERVERPROPERTY` reported, not something this tool can authenticate. A rerun
+also compares the address and database it was given with those the earlier
+run's `_run.json` recorded, and keeps the earlier run when they differ, so two
+cloned instances that kept one name no longer replace each other's archives
+when they are reached at two addresses. Under
+`SQL_TRUST_SERVER_CERTIFICATE=true`, anything answering on the same address can
+still claim the name. Validating the certificate is what closes that case,
+which is why the default was changed and why `MANIFEST.txt` now records whether
+it happened. Use `--keep`, or a different `OUTPUT_DIR`, when two instances
 legitimately share a name.
 
 Some Azure and contained configurations return no name at all. Such a run is
@@ -963,7 +975,8 @@ its databases is created, altered or deleted, and no data of yours is
 written anywhere by this tool.
 
 What is in here that names things:
-  - this server's name, version, edition and file paths
+  - this server's name, version, edition and file paths, and the address
+    and database the run was pointed at (SQL_SERVER and SQL_DATABASE)
   - database, schema and object names
   - the Windows or SQL login names of database owners
 
@@ -1019,6 +1032,10 @@ the query corpus.
 
 Its name is in the zip filename, in `MANIFEST.txt` and in `_run.json`, along
 with its version, edition, file paths and the names of every database collected.
+`_run.json` also records where the run was pointed: `SQL_SERVER` as you wrote
+it, under `server.address`, and `SQL_DATABASE` under `server.database`. The
+login is in `server.auth`; the password is in neither. An address that holds an
+`@`, or the password itself, is left out rather than written.
 
 Nothing is anonymised or hashed, and there is no option to do so: the facts
 would be useless without the names attached.

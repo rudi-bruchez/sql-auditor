@@ -367,7 +367,10 @@ from before the wizard.
   that run stays beside it, named `.superseded-HHMMSS`, and the collection says
   where. Only a run that exits `0` removes it, and only when it collected
   everything the earlier run did: every option that run had on, every
-  database it read, and no narrower `--profile`.
+  database it read, and no narrower `--profile`. It also keeps a run of
+  another target that landed in the same folder: another server name, or
+  another `SQL_SERVER` or `SQL_DATABASE`, which `_run.json` records for that
+  reason (the password never).
 
 An argument therefore wins over everything else: `sql-auditor collect` does the
 same work whatever terminal it finds itself attached to, and no invocation that

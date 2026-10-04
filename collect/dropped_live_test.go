@@ -262,3 +262,74 @@ func TestLiveDatabaseExistsAsksTheCatalog(t *testing.T) {
 		}
 	}
 }
+
+// The rerun guard on a real run: _run.json records the address the run was
+// given, a rerun at the same address spelled otherwise replaces the run, and
+// a rerun of the same server with another SQL_DATABASE keeps it. Nothing is
+// created on the server; the corpus is one instance collector.
+func TestLiveRunAddressReachesTheRerunGuard(t *testing.T) {
+	cfg := liveConfig(t)
+	body := "-- @scope:       instance\n-- @resultsets:  root:object\n-- @timeout:     60\n" +
+		contractPreamble + "SELECT @@VERSION AS [version] OPTION (RECOMPILE, MAXDOP 1);\n"
+	corpus := fstest.MapFS{"queries/10.system/901.a.sql": &fstest.MapFile{Data: []byte(body)}}
+	out, now := t.TempDir(), time.Now()
+	run := func(server, database string) Manifest {
+		t.Helper()
+		c := *cfg
+		c.Server, c.Database, c.OutputDir = server, database, out
+		c.QueryTimeout = 30 * time.Second
+		c.QueryStoreDays, c.QueryStoreTop = 7, 50
+		code, runErr := Run(context.Background(), Options{
+			Config: &c, Corpus: corpus, Root: "queries", Now: now, Progress: io.Discard,
+		})
+		all, _ := filepath.Glob(filepath.Join(out, "*", manifestJSONName))
+		for _, p := range all {
+			if strings.Contains(p, ".superseded-") {
+				continue
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var m Manifest
+			if err := json.Unmarshal(b, &m); err != nil {
+				t.Fatal(err)
+			}
+			if runErr != nil || code != 0 {
+				t.Fatalf("Run(%s, %q) = %d, %v: %+v", server, database, code, runErr, m.Errors)
+			}
+			return m
+		}
+		t.Fatalf("no %s in %s", manifestJSONName, out)
+		return Manifest{}
+	}
+	keptWarning := func(m Manifest) string {
+		for _, w := range m.Warnings {
+			if strings.Contains(w, "the run it replaced was kept") {
+				return w
+			}
+		}
+		return ""
+	}
+	first := run(cfg.Server, "master")
+	t.Logf("first run: address %q, database %q, name %q", first.Server.Address, first.Server.Database, first.Server.Name)
+	if first.Server.Address != strings.TrimSpace(cfg.Server) {
+		t.Fatalf("_run.json records address %q, want %q", first.Server.Address, cfg.Server)
+	}
+
+	respelled := " TCP:" + strings.ToUpper(strings.TrimSpace(cfg.Server))
+	second := run(respelled, "master")
+	aside, _ := filepath.Glob(filepath.Join(out, "*.superseded-*"))
+	t.Logf("same address as %q: set aside %v, warning %q", respelled, aside, keptWarning(second))
+	if len(aside) != 0 || keptWarning(second) != "" {
+		t.Fatalf("a rerun at the same address kept the run it replaced: %v, %q", aside, keptWarning(second))
+	}
+
+	third := run(cfg.Server, "tempdb")
+	aside, _ = filepath.Glob(filepath.Join(out, "*.superseded-*"))
+	w := keptWarning(third)
+	t.Logf("another SQL_DATABASE: set aside %v, warning %q", aside, w)
+	if len(aside) == 0 || !strings.Contains(w, "connected to") || !strings.Contains(w, "database tempdb") {
+		t.Fatalf("a rerun with another SQL_DATABASE: set aside %v, warning %q; want it kept", aside, w)
+	}
+}

@@ -407,8 +407,15 @@ type runScope struct {
 	// Server is the name the server gave, which is what the run was filed
 	// under unless it gave none. A pointer, so that a manifest without the key
 	// is told apart from a server that answered with no name.
+	//
+	// Address and Database are where the run connected, SQL_SERVER and
+	// SQL_DATABASE as the operator gave them. Pointers for the same reason:
+	// an archive written before they were recorded has neither key, and is
+	// compared by name alone rather than taken for another target's.
 	Server struct {
-		Name *string `json:"name"`
+		Name     *string `json:"name"`
+		Address  *string `json:"address"`
+		Database *string `json:"database"`
 	} `json:"server"`
 	Config  map[string]string `json:"config"`
 	Profile struct {
@@ -441,8 +448,8 @@ type scopeSkip struct {
 
 func scopeOfManifest(m *Manifest) runScope {
 	var s runScope
-	name := m.Server.Name
-	s.Server.Name = &name
+	name, address, database := m.Server.Name, m.Server.Address, m.Server.Database
+	s.Server.Name, s.Server.Address, s.Server.Database = &name, &address, &database
 	s.Config = m.Config
 	s.Profile.Name = m.Profile.Name
 	for _, d := range m.Targets.Databases {
@@ -772,7 +779,7 @@ func previousRunLost(superseded []string, m *Manifest) string {
 	if err != nil {
 		return "this run could not be compared with the run it replaced (" + err.Error() + ")"
 	}
-	if why := otherServer(prev, m.Server.Name); why != "" {
+	if why := otherServer(prev, m.Server); why != "" {
 		return why
 	}
 	lost := scopeLost(prev, scopeOfManifest(m))
@@ -810,11 +817,11 @@ func previousRunLost(superseded []string, m *Manifest) string {
 }
 
 // otherServer is why the run set aside may belong to another target than this
-// one, or "" when both name the same server. The folder they share does not
-// say: RunServerName falls back to the address when the server gives no name,
-// so a nameless target at address SQL01 is filed where a server calling itself
-// SQL01 is, and a rerun of either deleted the other's archive of the day once
-// it completed. scopeLost does not see it when the two read databases of the
+// one, or "" when both name the same server and connected to the same place.
+// The folder they share does not say: RunServerName falls back to the address
+// when the server gives no name, so a nameless target at address SQL01 is
+// filed where a server calling itself SQL01 is, and a rerun of either deleted
+// the other's archive of the day once it completed. scopeLost does not see it when the two read databases of the
 // same names, two Azure logical servers each holding a SALESDB being the case
 // that matters, because every unit of the one has its match in the other.
 //
@@ -829,18 +836,100 @@ func previousRunLost(superseded []string, m *Manifest) string {
 // is ignored because Windows ignores it, and two names that differ only by
 // case collide there only when they are the same server's.
 //
-// What it cannot see is two nameless targets: _run.json records the name the
-// server gave and not the address, so address A with SQL_DATABASE=B and
-// address A_B without one both record "" and still compare equal.
-func otherServer(prev runScope, cur string) string {
+// The name alone cannot tell two nameless targets apart: address A with
+// SQL_DATABASE=B and address A_B without one both give "" and share the folder
+// A_B. So the address and the database are compared as well, the two things
+// RunServerName builds a nameless folder from, which also tell apart two
+// servers giving one name (clones never renamed) from two addresses. A
+// manifest written before they were recorded has no address key and is
+// compared by name only, as before: taking its absence for a difference would
+// keep the previous run on every same-day rerun after an upgrade.
+//
+// The cost falls on the safe side: one server reached in the morning as SQL01
+// and in the afternoon as sql01.example.com, or with another SQL_DATABASE,
+// keeps the morning's run, and the reason says why.
+func otherServer(prev runScope, cur ServerBlock) string {
 	if prev.Server.Name == nil {
 		return "the run it replaced records no server name, so it cannot be shown to be this server's"
 	}
-	if p := *prev.Server.Name; !strings.EqualFold(p, cur) {
+	if p := *prev.Server.Name; !strings.EqualFold(p, cur.Name) {
 		return fmt.Sprintf("the run it replaced is of server %s and this run of server %s, "+
-			"two different targets filed under the same folder", nameOrNone(p), nameOrNone(cur))
+			"two different targets filed under the same folder", nameOrNone(p), nameOrNone(cur.Name))
 	}
-	return ""
+	// An empty address is one serverBlock withheld; there is nothing to
+	// compare, and the name has already been.
+	if prev.Server.Address == nil || *prev.Server.Address == "" || cur.Address == "" {
+		return ""
+	}
+	pDB := ""
+	if prev.Server.Database != nil {
+		pDB = *prev.Server.Database
+	}
+	if sameAddress(*prev.Server.Address, cur.Address) && sameDatabase(pDB, cur.Database) {
+		return ""
+	}
+	return fmt.Sprintf("the run it replaced connected to %s and this run to %s, "+
+		"two different targets filed under the same folder",
+		addressAndDatabase(*prev.Server.Address, pDB), addressAndDatabase(cur.Address, cur.Database))
+}
+
+// sameAddress compares two SQL_SERVER values as parseServer reads them, so
+// that localhost,1433, tcp:localhost:1433 and LOCALHOST,1433 are one address:
+// host and instance names are case-insensitive, parseServer drops the tcp:
+// prefix and the spaces, and a comma and a colon before a port mean the same.
+// Nothing finer is attempted. A short name and its FQDN, or a host and its IP
+// address, compare different: calling them equal would take a resolver, and a
+// wrong "equal" here deletes an archive.
+func sameAddress(a, b string) bool {
+	ah, ai, aerr := parseServer(a)
+	bh, bi, berr := parseServer(b)
+	if aerr != nil || berr != nil {
+		return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+	}
+	return strings.EqualFold(ah, bh) && strings.EqualFold(ai, bi)
+}
+
+// sameDatabase follows RunServerName: master is the same as no database, as
+// both land the session in master, and case is ignored as it is there.
+func sameDatabase(a, b string) bool {
+	norm := func(d string) string {
+		d = strings.TrimSpace(d)
+		if strings.EqualFold(d, "master") {
+			return ""
+		}
+		return d
+	}
+	return strings.EqualFold(norm(a), norm(b))
+}
+
+func addressAndDatabase(address, database string) string {
+	if strings.TrimSpace(database) == "" {
+		return address
+	}
+	return address + " (database " + database + ")"
+}
+
+// serverBlock is the manifest's server block: what the server said about
+// itself, and where the operator pointed the run.
+//
+// The address is SQL_SERVER as given, trimmed, and the database SQL_DATABASE.
+// Neither is a credential. The login and the password are fields of their own
+// in Config, connURL puts them in the URL's user part and never in its host,
+// and parseServer accepts only a host, a port and an instance, so a connection
+// string in SQL_SERVER fails before a run gets here. What parseServer lets
+// through is a host with an @ in it, which no host name has and which in a URL
+// is where a user name goes, and an instance name, which is free text. An
+// address holding an @ or the password itself is therefore not written: the
+// guard falls back to the name, which is what it did before the address was
+// kept, and the archive does not carry what the operator mistyped.
+func serverBlock(si ServerInfo, cfg *Config) ServerBlock {
+	address := strings.TrimSpace(cfg.Server)
+	if strings.Contains(address, "@") || (cfg.Password != "" && strings.Contains(address, cfg.Password)) {
+		address = ""
+	}
+	return ServerBlock{Name: si.Name, Version: si.Version, Edition: si.Edition,
+		UTCOffsetMinutes: si.UTCOffsetMinutes, Auth: AuthLabel(cfg),
+		Address: address, Database: strings.TrimSpace(cfg.Database)}
 }
 
 func nameOrNone(name string) string {
@@ -2204,8 +2293,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	if err != nil {
 		return stoppedOr(1, err)
 	}
-	m.Server = ServerBlock{Name: si.Name, Version: si.Version, Edition: si.Edition,
-		UTCOffsetMinutes: si.UTCOffsetMinutes, Auth: AuthLabel(o.Config)}
+	m.Server = serverBlock(si, o.Config)
 	// A warning rather than a refusal: the run is legitimate and its output is
 	// no different. What is different is what a mistake could have cost, and
 	// that belongs in the archive as much as on the operator's screen — the
