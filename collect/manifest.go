@@ -104,6 +104,21 @@ type SkippedScript struct {
 	Reason string `json:"reason"`
 }
 
+// ReducedScript is a collector that ran without a capability it declares in
+// @optional_permissions. It is not a skip and not an error: the document is in
+// the archive, and the part that needed the capability says in its own root
+// that it could not be read. It is recorded here as well so that a reader of
+// the manifest alone, or an analysis that never opens the document, knows the
+// document is short of something and of what.
+//
+// Capability is the key, as in preflight, for an analysis to match on; Reason
+// is the sentence MANIFEST.txt prints.
+type ReducedScript struct {
+	Script     string `json:"script"`
+	Capability string `json:"capability"`
+	Reason     string `json:"reason"`
+}
+
 type ErrorEntry struct {
 	Script   string `json:"script"`
 	Target   string `json:"target"`
@@ -259,8 +274,12 @@ type Manifest struct {
 	Targets       TargetBlock        `json:"targets"`
 	Results       []ResultEntry      `json:"results"`
 	Skipped       []SkippedScript    `json:"skipped_scripts"`
-	Warnings      []string           `json:"warnings"`
-	Errors        []ErrorEntry       `json:"errors"`
+	// Reduced lists the collectors that ran without an optional capability,
+	// one entry per script and capability. Null when there are none, like
+	// skipped_scripts.
+	Reduced  []ReducedScript `json:"reduced_scripts"`
+	Warnings []string        `json:"warnings"`
+	Errors   []ErrorEntry    `json:"errors"`
 }
 
 // BlockingWatchBlock is the manifest's account of the blocking watch.
@@ -619,6 +638,7 @@ func (m *Manifest) Human() string {
 	m.writeTargets(&b)
 	m.writeWhatWasRead(&b)
 	m.writeNotRun(&b)
+	m.writeReduced(&b)
 	m.writeProblems(&b)
 	m.writeBlockedWaits(&b)
 	m.writeSlowest(&b)
@@ -1058,6 +1078,20 @@ func (m *Manifest) writeNotRun(b *strings.Builder) {
 			continue
 		}
 		fmt.Fprintf(b, "  - %s\n      %s\n", s.Script, s.Reason)
+	}
+}
+
+// writeReduced lists the collectors that ran without a capability they use
+// and do not require. It follows the list of what did not run because the two
+// answer the same question for a reader looking for a missing section: here
+// the section is present, and shorter than it would have been.
+func (m *Manifest) writeReduced(b *strings.Builder) {
+	if len(m.Reduced) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\nQueries run without an optional permission (%d):\n", len(m.Reduced))
+	for _, r := range m.Reduced {
+		fmt.Fprintf(b, "  - %s\n      %s\n", r.Script, r.Reason)
 	}
 }
 

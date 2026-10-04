@@ -250,7 +250,8 @@ func probeCapability(ctx context.Context, c *sql.Conn, query string) (int, error
 const StatusNotNeeded = "not_needed"
 
 // ProfileChecks returns checks with the status of every capability that is
-// "denied", that no member of the profile declares in @permissions, and that
+// "denied", that no member of the profile declares in @permissions or
+// @optional_permissions, and that
 // is neither "connect" nor "view_any_definition", set to "not_needed". Every
 // other status, "error" included, is left as it is. With an empty profile it
 // returns checks unchanged. The input is never modified.
@@ -267,6 +268,14 @@ func ProfileChecks(checks []CapabilityCheck, scripts []Script, profile string) [
 	for _, s := range scripts {
 		if s.LintError == "" && slices.Contains(s.Profiles, profile) {
 			for _, p := range s.Permissions {
+				needed[p] = true
+			}
+			// An optional capability is needed too: the member runs without
+			// it, and the part that needs it comes back unread. Calling the
+			// denial "not needed" would let the manifest say COMPLETE over a
+			// document the login could only partly fill, and would drop the
+			// grant from the profile's script.
+			for _, p := range s.OptionalPermissions {
 				needed[p] = true
 			}
 		}

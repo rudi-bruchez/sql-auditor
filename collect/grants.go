@@ -2,6 +2,7 @@ package collect
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -152,7 +153,8 @@ func quoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// collectorsFor lists the query paths that declared a capability, sorted.
+// collectorsFor lists the query paths that declared a capability, in
+// @permissions or in @optional_permissions, sorted.
 //
 // A collector behind @requires_flag is named with its flag. Without that the
 // list overstates what the grant buys: someone could grant the permission,
@@ -164,17 +166,21 @@ func collectorsFor(scripts []Script, capability string) []string {
 		if s.LintError != "" {
 			continue
 		}
-		for _, p := range s.Permissions {
-			if p != capability {
-				continue
-			}
-			line := s.Path
-			if s.RequiresFlag != "" {
-				line += "   (only with " + flagOption(s.RequiresFlag) + ")"
-			}
-			out = append(out, line)
-			break
+		optional := slices.Contains(s.OptionalPermissions, capability)
+		if !optional && !slices.Contains(s.Permissions, capability) {
+			continue
 		}
+		line := s.Path
+		if s.RequiresFlag != "" {
+			line += "   (only with " + flagOption(s.RequiresFlag) + ")"
+		}
+		// An optional need is granted like any other, and said to be
+		// optional, so the reader weighing the line knows that refusing it
+		// costs part of a document rather than the whole of it.
+		if optional {
+			line += "   (optional: runs without it, and reports what it could not read)"
+		}
+		out = append(out, line)
 	}
 	sort.Strings(out)
 	return out
@@ -275,9 +281,9 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 			why: append([]string{
 				"From SQL Server 2022 sys.dm_database_encryption_keys asks for VIEW",
 				"SERVER SECURITY STATE, which VIEW SERVER PERFORMANCE STATE does not",
-				"include. Without it the collectors below are skipped, and the archive",
-				"cannot say which certificate protects each database encrypted with",
-				"TDE, nor whether that certificate's private key was ever backed up.",
+				"include. Without it the archive cannot say which certificate",
+				"protects each database encrypted with TDE, nor whether that",
+				"certificate's private key was ever backed up.",
 				"VIEW SERVER STATE would also cover it, and would grant more.",
 				"",
 				"It opens the security-related dynamic management views of the",

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -43,19 +44,20 @@ var msdbSameRoute = map[string][]string{
 // the list cannot outlive the fix.
 var msdbKnownUnguarded = map[string]string{}
 
-func TestUndeclaredMsdbReadsAreGuarded(t *testing.T) {
-	scripts, err := Discover(os.DirFS(".."), "queries")
-	if err != nil {
-		t.Fatalf("Discover: %v", err)
-	}
-	ref := regexp.MustCompile(`(?i)(?:\bmsdb|\[msdb\])\s*\.\s*(?:\[?dbo\]?)?\s*\.\s*\[?(\w+)\]?`)
-	bare := regexp.MustCompile(`(?i)(\bmsdb|\[msdb\])\s*\.`)
+var (
+	msdbRef  = regexp.MustCompile(`(?i)(?:\bmsdb|\[msdb\])\s*\.\s*(?:\[?dbo\]?)?\s*\.\s*\[?(\w+)\]?`)
+	msdbBare = regexp.MustCompile(`(?i)(\bmsdb|\[msdb\])\s*\.`)
+	tryBegin = regexp.MustCompile(`(?i)\bBEGIN\s+TRY\b`)
+	tryEnd   = regexp.MustCompile(`(?i)\bEND\s+TRY\b`)
+)
 
-	// What each probe vouches for, read from the probes themselves so that a
-	// probe narrowed or widened moves the rule with it.
+// msdbCoverage is what each probe vouches for, read from the probes themselves
+// so that a probe narrowed or widened moves the rule with it.
+func msdbCoverage(t *testing.T) map[string]map[string]bool {
+	t.Helper()
 	covers := map[string]map[string]bool{}
 	for _, c := range Capabilities() {
-		for _, m := range ref.FindAllStringSubmatch(c.SQL, -1) {
+		for _, m := range msdbRef.FindAllStringSubmatch(c.SQL, -1) {
 			if covers[c.Name] == nil {
 				covers[c.Name] = map[string]bool{}
 			}
@@ -73,9 +75,49 @@ func TestUndeclaredMsdbReadsAreGuarded(t *testing.T) {
 	if !covers["msdb_read"]["backupset"] || covers["msdb_read"]["sysproxies"] {
 		t.Fatalf("probe coverage read wrong: msdb_read covers %v", covers["msdb_read"])
 	}
+	return covers
+}
 
-	begin := regexp.MustCompile(`(?i)\bBEGIN\s+TRY\b`)
-	end := regexp.MustCompile(`(?i)\bEND\s+TRY\b`)
+// msdbVouchers are the capabilities whose probes may vouch for a file's msdb
+// reads: the ones it requires, and only those. A capability in
+// @optional_permissions is never a gate, so the file runs when its probe was
+// refused, and an unguarded read the probe "covers" is then refused with the
+// whole file.
+func msdbVouchers(s Script) []string {
+	return s.Permissions
+}
+
+// msdbUnguarded returns the msdb reads of sql that no capability of s vouches
+// for and that sit outside BEGIN TRY, as "object: excerpt", and how many reads
+// were checked at all. sql has had its comments stripped.
+func msdbUnguarded(s Script, sql string, covers map[string]map[string]bool) (out []string, checked int) {
+	for _, r := range msdbRef.FindAllStringSubmatchIndex(sql, -1) {
+		object := strings.ToLower(sql[r[2]:r[3]])
+		covered := false
+		for _, p := range msdbVouchers(s) {
+			if covers[p][object] {
+				covered = true
+			}
+		}
+		if covered {
+			continue
+		}
+		checked++
+		depth := len(tryBegin.FindAllStringIndex(sql[:r[0]], -1)) - len(tryEnd.FindAllStringIndex(sql[:r[0]], -1))
+		if depth <= 0 {
+			out = append(out, object+": "+sql[r[0]:min(len(sql), r[0]+60)])
+		}
+	}
+	return out, checked
+}
+
+func TestUndeclaredMsdbReadsAreGuarded(t *testing.T) {
+	scripts, err := Discover(os.DirFS(".."), "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	covers := msdbCoverage(t)
+
 	checked := 0
 	seenKnown := map[string]bool{}
 	for _, s := range scripts {
@@ -86,30 +128,21 @@ func TestUndeclaredMsdbReadsAreGuarded(t *testing.T) {
 		sql := StripSQLComments(string(b))
 		// Every msdb reference must be one the object pattern understands,
 		// or an unusual spelling would slip past the per-object rule.
-		if n, m := len(bare.FindAllStringIndex(sql, -1)), len(ref.FindAllStringIndex(sql, -1)); n != m {
+		if n, m := len(msdbBare.FindAllStringIndex(sql, -1)), len(msdbRef.FindAllStringIndex(sql, -1)); n != m {
 			t.Errorf("%s: %d msdb references, %d of them parsed as msdb.<schema>.<object>", s.Path, n, m)
 		}
-		for _, r := range ref.FindAllStringSubmatchIndex(sql, -1) {
-			object := strings.ToLower(sql[r[2]:r[3]])
-			covered := false
-			for _, p := range s.Permissions {
-				if covers[p][object] {
-					covered = true
-				}
-			}
-			if covered {
+		unguarded, n := msdbUnguarded(s, sql, covers)
+		checked += n
+		for _, u := range unguarded {
+			object, excerpt, _ := strings.Cut(u, ": ")
+			if key := s.Path + " " + object; msdbKnownUnguarded[key] != "" {
+				seenKnown[key] = true
 				continue
 			}
-			checked++
-			depth := len(begin.FindAllStringIndex(sql[:r[0]], -1)) - len(end.FindAllStringIndex(sql[:r[0]], -1))
-			if key := s.Path + " " + object; depth <= 0 && msdbKnownUnguarded[key] != "" {
-				seenKnown[key] = true
-			} else if depth <= 0 {
-				t.Errorf("%s reads msdb.dbo.%s outside BEGIN TRY, and no capability it declares vouches for "+
-					"that object; a login the preflight lets through can still be refused it and lose "+
-					"the whole file. Guard the read, or declare the capability whose probe covers it: %q",
-					s.Path, object, sql[r[0]:min(len(sql), r[0]+60)])
-			}
+			t.Errorf("%s reads msdb.dbo.%s outside BEGIN TRY, and no capability it requires vouches for "+
+				"that object; a login the preflight lets through can still be refused it and lose "+
+				"the whole file. Guard the read, or require the capability whose probe covers it: %q",
+				s.Path, object, excerpt)
 		}
 	}
 	for key := range msdbKnownUnguarded {
@@ -121,5 +154,34 @@ func TestUndeclaredMsdbReadsAreGuarded(t *testing.T) {
 	// to the regex could leave it green over nothing.
 	if checked == 0 {
 		t.Error("no msdb read falls outside a declared probe; the rule checked nothing")
+	}
+}
+
+// An optional MSDB READ vouches for nothing. The same unguarded read of
+// backupset is allowed when the capability is required, since a refusal then
+// skips the file before it runs, and refused when it is optional, since the
+// file then runs for the login the probe refused.
+func TestAnOptionalMsdbCapabilityVouchesForNothing(t *testing.T) {
+	covers := msdbCoverage(t)
+	const body = `
+-- @timeout: 30
+SELECT COUNT(*) AS [n] FROM msdb.dbo.backupset;
+`
+	required := parseScript("60.backup/099.t.sql", "-- @permissions: CONNECT, MSDB READ"+body)
+	optional := parseScript("60.backup/099.t.sql",
+		"-- @permissions: CONNECT\n-- @optional_permissions: MSDB READ"+body)
+	// The fixture is a header and one statement, not a collector, so only
+	// what the rule reads is checked: the two directives parsed as intended.
+	if !slices.Contains(required.Permissions, "msdb_read") ||
+		!slices.Contains(optional.OptionalPermissions, "msdb_read") ||
+		slices.Contains(optional.Permissions, "msdb_read") {
+		t.Fatalf("fixtures parsed wrong: required %v, optional %v / %v",
+			required.Permissions, optional.Permissions, optional.OptionalPermissions)
+	}
+	if got, _ := msdbUnguarded(required, StripSQLComments(required.SQL), covers); len(got) != 0 {
+		t.Errorf("a required MSDB READ vouches for backupset, got %v", got)
+	}
+	if got, _ := msdbUnguarded(optional, StripSQLComments(optional.SQL), covers); len(got) != 1 {
+		t.Errorf("an optional MSDB READ must not vouch for an unguarded backupset read, got %v", got)
 	}
 }

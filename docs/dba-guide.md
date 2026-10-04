@@ -197,8 +197,36 @@ encrypted with TDE to the certificate that protects it through
 include. `check` probes it with a read of that view, and the generated script
 grants it by name on those versions. Before 2022 the permission does not exist
 and the script asks for nothing more: `VIEW SERVER STATE`, which it grants for
-the performance counters, covers the view there. A login refused it does not
-run that collector, and the archive says so.
+the performance counters, covers the view there. A login refused it still runs
+that collector, which declares the permission optional (below): the certificate
+list is collected, and the root of the document says the keys could not be
+read.
+
+### A collector skipped whole, and one that runs with less
+
+Each collector declares, in its header, the permissions it needs, and the run
+decides from the probes before anything executes. A permission can be declared
+in one of two ways, and they fail differently:
+
+| Declared in | When the probe is refused |
+| --- | --- |
+| `@permissions` | the collector does not run. `MANIFEST.txt` lists it under *Queries not run* with the permission, and `_run.json` under `skipped_scripts`. |
+| `@optional_permissions` | the collector runs. The part that needs the permission is read inside a guard and comes back empty, with the error in the document's own root; `MANIFEST.txt` lists it under *Queries run without an optional permission*, and `_run.json` under `reduced_scripts`, with the capability. |
+
+`@permissions` is for a permission without which the document has nothing to
+say. `@optional_permissions` is for one that a single part of the document
+needs, when the rest stands on its own: the encryption keys beside the
+certificate list. Both are
+probed by `check` and asked for by the generated script, which marks an
+optional need as such under the collector's name, so you can weigh refusing it
+knowing it costs part of a document rather than the whole of it.
+
+The collectors that use an optional permission today:
+
+| Collector | Optional | Lost without it |
+| --- | --- | --- |
+| `40.security/040.encryption-certificates.sql` | `VIEW SERVER SECURITY STATE` | which certificate protects each database encrypted with TDE |
+| `40.security/040.encryption-certificates.sql` | `MSDB READ` | the encryptors found in the backup history |
 
 ### Three of those deserve a second look
 
@@ -463,6 +491,7 @@ They are the conditions attached to a query:
 | `per database` | runs once for each selected database |
 | `SQL Server 13+` | skipped on older instances |
 | a flag name and its state | the query is opt-in |
+| `runs without ... if refused` | the permissions the query declares optional: refused, it runs and loses the part that needs them |
 | a sentence after those | on the two Query Store lines: the collector writes a directory rather than a single JSON document |
 
 ### A `denied` line is a warning, not a failure
