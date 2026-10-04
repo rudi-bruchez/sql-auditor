@@ -1798,6 +1798,16 @@ the rest of the projection survives. The second is better here: on 2017 every
 other field of `021.host-info` is available, and losing the operating system
 version to one absent column is the expensive part.
 
+Closed on 4 October 2026, both halves. `060.spills.sql` had already moved to a
+declared floor of 14.0.3015 (`1d274f4`), the 2017 build where `total_spills`
+arrived, since a 2016 floor let 2017 RTM through. `021.host-info.sql` takes the
+second route this section prefers: it asks `COL_LENGTH` whether
+`host_architecture` exists and reads it only then, so a 2017 instance keeps its
+distribution, release, service pack level and SKU and reports the architecture
+as NULL. Both branches were run on SQL Server 2025, the second by pointing the
+test at a column that does not exist; no 2017 instance was run, since the lab
+has none and none is to be created beside the existing containers.
+
 ### 24. One warning per capped item makes the cap unreadable
 
 slug: cap-warning-per-item

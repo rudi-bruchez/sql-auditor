@@ -71,14 +71,32 @@ BEGIN
        that is absent is a compile-time error, which a TRY at this level cannot
        catch, and a runtime one inside sp_executesql, which it can. */
     BEGIN TRY
-        INSERT INTO @host ([platform], [distribution], [release],
-                           [service_pack_level], [sku], [language_version],
-                           [architecture])
-        EXEC sys.sp_executesql
-            N'SELECT h.host_platform, h.host_distribution, h.host_release,
-                     h.host_service_pack_level, h.host_sku,
-                     h.os_language_version, h.host_architecture
-              FROM sys.dm_os_host_info AS h OPTION (RECOMPILE, MAXDOP 1)';
+        /* host_architecture is younger than the view. On 14.0.1000.169 the
+           view exists without it, and selecting it failed the whole statement
+           with error 207: the Windows distribution, release and SKU were lost
+           to one absent column, and end-of-life-windows-server-os could not
+           be answered. So the column is read only where it exists, and the
+           rest of the row survives where it does not. COL_LENGTH also answers
+           NULL for a view the login cannot see; that case takes the second
+           branch and fails there on the permission, which is then the error
+           recorded, as it should be. */
+        IF COL_LENGTH(N'sys.dm_os_host_info', N'host_architecture') IS NOT NULL
+            INSERT INTO @host ([platform], [distribution], [release],
+                               [service_pack_level], [sku], [language_version],
+                               [architecture])
+            EXEC sys.sp_executesql
+                N'SELECT h.host_platform, h.host_distribution, h.host_release,
+                         h.host_service_pack_level, h.host_sku,
+                         h.os_language_version, h.host_architecture
+                  FROM sys.dm_os_host_info AS h OPTION (RECOMPILE, MAXDOP 1)';
+        ELSE
+            INSERT INTO @host ([platform], [distribution], [release],
+                               [service_pack_level], [sku], [language_version])
+            EXEC sys.sp_executesql
+                N'SELECT h.host_platform, h.host_distribution, h.host_release,
+                         h.host_service_pack_level, h.host_sku,
+                         h.os_language_version
+                  FROM sys.dm_os_host_info AS h OPTION (RECOMPILE, MAXDOP 1)';
         SET @source = 'dm_os_host_info';
     END TRY
     BEGIN CATCH
