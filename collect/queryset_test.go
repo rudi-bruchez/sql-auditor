@@ -579,6 +579,114 @@ func TestLintComparesEmittingStatementsWithResultSets(t *testing.T) {
 	}
 }
 
+// The hint was only ever required of the statements that return rows, by
+// counting hints against @resultsets. A statement that buffers into a #temp
+// table returns nothing, so it escaped: 050.commandlog.sql's INSERT INTO #sel
+// compiled at DOP 22 on a 200 000-row CommandLog and landed in the client's
+// Query Store. And the count ran the other way too: a hinted DELETE or UPDATE
+// on a work table was counted as a result set, so the files that needed one
+// had to leave it unhinted to pass.
+func TestLintRequiresTheHintOnEveryStatementThatReads(t *testing.T) {
+	const hint = " OPTION (RECOMPILE, MAXDOP 1)"
+	const emit = "SELECT 1 AS x FROM sys.databases" + hint + ";"
+	tests := []struct {
+		name, body, want string
+	}{
+		{"insert into a temp table without the hint",
+			"CREATE TABLE #t (x int);\nINSERT INTO #t (x) SELECT database_id FROM sys.databases;\n" + emit,
+			"OPTION (RECOMPILE, MAXDOP 1)"},
+		{"insert into a table variable without the hint",
+			"DECLARE @t TABLE (x int);\nINSERT INTO @t (x) SELECT database_id FROM sys.databases;\n" + emit,
+			"INSERT INTO @t"},
+		{"select into a temp table without the hint",
+			"SELECT database_id INTO #t FROM sys.databases;\n" + emit,
+			"SELECT database_id INTO #t"},
+		{"update of a temp table without the hint",
+			"CREATE TABLE #t (x int);\nUPDATE #t SET x = 2 WHERE x = 1;\n" + emit,
+			"UPDATE #t"},
+		{"delete from a table variable without the hint",
+			"DECLARE @t TABLE (x int);\nDELETE FROM @t WHERE x > 1;\n" + emit,
+			"DELETE FROM @t"},
+		{"assignment from a table without the hint",
+			"DECLARE @n int;\nSELECT @n = COUNT(*) FROM sys.databases;\n" + emit,
+			"SELECT @n = COUNT(*)"},
+		{"statement without a terminator before the next one",
+			"CREATE TABLE #t (x int);\nINSERT INTO #t (x) SELECT database_id FROM sys.databases\n" + emit,
+			"INSERT INTO #t"},
+		{"subquery in a DECLARE, which cannot carry the hint",
+			"DECLARE @n int = (SELECT COUNT(*) FROM sys.databases);\n" + emit,
+			"cannot carry"},
+		{"subquery in an IF EXISTS, which cannot carry the hint",
+			"IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id = 5)\n    " + emit,
+			"cannot carry"},
+		{"unhinted read inside dynamic SQL",
+			"DECLARE @t TABLE (x int);\nINSERT INTO @t (x) EXEC sp_executesql N'SELECT database_id FROM sys.databases';\n" + emit,
+			"inside the dynamic SQL"},
+		{"hint in another form on a buffering statement",
+			"CREATE TABLE #t (x int);\nINSERT INTO #t (x) SELECT database_id FROM sys.databases OPTION (MAXDOP 1);\n" + emit,
+			"in another form"},
+		{"a no-break space between a keyword and its select list",
+			"CREATE TABLE #t (x int);\nINSERT INTO #t (x) SELECT database_id FROM sys.databases;\n" + emit,
+			"INSERT INTO #t"},
+		{"an escaped bracket in an identifier before an unhinted update",
+			"CREATE TABLE #t ([x]](y] int);\nUPDATE #t SET [x]](y] = 2 FROM #t JOIN sys.databases AS d ON 1 = 1;\n" + emit,
+			"UPDATE #t"},
+		{"a keyword glued to a number",
+			"DECLARE @n int;\nSET @n = 1SELECT database_id INTO #t FROM sys.databases;\n" + emit,
+			"SELECT database_id INTO #t"},
+		{"a keyword after a number with a trailing dot",
+			"DECLARE @n int;\nSET @n = 1.SELECT database_id INTO #t FROM sys.databases;\n" + emit,
+			"SELECT database_id INTO #t"},
+
+		{"hinted delete, update and select into are not result sets",
+			"CREATE TABLE #t (x int);\nINSERT INTO #t (x) SELECT database_id FROM sys.databases" + hint + ";\n" +
+				"UPDATE #t SET x = 2 WHERE x = 1" + hint + ";\n" +
+				"DELETE FROM #t WHERE x > 3" + hint + ";\n" +
+				"DECLARE @p TABLE (x int);\nDELETE FROM @p WHERE x > 1" + hint + ";\n" +
+				"SELECT x INTO #u FROM #t" + hint + ";\n" + emit,
+			""},
+		{"a common table expression feeding a buffering insert",
+			"CREATE TABLE #t (x int);\nWITH c AS (SELECT database_id AS x FROM sys.databases)\n" +
+				"INSERT INTO #t (x) SELECT x FROM c UNION ALL SELECT x FROM c" + hint + ";\n" + emit,
+			""},
+		{"an assignment that reads nothing needs no hint",
+			"DECLARE @a int, @b int;\nSELECT @a = 1, @b = 2;\n" + emit,
+			""},
+		{"insert from EXEC and from VALUES cannot take one",
+			"DECLARE @t TABLE (x int);\nINSERT INTO @t (x) VALUES (1);\n" +
+				"INSERT INTO @t (x) EXEC sp_executesql N'SELECT database_id FROM sys.databases" + hint + "';\n" + emit,
+			""},
+		{"a cursor's SELECT carries the hint and returns nothing to the client",
+			"CREATE TABLE #t (x int);\nDECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT x FROM #t" + hint + ";\n" + emit,
+			""},
+		{"a compound assignment reads no table",
+			"DECLARE @a int = 0;\nSELECT @a += 1;\n" + emit,
+			""},
+		{"a CASE in the select list does not end the statement",
+			"SELECT CASE WHEN database_id > 4 THEN 1 ELSE 0 END AS x FROM sys.databases" + hint + ";",
+			""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "-- @resultsets: a:array\n-- @timeout: 60\n" + contractPreamble + tc.body
+			fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
+			got, err := Discover(fsys, "queries")
+			if err != nil {
+				t.Fatalf("Discover: %v", err)
+			}
+			if tc.want == "" {
+				if got[0].LintError != "" {
+					t.Errorf("unexpected lint error: %s", got[0].LintError)
+				}
+				return
+			}
+			if !strings.Contains(got[0].LintError, tc.want) {
+				t.Errorf("lint error = %q, want it to contain %q", got[0].LintError, tc.want)
+			}
+		})
+	}
+}
+
 // @scope: databases used to fall through to the instance default, so a
 // per-database collector ran once against master and the run silently held one
 // file where it should have held one per database.

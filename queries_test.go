@@ -91,10 +91,10 @@ func TestEmbeddedCorpusClaimsEveryWriter(t *testing.T) {
 // reaches the corpus. This does both, statically, for every file.
 //
 // Statements are matched to result sets by position, after dropping the ones
-// that emit nothing. contractLint requires one OPTION (RECOMPILE, MAXDOP 1)
-// per declared set, but a variable assignment carries the hint too and returns
-// no rows — 050.tempdb.sql has one — so the count only lines up once those are
-// removed. When it still does not line up the test says so and stops rather
+// that emit nothing. Every statement that reads carries OPTION (RECOMPILE,
+// MAXDOP 1), so the hints cannot be the separator: the statements that return
+// rows come from collect.EmittingStatements, the scanner the lint counts with.
+// When their number still does not line up the test says so and stops rather
 // than comparing the wrong statement against the wrong set.
 func TestEmbeddedCorpusHasNoTopLevelKeyCollision(t *testing.T) {
 	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
@@ -102,16 +102,6 @@ func TestEmbeddedCorpusHasNoTopLevelKeyCollision(t *testing.T) {
 		t.Fatalf("Discover: %v", err)
 	}
 	alias := regexp.MustCompile(`(?i)\bAS\s+\[([^\]]+)\]`)
-	// A SELECT that assigns into a variable returns no rows, so it consumes a
-	// hint without consuming a result set. So does an INSERT that buffers a
-	// read into a table variable, which is the guard pattern the four
-	// blockable collectors use: they read into @tables inside TRY/CATCH and
-	// emit from them at the bottom, so the emitting statements are the ones
-	// selecting FROM a table variable and the buffering ones return nothing.
-	// An INSERT into a #temp table is the same thing: 028 decides its retained
-	// queries once, into #retained, so that two listings read one population.
-	assignment := regexp.MustCompile(`(?is)\bSELECT\s+@\w+\s*=`)
-	buffering := regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+[@#]\w+`)
 
 	for _, s := range scripts {
 		rootAt := -1
@@ -123,23 +113,12 @@ func TestEmbeddedCorpusHasNoTopLevelKeyCollision(t *testing.T) {
 		if rootAt < 0 {
 			continue // no root set, so nothing merges into the top level
 		}
-		// Comments are stripped as well as literals blanked. The statement that
-		// owns a hint is found by looking back to the last ";", and an alias is
-		// found by looking for AS [x]; a banner comment between SELECT and its
-		// first assignment hid an assignment from the filter below, and a ";" or
-		// an [alias] inside prose would mislead both.
-		chunks := strings.Split(collect.BlankSQLStrings(collect.StripSQLComments(s.SQL)), "OPTION (RECOMPILE, MAXDOP 1)")
-		chunks = chunks[:len(chunks)-1] // the tail after the last hint emits nothing
-		var parts []string
-		for _, c := range chunks {
-			// The statement that owns this hint is the one after the last ";".
-			// Testing the whole chunk would drop a producing SELECT that merely
-			// happens to sit behind an earlier assignment.
-			if stmt := c[strings.LastIndex(c, ";")+1:]; assignment.MatchString(stmt) || buffering.MatchString(stmt) {
-				continue
-			}
-			parts = append(parts, c)
-		}
+		// The statements that return rows, as the lint's own scanner tells
+		// them from assignments, buffering inserts, SELECT ... INTO and the
+		// DELETE and UPDATE on work tables, all of which carry the hint and
+		// emit nothing. Comments are stripped and literals blanked inside,
+		// so an [alias] in prose or in dynamic SQL is not read.
+		parts := collect.EmittingStatements(s.SQL)
 		if len(parts) != len(s.Results) {
 			t.Errorf("%s: %d emitting statements for %d result sets; the positional "+
 				"match below is unreliable", s.Path, len(parts), len(s.Results))

@@ -135,6 +135,7 @@ DECLARE @present  bit = CASE WHEN OBJECT_ID(N'dbo.CommandLog', N'U') IS NULL THE
         @seeks    int = 0,
         @rows     int = 0,
         @read_ms  int,
+        @selected int,
         @t0       datetime2(7);
 
 IF @present = 1
@@ -144,7 +145,8 @@ IF @present = 1
       AND name IN (N'ID', N'DatabaseName', N'SchemaName', N'ObjectName', N'ObjectType',
                    N'IndexName', N'IndexType', N'StatisticsName', N'PartitionNumber',
                    N'ExtendedInfo', N'Command', N'CommandType', N'StartTime', N'EndTime',
-                   N'ErrorNumber');
+                   N'ErrorNumber')
+    OPTION (RECOMPILE, MAXDOP 1);
 
 /* The commands of the window, without their text. */
 CREATE TABLE #w (
@@ -171,9 +173,9 @@ BEGIN
     BEGIN TRY
         EXEC sys.sp_executesql
             N'DECLARE @lo bigint, @hi bigint, @mid bigint, @t datetime2(7);
-              SELECT @min_id = MIN(ID), @max_id = MAX(ID) FROM dbo.CommandLog;
-              SELECT @oldest = StartTime FROM dbo.CommandLog WHERE ID = @min_id;
-              SELECT @newest = StartTime FROM dbo.CommandLog WHERE ID = @max_id;
+              SELECT @min_id = MIN(ID), @max_id = MAX(ID) FROM dbo.CommandLog OPTION (RECOMPILE, MAXDOP 1);
+              SELECT @oldest = StartTime FROM dbo.CommandLog WHERE ID = @min_id OPTION (RECOMPILE, MAXDOP 1);
+              SELECT @newest = StartTime FROM dbo.CommandLog WHERE ID = @max_id OPTION (RECOMPILE, MAXDOP 1);
               IF @newest >= @since
               BEGIN
                   SELECT @lo = @min_id, @hi = @max_id;
@@ -181,7 +183,7 @@ BEGIN
                   BEGIN
                       SET @mid = @lo + (@hi - @lo) / 2;
                       SELECT TOP (1) @t = StartTime
-                      FROM dbo.CommandLog WHERE ID >= @mid ORDER BY ID;
+                      FROM dbo.CommandLog WHERE ID >= @mid ORDER BY ID OPTION (RECOMPILE, MAXDOP 1);
                       SET @seeks = @seeks + 1;
                       IF @t >= @since SET @hi = @mid; ELSE SET @lo = @mid + 1;
                   END;
@@ -194,7 +196,8 @@ BEGIN
                          c.StartTime, c.EndTime, c.ErrorNumber
                   FROM dbo.CommandLog AS c
                   WHERE c.ID >= @first AND c.StartTime >= @since
-                  ORDER BY c.ID DESC;
+                  ORDER BY c.ID DESC
+                  OPTION (RECOMPILE, MAXDOP 1);
                   SET @rows = @@ROWCOUNT;
               END;',
             N'@since datetime2(7), @row_cap int, @min_id bigint OUTPUT, @max_id bigint OUTPUT,
@@ -206,7 +209,7 @@ BEGIN
         SET @readable = 1;
     END TRY
     BEGIN CATCH
-        DELETE FROM #w;
+        DELETE FROM #w OPTION (RECOMPILE, MAXDOP 1);
         SELECT @readable = 0, @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE(),
                @rows = 0, @first = NULL;
     END CATCH;
@@ -257,14 +260,18 @@ FROM (
             AND w.end_time IS NOT NULL) AS r
     WHERE r.rn <= @longest_per_type
 ) AS x
-GROUP BY x.id;
+GROUP BY x.id
+OPTION (RECOMPILE, MAXDOP 1);
+SET @selected = @@ROWCOUNT;
 
 /* Back to the log for the listed rows only, by clustered seek: what each
    command did and the numbers IndexOptimize recorded, read out of Command and
    ExtendedInfo, neither of which leaves the server. Index and statistic names
    are bracketed in the command, so the keyword is looked for after a closing
-   bracket and an index named REBUILD_x is not taken for a rebuild. */
-IF EXISTS (SELECT 1 FROM #sel)
+   bracket and an index named REBUILD_x is not taken for a rebuild. The test is
+   on the count of the INSERT above, because IF EXISTS cannot carry the query
+   hint. */
+IF @selected > 0
 BEGIN TRY
     EXEC sys.sp_executesql
         N'UPDATE #sel
@@ -291,7 +298,8 @@ BEGIN TRY
               modification_counter = TRY_CONVERT(bigint,
                   c.ExtendedInfo.value(''(/ExtendedInfo/ModificationCounter)[1]'', ''nvarchar(40)''))
           FROM #sel
-          JOIN dbo.CommandLog AS c ON c.ID = #sel.id;';
+          JOIN dbo.CommandLog AS c ON c.ID = #sel.id
+          OPTION (RECOMPILE, MAXDOP 1);';
 END TRY
 BEGIN CATCH
     SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
@@ -348,7 +356,8 @@ SELECT d.command_type, d.database_name, d.schema_name, d.object_name, d.index_na
        MAX(CASE WHEN d.rn = 2 THEN d.dur END)
 FROM done AS d
 GROUP BY d.command_type, d.database_name, d.schema_name, d.object_name, d.index_name,
-         d.statistics_name, d.partition_number;
+         d.statistics_name, d.partition_number
+OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT
     CONVERT(varchar(23), SYSDATETIME(), 126)                    AS [collected_at],

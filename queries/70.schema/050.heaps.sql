@@ -162,19 +162,22 @@ SET LOCK_TIMEOUT 10000;
    guessing that it is not a secondary. */
 DECLARE @readable_secondary bit = 0, @replica_err int = 0, @replica_msg nvarchar(2048) = N'';
 BEGIN TRY
-    IF EXISTS (SELECT 1
-               FROM sys.databases AS d
-               JOIN sys.dm_hadr_availability_replica_states AS ars
-                 ON ars.replica_id = d.replica_id AND ars.is_local = 1
-               WHERE d.database_id = DB_ID() AND ars.role = 2)
-        SET @readable_secondary = 1;
+    /* Assignments rather than IF EXISTS, which cannot carry the query hint:
+       a SELECT that finds no row leaves the variables as they were. */
+    SELECT @readable_secondary = 1
+    FROM sys.databases AS d
+    JOIN sys.dm_hadr_availability_replica_states AS ars
+      ON ars.replica_id = d.replica_id AND ars.is_local = 1
+    WHERE d.database_id = DB_ID() AND ars.role = 2
+    OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
-    IF EXISTS (SELECT 1 FROM sys.databases
-               WHERE database_id = DB_ID() AND replica_id IS NOT NULL)
-        SELECT @readable_secondary = 1, @replica_err = ERROR_NUMBER(),
-               @replica_msg = N'availability replica state unreadable, physical reads skipped: '
-                              + ERROR_MESSAGE();
+    SELECT @readable_secondary = 1, @replica_err = ERROR_NUMBER(),
+           @replica_msg = N'availability replica state unreadable, physical reads skipped: '
+                          + ERROR_MESSAGE()
+    FROM sys.databases
+    WHERE database_id = DB_ID() AND replica_id IS NOT NULL
+    OPTION (RECOMPILE, MAXDOP 1);
 END CATCH
 
 DECLARE @err_counts int = 0, @err_heaps int = @replica_err, @msg nvarchar(2048) = @replica_msg,
@@ -184,7 +187,7 @@ DECLARE @err_counts int = 0, @err_heaps int = @replica_err, @msg nvarchar(2048) 
 DECLARE @top int = 100, @page_budget bigint = 200000, @pages_spent bigint = 0,
         @batch_started datetime2 = SYSDATETIME(), @budget_sec int = 240,
         @measured int = 0, @skipped_locked int = 0, @skipped_budget int = 0,
-        @i int = 1, @obj int, @pid bigint, @part int, @est_pages bigint,
+        @i int = 1, @candidate_count int = 0, @obj int, @pid bigint, @part int, @est_pages bigint,
         @compression nvarchar(60);
 
 /* The heap partitions to read, largest first, with what each is expected to
@@ -281,19 +284,26 @@ BEGIN TRY
       AND a.used_pages > 128
     ORDER BY a.used_pages DESC, p.object_id, p.partition_number
     OPTION (RECOMPILE, MAXDOP 1);
+    SET @candidate_count = @@ROWCOUNT;
 END TRY
 BEGIN CATCH
     SELECT @err_heaps = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
 END CATCH
 
+/* The loop runs while @i <= @candidate_count, the number of rows the INSERT above put
+   in the candidates. [n] is an IDENTITY filled by that one INSERT, so it runs
+   1 to @candidate_count without a gap, and this is the test EXISTS (SELECT 1 FROM the
+   candidates WHERE [n] = @i) made; but a subquery in a WHILE cannot carry
+   OPTION (RECOMPILE, MAXDOP 1), and the contract wants it on every read. */
 WHILE @err_heaps = 0
-      AND EXISTS (SELECT 1 FROM @candidates WHERE [n] = @i)
+      AND @i <= @candidate_count
       AND DATEDIFF(second, @batch_started, SYSDATETIME()) < @budget_sec
 BEGIN
     SELECT @obj = [object_id], @pid = [partition_id], @part = [partition_number],
            @est_pages = [est_pages], @compression = [data_compression]
     FROM @candidates
-    WHERE [n] = @i;
+    WHERE [n] = @i
+    OPTION (RECOMPILE, MAXDOP 1);
     SET @i += 1;
 
     IF @pages_spent + @est_pages > @page_budget

@@ -96,7 +96,7 @@ DECLARE @registry TABLE (
 DECLARE @rows_total int = 0;
 
 BEGIN TRY
-    SELECT @rows_total = COUNT(*) FROM sys.dm_server_registry;
+    SELECT @rows_total = COUNT(*) FROM sys.dm_server_registry OPTION (RECOMPILE, MAXDOP 1);
 
     /* The two documented value names, wherever they appear, plus any key whose
        path names the opt-out subkey. Matching on the value name rather than on

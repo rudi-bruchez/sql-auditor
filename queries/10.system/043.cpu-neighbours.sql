@@ -104,7 +104,8 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-DECLARE @ticks bigint = (SELECT ms_ticks FROM sys.dm_os_sys_info);
+DECLARE @ticks bigint;
+SELECT @ticks = ms_ticks FROM sys.dm_os_sys_info OPTION (RECOMPILE, MAXDOP 1);
 DECLARE @platform varchar(32) = 'Windows', @err int = 0;
 
 DECLARE @p TABLE ([platform] varchar(32));

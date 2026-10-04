@@ -104,7 +104,8 @@ JOIN       sys.dm_db_partition_stats AS ps
 WHERE t.is_ms_shipped = 0 AND p.data_compression = 0
 GROUP BY t.schema_id, t.name, t.object_id
 HAVING SUM(ps.reserved_page_count) * 8.0 / 1024 >= @min_mb
-ORDER BY SUM(ps.reserved_page_count) DESC;
+ORDER BY SUM(ps.reserved_page_count) DESC
+OPTION (RECOMPILE, MAXDOP 1);
 
 CREATE TABLE #savings (
     object_name sysname, schema_name sysname, index_id int, partition_number int,
@@ -112,7 +113,7 @@ CREATE TABLE #savings (
     sample_current_kb bigint, sample_requested_kb bigint);
 
 DECLARE @s sysname, @o sysname;
-DECLARE cur CURSOR LOCAL FAST_FORWARD FOR SELECT schema_name, object_name FROM #candidates;
+DECLARE cur CURSOR LOCAL FAST_FORWARD FOR SELECT schema_name, object_name FROM #candidates OPTION (RECOMPILE, MAXDOP 1);
 OPEN cur;
 FETCH NEXT FROM cur INTO @s, @o;
 WHILE @@FETCH_STATUS = 0

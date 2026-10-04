@@ -54,11 +54,12 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-DECLARE @ring xml =
-    (SELECT CAST(t.target_data AS xml)
-       FROM sys.dm_xe_session_targets AS t
-       JOIN sys.dm_xe_sessions AS s ON s.address = t.event_session_address
-      WHERE s.name = 'system_health' AND t.target_name = 'ring_buffer');
+DECLARE @ring xml;
+SELECT @ring = CAST(t.target_data AS xml)
+  FROM sys.dm_xe_session_targets AS t
+  JOIN sys.dm_xe_sessions AS s ON s.address = t.event_session_address
+ WHERE s.name = 'system_health' AND t.target_name = 'ring_buffer'
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* Shredded once into a table variable rather than twice out of the XML: the
    ring can hold thousands of events and each .nodes() over it is a full parse.
@@ -74,7 +75,8 @@ INSERT INTO @deadlocks (event_time, graph, source)
 SELECT x.value('@timestamp', 'datetime2(3)'),
        CAST(x.query('(data[@name="xml_report"]/value/*)[1]') AS nvarchar(max)),
        'ring_buffer'
-FROM @ring.nodes('/RingBufferTarget/event[@name="xml_deadlock_report"]') AS e(x);
+FROM @ring.nodes('/RingBufferTarget/event[@name="xml_deadlock_report"]') AS e(x)
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* AND THEN THE FILES, which is where the history actually is. The ring buffer
    is bounded by max_memory before it is bounded by max_events_limit: a session
@@ -97,11 +99,12 @@ DECLARE @err_number  int           = NULL;
 DECLARE @err_message nvarchar(400) = NULL;
 DECLARE @path        nvarchar(600) = NULL;
 
-DECLARE @current nvarchar(600) =
-    (SELECT CAST(CAST(t.target_data AS xml).value('(/EventFileTarget/File/@name)[1]', 'nvarchar(600)') AS nvarchar(600))
-       FROM sys.dm_xe_session_targets AS t
-       JOIN sys.dm_xe_sessions AS s ON s.address = t.event_session_address
-      WHERE s.name = 'system_health' AND t.target_name = 'event_file');
+DECLARE @current nvarchar(600);
+SELECT @current = CAST(CAST(t.target_data AS xml).value('(/EventFileTarget/File/@name)[1]', 'nvarchar(600)') AS nvarchar(600))
+  FROM sys.dm_xe_session_targets AS t
+  JOIN sys.dm_xe_sessions AS s ON s.address = t.event_session_address
+ WHERE s.name = 'system_health' AND t.target_name = 'event_file'
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* Either slash separates. On Linux the path is /var/opt/mssql/log/..., and
    looking for a backslash only kept the whole file name as the directory, so
@@ -128,7 +131,8 @@ BEGIN
              deadlocks resolving in the same millisecond on the same instance is
              not a case worth carrying code for. */
           AND NOT EXISTS (SELECT 1 FROM @deadlocks AS d
-                           WHERE d.event_time = x.value('(/event/@timestamp)[1]', 'datetime2(3)'));
+                           WHERE d.event_time = x.value('(/event/@timestamp)[1]', 'datetime2(3)'))
+        OPTION (RECOMPILE, MAXDOP 1);
     END TRY
     BEGIN CATCH
         SET @err_number  = ERROR_NUMBER();
