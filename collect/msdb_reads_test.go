@@ -41,8 +41,7 @@ var msdbSameRoute = map[string][]string{
 // msdbKnownUnguarded lists reads the rule refuses and the corpus still makes,
 // each with what it costs. The test fails when an entry stops being needed, so
 // the list cannot outlive the fix.
-var msdbKnownUnguarded = map[string]string{
-}
+var msdbKnownUnguarded = map[string]string{}
 
 func TestUndeclaredMsdbReadsAreGuarded(t *testing.T) {
 	scripts, err := Discover(os.DirFS(".."), "queries")
