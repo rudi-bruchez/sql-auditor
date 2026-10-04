@@ -429,79 +429,13 @@ FROM @bounds WHERE message_id = 9017 AND ordinal = 1;
 SELECT @cnt_left = lit_left, @cnt_right = lit_right
 FROM @bounds WHERE message_id = 9017 AND ordinal = 2;
 
-SELECT COUNT(*)                                                   AS [lines],
-       MIN(l.LogDate)                                             AS [oldest],
-       MAX(l.LogDate)                                             AS [newest],
-       DATEDIFF(second, MIN(l.LogDate), MAX(l.LogDate))           AS [span_seconds],
-       COUNT(DISTINCT LEFT(l.Txt, 80))                            AS [distinct_message_prefixes],
-       SYSDATETIME()                                              AS [collected_at]
-FROM #log AS l
-OPTION (RECOMPILE, MAXDOP 1);
+/* The lines notable emits further down, kept here first and in full, so that
+   status can say how many matched before the cap: notable_matched against
+   notable_cap. The text is already cut at 400 characters, like the sample in
+   top_messages; the filter is explained where the set is emitted. */
+CREATE TABLE #notable (LogDate datetime, ProcessInfo nvarchar(100),
+                       Txt nvarchar(400), occurrences int);
 
-SELECT @collected                                                 AS [collected],
-       @err                                                       AS [error_number],
-       NULLIF(@msg, N'')                                          AS [error_message],
-       0                                                          AS [log_file],
-       @log_bytes                                                 AS [log_size_bytes],
-       @size_limit                                                AS [log_size_limit_bytes],
-       @skipped_for_size                                          AS [skipped_for_size],
-       NULLIF(@size_msg, N'')                                     AS [size_error_message],
-       80                                                         AS [grouping_prefix_length],
-       40                                                         AS [top_messages_kept]
-OPTION (RECOMPILE, MAXDOP 1);
-
-/* TOP 40 by count, and the cut is REPORTED above rather than left implicit: a
-   truncated list that does not say it is truncated reads as a complete one. */
---
--- POURQUOI UN CLASSEMENT PAR FRÉQUENCE NE SUFFIT PAS.
---
--- top_messages rend les quarante préfixes les plus fréquents, ce qui est la
--- bonne question pour « qu'est-ce qui pollue le journal ». C'est la mauvaise
--- pour « que s'est-il passé ». Sur l'instance qui a motivé ce jeu de
--- résultats, le journal comptait 5 252 préfixes distincts et deux événements
--- décisifs étaient uniques, donc invisibles :
---
---   Autogrow of file 'X_log' ... was cancelled by user or timed out
---   Configuration option 'max server memory (MB)' changed from 220000 to 300000
---
--- Le second datait du lendemain d'un redémarrage difficile : quelqu'un avait
--- augmenté la mémoire pour régler un problème de performance. Cela n'a servi à
--- rien, l'édition plafonnant le buffer pool, mais l'audit devait le savoir et
--- ne l'a pas su.
---
--- D'où ce jeu de résultats : une liste fermée de motifs qui comptent quelle que
--- soit leur fréquence, rendus par ordre chronologique. Un changement de
--- configuration, une extension de fichier annulée, une entrée/sortie longue,
--- une erreur de cohérence ou un CHECKDB se lisent une fois et pèsent lourd.
-
-SELECT TOP (40)
-       LEFT(l.Txt, 80)                                            AS [message_prefix],
-       COUNT(*)                                                   AS [occurrences],
-       MIN(l.LogDate)                                             AS [first_seen],
-       MAX(l.LogDate)                                             AS [last_seen],
-       MIN(LEFT(l.Txt, 400))                                      AS [sample]
-FROM #log AS l
-GROUP BY LEFT(l.Txt, 80)
-ORDER BY COUNT(*) DESC
-OPTION (RECOMPILE, MAXDOP 1);
-
-/* ProcessInfo is locale-independent and tells a reader which subsystem is
-   talking: Logon, Backup, Server, or a session id. Session ids are collapsed
-   because their individual values carry nothing once the log is aggregated. */
-SELECT CASE WHEN l.ProcessInfo LIKE 'spid%' THEN 'spid' ELSE l.ProcessInfo END AS [source],
-       COUNT(*)                                                   AS [occurrences],
-       MIN(l.LogDate)                                             AS [first_seen],
-       MAX(l.LogDate)                                             AS [last_seen]
-FROM #log AS l
-GROUP BY CASE WHEN l.ProcessInfo LIKE 'spid%' THEN 'spid' ELSE l.ProcessInfo END
-ORDER BY COUNT(*) DESC
-OPTION (RECOMPILE, MAXDOP 1);
-
-
-/* Les événements qui comptent une fois. Le cap est de 200 lignes et il est
-   reporté, parce qu'une liste tronquée sans le dire se lit comme une liste
-   complète. L'ordre est chronologique : ce jeu se lit comme un récit, pas
-   comme un classement. */
 WITH frequence AS (
     /* Un motif notable peut aussi être bavard. « Configuration option 'user
        options' changed from 0 to 0 » correspond au filtre et apparaît 537 fois
@@ -510,11 +444,8 @@ WITH frequence AS (
        fréquent est déjà dans top_messages ; ici on ne garde que le rare. */
     SELECT LEFT(RTRIM(Txt), 80) AS prefixe, COUNT(*) AS n
     FROM #log GROUP BY LEFT(RTRIM(Txt), 80))
-SELECT TOP (200)
-       l.LogDate                                                  AS [when],
-       RTRIM(l.ProcessInfo)                                       AS [source],
-       LEFT(RTRIM(l.Txt), 400)                                    AS [message],
-       f.n                                                        AS [occurrences]
+INSERT INTO #notable (LogDate, ProcessInfo, Txt, occurrences)
+SELECT l.LogDate, RTRIM(l.ProcessInfo), LEFT(RTRIM(l.Txt), 400), f.n
 FROM       #log AS l
 JOIN       frequence AS f ON f.prefixe = LEFT(RTRIM(l.Txt), 80)
 WHERE f.n <= 20
@@ -568,7 +499,124 @@ WHERE f.n <= 20
    OR l.Txt LIKE '%FlushCache: cleaned up%'
    OR l.Txt LIKE '%I/O saturation%'
    OR l.Txt LIKE '%avgWriteLatency%')
-ORDER BY l.LogDate
+OPTION (RECOMPILE, MAXDOP 1);
+
+
+SELECT COUNT(*)                                                   AS [lines],
+       MIN(l.LogDate)                                             AS [oldest],
+       MAX(l.LogDate)                                             AS [newest],
+       DATEDIFF(second, MIN(l.LogDate), MAX(l.LogDate))           AS [span_seconds],
+       COUNT(DISTINCT LEFT(l.Txt, 80))                            AS [distinct_message_prefixes],
+       SYSDATETIME()                                              AS [collected_at]
+FROM #log AS l
+OPTION (RECOMPILE, MAXDOP 1);
+
+SELECT @collected                                                 AS [collected],
+       @err                                                       AS [error_number],
+       NULLIF(@msg, N'')                                          AS [error_message],
+       0                                                          AS [log_file],
+       @log_bytes                                                 AS [log_size_bytes],
+       @size_limit                                                AS [log_size_limit_bytes],
+       @skipped_for_size                                          AS [skipped_for_size],
+       NULLIF(@size_msg, N'')                                     AS [size_error_message],
+       80                                                         AS [grouping_prefix_length],
+       200                                                        AS [top_messages_kept],
+       /* notable is capped too, and its cap is reported here with the number
+          of lines that matched before it, so a full list says it is full. */
+       200                                                        AS [notable_cap],
+       (SELECT COUNT(*) FROM #notable)                            AS [notable_matched]
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* TOP 200 by count, and the cut is REPORTED above rather than left implicit:
+   a truncated list that does not say it is truncated reads as a complete one.
+   status.top_messages_kept is the cap and root.distinct_message_prefixes the
+   number of prefixes it was taken from.
+
+   It was 40 until October 2026. Measured on fifteen client collections
+   between August and September 2026, the 40 were hit every time and covered
+   54 % to 90 % of the lines; on one instance 5 313 prefixes and 11 236 lines
+   fell outside them. A row is about 600 bytes, so 200 is about 100 KB more at
+   most, and it costs the server nothing: the log is already in #log and
+   grouped. The rows past 40 are of the kind of the rows before them, each a
+   prefix, a count and a sample of the same length, so the disclosure this
+   file declares does not change with the number.
+
+   THE SAMPLE STAYS AT 400 CHARACTERS, and that is a decision rather than an
+   oversight. Raising it to 1 000 was proposed with the 200, for the engine
+   messages that run past 400 (a filegroup-full message is 403, the TLS line
+   600). But not every line of this log is the engine's: RAISERROR ... WITH LOG
+   and xp_logevent write an application's own text, up to 2 047 characters,
+   and trace flags 1204 and 1222 write deadlock graphs, statement text
+   included. 400 characters of such a line are already carried, and 1 000
+   would carry statement text and literals that 400 cuts off. That is a
+   disclosure decision, not a size one, and it is left to whoever owns the
+   disclosure list. */
+--
+-- POURQUOI UN CLASSEMENT PAR FRÉQUENCE NE SUFFIT PAS.
+--
+-- top_messages rend les deux cents préfixes les plus fréquents, ce qui est la
+-- bonne question pour « qu'est-ce qui pollue le journal ». C'est la mauvaise
+-- pour « que s'est-il passé ». Sur l'instance qui a motivé ce jeu de
+-- résultats, le journal comptait 5 252 préfixes distincts et deux événements
+-- décisifs étaient uniques, donc invisibles :
+--
+--   Autogrow of file 'X_log' ... was cancelled by user or timed out
+--   Configuration option 'max server memory (MB)' changed from 220000 to 300000
+--
+-- Le second datait du lendemain d'un redémarrage difficile : quelqu'un avait
+-- augmenté la mémoire pour régler un problème de performance. Cela n'a servi à
+-- rien, l'édition plafonnant le buffer pool, mais l'audit devait le savoir et
+-- ne l'a pas su.
+--
+-- D'où ce jeu de résultats : une liste fermée de motifs qui comptent quelle que
+-- soit leur fréquence, rendus du plus récent au plus ancien. Un changement de
+-- configuration, une extension de fichier annulée, une entrée/sortie longue,
+-- une erreur de cohérence ou un CHECKDB se lisent une fois et pèsent lourd.
+
+SELECT TOP (200)
+       LEFT(l.Txt, 80)                                            AS [message_prefix],
+       COUNT(*)                                                   AS [occurrences],
+       MIN(l.LogDate)                                             AS [first_seen],
+       MAX(l.LogDate)                                             AS [last_seen],
+       MIN(LEFT(l.Txt, 400))                                      AS [sample]
+FROM #log AS l
+GROUP BY LEFT(l.Txt, 80)
+ORDER BY COUNT(*) DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* ProcessInfo is locale-independent and tells a reader which subsystem is
+   talking: Logon, Backup, Server, or a session id. Session ids are collapsed
+   because their individual values carry nothing once the log is aggregated. */
+SELECT CASE WHEN l.ProcessInfo LIKE 'spid%' THEN 'spid' ELSE l.ProcessInfo END AS [source],
+       COUNT(*)                                                   AS [occurrences],
+       MIN(l.LogDate)                                             AS [first_seen],
+       MAX(l.LogDate)                                             AS [last_seen]
+FROM #log AS l
+GROUP BY CASE WHEN l.ProcessInfo LIKE 'spid%' THEN 'spid' ELSE l.ProcessInfo END
+ORDER BY COUNT(*) DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+
+/* The events that count once; the French note above top_messages says why a
+   frequency ranking cannot find them. The cap is 200 lines and it is reported in
+   status, as notable_cap and notable_matched, because a truncated list that
+   does not say so reads as a complete one.
+
+   Until October 2026 the comment here said the cap was reported and nothing
+   reported it, and the set was ordered oldest first, so a list cut by the cap
+   kept the 200 oldest lines and dropped the most recent ones without a word.
+   It is ordered newest first now, so a cut drops the oldest lines rather
+   than the latest, and notable_matched says how many. Measured on fifteen client
+   collections in August and September 2026, the cap was never reached (138
+   lines at most), so this changes what a full list says, not what any list
+   seen so far held. */
+SELECT TOP (200)
+       n.LogDate                                                  AS [when],
+       n.ProcessInfo                                              AS [source],
+       n.Txt                                                      AS [message],
+       n.occurrences                                              AS [occurrences]
+FROM #notable AS n
+ORDER BY n.LogDate DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* Quand chaque base a été montée, et combien de fois.
