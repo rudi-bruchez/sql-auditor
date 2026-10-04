@@ -85,6 +85,9 @@ SET LOCK_TIMEOUT 10000;
 DECLARE @now datetime = GETDATE();
 DECLARE @since datetime = DATEADD(day, -30, @now);
 
+-- The cap on recent, declared once because the root reports it. See recent.
+DECLARE @recent_cap int = 2000;
+
 SELECT
     30                                                          AS [window.days],
     CONVERT(varchar(19), @since, 126)                           AS [window.since],
@@ -102,7 +105,13 @@ SELECT
     (SELECT COUNT(*) FROM msdb.dbo.backupset
       WHERE backup_finish_date >= @since AND is_snapshot = 1)   AS [window.snapshot_backups],
     (SELECT COUNT(DISTINCT user_name) FROM msdb.dbo.backupset
-      WHERE backup_finish_date >= @since)                       AS [window.distinct_users]
+      WHERE backup_finish_date >= @since)                       AS [window.distinct_users],
+    -- recent lists at most this many of the backups_in_window above, so a
+    -- reader compares the two; recent_capped says it outright.
+    @recent_cap                                                 AS [window.recent_cap],
+    CASE WHEN (SELECT COUNT(*) FROM msdb.dbo.backupset
+                WHERE backup_finish_date >= @since) > @recent_cap
+         THEN 1 ELSE 0 END                                      AS [window.recent_capped]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* One row per database and backup type. The averages are what a schedule
@@ -236,9 +245,33 @@ GROUP BY bs.database_name, bs.type
 ORDER BY bs.database_name, bs.type
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* Where the backups are written. Grouped by device rather than listed per
+/* Where the backups are written. Grouped by destination rather than listed per
    backup: the question is how many destinations exist and what goes to each,
-   not the name of every file. */
+   not the name of every file.
+
+   THE DIRECTORY, NOT THE FILE, AND NO NAME AT ALL FOR A VIRTUAL DEVICE. A
+   backup file name carries a timestamp and would produce one row per backup;
+   the path is what says which storage the copies live on. Until October 2026
+   the directory was found by cutting at the last backslash, which grouped
+   nothing that had none:
+
+     - a virtual device, which is a VSS requestor or a third-party agent
+       writing through the backup API, is named by the agent, typically a
+       GUID per backup ({GUID}1). Measured on twelve client collections in
+       August and September 2026: in seven of them this set had one row per
+       backup, up to 15 183 rows, and in one file 2.4 MB of its 2.5, against
+       55 KB for recent. The name says nothing about where the copy lands,
+       which the agent alone knows, so the path is NULL for these and the
+       device type is the grouping key;
+     - a path on Linux, or a URL to Azure storage, separates with a forward
+       slash, so every file was its own row there too. Measured on the lab, a
+       SQL Server 2025 container: /var/opt/mssql/backup/x.bak came back whole.
+
+   So the cut is at the last separator of either kind, and a virtual device
+   keeps its type and loses its name. device_names says how many distinct
+   names a row stands for, and a_device_name is one of them, arbitrary like
+   a_user in per_database: a virtual device's name is sometimes the only word
+   on which agent wrote it. */
 SELECT
     CASE bmf.device_type
          WHEN 2   THEN 'disk'
@@ -249,34 +282,45 @@ SELECT
          WHEN 106 THEN 'permanent_tape'
          WHEN 107 THEN 'permanent_virtual_device'
          ELSE CAST(bmf.device_type AS varchar(10)) END          AS [device_type],
-    -- The directory, not the file. A backup file name carries a timestamp and
-    -- would produce one row per backup; the path is what says which storage
-    -- the copies live on.
-    CASE WHEN bmf.physical_device_name LIKE '%\%'
-         THEN LEFT(bmf.physical_device_name,
-                   LEN(bmf.physical_device_name)
-                   - CHARINDEX('\', REVERSE(bmf.physical_device_name)))
-         ELSE bmf.physical_device_name END                      AS [path],
+    d.[path]                                                    AS [path],
     COUNT(*)                                                    AS [backups],
+    COUNT(DISTINCT bmf.physical_device_name)                    AS [device_names],
+    MAX(bmf.physical_device_name)                               AS [a_device_name],
     COUNT(DISTINCT bs.database_name)                            AS [databases],
     CAST(SUM(bs.backup_size) / 1073741824.0 AS DECIMAL(18,1))   AS [total_gb],
     CONVERT(varchar(19), MAX(bs.backup_finish_date), 126)       AS [last]
 FROM msdb.dbo.backupmediafamily AS bmf
 JOIN msdb.dbo.backupset AS bs ON bs.media_set_id = bmf.media_set_id
-WHERE bs.backup_finish_date >= @since
-GROUP BY bmf.device_type,
-    CASE WHEN bmf.physical_device_name LIKE '%\%'
+CROSS APPLY (SELECT [path] =
+    CASE WHEN bmf.device_type IN (7, 107) THEN NULL
+         WHEN PATINDEX('%[\/]%', bmf.physical_device_name) > 0
          THEN LEFT(bmf.physical_device_name,
                    LEN(bmf.physical_device_name)
-                   - CHARINDEX('\', REVERSE(bmf.physical_device_name)))
-         ELSE bmf.physical_device_name END
+                   - PATINDEX('%[\/]%', REVERSE(bmf.physical_device_name)))
+         ELSE bmf.physical_device_name END) AS d
+WHERE bs.backup_finish_date >= @since
+GROUP BY bmf.device_type, d.[path]
 ORDER BY COUNT(*) DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* The last 200 backups, newest first. The aggregate above says what usually
-   happens; this says what happened last night, which is the question asked
-   when something went wrong. */
-SELECT TOP (200)
+/* The last 2 000 backups of the window, newest first. The aggregate above says
+   what usually happens; this says what happened last night, which is the
+   question asked when something went wrong.
+
+   2 000, AND WHY NOT THE WHOLE WINDOW. It was 200 until October 2026, and 200
+   did not reach last night on a busy instance: measured on twelve client
+   collections in August and September 2026, the cap was hit in six, and the
+   200 rows covered 9 hours of the 30-day window on the busiest (15 183
+   backups), 32 and 37 hours on two others, 3, 8 and 16 days elsewhere. A row
+   is about 260 bytes, so 2 000 is about half a megabyte, and on the busiest
+   instance seen they reach back about four days, past a weekend. The whole
+   window was the alternative, 4 MB there, and it has no bound of its own: a
+   few hundred databases with log backups every five minutes write millions
+   of rows in thirty days. The rows past the cap are no different in kind, and
+   per_database and fulls carry what a longer reach would be wanted for, the
+   counts and the chain. root.window.recent_capped says when the cap was hit,
+   against window.backups_in_window. */
+SELECT TOP (@recent_cap)
     bs.database_name                                            AS [database],
     CASE bs.type WHEN 'D' THEN 'full'
                  WHEN 'I' THEN 'differential'
@@ -352,12 +396,12 @@ OPTION (RECOMPILE, MAXDOP 1);
    database: the ten most recent fulls of each database in the window, copy-only
    and snapshot ones included, newest first.
 
-   WHY recent CANNOT CARRY IT. recent is the last 200 backups of the instance,
-   all databases and all types together. On an instance with a hundred
-   databases and log backups every quarter of an hour, 200 rows cover the last
-   few hours, so the full a differential depends on, taken last Sunday, is
-   simply not in the archive, and neither is the copy-only full someone took on
-   Wednesday. The aggregate in per_database counts them and cannot say which
+   WHY recent CANNOT CARRY IT. recent is the last 2 000 backups of the
+   instance, all databases and all types together. On an instance with a
+   hundred databases and log backups every quarter of an hour, 2 000 rows cover
+   the last few days, so the full a differential depends on, taken two Sundays
+   ago, is not in it, and neither is the copy-only full someone took the week
+   before. The aggregate in per_database counts them and cannot say which
    one the base is. This set is scoped by database instead of by instance, so a
    busy neighbour cannot push a quiet database's fulls out of it.
 
