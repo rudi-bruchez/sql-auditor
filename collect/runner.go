@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/microsoft/go-mssqldb"
+	mssql "github.com/microsoft/go-mssqldb"
 )
 
 // badAddress marks a failure to make sense of SQL_SERVER, as opposed to a
@@ -317,15 +317,21 @@ func connURL(cfg *Config) (*url.URL, error) {
 // Open builds a sqlserver:// URL from cfg and returns a pool pinned to a single
 // connection. It does not contact the server: database/sql connects lazily, so
 // a bad address surfaces on the first query, not here.
+//
+// The connector is the one sql.Open("sqlserver", ...) would build, with
+// attemptDialer in place of the driver's own dialer, so that connWithin can
+// close a socket whose login it has given up on.
 func Open(cfg *Config) (*sql.DB, error) {
 	u, err := connURL(cfg)
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlserver", u.String())
+	connector, err := mssql.NewConnector(u.String())
 	if err != nil {
 		return nil, err
 	}
+	connector.Dialer = attemptDialer{}
+	db := sql.OpenDB(connector)
 	// One connection for the whole run: session state (database context,
 	// SET options) must be predictable between scripts.
 	db.SetMaxOpenConns(1)

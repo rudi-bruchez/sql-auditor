@@ -19,6 +19,10 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Fixed
+
+- A connection that gives up on a server which accepts the socket and never answers the login now closes that socket, so the attempt ends with it. Since 0.37.0 the caller returned at its deadline, but go-mssqldb reads the pre-login answer with no deadline and without watching the context, so the driver's goroutine, the one waiting to close a late connection, and the socket lived until the server hung up. In the command line the process exit ended them; in the assistant, a long process, each attempt against a mute server left two goroutines and a socket behind. The pool is now built from the driver's connector with a dialer of its own, which records the sockets each attempt dials so they can be closed when it is abandoned. Measured against a listener that accepts and stays silent, with a 300 ms deadline: the server side sees the end of the stream at once and the goroutine count is back to where it was, where without the close it was two higher after two seconds and the socket still open.
+
 ## [0.37.0] - 2026-10-04
 
 This release lets a collector lose one guarded part instead of the whole

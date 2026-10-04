@@ -612,23 +612,36 @@ func startWatchOn(ctx context.Context, db *sql.DB, cfg *Config, spid int) (*bloc
 // no deadline and does not watch the context, so a server that accepts the
 // connection and never answers holds db.Conn for as long as the socket lives.
 // Measured against a listener that accepts and stays silent, with a 3 s
-// context: still waiting after two minutes. The attempt is left to finish on
-// its own, and a connection it opens late is closed rather than leaked into
-// the pool.
+// context: still waiting after two minutes.
+//
+// When ctx ends first, connWithin closes the sockets dialed for this call,
+// which Open's dialer records through ctx (dial.go). The driver's read then
+// fails, db.Conn returns, and the goroutines of the attempt exit within
+// moments rather than when the server hangs up; in the assistant, a long
+// process, each attempt against a mute server used to leave two goroutines and
+// a socket behind. A pool not built by Open has no such dialer, and its
+// attempt is still left to finish on its own. Either way a connection that
+// completes late is closed rather than leaked into the pool. What the dialer
+// does not cover is the name lookup before the dial, which the driver makes
+// without the context: a resolver that hangs still holds the goroutine until
+// the system resolver gives up.
 func connWithin(ctx context.Context, db *sql.DB) (*sql.Conn, error) {
 	type result struct {
 		c   *sql.Conn
 		err error
 	}
+	a := &attempt{}
+	actx := context.WithValue(ctx, attemptKey{}, a)
 	got := make(chan result, 1)
 	go func() {
-		c, err := db.Conn(ctx)
+		c, err := db.Conn(actx)
 		got <- result{c, err}
 	}()
 	select {
 	case r := <-got:
 		return r.c, r.err
 	case <-ctx.Done():
+		a.abandon()
 		go func() {
 			if r := <-got; r.c != nil {
 				r.c.Close()
