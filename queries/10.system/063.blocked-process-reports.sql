@@ -61,6 +61,24 @@
 -- blocking side, so a key built on the blocker's ownerId would merge every
 -- episode into one.
 --
+-- monitor_loop IS WHICH PASS OF THE MONITOR EMITTED THE REPORT. The
+-- monitorLoop attribute of the report counts the passes of the deadlock
+-- monitor, which also produces blocked process reports, from 0 at instance
+-- start; reports that share it were detected in the same pass, so they are
+-- one picture of the blocking at one moment, and a blocker that is itself
+-- blocked in a report of the same pass is a link of a chain rather than its
+-- head. That test needs the pass of EVERY report, and keeping one report whole
+-- per episode had removed it from the archive, so it is projected on every row
+-- and carried into the episodes as their first and last pass. It is not a
+-- clock: the monitor runs about every five seconds and faster after it finds a
+-- deadlock, so the gap between two passes is not a duration, and the counter
+-- restarts with the instance. Microsoft does not document the attribute; its
+-- meaning here is the one published by Michael J. Swart in February 2017. It
+-- was not measured on real reports tonight, because producing them needs
+-- 'blocked process threshold (s)' changed on the lab; the XPath was run
+-- against a literal report of the documented shape instead, and an absent
+-- attribute reads NULL.
+--
 -- TWO CAPS, NEITHER SILENT. At most 500 reports kept whole, and at most 1 MiB
 -- each. Past either, the XML is NULLed by a CONDITIONAL PROJECTION — never a
 -- WHERE — so the row survives with its timestamp, its size and its fields.
@@ -166,6 +184,7 @@ DECLARE @reports TABLE (
     report     nvarchar(max),
     file_name  nvarchar(400),
     file_offset bigint,
+    monitor_loop       bigint,
     blocked_spid       int,
     blocked_owner_id   bigint,
     blocked_wait_ms    bigint,
@@ -185,13 +204,14 @@ IF @path IS NOT NULL
 BEGIN
     BEGIN TRY
         INSERT INTO @reports (event_time, report, file_name, file_offset,
-                              blocked_spid, blocked_owner_id, blocked_wait_ms,
+                              monitor_loop, blocked_spid, blocked_owner_id, blocked_wait_ms,
                               blocked_trancount, lock_mode, wait_resource,
                               blocking_spid, blocking_status, blocking_trancount)
         SELECT x.value('(/event/@timestamp)[1]', 'datetime2(3)'),
                CAST(x.query('(/event/data[@name="blocked_process"]/value/*)[1]') AS nvarchar(max)),
                t.file_name,
                t.file_offset,
+               d.value('(@monitorLoop)[1]',                        'bigint'),
                d.value('(blocked-process/process/@spid)[1]',       'int'),
                d.value('(blocked-process/process/@ownerId)[1]',    'bigint'),
                d.value('(blocked-process/process/@waittime)[1]',   'bigint'),
@@ -257,6 +277,7 @@ SELECT
     s.sample_rank                                                 AS [report.sample_rank],
     CONVERT(varchar(23), s.event_time, 126)                       AS [occurred_at],
     s.file_name                                                   AS [file_name],
+    s.monitor_loop                                                AS [monitor_loop],
     s.blocked_spid                                                AS [blocked.spid],
     s.blocked_owner_id                                            AS [blocked.owner_id],
     s.blocked_wait_ms                                             AS [blocked.wait_ms],

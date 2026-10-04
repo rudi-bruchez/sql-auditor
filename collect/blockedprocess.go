@@ -91,6 +91,14 @@ type blockingEpisode struct {
 	FirstSeen      string `json:"first_seen"`
 	LastSeen       string `json:"last_seen"`
 	MaxWaitMs      int64  `json:"max_wait_ms"`
+	// FirstMonitorLoop and LastMonitorLoop are the lowest and highest pass of
+	// the deadlock monitor among the episode's reports, nil when no report
+	// carried the attribute. The per-report value is in Reports; these say at
+	// a glance which passes the episode spans. A pass number is not a clock:
+	// the monitor speeds up after a deadlock and restarts its count with the
+	// instance.
+	FirstMonitorLoop *int64 `json:"first_monitor_loop"`
+	LastMonitorLoop  *int64 `json:"last_monitor_loop"`
 	// The blocker as its longest report saw it. A trancount of 0 separates a
 	// statement that holds locks for a long time from a transaction left open,
 	// and the two call for different remedies.
@@ -109,8 +117,15 @@ type indexedReport struct {
 	// rollover file and one from the file being written are the same fact, but
 	// knowing which is what lets a reader see how far back the capture reaches.
 	FromFile string `json:"from_file,omitempty"`
-	Bytes    int64  `json:"bytes"`
-	File     string `json:"file,omitempty"`
+	// MonitorLoop is the pass of the deadlock monitor that emitted the report.
+	// Reports of the same pass are one picture of the blocking at one moment,
+	// so a blocker that appears as blocked in a report of the same pass is a
+	// link of a chain, not its head. Only one report per episode is kept
+	// whole, so this is the only place the pass of every report survives. Nil
+	// when the report carried no monitorLoop attribute.
+	MonitorLoop *int64 `json:"monitor_loop"`
+	Bytes       int64  `json:"bytes"`
+	File        string `json:"file,omitempty"`
 }
 
 // writeBlockedProcessReports is the @writer: blocked-process-reports
@@ -229,6 +244,9 @@ func writeBlockedProcessReports(req WriteRequest) (WriteResult, error) {
 
 		ep := episodeOf[r]
 		entry := indexedReport{Rank: rank, OccurredAt: at, Episode: ep, FromFile: from, Bytes: size}
+		if loop, ok := int64At(reports, r, "monitor_loop"); ok {
+			entry.MonitorLoop = &loop
+		}
 		file := fmt.Sprintf("blocked_process_%04d.xml", rank)
 
 		switch {
@@ -313,6 +331,16 @@ func groupEpisodes(reports ResultSet, idx *blockedProcessIndex) []int {
 			order = append(order, e)
 		}
 		e.Reports++
+		if loop, ok := int64At(reports, r, "monitor_loop"); ok {
+			if e.FirstMonitorLoop == nil || loop < *e.FirstMonitorLoop {
+				v := loop
+				e.FirstMonitorLoop = &v
+			}
+			if e.LastMonitorLoop == nil || loop > *e.LastMonitorLoop {
+				v := loop
+				e.LastMonitorLoop = &v
+			}
+		}
 		if at < e.FirstSeen {
 			e.FirstSeen = at
 		}

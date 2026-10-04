@@ -27,11 +27,11 @@ func bprSets(threshold int64, session string, rows [][]any) []NamedResultSet {
 	}
 	reports := ResultSet{
 		Columns: []string{"report.rank", "report.count", "report.sample_rank", "occurred_at", "file_name",
-			"blocked.spid", "blocked.owner_id", "blocked.wait_ms", "blocked.trancount", "blocked.lock_mode",
+			"monitor_loop", "blocked.spid", "blocked.owner_id", "blocked.wait_ms", "blocked.trancount", "blocked.lock_mode",
 			"blocked.wait_resource", "blocking.spid", "blocking.status", "blocking.trancount",
 			"report", "report_bytes"},
 		Types: []string{"BIGINT", "BIGINT", "BIGINT", "NVARCHAR", "NVARCHAR",
-			"INT", "BIGINT", "BIGINT", "INT", "NVARCHAR", "NVARCHAR", "INT", "NVARCHAR", "INT",
+			"BIGINT", "INT", "BIGINT", "BIGINT", "INT", "NVARCHAR", "NVARCHAR", "INT", "NVARCHAR", "INT",
 			"NVARCHAR", "BIGINT"},
 		Rows: rows,
 	}
@@ -45,7 +45,7 @@ func bprSets(threshold int64, session string, rows [][]any) []NamedResultSet {
 // not its episode's longest, which is how 063 marks every such row.
 func bprRow(rank int64, sample any, at string, blocked, owner, wait, blocking int64,
 	resource string, body any, size int64) []any {
-	return []any{rank, int64(0), sample, at, `D:\MSSQL\Log\bp_0_1.xel`,
+	return []any{rank, int64(0), sample, at, `D:\MSSQL\Log\bp_0_1.xel`, nil,
 		blocked, owner, wait, int64(0), "S", resource, blocking, "suspended", int64(1),
 		body, size}
 }
@@ -407,5 +407,91 @@ func TestStoppedSessionKeepsItsConfiguredDirectory(t *testing.T) {
 	}
 	if !regexp.MustCompile(`WHEN @current IS NULL THEN @configured_stem \+ N'\*\.xel'`).MatchString(string(b)) {
 		t.Error("063 no longer reads a stopped session from its configured path, directory included")
+	}
+}
+
+// withLoop sets the monitor_loop column of a bprRow, which bprRow leaves NULL
+// as a report without the attribute would.
+func withLoop(row []any, loop int64) []any {
+	row[5] = loop
+	return row
+}
+
+// The pass of the deadlock monitor is what says two reports were seen at the
+// same moment, which is how a blocker is told to be a link of a chain. Only one
+// report per episode is kept whole, so the index is the only place every
+// report's pass survives, and the episode carries its span.
+func TestBPRWriterKeepsTheMonitorLoopOfEveryReport(t *testing.T) {
+	body := `<blocked-process-report monitorLoop="41212"><blocked-process/></blocked-process-report>`
+	rows := [][]any{
+		withLoop(bprRow(1, int64(1), "2026-08-13T17:08:05.000", 87, 1001, 15000, 68, "KEY: 7:1 (a)", body, int64(len(body))), 41212),
+		withLoop(bprRow(2, nil, "2026-08-13T17:08:00.000", 87, 1001, 10000, 68, "KEY: 7:1 (a)", nil, int64(len(body))), 41211),
+		withLoop(bprRow(3, nil, "2026-08-13T17:07:55.000", 87, 1001, 5000, 68, "KEY: 7:1 (a)", nil, int64(len(body))), 41210),
+		// Blocked in pass 41211 while it blocks 87: the fact a chain is read from.
+		withLoop(bprRow(4, int64(2), "2026-08-13T17:08:00.000", 68, 2002, 6000, 55, "KEY: 7:1 (b)", body, int64(len(body))), 41211),
+		// A report without the attribute stays without it, rather than reading 0.
+		bprRow(5, int64(3), "2026-08-13T17:08:10.000", 90, 3003, 5000, 55, "OBJECT: 7:9", body, int64(len(body))),
+	}
+	root, rel, _, _ := runBPRWriter(t, bprSets(5, "blocked_processes", rows), maxRunBytes)
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel), "_index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx struct {
+		Episodes []struct {
+			BlockedSpid int64  `json:"blocked_spid"`
+			First       *int64 `json:"first_monitor_loop"`
+			Last        *int64 `json:"last_monitor_loop"`
+		} `json:"episodes"`
+		Reports []struct {
+			Rank        int64  `json:"rank"`
+			MonitorLoop *int64 `json:"monitor_loop"`
+		} `json:"reports"`
+	}
+	if err := json.Unmarshal(b, &idx); err != nil {
+		t.Fatal(err)
+	}
+	want := map[int64]int64{1: 41212, 2: 41211, 3: 41210, 4: 41211}
+	for _, r := range idx.Reports {
+		w, has := want[r.Rank]
+		switch {
+		case !has && r.MonitorLoop != nil:
+			t.Errorf("report %d has monitor_loop %d, want null", r.Rank, *r.MonitorLoop)
+		case has && (r.MonitorLoop == nil || *r.MonitorLoop != w):
+			t.Errorf("report %d monitor_loop = %v, want %d", r.Rank, r.MonitorLoop, w)
+		}
+	}
+	if !strings.Contains(string(b), `"monitor_loop": null`) {
+		t.Error("a report without the attribute must say null, not omit the key")
+	}
+	spans := map[int64][2]int64{87: {41210, 41212}, 68: {41211, 41211}}
+	for _, e := range idx.Episodes {
+		span, has := spans[e.BlockedSpid]
+		if !has {
+			if e.First != nil || e.Last != nil {
+				t.Errorf("episode of %d has a span without any loop: %v, %v", e.BlockedSpid, e.First, e.Last)
+			}
+			continue
+		}
+		if e.First == nil || e.Last == nil || *e.First != span[0] || *e.Last != span[1] {
+			t.Errorf("episode of %d spans %v..%v, want %d..%d", e.BlockedSpid, e.First, e.Last, span[0], span[1])
+		}
+	}
+}
+
+// 063 reads monitorLoop off the node it already binds to the report, so the
+// path is relative to blocked-process-report. Written from the root, or with
+// the element name repeated, it returns NULL on every row without an error:
+// measured on SQL Server 2025 against a literal report, October 2026.
+func TestBlockedProcessMonitorLoopIsReadOffTheBoundReport(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "queries", "10.system", "063.blocked-process-reports.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`d\.value\('\(@monitorLoop\)\[1\]',\s*'bigint'\)`).MatchString(string(b)) {
+		t.Error("063 no longer reads monitorLoop off the bound blocked-process-report node")
+	}
+	if !regexp.MustCompile(`AS \[monitor_loop\]`).MatchString(string(b)) {
+		t.Error("063 no longer projects monitor_loop, which the writer reads by that name")
 	}
 }
