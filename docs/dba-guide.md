@@ -552,6 +552,13 @@ A mistyped address is `2`, not `1`. `HOST\` with no instance name, or a bare
 has been asked of any server, and `1` would send you to check a machine that was
 never contacted.
 
+A database dropped while `collect` is reading it, a staging database another
+job tears down for instance, does not count as a failed collector. Once the
+server answers that the database does not exist and `DB_ID` confirms it is gone,
+the collectors left on it are skipped with the reason "the database was dropped
+during the collection", and one warning names the collector that found it gone.
+What was collected there before the drop stays in the archive.
+
 Whenever either command exits non-zero it prints the reason on stderr first. If
 you get a bare `1` with nothing above it, that is a bug. Please report it.
 

@@ -538,11 +538,25 @@ func scopeLost(prev, cur runScope) []string {
 	for _, d := range cur.Targets.Databases {
 		read[d.Name] = true
 	}
+	// A database dropped while cur read it is among cur's databases, since
+	// some of its collectors ran, and what prev had on it is lost all the
+	// same, as it is for one dropped between the two runs. It is named once,
+	// with the reason, rather than once per collector the drop took.
+	dropped := map[string]bool{}
+	for _, k := range cur.Skipped {
+		if k.Reason == skipDroppedDuringRun {
+			dropped[k.Target] = true
+		}
+	}
 	gone := map[string]bool{}
 	for _, d := range prev.Targets.Databases {
-		if !read[d.Name] {
+		switch {
+		case !read[d.Name]:
 			gone[d.Name] = true
 			lost = append(lost, "database "+d.Name)
+		case dropped[d.Name]:
+			gone[d.Name] = true
+			lost = append(lost, "database "+d.Name+" ("+skipDroppedDuringRun+")")
 		}
 	}
 	return append(lost, collectorsLost(prev, cur, gone)...)
@@ -658,7 +672,8 @@ func collectorsLost(prev, cur runScope, gone map[string]bool) []string {
 //
 // A database cur skipped as a whole (offline, single user, no access,
 // DB_EXCLUDE) never reaches here: it is not among cur's databases, and
-// scopeLost names it once.
+// scopeLost names it once. Nor does one dropped while cur read it, which
+// scopeLost names once by its skip reason.
 func skipLoses(reason string, prev, cur runScope) bool {
 	if cur.Profile.Name != "" && reason == ProfileSkipReason(cur.Profile.Name) {
 		return prev.Profile.Name == cur.Profile.Name
@@ -2361,11 +2376,19 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// same database could hold up the next one. Instance-scope units carry on,
 	// each bounded by the watch on its own.
 	cancelledOn := map[string]string{}
+	// Databases found dropped while the run was reading them. Their remaining
+	// units are skipped, as above, and the run is not partial for it: nothing
+	// was left to collect there.
+	droppedOn := map[string]bool{}
 	watchNoted := false
 
 	for _, u := range units {
 		s, target := u.Script, u.Target
-		if reason, ok := heldBack(cancelledOn, target.Name); ok {
+		reason, ok := heldBack(cancelledOn, target.Name)
+		if !ok {
+			reason, ok = droppedBefore(droppedOn, target.Name)
+		}
+		if ok {
 			m.Skipped = append(m.Skipped, SkippedScript{Script: s.Path, Target: target.Name, Reason: reason})
 			// UnitDone and not ScriptSkipped: this unit was planned, and one
 			// UnitDone per planned unit is what brings the gauge to its total.
@@ -2394,6 +2417,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// cannot succeed; and were it after UnitDone, the screen would show an
 		// error the manifest goes on to deny.
 		code, cancelled, report := 0, false, error(nil)
+		// A stop is asked about first, as recordUnitFailure does: a dead
+		// context fails the catalog check too, and a stop is not a drop.
+		if err != nil && ctx.Err() == nil && databaseDropped(err, target.Name, func(name string) (bool, error) {
+			return databaseExists(ctx, conn, o.Config, name)
+		}) {
+			// From here the unit is treated as one that succeeded with
+			// nothing to write: no error, and the ordinary session recycle.
+			report, err = noteDropped(m, droppedOn, s.Path, target.Name, err), nil
+		}
 		if err != nil {
 			code, cancelled, report = recordUnitFailure(ctx, m, s.Path, target.Name, err)
 		}
