@@ -160,6 +160,28 @@ func TestOptionsTakesTheCollectorCountFromTheResolvedPlan(t *testing.T) {
 	contains(t, lines, "Query Store window: last 7 days (from .env)")
 }
 
+// The ceiling follows the checkboxes: page density is one of the two options
+// off for cost, and ticking it is the moment the operator has to see what it
+// can cost on the databases selected.
+func TestOptionsShowsTheDurationCeilingOfTheFlagsTicked(t *testing.T) {
+	v := probedVerify()
+	v.Scripts = []collect.Script{
+		{Path: "10.system/010.properties.sql", Scope: collect.ScopeInstance, TimeoutSec: 60},
+		{Path: "70.schema/055.page-density.sql", Scope: collect.ScopeDatabase, TimeoutSec: 1800,
+			RequiresFlag: collect.FlagMeasurePageDensity},
+	}
+	lines := Render(State{Step: StepOptions, Verify: v, Flags: map[string]bool{}}, testWidth, 0)
+	contains(t, lines, "Duration, a ceiling and not an estimate:")
+	contains(t, lines, "12 databases; no costly collector on")
+	contains(t, lines, "all 1 units: at most 1m00s (60 s)")
+
+	lines = Render(State{Step: StepOptions, Verify: v,
+		Flags: map[string]bool{collect.FlagMeasurePageDensity: true}}, testWidth, 0)
+	contains(t, lines, "costly collectors on: 70.schema/055.page-density.sql;")
+	contains(t, lines, "at most 6h00m (21600 s) if every one of their 12 units")
+	contains(t, lines, "all 13 units: at most 6h01m (21660 s)")
+}
+
 func TestConnectionSaysWhenTheCertificateIsNotValidated(t *testing.T) {
 	s := State{Step: StepConnection, Server: `SQL01\PROD`,
 		Catalog: "master", User: "AUDIT_RO", Encrypt: true, TrustCert: true}

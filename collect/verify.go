@@ -63,6 +63,12 @@ type VerifyResult struct {
 	ConnErr       error
 	CandidatesErr error
 	SelectErr     error
+
+	// config is the configuration VerifyServer ran with. PlannedDuration needs
+	// it to unfold the plan the way Run will: QUERY_STORE_DB_INCLUDE narrows
+	// units, and SQL_QUERY_TIMEOUT_SEC prices a script with no @timeout. It is
+	// unexported because nothing a caller displays should come from it.
+	config *Config
 }
 
 // VerifyLocal gathers everything that can be known without a socket: the
@@ -124,6 +130,7 @@ func VerifyLocal(o Options) (VerifyResult, error) {
 // *sql.DB while this Conn is held would wait for a connection only this
 // function can give back.
 func VerifyServer(ctx context.Context, o Options, v *VerifyResult) error {
+	v.config = o.Config
 	db, err := Open(o.Config)
 	if err != nil {
 		v.OpenErr = err
@@ -213,9 +220,17 @@ func PlannedCollectors(v VerifyResult, profile string, flags map[string]bool) in
 	if !v.Probed {
 		return 0
 	}
+	return countCollectors(planFor(v, profile, flags))
+}
+
+// planFor is the plan of a verified instance under another profile or another
+// set of flags. PlannedCollectors counts it and PlannedDuration prices it; the
+// two must read one plan, or the wizard would announce N collectors and a
+// ceiling computed over a different N. The caller checks v.Probed.
+func planFor(v VerifyResult, profile string, flags map[string]bool) []plannedScript {
 	denied := DeniedCapabilities(ProfileChecks(v.Checks, v.Scripts, profile))
 	delete(denied, "connect")
-	return countCollectors(planScripts(v.Scripts, profile, denied, ParseVersion(v.Server.Version), flags))
+	return planScripts(v.Scripts, profile, denied, ParseVersion(v.Server.Version), flags)
 }
 
 // blockingWithDeadline is the fourth of the bounded read-only calls this
