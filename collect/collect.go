@@ -953,6 +953,10 @@ func ExportQueries(corpus fs.FS, root, dest string, force bool) error {
 type plannedScript struct {
 	Script Script
 	Skip   string
+	// Without lists the capabilities of @optional_permissions that were
+	// denied, for a script that will run. It is empty for a skipped script:
+	// a script that does not run is not short of anything.
+	Without []string
 }
 
 // skipReason applies the four gates that keep a script from running. None of
@@ -1063,7 +1067,36 @@ func planScripts(scripts []Script, profile string, denied map[string]bool, serve
 		if s.LintError == "" {
 			p.Skip, _ = skipReason(s, profile, denied, serverVersion, enabled)
 		}
+		// An optional capability is never a gate. It is noted only for a
+		// script that is going to run, so the manifest does not report a
+		// collector as reduced when it was skipped for another reason.
+		if s.LintError == "" && p.Skip == "" {
+			for _, c := range s.OptionalPermissions {
+				if denied[c] {
+					p.Without = append(p.Without, c)
+				}
+			}
+		}
 		out = append(out, p)
+	}
+	return out
+}
+
+// plannedReductions is the manifest's reduced_scripts, read from the plan for
+// the reason plannedDisclosures is: what the manifest says ran short and what
+// actually ran have to come from one decision.
+func plannedReductions(plan []plannedScript) []ReducedScript {
+	var out []ReducedScript
+	for _, p := range plan {
+		for _, c := range p.Without {
+			out = append(out, ReducedScript{
+				Script:     p.Script.Path,
+				Capability: c,
+				Reason: fmt.Sprintf("ran without permission to %s, which this query declares in "+
+					"@optional_permissions; the part that needs it is reported unreadable in "+
+					"the document's root", lowerFirst(capabilityLabel(c))),
+			})
+		}
 	}
 	return out
 }
@@ -1579,6 +1612,12 @@ func scriptNote(s Script, enabled map[string]bool) string {
 	// decide; the file name alone does not.
 	if s.Writer != "" {
 		notes = append(notes, KnownWriters[s.Writer].Description)
+	}
+	// The Permissions block below names capabilities by these keys, so a
+	// denied one can be matched to the queries that only lose part of their
+	// document to it, rather than all of it.
+	if len(s.OptionalPermissions) > 0 {
+		notes = append(notes, "runs without "+strings.Join(s.OptionalPermissions, ", ")+" if refused")
 	}
 	return strings.Join(notes, ", ")
 }
@@ -2233,6 +2272,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// it is an error the operator can act on before the first result arrives.
 	units, planSkipped, planErrors := planUnits(plan, folders, o.Config)
 	m.Skipped = append(m.Skipped, planSkipped...)
+	m.Reduced = append(m.Reduced, plannedReductions(plan)...)
 	m.Errors = append(m.Errors, planErrors...)
 	if len(planErrors) > 0 {
 		exit = 2

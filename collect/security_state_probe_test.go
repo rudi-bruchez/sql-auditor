@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -34,7 +35,9 @@ func TestTheSecurityStateProbeReadsTheEncryptionKeys(t *testing.T) {
 	}
 	declared := 0
 	for _, s := range scripts {
-		for _, p := range s.Permissions {
+		// Optional or required, a declaration is a claim that the file reads
+		// the view, and the grant script asks for the permission on it.
+		for _, p := range append(slices.Clone(s.Permissions), s.OptionalPermissions...) {
 			if p != "view_server_security_state" {
 				continue
 			}

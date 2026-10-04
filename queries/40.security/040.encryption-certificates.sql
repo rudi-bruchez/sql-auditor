@@ -1,6 +1,7 @@
 -- @scope:       instance
 -- @resultsets:  root:object, certificates:array, encrypted_databases:array, backup_encryptors:array
--- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER SECURITY STATE, MSDB READ
+-- @permissions: CONNECT, VIEW ANY DEFINITION
+-- @optional_permissions: VIEW SERVER SECURITY STATE, MSDB READ
 -- @timeout:     60
 --
 -- The certificates in master, whether their private key was ever backed up,
@@ -40,34 +41,37 @@
 -- private key went from a date back to NULL. So a date is evidence of a
 -- procedure, and NULL is a question to ask rather than a proof of loss.
 --
--- WHAT A LOGIN BUILT FROM THE GRANT SCRIPT SEES, MEASURED. sys.certificates in
--- master is filtered by metadata visibility, and VIEW ANY DEFINITION makes
--- every row visible, pvt_key_last_backup_date included. The database keys are
--- another matter. From SQL Server 2022, sys.dm_database_encryption_keys asks
--- for VIEW SERVER SECURITY STATE, which VIEW SERVER PERFORMANCE STATE does not
--- include, and a login holding only the latter is refused the view with Msg
--- 300, "VIEW SERVER SECURITY STATE permission was denied on object 'server'".
--- That is why this file declares VIEW SERVER SECURITY STATE rather than VIEW
--- SERVER STATE: check probes it with a read of the same view, and the grant
--- script grants it by that name from 2022 and as VIEW SERVER STATE before,
--- where the narrower permission does not exist. A login built from the script
--- reads the view; measured on SQL Server 2025, with exactly the server-level
--- grants the script wrote, encryption_keys.readable came back true. A login
--- the probe finds without it does not run this file at all, and the manifest
--- says why. VIEW SERVER STATE alone, or VIEW SERVER SECURITY STATE alone,
--- reads the view on the same instance.
+-- WHAT EACH PERMISSION BUYS, AND WHAT IS LOST WITHOUT IT. The certificate
+-- list is the part this file exists for, and it is the only part that is
+-- required: sys.certificates in master is filtered by metadata visibility,
+-- and VIEW ANY DEFINITION makes every row visible, pvt_key_last_backup_date
+-- included. The other two reads are declared optional. check probes them and
+-- the grant script asks for them, but a login refused either still runs the
+-- file, the refused read leaves its array empty, its root says so, and the
+-- manifest lists the file under reduced_scripts.
 --
--- The read stays guarded. A refusal the probe did not see (a DENY on the view
--- itself, a corpus run by an older binary whose preflight does not know this
--- permission) leaves encrypted_databases empty and says so in
--- encryption_keys.error_number and _message, rather than failing the whole
--- file and taking the certificate list with it. Measured on SQL Server 2025
--- with a login built from the grant script of the previous release, which
--- granted VIEW SERVER PERFORMANCE STATE only: every certificate came back with
--- its backup date, the backup history was read, and the key read failed with
--- Msg 300. The databases encrypted with TDE are still named by
--- 20.databases/010.all-databases from sys.databases, which needs no server
--- state; what is lost is which certificate protects each one.
+--   VIEW SERVER SECURITY STATE, for sys.dm_database_encryption_keys. From SQL
+--     Server 2022 the view asks for it, and VIEW SERVER PERFORMANCE STATE does
+--     not include it: a login holding only the latter is refused with Msg 300,
+--     "VIEW SERVER SECURITY STATE permission was denied on object 'server'".
+--     Before 2022 VIEW SERVER STATE covers the view, and the grant script asks
+--     for that. Without it encrypted_databases is empty and
+--     encryption_keys.readable is false with the error, so which certificate
+--     protects each database encrypted with TDE is lost. The databases
+--     themselves are still named by 20.databases/010.all-databases from
+--     sys.databases, which needs no server state. Measured on SQL Server 2025
+--     with a login holding VIEW ANY DEFINITION and VIEW SERVER PERFORMANCE
+--     STATE only: every certificate came back with its backup date and the
+--     key read failed with Msg 300. With the permission, the keys read.
+--   MSDB READ, for msdb.dbo.backupset. Without it backup_encryptors is empty
+--     and backup_history.error_number says why, so a backup protected by a
+--     certificate that has since left master is not seen.
+--
+-- Both reads stay guarded whatever the probes said, for refusals the probes
+-- cannot see: a DENY on the view itself, or a corpus run by an older binary
+-- whose preflight does not know these permissions. When VIEW SERVER SECURITY
+-- STATE was declared required, a login without it lost the certificate list
+-- with the keys, though the list needs nothing the login lacked.
 --
 -- TEMPDB IS LEFT OUT OF encrypted_databases. As soon as one database on the
 -- instance is encrypted, the engine encrypts tempdb too, and tempdb is
@@ -141,9 +145,9 @@ DECLARE @bak TABLE (
     [last_backup]          datetime      NULL);
 
 /* Deferred and caught, because the refusal is a runtime error on 2022 and
-   later for a login that holds VIEW SERVER PERFORMANCE STATE only, which the
-   preflight normally catches first: see the header. The certificate list
-   below does not depend on it. */
+   later for a login that holds VIEW SERVER PERFORMANCE STATE only, and the
+   file runs for that login: VIEW SERVER SECURITY STATE is optional, see the
+   header. The certificate list below does not depend on it. */
 BEGIN TRY
     INSERT INTO @dek ([database_id], [encryption_state], [key_algorithm],
                       [key_length], [encryptor_thumbprint], [encryptor_type],
@@ -163,10 +167,18 @@ BEGIN CATCH
 END CATCH
 
 /* Backup encryption is 2014 and later; the columns are looked for rather than
-   a version compared, so the read follows what msdb actually holds. */
-IF COL_LENGTH(N'msdb.dbo.backupset', N'encryptor_thumbprint') IS NOT NULL
-BEGIN
-    BEGIN TRY
+   a version compared, so the read follows what msdb actually holds. But
+   COL_LENGTH is NULL as well for a table the login cannot see, and MSDB READ
+   is optional here, so a missing column counts as an older version only when
+   the table itself is visible. Otherwise the read is attempted, and the
+   refusal lands in backup_history.error_number rather than passing for a
+   version that predates backup encryption. All of it sits inside TRY. */
+BEGIN TRY
+    IF COL_LENGTH(N'msdb.dbo.backupset', N'encryptor_thumbprint') IS NULL
+       AND OBJECT_ID(N'msdb.dbo.backupset') IS NOT NULL
+        SET @bak_source = 'not_on_this_version';
+    ELSE
+    BEGIN
         INSERT INTO @bak ([encryptor_thumbprint], [encryptor_type],
                           [key_algorithm], [backups], [databases],
                           [first_backup], [last_backup])
@@ -180,13 +192,11 @@ BEGIN
               GROUP BY b.encryptor_thumbprint
               OPTION (RECOMPILE, MAXDOP 1)';
         SET @bak_source = 'backupset';
-    END TRY
-    BEGIN CATCH
-        SELECT @bak_err = ERROR_NUMBER(), @bak_msg = ERROR_MESSAGE();
-    END CATCH
-END
-ELSE
-    SET @bak_source = 'not_on_this_version';
+    END
+END TRY
+BEGIN CATCH
+    SELECT @bak_err = ERROR_NUMBER(), @bak_msg = ERROR_MESSAGE();
+END CATCH
 
 SELECT
     CONVERT(varchar(23), SYSDATETIME(), 126)                    AS [collected_at],

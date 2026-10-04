@@ -1,6 +1,7 @@
 -- @scope:       database
 -- @resultsets:  root:object, backups:object, files:array, largest_objects:array, unused_indexes:array, missing_indexes:array
--- @permissions: CONNECT, VIEW SERVER STATE, VIEW ANY DEFINITION, MSDB READ
+-- @permissions: CONNECT, VIEW SERVER STATE, VIEW ANY DEFINITION
+-- @optional_permissions: MSDB READ
 -- @timeout:     300
 -- @profiles:    space
 --
@@ -21,6 +22,14 @@
 -- emitting SELECTs at the bottom run unconditionally. The root object carries
 -- one collected flag and one error number per area, because an empty array and
 -- a blocked read are different facts and the archive must not merge them.
+--
+-- MSDB READ IS OPTIONAL. Only the backups object reads msdb, for the last
+-- full, differential and log backup of the database, and it is one of the
+-- guarded areas. A login refused msdb keeps the properties, the files and the
+-- three index listings; the backup dates are NULL, collected.backups is false
+-- with the error, and the manifest lists the file under reduced_scripts.
+-- 60.backup/010.history, which requires the permission, is skipped whole in
+-- that case, so the dates are not to be read as "never backed up".
 --
 -- The root is emitted from VARIABLES and not from a buffered row. A root
 -- result set that returns no rows is skipped by the encoder — that is correct

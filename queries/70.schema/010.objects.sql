@@ -1,6 +1,7 @@
 -- @scope:       database
 -- @resultsets:  root:object, object_counts:array, tables:array, untrusted_constraints:array, deprecated_types:array
--- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
+-- @permissions: CONNECT, VIEW ANY DEFINITION
+-- @optional_permissions: VIEW SERVER STATE
 -- @timeout:     120
 -- @profiles:    space
 --
@@ -14,6 +15,13 @@
 -- theme. And on the audit that prompted it, the biggest object on the whole
 -- instance was a 914-million-row table with no clustered index, which nothing
 -- in the corpus could see.
+--
+-- VIEW SERVER STATE IS OPTIONAL. Only the tables array needs it, for the
+-- row and page counts of sys.dm_db_partition_stats, and that area is read
+-- inside its own TRY like every other. A login refused it still collects the
+-- object counts, the untrusted constraints and the deprecated types; the
+-- tables array is empty and the root says so in collected.tables and
+-- errors.tables. The manifest lists the file under reduced_scripts.
 --
 -- EVERY READ HERE NAMES USER OBJECTS, SO EVERY READ IS BLOCKABLE. This is the
 -- most exposed collector in the corpus on that count: sys.tables, sys.columns,

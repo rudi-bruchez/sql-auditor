@@ -1,6 +1,7 @@
 -- @scope:       database
 -- @resultsets:  root:object, heaps:array
--- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
+-- @permissions: CONNECT, VIEW ANY DEFINITION
+-- @optional_permissions: VIEW SERVER STATE
 -- @timeout:     300
 -- @profiles:    space
 --
@@ -15,6 +16,15 @@
 -- and it is the second that says whether rebuilding a heap today would fix
 -- anything. An audit that has only the first has to write "redirections
 -- followed" everywhere and cannot answer "is it worth acting".
+--
+-- VIEW SERVER STATE IS OPTIONAL. The physical reads need it
+-- (sys.dm_db_index_physical_stats, sys.dm_db_partition_stats, and the replica
+-- state that decides whether they may run), and all of them sit inside TRY.
+-- A login refused it still gets the counts of the root, read from the catalog
+-- and the allocation units: how many heaps, how many carry nonclustered
+-- indexes, and their total size. The heaps array is empty, collected.heaps is
+-- false with the error, and the manifest lists the file under
+-- reduced_scripts.
 --
 -- WHY A SEPARATE SCAN. forwarded_record_count is NULL in the LIMITED mode that
 -- 20.databases/025.fragmentation uses: the count requires SAMPLED or

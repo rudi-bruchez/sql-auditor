@@ -31,6 +31,16 @@ type Script struct {
 	TimeoutSec      int
 	Results         []ResultSpec
 	Permissions     []string
+	// OptionalPermissions are capabilities the script USES and does not
+	// REQUIRE, in the same vocabulary as Permissions. check probes them and
+	// the grant script asks for them like any other, but a denied one never
+	// skips the script: it runs, the part that needs the capability is read
+	// inside TRY and reports the refusal in the script's own root, and the
+	// manifest lists the script under reduced_scripts. The directive exists
+	// because @permissions is all or nothing: 40.security/040 declared the
+	// security half of the server state for one guarded read, and a login
+	// without it lost the certificate list it could read perfectly well.
+	OptionalPermissions []string
 	// MinVersion is the dotted ProductVersion prefix below which this script
 	// must not run. nil means ungated.
 	MinVersion []int
@@ -292,7 +302,7 @@ func filepathRel(root, p string) (string, error) {
 // be wrong when a tenth directive is added is the one whose job is to say
 // what the nine are.
 var knownDirectives = []string{
-	"scope", "timeout", "permissions", "resultsets", "min_version",
+	"scope", "timeout", "permissions", "optional_permissions", "resultsets", "min_version",
 	"max_version", "requires_flag", "writer", "widened", "correlated", "discloses",
 	"profiles",
 }
@@ -349,19 +359,9 @@ func parseScript(rel, sql string) Script {
 			}
 			s.TimeoutSec = n
 		case "permissions":
-			for _, p := range strings.Split(val, ",") {
-				p = strings.TrimSpace(p)
-				if p == "" {
-					continue
-				}
-				key, ok := NormalisePermission(p)
-				if !ok {
-					setLint(fmt.Sprintf("@permissions: unknown permission %q; "+
-						"expected one of VIEW SERVER STATE, VIEW SERVER SECURITY STATE, VIEW ANY DEFINITION, MSDB READ, AGENT JOBS, AGENT JOB STEPS, AGENT ALERTS, LOG SHIPPING, MAINTENANCE PLANS, ERROR LOG, CONNECT", p))
-					continue
-				}
-				s.Permissions = append(s.Permissions, key)
-			}
+			s.Permissions = append(s.Permissions, parsePermissionList(key, val, setLint)...)
+		case "optional_permissions":
+			s.OptionalPermissions = append(s.OptionalPermissions, parsePermissionList(key, val, setLint)...)
 		case "resultsets":
 			specs, err := parseResultSets(val)
 			if err != nil {
@@ -488,6 +488,26 @@ func parseScript(rel, sql string) Script {
 	if spec, ok := KnownWriters[s.Writer]; ok && s.Scope != spec.Scope {
 		setLint(fmt.Sprintf("@writer: %q needs @scope: %s; %s", s.Writer,
 			scopeWord(spec.Scope), spec.ScopeReason))
+	}
+	// An optional capability is checked against the required ones only once
+	// both lists are complete, since either directive may come first.
+	//
+	// CONNECT cannot be optional: without it nothing runs at all, so the
+	// promise "runs without it" would be false. A capability in both lists is
+	// a contradiction the plan would resolve silently in favour of skipping,
+	// which is exactly the outcome the author of the optional line did not
+	// want, so it is refused rather than guessed at.
+	for _, p := range s.OptionalPermissions {
+		if p == "connect" {
+			setLint("@optional_permissions: CONNECT cannot be optional; nothing runs without it")
+			break
+		}
+		if slices.Contains(s.Permissions, p) {
+			setLint(fmt.Sprintf("@optional_permissions: %s is also in @permissions; a capability "+
+				"is either required, and its denial skips the file, or optional, and the file "+
+				"runs without it", permissionSpelling(p)))
+			break
+		}
 	}
 	// @widened is consulted only where planUnits pairs a script with database
 	// folders, so on an instance-scoped file it parses clean and means nothing.
@@ -685,6 +705,41 @@ var permissionKeys = map[string]string{
 func NormalisePermission(s string) (string, bool) {
 	k, ok := permissionKeys[strings.ToLower(strings.Join(strings.Fields(s), " "))]
 	return k, ok
+}
+
+// permissionSpelling is the directive spelling of a capability key, upper
+// case as the corpus writes it, for lint messages. A key the table does not
+// know falls back to itself.
+func permissionSpelling(key string) string {
+	for written, k := range permissionKeys {
+		if k == key {
+			return strings.ToUpper(written)
+		}
+	}
+	return key
+}
+
+// parsePermissionList reads the comma-separated value of @permissions or
+// @optional_permissions. The two directives share one closed vocabulary, so
+// they share the parser and the message: a misspelt optional capability would
+// otherwise be dropped in silence, and the file would run without asking for
+// the right at all.
+func parsePermissionList(directive, val string, setLint func(string)) []string {
+	var out []string
+	for _, p := range strings.Split(val, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		key, ok := NormalisePermission(p)
+		if !ok {
+			setLint(fmt.Sprintf("@%s: unknown permission %q; "+
+				"expected one of VIEW SERVER STATE, VIEW SERVER SECURITY STATE, VIEW ANY DEFINITION, MSDB READ, AGENT JOBS, AGENT JOB STEPS, AGENT ALERTS, LOG SHIPPING, MAINTENANCE PLANS, ERROR LOG, CONNECT", directive, p))
+			continue
+		}
+		out = append(out, key)
+	}
+	return out
 }
 
 // The three classes classifySQL assigns to every byte of a script. clsCode is
