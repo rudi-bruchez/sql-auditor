@@ -636,6 +636,15 @@ var KnownDisclosures = map[string][]string{
 		"code written on this server and can name tables, logins and hosts and",
 		"embed the literals its author used",
 	},
+	// 046.local-sessions.sql. The address is always a loopback one or
+	// "<local>", by the file's own WHERE, so it is the program name that
+	// tells the reader something.
+	"local_sessions": {
+		"the program names of the sessions opened from the server itself, over",
+		"Shared Memory or a loopback address, grouped with their transport and a",
+		"count of sessions each; a program name is whatever the client chose to",
+		"send, and it names the tools and applications running on the host",
+	},
 	"connection_pools": {
 		"the host names, program names and logins of the applications connected",
 		"during collection, grouped with a count of connections each; they name",
@@ -667,6 +676,7 @@ const (
 // about the estate rather than the data held in it".
 var disclosureFamilies = map[string]DisclosureFamily{
 	"connection_pools":      DisclosesNames,
+	"local_sessions":        DisclosesNames,
 	"query_text":            DisclosesApplicationText,
 	"job_messages":          DisclosesApplicationText,
 	"replication_messages":  DisclosesApplicationText,

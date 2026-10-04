@@ -1051,3 +1051,41 @@ func TestClosingParagraphFollowsWhatWasDisclosed(t *testing.T) {
 			m.Human())
 	}
 }
+
+// 10.system/046.local-sessions.sql projects the program name of every session
+// opened from the server itself, which the client chose and which names the
+// tools running on the host. It ran on the default path with no @discloses
+// until 4 October 2026, so MANIFEST.txt said nothing of it. It is a name, not
+// application text, and the closing paragraph must stay on metadata for it.
+func TestLocalSessionsAreDeclaredAndDisclosed(t *testing.T) {
+	scripts, err := Discover(os.DirFS(filepath.Join("..", "queries")), ".")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	found := false
+	for _, s := range scripts {
+		if s.Path != "10.system/046.local-sessions.sql" {
+			continue
+		}
+		found = true
+		if s.RequiresFlag != "" {
+			t.Errorf("%s is gated by %q; this test is about the default path", s.Path, s.RequiresFlag)
+		}
+		if !slices.Contains(s.Discloses, "local_sessions") {
+			t.Errorf("%s projects client-supplied program names and must declare "+
+				"@discloses: local_sessions, got %v", s.Path, s.Discloses)
+		}
+	}
+	if !found {
+		t.Fatal("10.system/046.local-sessions.sql is not in the corpus")
+	}
+	if disclosureFamilies["local_sessions"] != DisclosesNames {
+		t.Error("local_sessions is a program name and belongs with the names, not application text")
+	}
+	m := NewManifest("sql-auditor", "test", "abc")
+	m.Sources = map[string]SourceInfo{"queries": {From: "embedded", SHA256: "abc"}}
+	m.Disclosed = []string{"local_sessions"}
+	if h := flatten(m.Human()); !strings.Contains(h, "program names of the sessions opened from the server itself") {
+		t.Errorf("MANIFEST.txt should disclose the local session program names:\n%s", m.Human())
+	}
+}
