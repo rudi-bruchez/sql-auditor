@@ -447,3 +447,44 @@ func TestUntrustedConstraintListIsOrderedBeforeItIsCapped(t *testing.T) {
 		}
 	}
 }
+
+// The agent profile section of 042 names five parameters, and the names are
+// matched as MSagent_parameters stores them: with the leading dash, measured
+// on SQL Server 2025. A pivot on "SkipErrors" without it, or on a misspelling,
+// compiles, runs, and reports NULL on every distributor, which reads as "no
+// agent skips errors". Nothing at execution would say otherwise, so this test
+// does. It also holds the line the header draws on the job step: the command
+// is reduced to two tokens inside the read and never selected, because a
+// replication agent's command line is where -PublisherPassword is written.
+func TestReplicationAgentProfilesNameTheirParameters(t *testing.T) {
+	b, err := sqlauditor.Queries.ReadFile("queries/90.availability/042.replication-distribution.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := collect.StripSQLComments(string(b))
+	for param, column := range map[string]string{
+		"-SkipErrors":          "skip_errors",
+		"-MaxCmdsInTran":       "max_cmds_in_tran",
+		"-SubscriptionStreams": "subscription_streams",
+		"-ReadBatchSize":       "read_batch_size",
+		"-CommitBatchSize":     "commit_batch_size",
+	} {
+		pivot := regexp.MustCompile(`WHEN N'` + regexp.QuoteMeta(param) + `'\s+THEN x\.\[value\] END\), N''\)\s+AS \[` +
+			column + `\]|WHEN N'` + regexp.QuoteMeta(param) + `'\s+THEN x\.\[value\] END\)\s+AS \[` + column + `\]`)
+		if !pivot.MatchString(code) {
+			t.Errorf("042 does not pivot %s into [%s] in agent_profiles", param, column)
+		}
+	}
+	for _, token := range []string{"''-SkipErrors''", "''-MaxCmdsInTran''"} {
+		if !strings.Contains(code, token) {
+			t.Errorf("042 no longer looks for %s in the agent job steps", token)
+		}
+	}
+	steps := regexp.MustCompile(`(?s)SELECT s\.job_id, s\.step_id,(.*?)FROM msdb\.dbo\.sysjobsteps`).FindStringSubmatch(code)
+	if steps == nil {
+		t.Fatal("042 no longer reads msdb.dbo.sysjobsteps in the shape this test knows")
+	}
+	if strings.Contains(strings.ToLower(steps[1]), "command") || strings.Contains(steps[1], "c.cmd") {
+		t.Errorf("042 selects the job step command itself, not the two tokens:\n%s", steps[1])
+	}
+}

@@ -2,7 +2,8 @@
 
 Status: implemented in slice 1, on 4 September 2026, with the departures from
 this document recorded in "Where the implementation departed from this spec"
-at the end. Written 3 September 2026, rewritten the same day after a
+at the end. The agent profiles, left out of slice 1, were added to `042` on
+4 October 2026. Written 3 September 2026, rewritten the same day after a
 five-reader external review.
 
 The first draft's central mechanism was wrong, and every reader found it. That
@@ -730,14 +731,30 @@ seems sufficient, but it is untested against a real engagement.
 ## Where the implementation departed from this spec
 
 Slice 1 landed on 4 September 2026. Four things in the document above were not
-built as written, and each was a decision rather than an omission.
+built as written, and each was a decision rather than an omission. One of
+them, the agent profiles, has since been built, and how it departs from the
+Profiles section is recorded with it below.
 
-**`MSsubscriptions` and the agent profiles are not collected.** The topology
-section asks for `MSsubscriptions`, and a **Profiles** section asks for
-`msdb.dbo.MSagent_profiles` and `MSagent_parameters` — the batch and
-polling parameters that, as that section says, explain more latency than any
-single failure does. Both are still worth having and neither is in `042`. They
-are the first thing to add to it, not a decision to leave them out for good.
+**`MSsubscriptions` is not collected.** The topology section asks for it, for
+the publication-to-subscriber mapping. It is still worth having and is not in
+`042`; it is the next thing to add to it, not a decision to leave it out for
+good.
+
+**The agent profiles were added on 4 October 2026, and read more than the
+Profiles section asked for.** That section names `msdb.dbo.MSagent_profiles`
+and `MSagent_parameters`. `042` reads both, plus `MSagentparameterlist` for the
+built-in default of each parameter, plus the agent job steps in
+`msdb.dbo.sysjobsteps`, because a parameter given on the agent's command line
+overrides the profile (Learn, "Replication Agent Profiles") and because
+`sp_add_agent_parameter` was measured on SQL Server 2025 refusing
+`-MaxCmdsInTran` in a Log Reader profile, Msg 21806: on a current build that
+parameter exists only on the command line. The step command is never
+projected, only the tokens after `-SkipErrors` and `-MaxCmdsInTran`, since the
+same line carries `-PublisherPassword` under SQL authentication. Each of the
+three msdb reads has its own handler and none enters `collected`, on the terms
+of the configuration read. The result sets are `agent_profiles`,
+`agent_profile_parameters`, and five columns on `agents`; the header of `042`
+has the measurements.
 
 **Merge is in the agent inventory and not in the latency array.**
 `MSmerge_agents` has the same shape as the other three agent tables and joins

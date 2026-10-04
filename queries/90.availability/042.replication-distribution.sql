@@ -1,5 +1,5 @@
 -- @scope:       database
--- @resultsets:  root:object, configuration:array, publications:array, articles:array, agents:array, latency:array, repl_errors:array
+-- @resultsets:  root:object, configuration:array, publications:array, articles:array, agents:array, agent_profiles:array, agent_profile_parameters:array, latency:array, repl_errors:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION
 -- @timeout:     120
 -- @widened:     replication
@@ -52,6 +52,47 @@
 -- Only the newest row's comment is ever emitted, so 512 characters is the
 -- widest anything downstream can see either way.
 --
+-- THE AGENT PROFILES ARE READ FROM msdb AND THE AGENT JOB STEPS, BOTH. A
+-- profile is a named set of agent parameters in msdb.dbo.MSagent_profiles and
+-- MSagent_parameters, and each agent row here carries the profile_id it was
+-- assigned. But the job step that starts the agent may repeat a parameter on
+-- its command line, and the command line wins. Two measurements on SQL Server
+-- 2025 decide that the step has to be read too:
+--
+--   - sp_add_agent_parameter refuses -MaxCmdsInTran for a Log Reader profile
+--     (Msg 21806, validated against msdb.dbo.MSagentparameterlist, which does
+--     not list it), so on a current build that parameter can only ever be set
+--     on the command line. A profile read alone would never see it.
+--   - -SkipErrors is the parameter an audit must always report, because an
+--     agent that skips errors leaves the subscriber silently different from
+--     the publisher. It can be set in a profile (the system profile "Continue
+--     on data consistency errors." ships with 2601:2627:20598) or on the step.
+--
+-- THE STEP COMMAND IS NEVER PROJECTED. A replication agent's command line is
+-- where -PublisherPassword and -SubscriberPassword are written when an agent
+-- uses SQL authentication. Only the token after -SkipErrors and after
+-- -MaxCmdsInTran is extracted, capped at 100 characters: a list of error
+-- numbers and an integer. Everything else on the line stays on the server.
+--
+-- A NEW PROFILE IS A COPY, SO "NON-DEFAULT" IS MEASURED AGAINST THE ENGINE'S
+-- OWN LIST. sp_add_agent_profile copies every parameter of the default
+-- profile of its agent type into the new one, measured. A custom profile
+-- therefore lists a dozen parameters of which perhaps one was changed.
+-- agent_profile_parameters keeps only those whose value differs from
+-- default_value in msdb.dbo.MSagentparameterlist, or that the list does not
+-- know. The shipped default profiles themselves differ from that list in
+-- places (-HistoryVerboseLevel 1 in the Distribution default profile against
+-- 2 in the list, measured), so a row here means "this profile sets something
+-- other than the agent's built-in default", not "somebody changed this".
+-- Where the list cannot be read, every parameter of every profile in use is
+-- emitted with default_value NULL, which is wider and never silently thinner.
+--
+-- msdb grants nothing on these tables to public, measured: no row in
+-- msdb.sys.database_permissions names them. A login outside sysadmin and
+-- msdb's own roles is refused, each of the three msdb reads has its own
+-- handler, and the refusal is in errors.* without touching collected, on the
+-- same terms as the configuration read above.
+--
 -- SQL Server 2012 is the floor.
 
 SET NOCOUNT ON;
@@ -63,6 +104,7 @@ DECLARE @window_days int = 7;
 DECLARE @applies bit = 0,
         @err_cfg int = 0, @err_topo int = 0, @err_agents int = 0,
         @err_hist int = 0, @err_errs int = 0, @err_size int = 0,
+        @err_prof int = 0, @err_pdef int = 0, @err_steps int = 0,
         @msg nvarchar(2048) = N'';
 
 SELECT @applies = CONVERT(bit, d.is_distributor)
@@ -85,7 +127,21 @@ DECLARE @arts TABLE ([publisher_id] smallint, [publisher_db] sysname,
 DECLARE @agents TABLE ([kind] varchar(12), [id] int, [name] nvarchar(100),
                        [publisher_db] sysname NULL, [publication] sysname NULL,
                        [subscriber_db] sysname NULL, [job_id] binary(16) NULL,
-                       [local_job] bit NULL);
+                       [local_job] bit NULL, [profile_id] int NULL,
+                       [subscriptionstreams] tinyint NULL);
+
+DECLARE @profiles TABLE ([profile_id] int, [profile_name] sysname,
+                         [agent_type] int, [type] int, [def_profile] bit);
+
+DECLARE @params TABLE ([profile_id] int, [parameter_name] sysname,
+                       [value] nvarchar(255) NULL);
+
+DECLARE @param_defaults TABLE ([agent_type] int, [parameter_name] sysname,
+                               [default_value] nvarchar(255) NULL);
+
+DECLARE @steps TABLE ([job_id] uniqueidentifier, [step_id] int,
+                      [skip_errors] nvarchar(100) NULL,
+                      [max_cmds_in_tran] nvarchar(100) NULL);
 
 DECLARE @hist TABLE ([leg] varchar(40), [agent_id] int, [runstatus] int,
                      [last_time] datetime NULL, [last_duration] int NULL,
@@ -133,39 +189,103 @@ BEGIN
     END CATCH
     BEGIN TRY
         INSERT INTO @agents ([kind], [id], [name], [publisher_db], [publication],
-                             [subscriber_db], [job_id], [local_job])
+                             [subscriber_db], [job_id], [local_job],
+                             [profile_id], [subscriptionstreams])
         EXEC sys.sp_executesql N'
             SELECT ''distribution'', a.id, a.name, a.publisher_db, a.publication,
-                   a.subscriber_db, a.job_id, a.local_job
+                   a.subscriber_db, a.job_id, a.local_job,
+                   a.profile_id, a.subscriptionstreams
             FROM dbo.MSdistribution_agents AS a
             OPTION (RECOMPILE, MAXDOP 1)';
 
         INSERT INTO @agents ([kind], [id], [name], [publisher_db], [publication],
-                             [subscriber_db], [job_id], [local_job])
+                             [subscriber_db], [job_id], [local_job], [profile_id])
         EXEC sys.sp_executesql N'
             SELECT ''logreader'', a.id, a.name, a.publisher_db, a.publication,
-                   NULL, a.job_id, a.local_job
+                   NULL, a.job_id, a.local_job, a.profile_id
             FROM dbo.MSlogreader_agents AS a
             OPTION (RECOMPILE, MAXDOP 1)';
 
         INSERT INTO @agents ([kind], [id], [name], [publisher_db], [publication],
-                             [subscriber_db], [job_id], [local_job])
+                             [subscriber_db], [job_id], [local_job], [profile_id])
         EXEC sys.sp_executesql N'
             SELECT ''snapshot'', a.id, a.name, a.publisher_db, a.publication,
-                   NULL, a.job_id, a.local_job
+                   NULL, a.job_id, a.local_job, a.profile_id
             FROM dbo.MSsnapshot_agents AS a
             OPTION (RECOMPILE, MAXDOP 1)';
 
         INSERT INTO @agents ([kind], [id], [name], [publisher_db], [publication],
-                             [subscriber_db], [job_id], [local_job])
+                             [subscriber_db], [job_id], [local_job], [profile_id])
         EXEC sys.sp_executesql N'
             SELECT ''merge'', a.id, a.name, a.publisher_db, a.publication,
-                   a.subscriber_db, a.job_id, a.local_job
+                   a.subscriber_db, a.job_id, a.local_job, a.profile_id
             FROM dbo.MSmerge_agents AS a
             OPTION (RECOMPILE, MAXDOP 1)';
     END TRY
     BEGIN CATCH
         SELECT @err_agents = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+    END CATCH
+
+    /* Every profile and every parameter, not only those in use: the msdb read
+       cannot see @agents, and the whole of both tables is a few dozen rows on
+       any instance (16 profiles and their parameters on a fresh 2025
+       distributor). The filter to the profiles in use is applied on output. */
+    BEGIN TRY
+        INSERT INTO @profiles
+        EXEC sys.sp_executesql N'
+            SELECT p.profile_id, p.profile_name, p.agent_type, p.[type], p.def_profile
+            FROM msdb.dbo.MSagent_profiles AS p
+            OPTION (RECOMPILE, MAXDOP 1)';
+
+        INSERT INTO @params
+        EXEC sys.sp_executesql N'
+            SELECT x.profile_id, x.parameter_name, LEFT(x.value, 255)
+            FROM msdb.dbo.MSagent_parameters AS x
+            OPTION (RECOMPILE, MAXDOP 1)';
+    END TRY
+    BEGIN CATCH
+        SELECT @err_prof = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+    END CATCH
+
+    /* Its own handler, so that a build or a login without the list still
+       gets the profiles: the parameters are then emitted unfiltered. */
+    BEGIN TRY
+        INSERT INTO @param_defaults
+        EXEC sys.sp_executesql N'
+            SELECT l.agent_type, l.parameter_name, LEFT(l.default_value, 255)
+            FROM msdb.dbo.MSagentparameterlist AS l
+            OPTION (RECOMPILE, MAXDOP 1)';
+    END TRY
+    BEGIN CATCH
+        SELECT @err_pdef = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+    END CATCH
+
+    /* The agent steps of every replication job on this server, reduced to the
+       two tokens. The command itself never leaves this statement; see the
+       header. The comparison is made case-insensitive explicitly, because the
+       agents accept the parameter in any case and msdb may have been installed
+       under a case-sensitive collation. A pull subscription's Distribution
+       Agent runs at the subscriber and has no step here: its row in agents
+       says job_step_found 0, which is not the same as "no -SkipErrors". */
+    BEGIN TRY
+        INSERT INTO @steps
+        EXEC sys.sp_executesql N'
+            SELECT s.job_id, s.step_id,
+                   CASE WHEN se.p > 0 THEN LEFT(LEFT(se.rest, CHARINDEX(N'' '', se.rest + N'' '') - 1), 100) END,
+                   CASE WHEN mc.p > 0 THEN LEFT(LEFT(mc.rest, CHARINDEX(N'' '', mc.rest + N'' '') - 1), 100) END
+            FROM msdb.dbo.sysjobsteps AS s
+            CROSS APPLY (SELECT CONVERT(nvarchar(4000), s.command) COLLATE Latin1_General_CI_AS AS cmd) AS c
+            CROSS APPLY (SELECT CHARINDEX(N''-SkipErrors'', c.cmd) AS p) AS se0
+            CROSS APPLY (SELECT se0.p, CASE WHEN se0.p > 0
+                                THEN LTRIM(SUBSTRING(c.cmd, se0.p + 11, 4000)) END AS rest) AS se
+            CROSS APPLY (SELECT CHARINDEX(N''-MaxCmdsInTran'', c.cmd) AS p) AS mc0
+            CROSS APPLY (SELECT mc0.p, CASE WHEN mc0.p > 0
+                                THEN LTRIM(SUBSTRING(c.cmd, mc0.p + 14, 4000)) END AS rest) AS mc
+            WHERE s.subsystem IN (N''Distribution'', N''LogReader'', N''Snapshot'', N''Merge'')
+            OPTION (RECOMPILE, MAXDOP 1)';
+    END TRY
+    BEGIN CATCH
+        SELECT @err_steps = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
     END CATCH
     /* KNOWN COST, LEFT AS IT IS ON PURPOSE. Each branch of the UNION ALL below
        computes two window functions over the same partition with different
@@ -261,6 +381,31 @@ BEGIN
         SELECT @err_size = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
     END CATCH
 END
+
+/* One row per agent with what its profile and its job step say, resolved
+   once here so that the agents array and the root count cannot disagree.
+   The step wins where it sets a value, as it does for the agent. A token that
+   starts with "-" is the next parameter, meaning the step names -SkipErrors
+   with no value, and is read as no value. An empty -SkipErrors is the shipped
+   default in the Distribution default profile, measured, and means none. */
+DECLARE @agent_eff TABLE ([kind] varchar(12), [id] int, [job_step_found] int,
+                          [job_skip_errors] nvarchar(100) NULL,
+                          [job_max_cmds_in_tran] nvarchar(100) NULL,
+                          [profile_skip_errors] nvarchar(255) NULL);
+
+INSERT INTO @agent_eff
+SELECT a.[kind], a.[id],
+       CASE WHEN @err_steps <> 0 THEN NULL WHEN st.[n] > 0 THEN 1 ELSE 0 END,
+       NULLIF(CASE WHEN LEFT(st.[skip_errors], 1) = N'-' THEN N'' ELSE st.[skip_errors] END, N''),
+       NULLIF(CASE WHEN LEFT(st.[max_cmds_in_tran], 1) = N'-' THEN N'' ELSE st.[max_cmds_in_tran] END, N''),
+       (SELECT NULLIF(x.[value], N'') FROM @params AS x
+        WHERE x.[profile_id] = a.[profile_id] AND x.[parameter_name] = N'-SkipErrors')
+FROM @agents AS a
+OUTER APPLY (SELECT COUNT(*) AS [n], MAX(s.[skip_errors]) AS [skip_errors],
+                    MAX(s.[max_cmds_in_tran]) AS [max_cmds_in_tran]
+             FROM @steps AS s
+             WHERE s.[job_id] = CONVERT(uniqueidentifier, a.[job_id])) AS st
+OPTION (RECOMPILE, MAXDOP 1);
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)     AS [collected_at],
        CONVERT(int, @applies)                       AS [applies],
        /* collected, on the same terms as 041, 043 and 044: every read this
@@ -283,10 +428,27 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)     AS [collected_at],
        @err_cfg    AS [errors.configuration], @err_topo  AS [errors.topology],
        @err_agents AS [errors.agents],        @err_hist  AS [errors.history],
        @err_errs   AS [errors.repl_errors],   @err_size  AS [errors.size],
+       @err_prof   AS [errors.profiles],      @err_pdef  AS [errors.parameter_defaults],
+       @err_steps  AS [errors.job_steps],
        NULLIF(@msg, N'')                            AS [errors.last_message],
        (SELECT COUNT(*) FROM @pubs)                 AS [counts.publications],
        (SELECT COUNT(*) FROM @arts)                 AS [counts.articles],
        (SELECT COUNT(*) FROM @agents)               AS [counts.agents],
+       /* The number this section exists for: agents that skip errors, by
+          their profile or their job step. A count above zero stands whatever
+          else failed, as a floor. Zero is only emitted when the agents, the
+          profiles and the steps were all read, because otherwise it claims
+          something nobody looked at: measured, a login refused the agent
+          tables and allowed sysjobsteps reported 0 here before this rule. */
+       CASE WHEN (SELECT COUNT(*) FROM @agent_eff AS e
+                  WHERE COALESCE(e.[job_skip_errors], e.[profile_skip_errors]) IS NOT NULL) > 0
+            THEN (SELECT COUNT(*) FROM @agent_eff AS e
+                  WHERE COALESCE(e.[job_skip_errors], e.[profile_skip_errors]) IS NOT NULL)
+            WHEN @err_agents <> 0 OR @err_prof <> 0 OR @err_steps <> 0 THEN NULL
+            ELSE 0
+       END                                          AS [counts.agents_skipping_errors],
+       (SELECT COUNT(DISTINCT [profile_id]) FROM @agents WHERE [profile_id] IS NOT NULL)
+                                                    AS [counts.profiles_in_use],
        (SELECT [row_count] FROM @size WHERE [table_name] = N'MSrepl_commands')
                                                     AS [counts.repl_commands_rows],
        /* Staged by the same read as the line above, so projecting it costs
@@ -322,11 +484,77 @@ OPTION (RECOMPILE, MAXDOP 1);
    and a uniqueidentifier in msdb.dbo.sysjobs; the conversion was measured
    against both and yields the matching GUID. local_job stays beside it — it
    answers a different question, whether the job runs on this server at all. */
+/* profile_id joins to agent_profiles. subscriptionstreams is the column the
+   subscription itself carries (sp_addsubscription @subscriptionstreams), only
+   on Distribution Agents, and NULL when the subscription leaves it to the
+   profile, measured on a push subscription created without it.
+
+   skip_errors is the value the agent runs with: the job step's when the step
+   sets one, else the profile's. skip_errors_source says which, so that a
+   reader who changes the profile knows whether that will change anything.
+   job_step_found 0 means no step of this agent's job is on this server (a
+   pull subscription, or a job deleted by hand); NULL means the steps could not
+   be read, and errors.job_steps says why. */
 SELECT a.[kind], a.[id], a.[name], a.[publisher_db], a.[publication],
        a.[subscriber_db],
        CONVERT(char(36), CONVERT(uniqueidentifier, a.[job_id])) AS [job_id],
-       CONVERT(int, a.[local_job]) AS [local_job]
-FROM @agents AS a ORDER BY a.[kind], a.[name]
+       CONVERT(int, a.[local_job]) AS [local_job],
+       a.[profile_id],
+       CONVERT(int, a.[subscriptionstreams])                   AS [subscriptionstreams],
+       e.[job_step_found], e.[job_skip_errors], e.[job_max_cmds_in_tran],
+       COALESCE(e.[job_skip_errors], e.[profile_skip_errors])  AS [skip_errors],
+       CASE WHEN e.[job_skip_errors] IS NOT NULL THEN 'job_step'
+            WHEN e.[profile_skip_errors] IS NOT NULL THEN 'profile' END AS [skip_errors_source]
+FROM @agents AS a
+JOIN @agent_eff AS e ON e.[kind] = a.[kind] AND e.[id] = a.[id]
+ORDER BY a.[kind], a.[name]
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* The profiles assigned to at least one agent of this distribution database,
+   with the five parameters an audit reads first spelled out. NULL means the
+   profile does not set the parameter, so the agent runs with its built-in
+   default; an empty -SkipErrors is reported as NULL for the same reason.
+   max_cmds_in_tran will be NULL on any profile created through
+   sp_add_agent_parameter on a build that validates against
+   MSagentparameterlist; it is here for profiles carried over from older
+   builds, and the job step column in agents is where it is normally found.
+   is_system is MSagent_profiles.type = 0, a profile shipped by SQL Server;
+   is_default is def_profile, the one new agents of that type receive. */
+SELECT p.[profile_id], p.[profile_name], p.[agent_type],
+       CASE p.[agent_type] WHEN 1 THEN 'snapshot' WHEN 2 THEN 'logreader'
+                           WHEN 3 THEN 'distribution' WHEN 4 THEN 'merge'
+                           WHEN 9 THEN 'queuereader' END             AS [agent_type_desc],
+       CASE p.[type] WHEN 0 THEN 1 ELSE 0 END                        AS [is_system],
+       CONVERT(int, p.[def_profile])                                 AS [is_default],
+       (SELECT COUNT(*) FROM @agents AS a WHERE a.[profile_id] = p.[profile_id]) AS [agents],
+       NULLIF(MAX(CASE x.[parameter_name] WHEN N'-SkipErrors' THEN x.[value] END), N'') AS [skip_errors],
+       MAX(CASE x.[parameter_name] WHEN N'-MaxCmdsInTran'      THEN x.[value] END) AS [max_cmds_in_tran],
+       MAX(CASE x.[parameter_name] WHEN N'-SubscriptionStreams' THEN x.[value] END) AS [subscription_streams],
+       MAX(CASE x.[parameter_name] WHEN N'-ReadBatchSize'      THEN x.[value] END) AS [read_batch_size],
+       MAX(CASE x.[parameter_name] WHEN N'-CommitBatchSize'    THEN x.[value] END) AS [commit_batch_size]
+FROM @profiles AS p
+LEFT JOIN @params AS x ON x.[profile_id] = p.[profile_id]
+WHERE EXISTS (SELECT 1 FROM @agents AS a WHERE a.[profile_id] = p.[profile_id])
+GROUP BY p.[profile_id], p.[profile_name], p.[agent_type], p.[type], p.[def_profile]
+ORDER BY p.[agent_type], p.[profile_id]
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* Every parameter of a profile in use whose value is not the agent's built-in
+   default, with that default beside it. The list stores names without the
+   leading dash, the profiles with it, measured, hence the STUFF. A parameter
+   the list does not know is kept, and so is every parameter when the list
+   could not be read: default_value is then NULL. */
+SELECT x.[profile_id], p.[profile_name], x.[parameter_name], x.[value],
+       d.[default_value]
+FROM @params AS x
+JOIN @profiles AS p ON p.[profile_id] = x.[profile_id]
+LEFT JOIN @param_defaults AS d
+       ON d.[agent_type] = p.[agent_type]
+      AND d.[parameter_name] = STUFF(x.[parameter_name], 1, 1, N'')
+WHERE EXISTS (SELECT 1 FROM @agents AS a WHERE a.[profile_id] = p.[profile_id])
+  AND (d.[parameter_name] IS NULL
+       OR ISNULL(x.[value], N'') <> ISNULL(d.[default_value], N''))
+ORDER BY x.[profile_id], x.[parameter_name]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* runstatus is projected raw beside its description, and the raw one is the
