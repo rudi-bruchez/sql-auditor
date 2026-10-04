@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -244,6 +245,117 @@ func TestAPreviousRunWithoutAServerNameIsKept(t *testing.T) {
 	}
 	if why := previousRunLost(aside, scopeManifest("", nil, "SALESDB")); !strings.Contains(why, "no server name") {
 		t.Errorf("previousRunLost = %q", why)
+	}
+}
+
+// reached is a manifest of a run that connected to address with database, and
+// was told name by the server.
+func reached(name, address, database string) *Manifest {
+	m := scopeManifest("", nil, "SALESDB")
+	m.Server.Name, m.Server.Address, m.Server.Database = name, address, database
+	return m
+}
+
+// The two collisions otherServer could not see while _run.json recorded only
+// the name: nameless targets whose addresses fold to one folder, and two
+// servers that give the same name, or none, from different addresses. And the
+// spellings of one address, which must go on replacing each other.
+func TestRunAddressTellsTwoTargetsApart(t *testing.T) {
+	cases := []struct {
+		name      string
+		prev, cur *Manifest
+		kept      bool
+	}{
+		{"address A with SQL_DATABASE=B before address A_B", reached("", "A", "B"), reached("", "A_B", ""), true},
+		{"address A_B before address A with SQL_DATABASE=B", reached("", "A_B", ""), reached("", "A", "B"), true},
+		{"two nameless servers", reached("", "192.0.2.1", "SALESDB"), reached("", "192.0.2.2", "SALESDB"), true},
+		{"two servers giving the same name", reached("SQL01", "sql01a", ""), reached("SQL01", "sql01b", ""), true},
+		{"one address, two databases", reached("", "A", "B"), reached("", "A", "C"), true},
+		{"the same address", reached("", "A", "B"), reached("", "A", "B"), false},
+		{"the same address in another spelling", reached("", "localhost,11533", "B"),
+			reached("", " TCP:LOCALHOST:11533 ", "b"), false},
+		{"master and no database", reached("SQL01", "SQL01", "master"), reached("SQL01", "SQL01", ""), false},
+	}
+	for _, c := range cases {
+		for _, where := range []string{"folder", "archive only"} {
+			t.Run(c.name+", "+where, func(t *testing.T) {
+				aside := writeSetAside(t, c.prev, where == "folder", true)
+				why := previousRunLost(aside, c.cur)
+				if !c.kept {
+					if why != "" {
+						t.Fatalf("previousRunLost = %q, want the run it replaced deleted", why)
+					}
+					return
+				}
+				if !strings.Contains(why, "two different targets") || !strings.Contains(why, c.prev.Server.Address) ||
+					!strings.Contains(why, c.cur.Server.Address) {
+					t.Fatalf("previousRunLost = %q, want it kept as another target's, naming both addresses", why)
+				}
+			})
+		}
+	}
+}
+
+// An archive from before the address was recorded is compared by name, as it
+// was: absent is not different, or every same-day rerun after the upgrade
+// would keep the run it replaced.
+func TestRunAddressAbsentFromAnOlderRun(t *testing.T) {
+	cases := []struct {
+		name, prev string
+		kept       bool
+	}{
+		{"the same server", "SQL01", false},
+		{"another server", "SQL02", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			aside := writeSetAside(t, scopeManifest("", nil, "SALESDB"), true, false)
+			body := `{"server":{"name":"` + c.prev + `"},"config":{},"targets":{"databases":[{"name":"SALESDB"}]}}`
+			if err := os.WriteFile(filepath.Join(aside[0], manifestJSONName), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			why := previousRunLost(aside, reached("SQL01", "sql01.example.com", ""))
+			if (why != "") != c.kept {
+				t.Fatalf("previousRunLost = %q, want kept %v", why, c.kept)
+			}
+		})
+	}
+}
+
+// The run records where it connected, as the operator wrote it, in the
+// server block of _run.json.
+func TestRunAddressIsRecorded(t *testing.T) {
+	cfg := &Config{Server: " sql01.example.com,1433 ", Database: "SALESDB", User: "auditor", Password: "s3cret-Passw0rd"}
+	m := NewManifest("sql-auditor", "test", "")
+	m.Server = serverBlock(ServerInfo{Name: "SQL01"}, cfg)
+	b, err := m.marshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Server map[string]any `json:"server"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Server["address"] != "sql01.example.com,1433" || got.Server["database"] != "SALESDB" {
+		t.Errorf("server block = %v, want address sql01.example.com,1433 and database SALESDB", got.Server)
+	}
+	// The login is already in auth; the password must be nowhere.
+	if strings.Contains(string(b), cfg.Password) {
+		t.Errorf("_run.json carries the password: %s", b)
+	}
+}
+
+// SQL_SERVER is an address and nothing else, but it is text the operator
+// typed: an address that carries a user part, or the password itself, is not
+// written.
+func TestRunAddressHoldsNoSecret(t *testing.T) {
+	for _, server := range []string{"auditor@sql01,1433", "sql01\\s3cret-Passw0rd"} {
+		cfg := &Config{Server: server, User: "auditor", Password: "s3cret-Passw0rd"}
+		if b := serverBlock(ServerInfo{}, cfg); b.Address != "" {
+			t.Errorf("SQL_SERVER=%s recorded as %q", server, b.Address)
+		}
 	}
 }
 
