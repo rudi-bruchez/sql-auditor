@@ -1,6 +1,9 @@
 # Recording what the collection blocked, and what it cost
 
-Status: draft, not implemented. Written on 20 September 2026, and revised the
+Status: implemented on 20 September 2026 (`e8fba47`, released in 0.30.0):
+`blocking_watch.waits` in `_run.json` and the slowest collectors in
+`MANIFEST.txt`. The shared blocking format it defers to is still a stub on
+4 October 2026. Written on 20 September 2026, and revised the
 same day after a panel of five independent readers ran it against a live SQL
 Server 2025. What the panel changed is at the end.
 

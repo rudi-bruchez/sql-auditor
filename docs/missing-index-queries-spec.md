@@ -1,6 +1,7 @@
 # Which queries wanted a suggested index
 
-Status: draft, not implemented. Written on 20 September 2026, from the answer
+Status: implemented on 20 September 2026 (`8de34a3`, released in 0.32.0,
+`70.schema/021.missing-index-queries.sql`). Written on 20 September 2026, from the answer
 recorded in `docs/missing-index-suggestions-spec.md` on the same day, and
 revised the same day after a panel of five readers ran it against SQL Server
 2025. What the panel changed is at the end.
