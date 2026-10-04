@@ -215,7 +215,15 @@ SELECT @frag_eligible               AS [fragmentation_sample.eligible_partitions
        NULLIF(@msg, N'')            AS [error_message]
 OPTION (RECOMPILE, MAXDOP 1);
 
-SELECT TOP (25) g.[table], g.[index_name], g.[index_type], g.[partition_number],
+/* Every fragmented partition measured, most fragmented first. There was a
+   TOP (25) here, with no reason stated, and no count above it: a list of 25
+   could not say whether it was all of them. It was hit in 5 of 30 database
+   units on the client collections of August and September 2026, when this set
+   still lived in 020.properties. It is gone because the measurement already
+   bounds the list: at most 100 partitions are read, each gives at most one
+   IN_ROW_DATA row, so the array holds at most 100 rows of about 150 bytes, and
+   measured_partitions above is the population it was taken from. */
+SELECT g.[table], g.[index_name], g.[index_type], g.[partition_number],
        g.[page_count], g.[fragmentation_pct]
 FROM @fragmentation AS g
 ORDER BY g.[sort_frag] DESC

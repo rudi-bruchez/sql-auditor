@@ -21,8 +21,9 @@
 --
 -- WHAT THE RING BUFFER IS. system_health writes to a memory ring of bounded
 -- size: old events are overwritten, not archived. The window it covers is
--- therefore whatever the event rate leaves — hours on a busy instance, weeks
--- on a quiet one. earliest_event is projected for exactly this reason: a count
+-- therefore whatever the event rate leaves, and it is shorter than one would
+-- guess: on nine client instances measured in August and September 2026 it
+-- reached back 15 to 46 minutes, and a day only on an idle lab instance. earliest_event is projected for exactly this reason: a count
 -- of "3 deadlocks" means nothing until a reader knows whether it covers two
 -- days or twenty minutes. A restart empties it entirely.
 --
@@ -115,8 +116,14 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 /* One row per deadlock, timestamp only. Enough to say how many, how often and
    whether they cluster; not enough to say what was running, which is the
-   line this collector does not cross. */
-SELECT TOP (200)
+   line this collector does not cross.
+
+   Every deadlock the ring holds, newest first. There was a TOP (200) here
+   with no reason stated, while session.deadlocks above counted them all. The
+   ring bounds the list itself, and a row is 25 bytes: 200 rows were never
+   reached on the client collections of August and September 2026, where the
+   ring held no deadlock at all in 9 of 9. */
+SELECT
     CONVERT(varchar(23), event_time, 126)                       AS [occurred_at]
 FROM @events
 WHERE event_name = 'xml_deadlock_report'

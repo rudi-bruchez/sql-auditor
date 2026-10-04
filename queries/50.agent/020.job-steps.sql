@@ -44,8 +44,9 @@
 -- The residual risk is stated rather than hidden: a T-SQL step whose first 200
 -- characters contain a literal password would carry it into the archive. That
 -- is a narrower exposure than projecting every command in full, and it is the
--- line this file draws. A collector that projects command bodies in full
--- belongs behind an opt-in flag, like session text, and does not exist yet.
+-- line this file draws. The command bodies in full are collected by
+-- 50.agent/021.job-step-commands.sql, behind --include-job-step-commands, like
+-- session text: an opt-in the operator declares, and MANIFEST.txt with it.
 --
 -- NO JUDGEMENT IS APPLIED. A job that rebuilds every index nightly is not
 -- called a defect here; the archive records the command and the schedule it

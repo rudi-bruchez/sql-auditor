@@ -236,6 +236,19 @@ jobs:
               VALUES (N'ci_probe', N'dbo', N'ix_probe', 'U', N'ix_probe_written',
                 N'UPDATE STATISTICS [ci_probe].[dbo].[ix_probe] [ix_probe_written] WITH FULLSCAN',
                 N'UPDATE_STATISTICS', DATEADD(HOUR, -1, SYSDATETIME()), DATEADD(MINUTE, -59, SYSDATETIME()), 0);"
+      # 60.backup/010 groups the backup destinations by directory, and until
+      # October 2026 it found the directory by the last backslash, so a Linux
+      # path, which is what these containers write, came back once per file.
+      # Two full backups of model into one directory have to come back as one
+      # destination with two names. model, because ci_probe must keep having
+      # no full backup for the differential base assertion below, and nothing
+      # here reads model's chain.
+      - name: plant two backups into one directory
+        run: |
+          tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -b "$@"; }
+          tools -Q "BACKUP DATABASE model TO DISK = N'/var/opt/mssql/data/ci_model_1.bak' WITH INIT, COPY_ONLY;"
+          tools -Q "BACKUP DATABASE model TO DISK = N'/var/opt/mssql/data/ci_model_2.bak' WITH INIT, COPY_ONLY;"
       # 80.workload/030 names the column a cached plan converts to nvarchar,
       # and the form it exists for is the silent one: a varchar column under a
       # Windows collation, sought with nvarchar parameters, which the engine
@@ -405,6 +418,29 @@ jobs:
                     and .converted.columns_in_expression == 2] == [true]
                  and all(.conversions[]; (.converted.table // "") | startswith("@") | not)' "$f" \
             || { jq . "$f"; exit 1; }
+      # The two planted backups share a directory and are one destination,
+      # and recent lists every backup of the window while it is under its cap,
+      # which the root says. The error log's notable set reports its cap and
+      # how many lines matched before it, and is listed newest first;
+      # top_messages holds every prefix while there are fewer than its cap.
+      # A fresh container logs configuration changes and database options,
+      # so notable is not empty on either leg.
+      - name: assert the backup destinations and the error log caps
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          f="$run_dir/60.backup/010.history.json"
+          jq -e '([.devices[] | select(.path == "/var/opt/mssql/data")
+                   | .device_type == "disk" and .backups >= 2 and .device_names >= 2] == [true])
+                 and .window.recent_cap == 2000 and .window.recent_capped == 0
+                 and (.recent | length) == .window.backups_in_window' "$f" \
+            || { jq '{window, devices}' "$f"; exit 1; }
+          f="$run_dir/10.system/040.error-log.json"
+          jq -e '.status.notable_cap == 200 and .status.notable_matched >= 1
+                 and (.notable | length) == ([.status.notable_matched, .status.notable_cap] | min)
+                 and ([.notable[].when] == ([.notable[].when] | sort | reverse))
+                 and .status.top_messages_kept == 200
+                 and (.top_messages | length) == ([.distinct_message_prefixes, .status.top_messages_kept] | min)' "$f" \
+            || { jq '{status, distinct_message_prefixes, notable: [.notable[].when]}' "$f"; exit 1; }
       - name: assert the run is complete
         run: |
           run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"

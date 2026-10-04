@@ -50,7 +50,9 @@
 -- A CPU timeline. 043.cpu-neighbours.sql answers "how much of this machine's CPU
 -- is not SQL Server" from RING_BUFFER_SCHEDULER_MONITOR, which holds roughly
 -- four hours. systemCpuUtilization and sqlCpuUtilization here give the same
--- split over the whole system_health window, a day rather than an afternoon.
+-- split over the whole system_health window, which is a day on an idle
+-- instance and can be much shorter than those four hours on a busy one (see
+-- the intervals, below).
 --
 -- Long I/O. ioLatchTimeouts is the 845 family and totalLongIos is the 833
 -- family, both per interval. 030.file-io.sql gives cumulative latency per file;
@@ -69,8 +71,8 @@
 -- THREADPOOL cumulative since startup; neither can say when the instance ran
 -- out of workers. queryProcessing carries, per round, maxWorkers,
 -- workersCreated, workersIdle, pendingTasks (tasks queued for a worker) and
--- oldestPendingTaskWaitingTime, so the window holds a day of the worker pool's
--- shape: how close workers_created came to max_workers, and in which rounds
+-- oldestPendingTaskWaitingTime, so the window holds the worker pool's shape
+-- round by round: how close workers_created came to max_workers, and in which rounds
 -- tasks queued. hasUnresolvableDeadlockOccurred and
 -- hasDeadlockedSchedulersOccurred flag a round in which the deadlock monitor
 -- could not resolve a cycle or every scheduler stopped making progress, an
@@ -122,10 +124,22 @@
 -- same reason.
 --
 -- WHY THE INTERVALS ARE NOT SUMMED INTO ONE ROW. An interval is five minutes by
--- default and the window is about a day, so the array is a few hundred rows of
--- integers, which is cheap to carry and impossible to reconstruct later. A
--- single spike of spinlock backoffs at 03:40 and a steady trickle over a day
--- produce the same total and mean entirely different things.
+-- default, so the array is at most a few hundred rows of integers, which is
+-- cheap to carry and impossible to reconstruct later. A single spike of
+-- spinlock backoffs at 03:40 and a steady trickle over hours produce the same
+-- total and mean entirely different things.
+--
+-- HOW LONG THE WINDOW IS, MEASURED, AND WHY IT IS NOT A DAY. This header said
+-- "the window is about a day", from the SQL Server 2022 lab above, whose ring
+-- held 300 rounds over 24 hours and 55 minutes. That holds on an idle instance,
+-- where little else is written into the ring. The other events system_health
+-- records share the same buffer, and on nine client instances measured in
+-- August and September 2026 the ring reached back 15 to 46 minutes, that is 3
+-- to 9 rounds. The SQL Server 2025 lab, busy with other work on 4 October
+-- 2026, held 4 rounds over 15 minutes. So session.window_minutes is the number
+-- to read before any conclusion about a period, and on a client it is often an
+-- hour or less. The session's event_file target keeps far longer (about 143
+-- rounds over ten days on the lab) and this file does not read it.
 --
 -- NO JUDGEMENT IS APPLIED. A non-zero spinlockBackoffs is normal; the engine
 -- backs off spinlocks continuously on a busy instance. What makes it a finding
@@ -429,9 +443,12 @@ SELECT
     NULLIF(@msg, N'')                                           AS [error_message]
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* One row per interval, newest first. The cap is generous because the rows are
-   integers and the window is the point: three hundred rows of thirty integers
-   is smaller than one execution plan. */
+/* One row per interval, newest first. The cap of 400 is a guard rather than a
+   limit and it has not bound anywhere: the ring holds about 300 rounds at
+   most, on an idle lab instance, and 3 to 9 on the client instances measured
+   (see the header). Should it ever bind, session.intervals above counts every
+   round read, so a list shorter than that count says it was cut. Four hundred
+   rows of thirty integers is smaller than one execution plan. */
 SELECT TOP (400)
     CONVERT(varchar(23), i.[event_time], 126)                   AS [at_utc],
     -- Four is a whole round. Fewer is an edge of the ring, not a parse failure.

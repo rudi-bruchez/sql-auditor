@@ -46,9 +46,21 @@
 -- error text rather than table data — but it is written by whatever the job
 -- runs, so treat it as it is disclosed in MANIFEST.txt.
 --
--- The history window is bounded and REPORTED. An unbounded sp_help_jobhistory
--- is unpredictable in size, and a run count with no window is unreadable:
--- "no failures" means nothing until you know over how long.
+-- The history window is bounded and REPORTED, and it is 90 days. A run count
+-- with no window is unreadable: "no failures" means nothing until you know over
+-- how long, which is why window.days_requested and observed.oldest_run_date
+-- are both in outcomes_status.
+--
+-- WHAT THE WINDOW BOUNDS IS THE SERVER'S WORK, NOT THE ARCHIVE. This header
+-- used to justify it by size, "an unbounded sp_help_jobhistory is
+-- unpredictable in size", and the output never depended on it: outcomes is one
+-- row per job whatever the window. What grows with the window is the history
+-- read into @h, and that is bounded first by what msdb keeps, which the Agent
+-- purges at 1 000 rows by default. Measured on twelve client collections in
+-- August and September 2026, the 30-day window was the limit in three and msdb
+-- retention was shorter in the other nine. It was raised to 90 in October
+-- 2026: where retention is longer, three months of failures are worth more
+-- than one, and where it is not, the request changes nothing.
 --
 -- SQL Server 2012 is the floor. sysjobs_view, syscategories and
 -- sp_help_jobhistory all predate it, so no @min_version applies.
@@ -57,7 +69,7 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-DECLARE @window_days int = 30;
+DECLARE @window_days int = 90;
 DECLARE @start_run_date int =
     CONVERT(int, CONVERT(char(8), DATEADD(day, -@window_days, GETDATE()), 112));
 
