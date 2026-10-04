@@ -29,6 +29,10 @@ release workflow refuses a tag that disagrees with either this file or
   them a direct sign of a write path that cannot keep up. Both shapes were
   produced and matched on SQL Server 2025 under trace flag 3504.
 
+### Fixed
+
+- The `VIEW SERVER STATE` capability is labelled "Read the server state views (VIEW SERVER STATE)" instead of "Read performance counters (VIEW SERVER STATE)", in `check`, MANIFEST.txt and the skip reason of every collector gated on it, and the grant script's section for it is titled the same way. The old label was printed in the skip reason of collectors that read no counter, such as `10.system/042.connection-security.sql`, and told the reader the wrong thing about what was lost. The capability's name in `_run.json`, `view_server_state`, is unchanged.
+
 ## [0.37.0] - 2026-10-04
 
 This release lets a collector lose one guarded part instead of the whole

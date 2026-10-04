@@ -157,7 +157,7 @@ archive.
 | --- | --- | --- |
 | Connect to the instance | `CONNECT SQL` | nothing can run |
 | Read server and database metadata | `VIEW ANY DEFINITION` (server level) | instance configuration and database file layout not collected |
-| Read performance counters | `VIEW SERVER STATE`, or `VIEW SERVER PERFORMANCE STATE` on SQL Server 2022 and later | wait statistics, schedulers, memory and tempdb usage not collected |
+| Read the server state views | `VIEW SERVER STATE`, or `VIEW SERVER PERFORMANCE STATE` on SQL Server 2022 and later | wait statistics, schedulers, memory and tempdb usage not collected |
 | Read the database encryption keys | `VIEW SERVER STATE`, or `VIEW SERVER SECURITY STATE` on SQL Server 2022 and later | which certificate protects each encrypted database not collected; the report must not read this as 'no database is encrypted' |
 | Read backup history | `SELECT` on `msdb.dbo.backupset` | backup history not collected — the report must not read this as 'no backups exist' |
 | Read the Agent job inventory | `SQLAgentReaderRole` in msdb | Agent jobs not collected — the report must not read this as 'no jobs' or 'no failing jobs' |
@@ -197,7 +197,7 @@ encrypted with TDE to the certificate that protects it through
 include. `check` probes it with a read of that view, and the generated script
 grants it by name on those versions. Before 2022 the permission does not exist
 and the script asks for nothing more: `VIEW SERVER STATE`, which it grants for
-the performance counters, covers the view there. A login refused it still runs
+the server state views, covers the view there. A login refused it still runs
 that collector, which declares the permission optional (below): the certificate
 list is collected, and the root of the document says the keys could not be
 read.
