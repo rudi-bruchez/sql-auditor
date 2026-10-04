@@ -320,52 +320,42 @@ func TestEveryKnownWideningHasACollector(t *testing.T) {
 	}
 }
 
-// The two collectors must choose the same tables, or the archive lists a table
-// whose columns are missing. The selection is written three times, once in
-// 010.objects and twice in 060.columns, and this keeps the copies identical.
-func TestObjectsAndColumnsSelectTheSameTables(t *testing.T) {
-	read := func(name string) string {
+// The four 70.schema files that carry one row per table, column or statistic
+// must cover the same tables, or the archive lists a table whose columns or
+// statistics are missing and reads as a defect in the collector. Until October
+// 2026 010 and 060 took the 200 tables with the most rows and the 50 with the
+// most reserved pages while 090 and 091 took the 200 by rows alone, and the
+// test that kept 010 and 060 identical never looked at the other two. With no
+// cap left, the shared selection is every user table, and the way to keep the
+// four aligned is to keep any selection out of all four: none of them may take
+// a TOP, and every join to sys.tables filters on is_ms_shipped = 0, so no file
+// lists the shipped tables the others leave out.
+func TestSchemaFilesListEveryUserTable(t *testing.T) {
+	top := regexp.MustCompile(`(?i)\bTOP\s*\(`)
+	join := regexp.MustCompile(`(?i)JOIN\s+sys\.tables\s+AS\s+(\w+)\s+ON\s+([^\n]*)`)
+	for _, name := range []string{"010.objects.sql", "060.columns.sql", "090.statistics.sql", "091.statistics-density.sql"} {
 		b, err := sqlauditor.Queries.ReadFile("queries/70.schema/" + name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return string(b)
-	}
-	re := regexp.MustCompile(`(?s)SELECT by_rows\.object_id.*?AS by_size`)
-	var copies []string
-	for _, name := range []string{"010.objects.sql", "060.columns.sql"} {
-		for _, m := range re.FindAllString(read(name), -1) {
-			copies = append(copies, strings.Join(strings.Fields(m), " "))
+		code := collect.StripSQLComments(string(b))
+		if loc := top.FindStringIndex(code); loc != nil {
+			end := min(loc[1]+120, len(code))
+			t.Errorf("%s takes a TOP, which selects tables the other three files may not:\n%s",
+				name, code[loc[0]:end])
 		}
-	}
-	if len(copies) != 3 {
-		t.Fatalf("found %d copies of the table selection, want 3 (one in 010.objects, two in 060.columns)", len(copies))
-	}
-	for i := 1; i < len(copies); i++ {
-		if copies[i] != copies[0] {
-			t.Errorf("copy %d differs from copy 0:\n%s\n%s", i, copies[i], copies[0])
+		if strings.Contains(code, "listing_cap") {
+			t.Errorf("%s still projects a listing_cap, which names a cap it no longer has", name)
 		}
-	}
-	// The identity check above only says the three copies agree with each
-	// other, not that they still say what the docs, the spec and the root
-	// fields promise: the three could drift together, changing TOP (50) to
-	// TOP (49) in lockstep, and stay green. Pin the two caps the selection is
-	// for, and the two root fields that carry them into every result row.
-	if !strings.Contains(copies[0], "TOP (200)") {
-		t.Errorf("the table selection has lost TOP (200):\n%s", copies[0])
-	}
-	if !strings.Contains(copies[0], "TOP (50)") {
-		t.Errorf("the table selection has lost TOP (50):\n%s", copies[0])
-	}
-	listingCap := regexp.MustCompile(`(?m)^\s*200\s+AS \[listing_cap\],`)
-	listingCapBySize := regexp.MustCompile(`(?m)^\s*50\s+AS \[listing_cap_by_size\],`)
-	for _, name := range []string{"010.objects.sql", "060.columns.sql"} {
-		body := read(name)
-		if !listingCap.MatchString(body) {
-			t.Errorf("%s: listing_cap is not 200", name)
+		joins := join.FindAllStringSubmatch(code, -1)
+		if len(joins) == 0 {
+			t.Errorf("%s no longer joins sys.tables, which this test reads to know what it lists", name)
 		}
-		if !listingCapBySize.MatchString(body) {
-			t.Errorf("%s: listing_cap_by_size is not 50", name)
+		for _, j := range joins {
+			if !strings.Contains(j[2], j[1]+".is_ms_shipped = 0") {
+				t.Errorf("%s joins sys.tables without is_ms_shipped = 0, so it lists tables "+
+					"the other files leave out:\n%s", name, j[0])
+			}
 		}
 	}
 }
@@ -422,29 +412,24 @@ func TestNoCollectorEmitsAQueryStatementHandle(t *testing.T) {
 	}
 }
 
-// The untrusted constraint list is capped at 200 rows per kind, and a TOP
-// without an ORDER BY keeps whichever rows the scan meets first: two runs over
-// the same catalog could list different constraints, and a capped list could
-// drop the disabled ones in favour of not-for-replication ones nobody can fix.
-// Each kind's TOP must carry its own ORDER BY, and that order must put the
-// disabled constraints first and the not-for-replication ones last.
-func TestUntrustedConstraintListIsOrderedBeforeItIsCapped(t *testing.T) {
+// The untrusted constraint list is read whole and emitted disabled first, then
+// the ones a revalidation could fix, then the not-for-replication ones nobody
+// can fix, so the rows worth acting on lead and two runs over the same catalog
+// list them in the same order. It was capped at 200 a kind until October 2026,
+// when the order decided which rows survived; it now decides only what a
+// reader sees first, and a TOP coming back would bring the old question back
+// with it, which TestSchemaFilesListEveryUserTable refuses.
+func TestUntrustedConstraintListIsOrderedDisabledFirst(t *testing.T) {
 	b, err := sqlauditor.Queries.ReadFile("queries/70.schema/010.objects.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	sql := collect.StripSQLComments(string(b))
-	re := regexp.MustCompile(`(?s)SELECT TOP \(200\)\s+'(FOREIGN_KEY|CHECK_CONSTRAINT)'.*?\) AS (fk|ck)`)
-	branches := re.FindAllStringSubmatch(sql, -1)
-	if len(branches) != 2 {
-		t.Fatalf("found %d capped constraint branches, want one per kind", len(branches))
-	}
-	order := regexp.MustCompile(`ORDER BY \w+\.is_disabled DESC,\s*\w+\.is_not_for_replication,`)
-	for _, br := range branches {
-		if !order.MatchString(br[0]) {
-			t.Errorf("the %s branch takes TOP (200) without ordering disabled first and "+
-				"not-for-replication last:\n%s", br[1], br[0])
-		}
+	emit := regexp.MustCompile(`(?s)FROM @constraints AS c\s+ORDER BY c\.\[kind\] DESC, c\.\[is_disabled\] DESC, c\.\[is_not_for_replication\],` +
+		`\s+c\.\[schema_name\], c\.\[table_name\], c\.\[constraint_name\], c\.\[object_id\]`)
+	if !emit.MatchString(sql) {
+		t.Errorf("the untrusted constraint list is no longer emitted by kind, disabled first, " +
+			"not-for-replication last, with object_id breaking ties")
 	}
 }
 

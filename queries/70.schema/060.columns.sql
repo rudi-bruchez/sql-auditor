@@ -4,7 +4,7 @@
 -- @timeout:     120
 -- @profiles:    space
 --
--- The columns of the largest tables: type, nullability, identity, computed
+-- The columns of every user table: type, nullability, identity, computed
 -- expression and default constraint.
 --
 -- Why this collector exists. 010.objects.sql counts the columns of a table and
@@ -14,16 +14,27 @@
 -- of a NOT IN, and the defaults to make sense of an INSERT that names half the
 -- columns. None of that was in the archive.
 --
--- THE SAME SELECTION AS 010.objects.sql: the union of the 200 tables with the
--- most rows and the 50 with the most reserved pages, up to 250 tables, and
--- both caps are projected here too so this file is readable on its own. Two
--- different selections in one directory would be a trap: a table found here
--- and absent there reads as a defect in the collector rather than as two
--- different rules, so TestObjectsAndColumnsSelectTheSameTables keeps the
--- three copies of that selection, one in 010.objects.sql and two here,
--- textually identical. Within the selection, the tie-break on object_id
--- matters for the same reason: without it, two tables tied on the same
--- measure could swap places between the two TOPs and stop matching, silently.
+-- EVERY USER TABLE, AS IN 010.objects.sql. Until October 2026 both files
+-- listed the union of the 200 tables with the most rows and the 50 with the
+-- most reserved pages, kept identical by a test, because two selections in
+-- one directory would be a trap: a table found in one file and absent from
+-- the other reads as a defect in the collector. Twelve real collections taken
+-- on eight client instances between August and September 2026 measured what
+-- the selection cost (docs/caps-inventory.md): it bound in 7 of 27 databases,
+-- of 207 to 846 tables, and left out 3 to 65 percent of their columns, 8 572
+-- of 24 823 in the worst; 27 pieces of evidence of the analysis rest on this
+-- file. A column row is about 465 bytes, so that database goes from 4.0 MB to
+-- about 11.5 MB raw, under 1 MB zipped, and the 6.9 s the file took there
+-- were already mostly the catalog work that counts every column. With no
+-- selection there is nothing left to keep identical, and the test that kept
+-- the copies equal now keeps 010, 060, 090 and 091 free of one.
+--
+-- The root keeps tables_covered beside tables_total and columns_listed beside
+-- columns_total, which the analysis reads; they are equal unless a table is
+-- created or dropped between two reads. listing_cap and listing_cap_by_size
+-- left with the selection. Without it this file reads no DMV; VIEW SERVER
+-- STATE stays declared until dropping it is decided apart, since it changes
+-- which logins run the file and not what the file says.
 --
 -- WHY max_length IS PROJECTED RAW BESIDE A RENDERED DECLARATION. max_length
 -- counts bytes, so an nvarchar(50) reports 100, and -1 means (max). Printing
@@ -47,38 +58,15 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-/* columns_total counts every column of every user table, not only the ones
-   listed below. It is the pair (total, listed) that tells a reader how much
-   structure this file does not carry; either number alone invites the wrong
-   conclusion. */
-WITH sized AS (
-    /* The same selection as 010.objects.sql, kept identical by a test: the 200
-       tables with the most rows and the 50 with the most reserved pages. */
-    SELECT by_rows.object_id
-    FROM (SELECT TOP (200) t2.object_id
-          FROM sys.tables AS t2
-          CROSS APPLY (SELECT SUM(p.row_count) AS row_count
-                       FROM sys.dm_db_partition_stats AS p
-                       WHERE p.object_id = t2.object_id AND p.index_id IN (0, 1)) AS r
-          WHERE t2.is_ms_shipped = 0
-          ORDER BY r.row_count DESC, t2.object_id) AS by_rows
-    UNION
-    SELECT by_size.object_id
-    FROM (SELECT TOP (50) t2.object_id
-          FROM sys.tables AS t2
-          CROSS APPLY (SELECT SUM(p.reserved_page_count) AS reserved_pages
-                       FROM sys.dm_db_partition_stats AS p
-                       WHERE p.object_id = t2.object_id) AS r
-          WHERE t2.is_ms_shipped = 0
-          ORDER BY r.reserved_pages DESC, t2.object_id) AS by_size
-)
+/* tables_total and columns_total count every user table and every column of
+   one; tables_covered and columns_listed count what the rows below carry.
+   While the listing was capped the pair was what told a reader how much
+   structure this file did not carry. Both are kept so that an archive from
+   before October 2026 and one from after read the same way, and on a
+   database whose catalog moves during the read they can differ by a table. */
 SELECT DB_NAME()                                                  AS [database],
        CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_at],
-       200                                                        AS [listing_cap],
-       50                                                         AS [listing_cap_by_size],
-       /* Fewer than the cap on a small database, and saying so keeps a short
-          list from reading as a truncated one. */
-       (SELECT COUNT(*) FROM sized)                               AS [tables_covered],
+       (SELECT COUNT(*) FROM sys.tables AS t WHERE t.is_ms_shipped = 0) AS [tables_covered],
        (SELECT COUNT(*) FROM sys.tables AS t WHERE t.is_ms_shipped = 0) AS [tables_total],
        (SELECT COUNT(*)
         FROM sys.columns AS c
@@ -86,7 +74,8 @@ SELECT DB_NAME()                                                  AS [database],
                                                                   AS [columns_total],
        (SELECT COUNT(*)
         FROM sys.columns AS c
-        JOIN sized AS z ON z.object_id = c.object_id)             AS [columns_listed]
+        JOIN sys.tables  AS t ON t.object_id = c.object_id AND t.is_ms_shipped = 0)
+                                                                  AS [columns_listed]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* One row per column, ordered by table then column_id. column_id is the
@@ -94,27 +83,6 @@ OPTION (RECOMPILE, MAXDOP 1);
    varbinary(max) declared first does not read as the same design decision as
    the same column declared last, and a reader comparing the archive to a CREATE
    TABLE script needs the order to line up. */
-WITH sized AS (
-    /* The same selection as 010.objects.sql, kept identical by a test: the 200
-       tables with the most rows and the 50 with the most reserved pages. */
-    SELECT by_rows.object_id
-    FROM (SELECT TOP (200) t2.object_id
-          FROM sys.tables AS t2
-          CROSS APPLY (SELECT SUM(p.row_count) AS row_count
-                       FROM sys.dm_db_partition_stats AS p
-                       WHERE p.object_id = t2.object_id AND p.index_id IN (0, 1)) AS r
-          WHERE t2.is_ms_shipped = 0
-          ORDER BY r.row_count DESC, t2.object_id) AS by_rows
-    UNION
-    SELECT by_size.object_id
-    FROM (SELECT TOP (50) t2.object_id
-          FROM sys.tables AS t2
-          CROSS APPLY (SELECT SUM(p.reserved_page_count) AS reserved_pages
-                       FROM sys.dm_db_partition_stats AS p
-                       WHERE p.object_id = t2.object_id) AS r
-          WHERE t2.is_ms_shipped = 0
-          ORDER BY r.reserved_pages DESC, t2.object_id) AS by_size
-)
 SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
        c.name                                                     AS [column],
        c.column_id                                                AS [ordinal],
@@ -159,8 +127,7 @@ SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
        CAST(c.is_filestream AS int)                               AS [is_filestream],
        CAST(c.is_rowguidcol AS int)                               AS [is_rowguidcol]
 FROM       sys.columns           AS c
-JOIN       sized                 AS z  ON z.object_id = c.object_id
-JOIN       sys.tables            AS t  ON t.object_id = c.object_id
+JOIN       sys.tables            AS t  ON t.object_id = c.object_id AND t.is_ms_shipped = 0
 JOIN       sys.types             AS ty ON ty.user_type_id = c.user_type_id
 LEFT JOIN  sys.identity_columns  AS ic ON ic.object_id = c.object_id AND ic.column_id = c.column_id
 LEFT JOIN  sys.computed_columns  AS cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id

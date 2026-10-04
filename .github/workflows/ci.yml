@@ -356,6 +356,27 @@ jobs:
           jq -e '[.skipped_scripts[]? | select(.script == "40.security/032.server-trigger-definitions.sql")] | length == 1' \
             "$run_dir/_run.json" \
             || { jq '.skipped_scripts' "$run_dir/_run.json"; exit 1; }
+      # 010, 060, 090 and 091 list every user table since their caps were
+      # lifted, so each list is as long as the count beside it and no root
+      # still names a cap.
+      - name: assert the schema listings are whole
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          d="$run_dir/70.schema/ci_probe"
+          jq -e '(has("listing_cap") | not) and (.tables | length) == .counts.tables
+                 and any(.tables[]; .table == "dbo.ix_probe")' "$d/010.objects.json" \
+            || { jq 'del(.tables, .object_counts)' "$d/010.objects.json"; exit 1; }
+          jq -e '(has("listing_cap") | not) and .tables_covered == .tables_total
+                 and .columns_listed == .columns_total
+                 and (.columns | length) == .columns_total' "$d/060.columns.json" \
+            || { jq 'del(.columns)' "$d/060.columns.json"; exit 1; }
+          jq -e '(has("listing_cap") | not) and .statistics_listed == .statistics_total
+                 and (.statistics | length) == .statistics_total
+                 and (.statistics_all | length) == .statistics_total' "$d/090.statistics.json" \
+            || { jq 'del(.statistics, .statistics_all)' "$d/090.statistics.json"; exit 1; }
+          jq -e '(has("listing_cap") | not) and .counts.statistics == (.density | length)
+                 and any(.density[]; .table == "ix_probe")' "$d/091.statistics-density.json" \
+            || { jq 'del(.density)' "$d/091.statistics-density.json"; exit 1; }
       # The planted log is found, read whole and classified: the REORGANIZE
       # without an end is listed open, with its operation and page count read
       # out of the command and ExtendedInfo, one later command, and the
