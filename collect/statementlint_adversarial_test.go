@@ -125,3 +125,96 @@ func TestStatementLintRefusesTheAdversarialTable(t *testing.T) {
 		}
 	}
 }
+
+// Comments inside dynamic SQL, found by the harm review of 4 October 2026.
+//
+// The top level of a file reaches statementLint with its comments already
+// stripped by lint, but the text of an executed literal did not: it was
+// blanked and scanned with its comments in place. Every rule that reads a
+// word followed by a separator, or the first word of a batch, then read the
+// comment instead. Each statement below was measured on SQL Server 2025 with a
+// harmless procedure in its place, and each runs: the server treats a comment
+// as whitespace wherever whitespace may stand, nested block comments included,
+// and between the parts of a multipart name.
+func TestStatementLintSeesThroughCommentsInDynamicSQL(t *testing.T) {
+	mustRefuse := []struct{ name, sql string }{
+		{"block comment opening an EXEC() batch", `EXEC ('/* bypass */ msdb.dbo.sp_delete_backuphistory ''2020-01-01''')`},
+		{"line comment opening an EXEC() batch", "EXEC ('-- bypass\nmsdb.dbo.sp_delete_backuphistory ''2020-01-01''')"},
+		{"block comment opening an sp_executesql batch", `EXEC sp_executesql N'/* bypass */ msdb.dbo.sp_purge_jobhistory'`},
+		{"line comment opening an sp_executesql batch", "EXEC sp_executesql N'-- bypass\nmsdb.dbo.sp_purge_jobhistory'"},
+		{"block comment two levels down", `EXEC ('EXEC sp_executesql N''/* bypass */ msdb.dbo.sp_purge_jobhistory''')`},
+		{"line comment two levels down", "EXEC ('EXEC sp_executesql N''-- bypass\nmsdb.dbo.sp_purge_jobhistory''')"},
+		{"nested block comment", `EXEC ('/* a /* b */ c */ msdb.dbo.sp_purge_jobhistory')`},
+		{"apostrophe in the comment", `EXEC ('/* it''s */ msdb.dbo.sp_purge_jobhistory')`},
+		{"comment after the database", `EXEC ('msdb./**/dbo.sp_purge_jobhistory')`},
+		{"comment after the schema", `EXEC ('msdb.dbo./**/sp_purge_jobhistory')`},
+		{"comment between EXEC and the name", `EXEC ('EXEC/**/msdb.dbo.sp_purge_jobhistory')`},
+		{"comment after a return code", `EXEC ('DECLARE @r int; EXEC @r = /**/ msdb.dbo.sp_purge_jobhistory')`},
+		{"comment between EXEC and its parenthesis", `EXEC ('EXEC/**/(''DROP TABLE dbo.Orders'')')`},
+		{"comment between sp_executesql and its literal", `EXEC ('EXEC sp_executesql/**/N''DROP TABLE dbo.Orders''')`},
+		{"comment splitting EXECUTE AS", `EXEC ('EXECUTE/**/AS LOGIN = ''sa''; SELECT 1')`},
+		{"comment splitting END CONVERSATION", `EXEC ('END/**/CONVERSATION @h WITH CLEANUP')`},
+		{"comment splitting NEXT VALUE FOR", `EXEC ('SELECT NEXT/**/VALUE/**/FOR dbo.audit_sequence')`},
+		// The same forms at the top level, which lint strips before calling;
+		// statementLint must not depend on its caller having done so.
+		{"comment after the database, top level", `EXEC msdb./**/dbo.sp_purge_jobhistory`},
+		{"comment after the schema, top level", `EXEC msdb.dbo./**/sp_purge_jobhistory`},
+		{"comment after a return code, top level", `DECLARE @r int; EXEC @r = /**/ msdb.dbo.sp_purge_jobhistory`},
+		{"comment opening the batch, top level", `/* c */ msdb.dbo.sp_purge_jobhistory`},
+		// A carriage return on its own ends a line comment on the server, and
+		// classifySQL ended it only at \n, so the code after it was stripped as
+		// comment, at the top level as much as in dynamic SQL.
+		{"line comment ended by a bare CR, top level", "SELECT 1 AS a -- note\rEXEC msdb.dbo.sp_purge_jobhistory"},
+		{"line comment ended by a bare CR, dynamic", "EXEC ('-- note\rmsdb.dbo.sp_purge_jobhistory')"},
+	}
+	for _, c := range mustRefuse {
+		if msg := statementLint(c.sql); msg == "" {
+			t.Errorf("%s: accepted, and it must not be — %s", c.name, c.sql)
+		}
+	}
+
+	// Prose in dynamic SQL is prose, as it is at the top level: a guard that
+	// explains what it does not do must not be refused for saying so.
+	mustAccept := []struct{ name, sql string }{
+		{"comment naming a forbidden word", `EXEC sp_executesql N'/* no ALTER, no sp_purge_jobhistory */ SELECT 1'`},
+		{"line comment before a select", "EXEC ('-- reads only\nSELECT name FROM sys.databases')"},
+	}
+	for _, c := range mustAccept {
+		if msg := statementLint(c.sql); msg != "" {
+			t.Errorf("%s: refused, and it must not be — %s: %s", c.name, c.sql, msg)
+		}
+	}
+}
+
+// Separators the server accepts and a regular expression's \s does not, found
+// beside the comments above. Measured on SQL Server 2025: a control character,
+// a no-break space, any Unicode space and the zero-width space all separate
+// tokens, so EXECUTE<U+00A0>AS LOGIN runs as EXECUTE AS LOGIN. A no-break space
+// is what a statement copied out of a web page or a word processor carries,
+// which makes this the accident the lint exists for rather than a contrivance.
+func TestStatementLintSeesThroughUnusualWhitespace(t *testing.T) {
+	mustRefuse := []struct{ name, sql string }{
+		{"no-break space in EXECUTE AS", "EXECUTE AS LOGIN = 'sa'; SELECT 1"},
+		{"no-break space after EXEC", "EXEC msdb.dbo.sp_purge_jobhistory"},
+		{"vertical tab after EXEC", "EXEC\vmsdb.dbo.sp_purge_jobhistory"},
+		{"ideographic space after EXEC", "EXEC　msdb.dbo.sp_purge_jobhistory"},
+		{"zero-width space opening a dynamic batch", "EXEC ('​msdb.dbo.sp_purge_jobhistory')"},
+		{"no-break space opening a dynamic batch", "EXEC (' msdb.dbo.sp_purge_jobhistory')"},
+		{"control character opening a dynamic batch", "EXEC ('\x01msdb.dbo.sp_purge_jobhistory')"},
+		{"no-break space in END CONVERSATION", "END CONVERSATION @h WITH CLEANUP"},
+	}
+	for _, c := range mustRefuse {
+		if msg := statementLint(c.sql); msg == "" {
+			t.Errorf("%s: accepted, and it must not be — %q", c.name, c.sql)
+		}
+	}
+	mustAccept := []struct{ name, sql string }{
+		{"no-break space in a select", "SELECT name FROM sys.databases"},
+		{"non-ASCII text in a selected literal", "SELECT N'quantité : 3' AS label"},
+	}
+	for _, c := range mustAccept {
+		if msg := statementLint(c.sql); msg != "" {
+			t.Errorf("%s: refused, and it must not be — %q: %s", c.name, c.sql, msg)
+		}
+	}
+}
