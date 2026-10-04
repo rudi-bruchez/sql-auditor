@@ -970,7 +970,7 @@ approve the transfer. It states:
 - what could not be read, and why;
 - what kind of data is inside.
 
-This is its central paragraph, verbatim from a real run:
+This is its central section, verbatim from a default run on the lab instance on 4 October 2026:
 
 ```
 What this archive contains
@@ -994,16 +994,54 @@ What is in here that names things:
     and database the run was pointed at (SQL_SERVER and SQL_DATABASE)
   - database, schema and object names
   - the Windows or SQL login names of database owners
+  - the host names, program names and logins of the applications connected
+    during collection, grouped with a count of connections each; they name
+    the application servers and the accounts they connect as, a Windows
+    login being a person's account as often as a service's
+  - samples of the SQL Server error log, which name logins, databases,
+    file paths and client addresses, and, in lines an application
+    (RAISERROR WITH LOG) or a trace flag (1204, 1222) wrote, statement
+    text and literals, up to 1 000 characters a line
+  - the message of the last failed run of each SQL Server Agent job, up
+    to 512 characters, with each job's description and each alert's
+    notification message; the run message is written by whatever the
+    job ran and can quote the statement or the values that made it fail
+  - the first 200 characters of every step of every SQL Server Agent job,
+    which is application code too and, on some instances, a password typed
+    into a step rather than kept in a credential
+  - the program names of the sessions opened from the server itself, over
+    Shared Memory or a loopback address, grouped with their transport and a
+    count of sessions each; a program name is whatever the client chose to
+    send, and it names the tools and applications running on the host
+  - the 200 newest log shipping error messages, up to 4 000 characters
+    each, which name backup files, shares and servers and can quote the
+    error a restore or a copy raised
+  - the first 500 characters of the SQL of the queries the Query Store
+    recorded, for at most 200 queries in each ranking per database
+    (heaviest, most executed, most rows, interrupted, by resource) and for
+    every query with a forced plan; this is application code and can
+    carry the literal values a statement was written with
+  - the latest history comment of each replication agent and the 50
+    newest replication errors of the last seven days, up to 512
+    characters each; they are written by the agents and can quote a
+    replicated row, a duplicate key value for instance
+  - the full text of computed column definitions, default constraints
+    and the filters of filtered indexes and statistics, which are code
+    written for these databases and can carry literal values
 
 The password of the login used for this run is recorded nowhere in this
 archive. The run settings in _run.json are the query and output directories,
-the database name filters, and whether session text was collected; any setting
-whose name marks it as a password, token or other secret is replaced with
-"(redacted)" before that block is written.
+the database name filters, which optional collections were switched on, and
+the window and per-database limits the Query Store extraction was given; any
+setting whose name marks it as a password, token or other secret is replaced
+with "(redacted)" before that block is written.
 
-That is metadata about the estate rather than the data held in it, but the
-login names above are attributable to people, so treat this as internal
-infrastructure documentation rather than public material.
+Most of this is metadata about the estate rather than the data held in it,
+but the texts listed above that an application, a job, an agent or a person
+wrote (statements, plans, messages, definitions) can quote values copied
+from application tables, personal data among them, and the login names are
+attributable to people. Treat this archive as potentially containing
+personal data and handle it on that basis.
 ```
 
 ### The manifest describes the run it came from
@@ -1657,16 +1695,11 @@ side.
 
 ### What the manifest says
 
-If you do turn it on, `MANIFEST.txt` says so. The disclosure section gains a line
-naming the captured statement text, and the closing paragraph changes to the one
-any of the widening options produces:
-
-```
-Most of this is metadata about the estate rather than the data held in it,
-but the captured statement text can carry values copied from application
-tables, and the login names are attributable to people. Treat this archive
-as potentially containing personal data and handle it on that basis.
-```
+If you do turn it on, `MANIFEST.txt` says so: the disclosure section gains a line
+naming the captured statement text. The closing paragraph is already the one
+that says the archive may hold personal data, because a default run carries
+application text too (see the section above); the session text is one more of
+the texts it covers.
 
 Which form was used is a property of the archive, readable by whoever receives
 it. Nobody has to take your word for which way the flag was set, and an archive
