@@ -108,7 +108,7 @@ queries/90.availability/021.always-on-2016.sql TSql130 (SQL Server 2016)    resu
 queries/90.availability/030.log-shipping.sql   TSql110 (SQL Server 2012)    resultsets 4/4  ok
 queries/90.availability/040.replication.sql    TSql110 (SQL Server 2012)    resultsets 3/3  ok
 queries/90.availability/041.replication-publisher.sql TSql110 (SQL Server 2012)    resultsets 4/4  ok
-queries/90.availability/042.replication-distribution.sql TSql110 (SQL Server 2012)    resultsets 7/7  ok
+queries/90.availability/042.replication-distribution.sql TSql110 (SQL Server 2012)    resultsets 9/9  ok
 queries/90.availability/043.replication-subscriber.sql TSql110 (SQL Server 2012)    resultsets 3/3  ok
 queries/90.availability/044.replication-counters.sql TSql110 (SQL Server 2012)    resultsets 2/2  ok
 queries/90.availability/050.page-repair.sql    TSql110 (SQL Server 2012)    resultsets 2/2  ok

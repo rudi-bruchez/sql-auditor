@@ -180,6 +180,21 @@ There is deliberately no new grant to ask for here. If your organisation would
 have to raise the audit login's rights to collect this, run without it and read
 the error numbers.
 
+The replication agent profiles are the one part of this that lives in msdb,
+and msdb grants nothing on those tables to `public`.
+`90.availability/042.replication-distribution.sql` reads
+`msdb.dbo.MSagent_profiles`, `MSagent_parameters` and `MSagentparameterlist`
+for the profiles, and `msdb.dbo.sysjobsteps` for the parameters given on the
+agents' command lines, which override the profile. Of each step it keeps only
+the values after `-SkipErrors` and `-MaxCmdsInTran`, never the command, which is
+where an agent's `-PublisherPassword` is written. Measured on SQL Server 2025:
+a login in `db_datareader` on the distribution database, holding in msdb only
+`SQLAgentReaderRole` and `SELECT` on `backupset`, gets the topology and the
+agents, and the root says `errors.profiles 229`; `SELECT` on those three tables is what the profiles
+need, and the `sysjobsteps` grant the script already offers for job steps is
+what the command-line values need. Without them, `counts.agents_skipping_errors`
+is NULL rather than 0, because nobody looked.
+
 **The Agent proxy count of each credential asks for no right either.**
 `40.security/030.server-surface.sql` counts, per credential, the Agent proxies
 that run under it, from `msdb.dbo.sysproxies`. On a default msdb only
