@@ -74,6 +74,20 @@
 -- were trimmed come in a second array keyed the same way. The two arrays join
 -- on table, index and partition.
 --
+-- BOTH ARRAYS ARE CAPPED AT 2 000 ROWS, AND THE ROOT COUNTS WHAT THEY WOULD
+-- HOLD. counts.index_partitions is the number of rows columnstore would have
+-- without its cap and counts.trim_reason_rows that of trim_reasons, beside
+-- listing_cap and listing_cap_trim_reasons. Until October 2026 the caps were
+-- 200 and 400, with no reason stated and no count: a warehouse partitioned by
+-- day carries a columnstore partition per day, so 200 partitions is not much
+-- more than half a year of one table, and the partitions past the cap left
+-- without a word. No real collection carried this file then
+-- (docs/caps-inventory.md), so 2 000 rests on the lab: an index of 451
+-- partitions gave 451 and 451 rows, about 390 and 140 bytes each. The rows
+-- are aggregates of @groups, already read in full, so the cap bounds output
+-- and not server work. Within the order each list is read in, object_id,
+-- index_id and partition break ties, so two runs keep the same rows.
+--
 -- NO JUDGEMENT IS APPLIED. A columnstore index with open rowgroups is being
 -- written to, which is what it is for. Deleted rows accumulate between
 -- maintenance windows and that is normal; what makes a proportion a finding is
@@ -153,6 +167,16 @@ SELECT
         AND g.[trim_reason_desc] NOT IN (N'NO_TRIM', N'RESIDUAL_ROW_GROUP'))
                                                                 AS [counts.row_groups_trimmed],
     1048576                                                     AS [counts.max_rows_per_row_group],
+    -- What the two arrays below would hold without their caps, grouped as
+    -- they group.
+    (SELECT COUNT(*) FROM (SELECT DISTINCT g.[object_id], g.[index_id], g.[partition_number]
+                           FROM @groups AS g) AS x)              AS [counts.index_partitions],
+    (SELECT COUNT(*) FROM (SELECT DISTINCT g.[object_id], g.[index_id], g.[partition_number],
+                                  g.[trim_reason_desc]
+                           FROM @groups AS g
+                           WHERE g.[state_desc] = N'COMPRESSED') AS x) AS [counts.trim_reason_rows],
+    2000                                                        AS [listing_cap],
+    2000                                                        AS [listing_cap_trim_reasons],
     CASE WHEN @err_columnstore = 0 THEN 1 ELSE 0 END            AS [collected.columnstore],
     @err_columnstore                                            AS [errors.columnstore],
     NULLIF(@msg, N'')                                           AS [error_message]
@@ -161,7 +185,7 @@ OPTION (RECOMPILE, MAXDOP 1);
 /* One row per index partition. avg_rows_per_compressed_group is the number to
    read first: against the 1 048 576 maximum it says whether this index is
    getting what it was created for. */
-SELECT TOP (200)
+SELECT TOP (2000)
     OBJECT_SCHEMA_NAME(g.[object_id]) + '.' + OBJECT_NAME(g.[object_id])
                                                                 AS [table],
     i.name                                                      AS [index_name],
@@ -207,14 +231,15 @@ SELECT TOP (200)
 FROM @groups AS g
 LEFT JOIN sys.indexes AS i
        ON i.object_id = g.[object_id] AND i.index_id = g.[index_id]
-GROUP BY g.[object_id], i.name, i.type_desc, g.[partition_number]
-ORDER BY SUM(g.[deleted_rows]) DESC, SUM(g.[total_rows]) DESC
+GROUP BY g.[object_id], g.[index_id], i.name, i.type_desc, g.[partition_number]
+ORDER BY SUM(g.[deleted_rows]) DESC, SUM(g.[total_rows]) DESC,
+         g.[object_id], g.[index_id], g.[partition_number]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* Why the compressed rowgroups closed where they did, per index partition.
    NO_TRIM and RESIDUAL_ROW_GROUP are the expected reasons and are kept rather
    than filtered: a reader needs the denominator to judge the others. */
-SELECT TOP (400)
+SELECT TOP (2000)
     OBJECT_SCHEMA_NAME(g.[object_id]) + '.' + OBJECT_NAME(g.[object_id])
                                                                 AS [table],
     i.name                                                      AS [index_name],
@@ -228,6 +253,7 @@ FROM @groups AS g
 LEFT JOIN sys.indexes AS i
        ON i.object_id = g.[object_id] AND i.index_id = g.[index_id]
 WHERE g.[state_desc] = N'COMPRESSED'
-GROUP BY g.[object_id], i.name, g.[partition_number], g.[trim_reason_desc]
-ORDER BY SUM(g.[row_groups]) DESC
+GROUP BY g.[object_id], g.[index_id], i.name, g.[partition_number], g.[trim_reason_desc]
+ORDER BY SUM(g.[row_groups]) DESC, g.[object_id], g.[index_id], g.[partition_number],
+         g.[trim_reason_desc]
 OPTION (RECOMPILE, MAXDOP 1);

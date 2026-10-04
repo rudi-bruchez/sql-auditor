@@ -3,6 +3,7 @@ package sqlauditor_test
 import (
 	"io/fs"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -430,6 +431,73 @@ func TestUntrustedConstraintListIsOrderedDisabledFirst(t *testing.T) {
 	if !emit.MatchString(sql) {
 		t.Errorf("the untrusted constraint list is no longer emitted by kind, disabled first, " +
 			"not-for-replication last, with object_id breaking ties")
+	}
+}
+
+// A cap that stays has to say when it bound. These files keep one, and each
+// projects the value of its TOP and a count of what the list would hold
+// without it; the value must be the TOP's own, or a reader compares the count
+// with a number the file does not apply. The files are 70.schema/040, 045 and
+// 021, whose caps were raised in October 2026, and 050, whose cap is a
+// variable projected under sample.largest_heaps_scanned.
+func TestSchemaCapsAreProjectedWithTheirTotals(t *testing.T) {
+	cases := []struct {
+		file  string
+		top   string // regexp whose first group is the TOP's literal
+		cap   string // regexp whose first group is the projected cap
+		total string // the count of what the list would hold without the cap
+	}{
+		{"040.compression.sql", `SELECT TOP \((\d+)\)\s+u\.\[table\]`,
+			`(\d+)\s+AS \[listing_cap\]`, "AS [counts.uncompressed_indexes]"},
+		{"045.columnstore.sql", `SELECT TOP \((\d+)\)\s+OBJECT_SCHEMA_NAME[^;]*?AS \[index_type\]`,
+			`(\d+)\s+AS \[listing_cap\]`, "AS [counts.index_partitions]"},
+		{"045.columnstore.sql", `SELECT TOP \((\d+)\)\s+OBJECT_SCHEMA_NAME[^;]*?AS \[trim_reason\]`,
+			`(\d+)\s+AS \[listing_cap_trim_reasons\]`, "AS [counts.trim_reason_rows]"},
+		{"021.missing-index-queries.sql", `SELECT TOP \((\d+)\)\s+q\.\[group_handle\]`,
+			`(\d+)\s+AS \[listing_cap\]`, "AS [counts.rows_before_cap]"},
+		{"050.heaps.sql", `DECLARE @top int = (\d+)`,
+			`@top\s+AS \[sample\.largest_heaps_scanned\]()`, "AS [counts.eligible_partitions]"},
+	}
+	for _, c := range cases {
+		b, err := sqlauditor.Queries.ReadFile("queries/70.schema/" + c.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := collect.StripSQLComments(string(b))
+		top := regexp.MustCompile(c.top).FindStringSubmatch(code)
+		capm := regexp.MustCompile(c.cap).FindStringSubmatch(code)
+		if top == nil || capm == nil {
+			t.Errorf("%s: cannot find the TOP (%v) or the projected cap (%v)", c.file, top != nil, capm != nil)
+			continue
+		}
+		if capm[1] != "" && capm[1] != top[1] {
+			t.Errorf("%s: the list takes TOP (%s) and the root says %s", c.file, top[1], capm[1])
+		}
+		if !strings.Contains(code, c.total) {
+			t.Errorf("%s: no %s, so a list cut at its cap reads as complete", c.file, c.total)
+		}
+	}
+	// 021's outer TOP exists so that it never binds: the engine keeps at most
+	// 600 missing-index groups, and each keeps at most listing_cap_per_suggestion
+	// rows, so the product is the most the file can hold.
+	b, err := sqlauditor.Queries.ReadFile("queries/70.schema/021.missing-index-queries.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := collect.StripSQLComments(string(b))
+	per := regexp.MustCompile(`(\d+)\s+AS \[listing_cap_per_suggestion\]`).FindStringSubmatch(code)
+	rank := regexp.MustCompile(`\[rank_in_suggestion\] <= (\d+)`).FindStringSubmatch(code)
+	outer := regexp.MustCompile(`(\d+)\s+AS \[listing_cap\]`).FindStringSubmatch(code)
+	if per == nil || rank == nil || outer == nil {
+		t.Fatalf("021: per-suggestion cap %v, rank filter %v, outer cap %v", per != nil, rank != nil, outer != nil)
+	}
+	if per[1] != rank[1] {
+		t.Errorf("021: the rows are ranked to %s per suggestion and the root says %s", rank[1], per[1])
+	}
+	p, _ := strconv.Atoi(per[1])
+	o, _ := strconv.Atoi(outer[1])
+	if o < 600*p {
+		t.Errorf("021: listing_cap %d is below 600 groups times %d, so it can drop whole suggestions", o, p)
 	}
 }
 
