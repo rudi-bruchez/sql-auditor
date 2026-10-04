@@ -612,7 +612,10 @@ Two things worth knowing:
   earlier run did not use, a database the earlier run read and this one
   did not, a collector the earlier run ran on a target that this one never
   planned (removed from `QUERIES_DIR`, or absent from the corpus of the
-  binary you now run), or a setting that lets fewer units run or return
+  binary you now run), a collector the earlier run brought results back for
+  and this one skipped (a permission the login lost in between, or a newer
+  binary that raised its version floor, took it out of the profile or made
+  it opt-in; the skip's reason is quoted), or a setting that lets fewer units run or return
   less: a `QUERY_STORE_DB_INCLUDE` this run set or changed, a lower
   `QUERY_STORE_TOP`, a shorter `QUERY_STORE_DAYS`, a typed window that does
   not cover the earlier one, or another comparison point. Both runs' `_run.json` say what they covered, and a plain afternoon

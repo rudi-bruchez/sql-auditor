@@ -259,6 +259,12 @@ func TestARerunThatPlannedFewerCollectorsKeepsThePreviousRun(t *testing.T) {
 	}
 	both := []string{"SALESDB", "HRDB"}
 	full := []ResultEntry{{Script: srv}, {Script: db, Target: "SALESDB"}, {Script: db, Target: "HRDB"}}
+	const (
+		opt     = FlagDefaultTrace
+		denied  = "the login cannot read the server state, which this query declares in @permissions"
+		version = "needs SQL Server 16.0 or later; this instance reports 15.0.4430"
+		held    = "the blocking watch cancelled 20.database/030.indexes.sql on this database"
+	)
 	cases := []struct {
 		name      string
 		prev, cur *Manifest
@@ -271,24 +277,82 @@ func TestARerunThatPlannedFewerCollectorsKeepsThePreviousRun(t *testing.T) {
 			[]string{"collector " + srv}, nil},
 		{"a database collector run on fewer databases", run(both, full...), run(both, full[:2]...),
 			[]string{"collector " + db + " on HRDB"}, nil},
-		{"a collector skipped by this run is planned", run(both, full...),
+		{"a collector skipped by an opt-in the previous run had on is named by the option",
+			func() *Manifest { m := scopeManifest("", []string{opt}, both...); m.Results = full; return m }(),
 			func() *Manifest {
 				m := run(both, full[1:]...)
-				m.Skipped = []SkippedScript{{Script: srv, Reason: "not collected by default"}}
+				m.Skipped = []SkippedScript{{Script: srv, Reason: flagSkipReason(opt)}}
+				return m
+			}(), []string{flagOption(opt)}, []string{"collector " + srv, "skipped:"}},
+		{"a collector that became opt-in is lost", run(both, full...),
+			func() *Manifest {
+				m := run(both, full[1:]...)
+				m.Skipped = []SkippedScript{{Script: srv, Reason: flagSkipReason(opt)}}
+				return m
+			}(), []string{"collector " + srv + " (skipped: " + flagSkipReason(opt) + ")"}, nil},
+		{"a collector skipped for a permission the login lost is lost", run(both, full...),
+			func() *Manifest {
+				m := run(both, full[1:]...)
+				m.Skipped = []SkippedScript{{Script: srv, Reason: denied}}
+				return m
+			}(), []string{"collector " + srv + " (skipped: " + denied + ")"}, nil},
+		{"a collector skipped for a permission after it failed before loses nothing",
+			func() *Manifest {
+				m := run(both, full[1:]...)
+				m.Errors = []ErrorEntry{{Script: srv, Message: "permission denied"}}
+				return m
+			}(),
+			func() *Manifest {
+				m := run(both, full[1:]...)
+				m.Skipped = []SkippedScript{{Script: srv, Reason: denied}}
 				return m
 			}(), nil, nil},
-		{"a database collector skipped as a whole is planned on every database", run(both, full...),
+		{"a database collector skipped as a whole by the version is lost on every database", run(both, full...),
 			func() *Manifest {
 				m := run(both, full[0])
-				m.Skipped = []SkippedScript{{Script: db, Reason: "needs SQL Server 16.0 or later"}}
+				m.Skipped = []SkippedScript{{Script: db, Reason: version}}
 				return m
-			}(), nil, nil},
-		{"a database skipped for a collector is planned", run(both, full...),
+			}(), []string{"collector " + db + " on SALESDB, HRDB (skipped: " + version + ")"}, nil},
+		{"a database collector skipped as a whole by a dropped opt-in is planned on every database",
+			func() *Manifest { m := scopeManifest("", []string{opt}, both...); m.Results = full; return m }(),
+			func() *Manifest {
+				m := run(both, full[0])
+				m.Skipped = []SkippedScript{{Script: db, Reason: flagSkipReason(opt)}}
+				return m
+			}(), []string{flagOption(opt)}, []string{"collector " + db, "skipped:"}},
+		{"a database skipped for a collector by QUERY_STORE_DB_INCLUDE is left to the setting", run(both, full...),
 			func() *Manifest {
 				m := run(both, full[:2]...)
-				m.Skipped = []SkippedScript{{Script: db, Target: "HRDB", Reason: "not matched by QUERY_STORE_DB_INCLUDE"}}
+				m.Skipped = []SkippedScript{{Script: db, Target: "HRDB", Reason: skipNotInQueryStoreInclude}}
 				return m
 			}(), nil, nil},
+		{"a collector moved out of the same profile is lost",
+			func() *Manifest { m := scopeManifest("health", nil, both...); m.Results = full; return m }(),
+			func() *Manifest {
+				m := scopeManifest("health", nil, both...)
+				m.Results = full[1:]
+				m.Skipped = []SkippedScript{{Script: srv, Reason: ProfileSkipReason("health")}}
+				return m
+			}(), []string{"collector " + srv + " (skipped: " + ProfileSkipReason("health") + ")"}, nil},
+		{"a collector outside a narrower profile is named by the profile", run(both, full...),
+			func() *Manifest {
+				m := scopeManifest("health", nil, both...)
+				m.Results = full[1:]
+				m.Skipped = []SkippedScript{{Script: srv, Reason: ProfileSkipReason("health")}}
+				return m
+			}(), []string{"--profile health"}, []string{"collector " + srv, "skipped:"}},
+		{"a unit the blocking watch held back is lost", run(both, full...),
+			func() *Manifest {
+				m := run(both, full[:2]...)
+				m.Skipped = []SkippedScript{{Script: db, Target: "HRDB", Reason: held}}
+				return m
+			}(), []string{"collector " + db + " on HRDB (skipped: " + held + ")"}, nil},
+		{"a skip for a reason the comparison does not know is lost", run(both, full...),
+			func() *Manifest {
+				m := run(both, full[1:]...)
+				m.Skipped = []SkippedScript{{Script: srv, Reason: "a reason added later"}}
+				return m
+			}(), []string{"collector " + srv + " (skipped: a reason added later)"}, nil},
 		{"a database not read is named once", run(both, full...), run([]string{"SALESDB"}, full[:2]...),
 			[]string{"database HRDB"}, []string{"collector"}},
 		{"a collector that failed before", func() *Manifest {

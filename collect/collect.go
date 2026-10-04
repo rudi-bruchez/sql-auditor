@@ -415,7 +415,7 @@ type runScope struct {
 	} `json:"targets"`
 	Results []scopeUnit `json:"results"`
 	Errors  []scopeUnit `json:"errors"`
-	Skipped []scopeUnit `json:"skipped_scripts"`
+	Skipped []scopeSkip `json:"skipped_scripts"`
 }
 
 // scopeUnit is one collector on one target. Target is empty for an instance
@@ -423,6 +423,14 @@ type runScope struct {
 type scopeUnit struct {
 	Script string `json:"script"`
 	Target string `json:"target"`
+}
+
+// scopeSkip is a unit a run planned and did not execute, with the reason it
+// gave, which decides whether the skip loses something the earlier run had.
+type scopeSkip struct {
+	Script string `json:"script"`
+	Target string `json:"target"`
+	Reason string `json:"reason"`
 }
 
 func scopeOfManifest(m *Manifest) runScope {
@@ -441,7 +449,7 @@ func scopeOfManifest(m *Manifest) runScope {
 		s.Errors = append(s.Errors, scopeUnit{e.Script, e.Target})
 	}
 	for _, k := range m.Skipped {
-		s.Skipped = append(s.Skipped, scopeUnit{k.Script, k.Target})
+		s.Skipped = append(s.Skipped, scopeSkip{k.Script, k.Target, k.Reason})
 	}
 	return s
 }
@@ -494,8 +502,8 @@ func manifestInZip(path string) ([]byte, error) {
 // on and cur had off, every collector outside cur's profile when prev had
 // none or another, a setting that let prev run more or return more
 // (settingsLost), each database prev read and cur did not, and each collector
-// prev ran that cur did not plan (collectorsLost). Empty means cur covers
-// prev, and prev can go.
+// prev ran that cur did not plan, or skipped for a reason that did not hold
+// for prev (collectorsLost). Empty means cur covers prev, and prev can go.
 //
 // A set comparison rather than a count: a run over two other databases than
 // the morning's covers as many and still loses the morning's two.
@@ -537,49 +545,127 @@ func scopeLost(prev, cur runScope) []string {
 // target. The corpus is not named by its directory. The files under the same
 // QUERIES_DIR can change between two runs, and a new binary embeds another
 // corpus under the same empty setting, so two equal settings said nothing
-// about the collectors either run had. A skip is planning: the opt-ins, the
-// profile, the version and the permissions that skip a collector are compared
-// above, or are not a narrowing the operator chose.
+// about the collectors either run had.
+//
+// It also names each collector prev ran to a result that cur skipped, when
+// the skip loses that result rather than restating a narrowing named above
+// (skipLoses). A unit prev ran only to an error held nothing, and a skip of it
+// loses nothing.
 //
 // A unit on a database cur did not read at all is left out: that database is
 // named already, and naming each of its collectors again says nothing more.
 func collectorsLost(prev, cur runScope, gone map[string]bool) []string {
-	planned := map[scopeUnit]bool{}
+	ran := map[scopeUnit]bool{}
 	whole := map[string]bool{}
-	for _, list := range [][]scopeUnit{cur.Results, cur.Errors, cur.Skipped} {
+	for _, list := range [][]scopeUnit{cur.Results, cur.Errors} {
 		for _, u := range list {
-			planned[u] = true
+			ran[u] = true
 			if u.Target == "" {
 				whole[u.Script] = true
 			}
 		}
 	}
-	// An error with no script is about the run, a lost connection or a
-	// failed reset, and names no collector.
-	missing := map[string][]string{}
-	for _, list := range [][]scopeUnit{prev.Results, prev.Errors} {
+	// A skip with no target covers the collector on every database.
+	skipped := map[scopeUnit]string{}
+	for _, k := range cur.Skipped {
+		skipped[scopeUnit{k.Script, k.Target}] = k.Reason
+	}
+	skipOf := func(u scopeUnit) (string, bool) {
+		if r, ok := skipped[u]; ok {
+			return r, true
+		}
+		r, ok := skipped[scopeUnit{Script: u.Script}]
+		return r, ok
+	}
+	// Keyed by collector and skip reason, so one line names a collector lost
+	// on several databases for the same reason. The reason is empty for a
+	// collector cur did not plan.
+	type loss struct{ script, reason string }
+	missing := map[loss][]string{}
+	seen := map[scopeUnit]bool{}
+	// Results first: a unit prev has both a result and an error for is judged
+	// by its result.
+	for i, list := range [][]scopeUnit{prev.Results, prev.Errors} {
+		produced := i == 0
 		for _, u := range list {
-			if u.Script == "" || planned[u] || whole[u.Script] || gone[u.Target] {
+			// An error with no script is about the run, a lost connection or
+			// a failed reset, and names no collector.
+			if u.Script == "" || seen[u] || ran[u] || whole[u.Script] || gone[u.Target] {
 				continue
 			}
-			planned[u] = true // once, when prev has both a result and an error
-			dbs := missing[u.Script]
+			seen[u] = true
+			l := loss{script: u.Script}
+			if r, ok := skipOf(u); ok {
+				if !produced || !skipLoses(r, prev, cur) {
+					continue
+				}
+				l.reason = r
+			}
+			dbs := missing[l]
 			if u.Target != "" {
 				dbs = append(dbs, u.Target)
 			}
-			missing[u.Script] = dbs
+			missing[l] = dbs
 		}
 	}
 	lost := make([]string, 0, len(missing))
-	for sc, dbs := range missing {
+	for l, dbs := range missing {
+		line := "collector " + l.script
 		if len(dbs) > 0 {
-			lost = append(lost, "collector "+sc+" on "+strings.Join(dbs, ", "))
-		} else {
-			lost = append(lost, "collector "+sc)
+			line += " on " + strings.Join(dbs, ", ")
 		}
+		if l.reason != "" {
+			line += " (skipped: " + l.reason + ")"
+		}
+		lost = append(lost, line)
 	}
 	sort.Strings(lost)
 	return lost
+}
+
+// skipLoses reports whether cur's skip of a unit prev ran to a result loses
+// that result. prev producing it proves the reason did not hold for prev, so
+// the skip is a loss unless scopeLost already names the narrowing behind it,
+// and naming it again per collector would only repeat the line:
+//
+//	reason                          a loss?
+//	not in profile P                only when prev ran under the same profile,
+//	                                so the corpus moved the collector out of it;
+//	                                a changed profile is named above
+//	opt-in not passed (--x)         only when prev did not have --x on either,
+//	                                so the collector became opt-in; --x on in
+//	                                prev and off in cur is named above
+//	QUERY_STORE_DB_INCLUDE          never: settingsLost names every pattern
+//	                                that can narrow, and an unchanged one cannot
+//	                                have matched the database for prev alone
+//	SQL Server version floor or     yes: the same instance gave prev a result,
+//	ceiling                         so the collector's bounds changed and this
+//	                                run lacks what it collected
+//	login lacks a permission        yes: access lost between the two runs is
+//	                                the case this comparison exists for
+//	held back by the blocking       yes, though such a run already exits 2 and
+//	watch                           keeps prev as partial
+//	any other reason                yes: a reason this list does not know is
+//	                                not shown to cover anything
+//
+// A database cur skipped as a whole (offline, single user, no access,
+// DB_EXCLUDE) never reaches here: it is not among cur's databases, and
+// scopeLost names it once.
+func skipLoses(reason string, prev, cur runScope) bool {
+	if cur.Profile.Name != "" && reason == ProfileSkipReason(cur.Profile.Name) {
+		return prev.Profile.Name == cur.Profile.Name
+	}
+	if reason == skipNotInQueryStoreInclude {
+		return false
+	}
+	for _, flags := range []map[string]string{KnownFlags, ValueFlags} {
+		for n := range flags {
+			if reason == flagSkipReason(n) {
+				return !(prev.Config[n] == "true" && cur.Config[n] != "true")
+			}
+		}
+	}
+	return true
 }
 
 // settingsLost names what the settings with a value, rather than an on/off
@@ -887,7 +973,7 @@ func skipReason(s Script, profile string, denied map[string]bool, serverVersion 
 		return ProfileSkipReason(profile), true
 	}
 	if s.RequiresFlag != "" && !enabled[s.RequiresFlag] {
-		return fmt.Sprintf("not collected by default; pass %s to include it", flagOption(s.RequiresFlag)), true
+		return flagSkipReason(s.RequiresFlag), true
 	}
 	// An unparseable or absent ProductVersion is not evidence that the server
 	// is old. Gating on it would silently drop every version-gated collector
@@ -912,6 +998,17 @@ func skipReason(s Script, profile string, denied map[string]bool, serverVersion 
 	}
 	return "", false
 }
+
+// flagSkipReason is the sentence for a collector left out because its opt-in
+// was not passed. It is built in one place so the rerun comparison can tell
+// this skip from the others by equality rather than by searching the text.
+func flagSkipReason(flag string) string {
+	return fmt.Sprintf("not collected by default; pass %s to include it", flagOption(flag))
+}
+
+// skipNotInQueryStoreInclude is the reason for a Query Store unit dropped by
+// QUERY_STORE_DB_INCLUDE, held in one place for the same reason.
+const skipNotInQueryStoreInclude = "not matched by QUERY_STORE_DB_INCLUDE"
 
 // capabilityLabel turns a capability key into the English label the preflight
 // carries for it. The rule is stated in preflight.go: MANIFEST.txt gets the
@@ -1692,7 +1789,7 @@ func queryStoreUnits(cfg *Config, s Script, folders []DatabaseFolder) ([]Databas
 		}
 		skipped = append(skipped, SkippedScript{
 			Script: s.Path, Target: f.Name,
-			Reason: "not matched by QUERY_STORE_DB_INCLUDE",
+			Reason: skipNotInQueryStoreInclude,
 		})
 	}
 	return kept, skipped
