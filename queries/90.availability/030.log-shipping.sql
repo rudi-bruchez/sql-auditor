@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, primary:array, secondary:array, errors:array
 -- @permissions: CONNECT, LOG SHIPPING
 -- @timeout:     60
+-- @discloses:   log_shipping_messages
 --
 -- Log shipping: what this instance ships, what it receives, and how far behind
 -- each side is.

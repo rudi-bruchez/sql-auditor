@@ -3,6 +3,7 @@
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @min_version: 11.0.3000
 -- @timeout:     180
+-- @discloses:   schema_expressions
 --
 -- Every statistic in the database, in two widths: a short row and the full
 -- detail, each for every statistic on a user table. When it was last updated,

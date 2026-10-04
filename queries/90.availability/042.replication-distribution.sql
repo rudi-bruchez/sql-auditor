@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, configuration:array, publications:array, articles:array, agents:array, agent_profiles:array, agent_profile_parameters:array, latency:array, repl_errors:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION
 -- @timeout:     120
+-- @discloses:   replication_messages
 -- @widened:     replication
 --
 -- The distribution database: what it distributes, for whom, how far behind,

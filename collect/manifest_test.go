@@ -918,3 +918,58 @@ func TestServerTriggerSourceIsGatedAndDisclosed(t *testing.T) {
 		t.Errorf("MANIFEST.txt should disclose the server trigger source:\n%s", m.Human())
 	}
 }
+
+// Application-written text that leaves on the default path must be declared by
+// the collector that projects it and printed in MANIFEST.txt with its length.
+// None of these was declared until 4 October 2026: a job's failure message and
+// a replication error can quote the row that made them fail, and a default
+// constraint or an index filter can hold a literal copied out of the
+// application. Each row names the file, the token it must carry, and a phrase
+// the manifest must print for that token, which is how a reader learns how
+// much of the text left.
+func TestApplicationTextIsDeclaredAndDisclosed(t *testing.T) {
+	scripts, err := Discover(os.DirFS(filepath.Join("..", "queries")), ".")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	byPath := map[string]Script{}
+	for _, s := range scripts {
+		byPath[s.Path] = s
+	}
+	for _, c := range []struct {
+		path, token, phrase string
+	}{
+		{"50.agent/010.jobs.sql", "job_messages", "last failed run of each SQL Server Agent job, up to 512 characters"},
+		{"50.agent/030.alerts.sql", "job_messages", "notification message"},
+		{"90.availability/042.replication-distribution.sql", "replication_messages", "up to 512 characters each"},
+		{"90.availability/030.log-shipping.sql", "log_shipping_messages", "up to 4 000 characters"},
+		{"70.schema/060.columns.sql", "schema_expressions", "computed column definitions, default constraints"},
+		{"70.schema/020.index-usage.sql", "schema_expressions", "filtered indexes"},
+		{"70.schema/070.index-columns.sql", "schema_expressions", "filtered indexes"},
+		{"70.schema/090.statistics.sql", "schema_expressions", "statistics"},
+		{"80.workload/020.query-store.sql", "query_text", "first 500 characters"},
+		{"80.workload/020.query-store.sql", "query_text", "at most 200 queries in each ranking per database"},
+		{"80.workload/023.query-store-most-executed.sql", "query_text", "at most 200 queries"},
+		{"80.workload/024.query-store-rowcount.sql", "query_text", "at most 200 queries"},
+		{"80.workload/026.query-store-interrupted.sql", "query_text", "at most 200 queries"},
+		{"80.workload/028.query-store-resources.sql", "query_text", "at most 200 queries"},
+	} {
+		s, ok := byPath[c.path]
+		if !ok {
+			t.Errorf("%s is not in the corpus", c.path)
+			continue
+		}
+		if s.RequiresFlag != "" {
+			t.Errorf("%s is gated by %q; this test is about the default path", c.path, s.RequiresFlag)
+		}
+		if !slices.Contains(s.Discloses, c.token) {
+			t.Errorf("%s must declare @discloses: %s, got %v", c.path, c.token, s.Discloses)
+		}
+		m := NewManifest("sql-auditor", "test", "abc")
+		m.Sources = map[string]SourceInfo{"queries": {From: "embedded", SHA256: "abc"}}
+		m.Disclosed = s.Discloses
+		if h := flatten(m.Human()); !strings.Contains(h, c.phrase) {
+			t.Errorf("MANIFEST.txt for %s should say %q:\n%s", c.path, c.phrase, m.Human())
+		}
+	}
+}
