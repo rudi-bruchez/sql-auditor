@@ -38,15 +38,22 @@
 -- data, unlike sys.dm_db_index_physical_stats, which scans. There is no reason
 -- to gate this collector behind a flag.
 --
--- THE HEAPS LISTING HAS NO CAP. It kept the 200 heaps with the most forwarded
--- fetches until October 2026, with "the same cap as the two others" for its
--- only reason, and no heap total beside it. Twelve real collections taken on
--- eight client instances between August and September 2026 had it bind in 4
--- databases, up to 810 heaps (docs/caps-inventory.md). The aggregate already
--- read the DMV for every heap before the TOP kept 200 of them, so the whole
--- list costs output only, about 200 bytes a heap, some 120 KB raw more on the
--- largest seen. listing_cap, still 200, now describes contention and
--- page_compression and not heaps.
+-- THE HEAPS LISTING STOPS AT 100 000. It kept the 200 heaps with the most
+-- forwarded fetches until October 2026, with "the same cap as the two others"
+-- for its only reason, and no heap total beside it. Twelve real collections
+-- taken on eight client instances between August and September 2026 had it
+-- bind in 4 databases, up to 810 heaps (docs/caps-inventory.md), so the cap
+-- was lifted. It came back the same day, high, with the caps of 010, 060, 090
+-- and 091: the collector holds every row of a result in memory before it
+-- writes the file, and on a lab schema of 20 000 tables the files of
+-- 70.schema that had lost their caps took the collector to 2.09 GB resident
+-- (060.columns.sql has the measurement). A heap row is 168 bytes measured
+-- there, so 100 000 heaps is about 17 MB, a hundred times the largest count
+-- seen on a client. The order is forwarded fetches, then leaf updates, then
+-- schema and name, so the heaps kept are the damaged ones and two runs over
+-- the same counters keep the same ones. heaps_total counts the heaps the DMV
+-- reports, heaps_listed the rows of the listing, and heaps_listing_cap gives
+-- the cap; listing_cap, still 200, describes contention and page_compression.
 --
 -- IT IS STILL BLOCKABLE, AND THAT IS WHY THE READS ARE BUFFERED. Cheap is not
 -- the same as lock-free: the DMV is joined to sys.objects and sys.indexes,
@@ -231,7 +238,12 @@ DECLARE @instance_start datetime, @seconds_since int,
         @lock_wait_ms bigint, @lock_escalations bigint,
         @page_partitions int, @page_partitions_reporting int,
         @page_attempts bigint, @page_successes bigint,
-        @page_heaps int, @page_heaps_without_attempts int;
+        @page_heaps int, @page_heaps_without_attempts int,
+        @heaps_total int;
+
+/* The heaps listing's cap, a variable so that the TOP and the root project
+   the same number. See the header. */
+DECLARE @heaps_listing_cap int = 100000;
 
 DECLARE @heaps TABLE (
     [table]             nvarchar(300),
@@ -310,8 +322,14 @@ END CATCH
    forwarded record is created by an update: the ratio is what separates a
    heap that is merely written from one that is being damaged. */
 BEGIN TRY
+    SELECT @heaps_total = COUNT(DISTINCT os.object_id)
+    FROM       sys.dm_db_index_operational_stats(DB_ID(), NULL, NULL, NULL) AS os
+    JOIN       sys.objects AS o ON o.object_id = os.object_id AND o.type = 'U'
+    WHERE os.index_id = 0
+    OPTION (RECOMPILE, MAXDOP 1);
+
     INSERT INTO @heaps
-    SELECT
+    SELECT TOP (@heaps_listing_cap)
            SCHEMA_NAME(o.schema_id) + '.' + o.name,
            SUM(os.forwarded_fetch_count),
            SUM(os.leaf_insert_count),
@@ -327,10 +345,12 @@ BEGIN TRY
             ON ps.object_id = os.object_id AND ps.index_id = os.index_id
     WHERE os.index_id = 0
     GROUP BY o.schema_id, o.name
+    ORDER BY SUM(os.forwarded_fetch_count) DESC, SUM(os.leaf_update_count) DESC,
+             o.schema_id, o.name
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
-    SELECT @err_heaps = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
+    SELECT @err_heaps = ERROR_NUMBER(), @msg = ERROR_MESSAGE(), @heaps_total = NULL;
 END CATCH
 
 /* Ordered by total lock wait, not by lock count: a million locks taken and
@@ -455,6 +475,9 @@ SELECT DB_NAME()                                            AS [database],
        @page_heaps                                          AS [page_partitions.heaps],
        @page_heaps_without_attempts                         AS [page_partitions.heaps_without_attempts],
        200                                                  AS [listing_cap],
+       @heaps_listing_cap                                   AS [heaps_listing_cap],
+       @heaps_total                                         AS [heaps_total],
+       (SELECT COUNT(*) FROM @heaps)                        AS [heaps_listed],
        CASE WHEN @err_counts     = 0 THEN 1 ELSE 0 END      AS [collected.counts],
        CASE WHEN @err_heaps      = 0 THEN 1 ELSE 0 END      AS [collected.heaps],
        CASE WHEN @err_contention = 0 THEN 1 ELSE 0 END      AS [collected.contention],
@@ -470,7 +493,7 @@ SELECT h.[table], h.[forwarded_fetches], h.[leaf_inserts], h.[leaf_updates],
        h.[leaf_deletes], h.[leaf_ghosts], h.[range_scans],
        h.[singleton_lookups], h.[rows]
 FROM @heaps AS h
-ORDER BY h.[forwarded_fetches] DESC, h.[leaf_updates] DESC
+ORDER BY h.[forwarded_fetches] DESC, h.[leaf_updates] DESC, h.[table]
 OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT c.[table], c.[index_name], c.[index_id],

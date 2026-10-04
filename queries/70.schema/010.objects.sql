@@ -39,24 +39,40 @@
 -- with what error number, so an empty array is never mistaken for an empty
 -- database. See 020.index-usage.sql for the measurement behind the pattern.
 --
--- NOTHING IS CAPPED. Every user table is listed, every untrusted or disabled
--- constraint and every column of a retired type. Until October 2026 the tables
--- were the union of the 200 largest by row count and the 50 largest by
--- reserved pages, and the constraint and type lists stopped at 200, on the
--- reasoning that a database with 5 000 tables would otherwise produce an
--- archive nobody opens and that the tail of the table list is empty tables.
--- Twelve real collections taken on eight client instances between August and
--- September 2026 said otherwise (docs/caps-inventory.md): the table cap was
--- hit in 7 of 27 databases, cutting 7 to 646 tables, and the tail was empty
--- in only 4 of them; in the other 3 the 200th table held 1 095, 3 214 and
--- 472 542 rows, and 52, 382 and 646 non-empty tables were cut. The size
--- branch never added a table. A table row is about 300 bytes, so the worst of
--- those databases grows by some 200 KB raw, and the row and page counts were
--- already read for every table to rank them. The constraint and type lists
--- never reached their cap (160 and 173 at most) and cost nothing to keep
--- whole. The listing_cap and listing_cap_by_size fields left the root with
--- the caps: counts.tables now gives the length of the tables array, as
--- counts.untrusted_* and counts.deprecated_type_columns give that of theirs.
+-- THE TABLES ARE THE SHARED SELECTION OF 70.schema, AND NOTHING ELSE IS
+-- CAPPED. Every untrusted or disabled constraint and every column of a
+-- retired type is listed. The tables are the user tables by rows, largest
+-- first, object_id breaking ties, for as long as their columns add up to
+-- 100 000 at most and their statistics to 70 000 at most: the same statement
+-- fills #listed_tables in 060.columns.sql, 090.statistics.sql and
+-- 091.statistics-density.sql, and a test keeps it identical in all four, so a
+-- table found in one is in the others. 060.columns.sql carries the
+-- measurement behind the two numbers. They bind on an ERP-sized schema and on
+-- none of the databases below, the largest of which held 24 823 columns and
+-- 12 996 statistics.
+--
+-- Until October 2026 the tables were the union of the 200 largest by row
+-- count and the 50 largest by reserved pages, and the constraint and type
+-- lists stopped at 200, on the reasoning that a database with 5 000 tables
+-- would otherwise produce an archive nobody opens and that the tail of the
+-- table list is empty tables. Twelve real collections taken on eight client
+-- instances between August and September 2026 said otherwise
+-- (docs/caps-inventory.md): the table cap was hit in 7 of 27 databases,
+-- cutting 7 to 646 tables, and the tail was empty in only 4 of them; in the
+-- other 3 the 200th table held 1 095, 3 214 and 472 542 rows, and 52, 382 and
+-- 646 non-empty tables were cut. The size branch never added a table. A table
+-- row is about 300 bytes (296 measured on the lab), so a listing cut at the
+-- column cap holds at most 100 000 tables, 30 MB, and in practice a tenth of
+-- that or less. The constraint and type lists never reached their cap (160
+-- and 173 at most) and cost nothing to keep whole.
+--
+-- counts.tables counts every user table and counts.tables_listed the rows of
+-- the tables array; they are equal unless the selection cut.
+-- listing_cap.columns and listing_cap.statistics give the two numbers. The
+-- caps are declared outside every TRY so the root carries them even when the
+-- tables area fails; the selection itself reads sys.dm_db_partition_stats
+-- and lives in that area. counts.untrusted_* and
+-- counts.deprecated_type_columns give the length of their arrays.
 --
 -- is_not_trusted is the point of the constraints result set, and it is not a
 -- style question. A foreign key or check constraint left untrusted after a
@@ -120,6 +136,10 @@ DECLARE @n_schemas int, @n_tables int, @n_views int, @n_procedures int,
         @n_functions int, @n_triggers int, @n_heaps int, @n_no_pk int,
         @n_untrusted_fk int, @n_untrusted_ck int, @n_deprecated_cols int,
         @n_nfr_fk int, @n_nfr_ck int;
+
+/* The two numbers of the shared selection, declared outside every TRY so that
+   the root projects them even when the tables area fails. See the header. */
+DECLARE @listing_cap_columns int = 100000, @listing_cap_statistics int = 70000;
 
 DECLARE @object_counts TABLE (
     [type]    nvarchar(60),
@@ -250,6 +270,36 @@ END CATCH
    to. used is kept for the data only: free space inside a nonclustered index is
    a fragmentation question, and 030 and 050 already own that ground. */
 BEGIN TRY
+    /* THE SHARED SELECTION, the same statement in 010, 060, 090 and 091, which
+       a test keeps identical. It reads sys.dm_db_partition_stats, as the
+       listing below does, so it lives in the area that needs VIEW SERVER
+       STATE and fails with it. */
+    IF OBJECT_ID('tempdb..#listed_tables') IS NOT NULL DROP TABLE #listed_tables;
+    CREATE TABLE #listed_tables (object_id int NOT NULL PRIMARY KEY);
+
+    INSERT INTO #listed_tables (object_id)
+    SELECT r.object_id
+    FROM (SELECT t.object_id,
+                 SUM(ISNULL(c.n, 0)) OVER (ORDER BY p.row_count DESC, t.object_id
+                                           ROWS UNBOUNDED PRECEDING) AS columns_running,
+                 SUM(ISNULL(s.n, 0)) OVER (ORDER BY p.row_count DESC, t.object_id
+                                           ROWS UNBOUNDED PRECEDING) AS statistics_running
+          FROM      sys.tables AS t
+          LEFT JOIN (SELECT ps.object_id, SUM(ps.row_count) AS row_count
+                     FROM sys.dm_db_partition_stats AS ps
+                     WHERE ps.index_id IN (0, 1)
+                     GROUP BY ps.object_id) AS p ON p.object_id = t.object_id
+          LEFT JOIN (SELECT co.object_id, COUNT(*) AS n
+                     FROM sys.columns AS co
+                     GROUP BY co.object_id) AS c ON c.object_id = t.object_id
+          LEFT JOIN (SELECT st.object_id, COUNT(*) AS n
+                     FROM sys.stats AS st
+                     GROUP BY st.object_id) AS s ON s.object_id = t.object_id
+          WHERE t.is_ms_shipped = 0) AS r
+    WHERE r.columns_running    <= @listing_cap_columns
+      AND r.statistics_running <= @listing_cap_statistics
+    OPTION (RECOMPILE, MAXDOP 1);
+
     INSERT INTO @tables
     SELECT
            SCHEMA_NAME(t.schema_id) + '.' + t.name,
@@ -287,11 +337,10 @@ BEGIN TRY
                         SUM(p.reserved_page_count)                                                 AS total_reserved
                  FROM sys.dm_db_partition_stats AS p
                  WHERE p.object_id = t.object_id) AS ps
+    /* The shared selection, so a table found in one of the four files is in
+       the others. */
+    JOIN #listed_tables AS lt ON lt.object_id = t.object_id
     WHERE t.is_ms_shipped = 0
-    /* No selection: every user table, as 060.columns.sql, 090.statistics.sql
-       and 091.statistics-density.sql read every user table, so a table found
-       in one of the four files is in the others. A test keeps all four free of
-       a table selection. */
     ORDER BY ps.row_count DESC, t.object_id
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
@@ -359,6 +408,9 @@ SELECT DB_NAME()                                                  AS [database],
        SYSDATETIME()                                              AS [collected_at],
        @n_schemas                                                 AS [counts.schemas],
        @n_tables                                                  AS [counts.tables],
+       (SELECT COUNT(*) FROM @tables)                             AS [counts.tables_listed],
+       @listing_cap_columns                                       AS [listing_cap.columns],
+       @listing_cap_statistics                                    AS [listing_cap.statistics],
        @n_views                                                   AS [counts.views],
        @n_procedures                                              AS [counts.procedures],
        @n_functions                                               AS [counts.functions],
@@ -415,3 +467,5 @@ SELECT d.[table], d.[column], d.[type], d.[is_nullable]
 FROM @deprecated AS d
 ORDER BY d.[schema_name], d.[table_name], d.[column_id]
 OPTION (RECOMPILE, MAXDOP 1);
+
+IF OBJECT_ID('tempdb..#listed_tables') IS NOT NULL DROP TABLE #listed_tables;

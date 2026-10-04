@@ -370,27 +370,38 @@ jobs:
           jq -e '[.skipped_scripts[]? | select(.script == "40.security/032.server-trigger-definitions.sql")] | length == 1' \
             "$run_dir/_run.json" \
             || { jq '.skipped_scripts' "$run_dir/_run.json"; exit 1; }
-      # 010, 060, 090 and 091 list every user table since their caps were
-      # lifted, so each list is as long as the count beside it and no root
-      # still names a cap.
+      # 010, 060, 090 and 091 list the tables of one shared selection, capped
+      # at 100 000 columns and 70 000 statistics. ci_probe is far below both,
+      # so every list is whole, each count equals its total, and each root
+      # carries the two caps. 030 caps its heaps at 100 000 and says how many
+      # it saw: whole here too.
       - name: assert the schema listings are whole
         run: |
           run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
           d="$run_dir/70.schema/ci_probe"
-          jq -e '(has("listing_cap") | not) and (.tables | length) == .counts.tables
+          caps='.listing_cap.columns == 100000 and .listing_cap.statistics == 70000'
+          jq -e "$caps"' and (.tables | length) == .counts.tables
+                 and .counts.tables_listed == .counts.tables
                  and any(.tables[]; .table == "dbo.ix_probe")' "$d/010.objects.json" \
             || { jq 'del(.tables, .object_counts)' "$d/010.objects.json"; exit 1; }
-          jq -e '(has("listing_cap") | not) and .tables_covered == .tables_total
+          jq -e "$caps"' and .tables_covered == .tables_total
                  and .columns_listed == .columns_total
                  and (.columns | length) == .columns_total' "$d/060.columns.json" \
             || { jq 'del(.columns)' "$d/060.columns.json"; exit 1; }
-          jq -e '(has("listing_cap") | not) and .statistics_listed == .statistics_total
+          jq -e "$caps"' and .tables_covered == .tables_total
+                 and .statistics_listed == .statistics_total
                  and (.statistics | length) == .statistics_total
                  and (.statistics_all | length) == .statistics_total' "$d/090.statistics.json" \
             || { jq 'del(.statistics, .statistics_all)' "$d/090.statistics.json"; exit 1; }
-          jq -e '(has("listing_cap") | not) and .counts.statistics == (.density | length)
+          jq -e "$caps"' and .counts.statistics == (.density | length)
+                 and .counts.statistics == .counts.statistics_total
+                 and .counts.tables_covered == .counts.tables_total
                  and any(.density[]; .table == "ix_probe")' "$d/091.statistics-density.json" \
             || { jq 'del(.density)' "$d/091.statistics-density.json"; exit 1; }
+          jq -e '.heaps_listing_cap == 100000 and (.heaps_total | type) == "number"
+                 and .heaps_listed == .heaps_total
+                 and (.heaps | length) == .heaps_total' "$d/030.index-operational.json" \
+            || { jq 'del(.heaps, .contention, .page_compression)' "$d/030.index-operational.json"; exit 1; }
       # 040, 045 and 050 keep a cap and count what it would cut: ix_probe,
       # planted above with a primary key and two indexes, none compressed,
       # gives 040 rows to count; 045 and 050 find no columnstore and no heap

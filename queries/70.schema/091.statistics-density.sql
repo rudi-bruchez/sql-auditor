@@ -70,20 +70,30 @@
 --   Filtered statistics describe a subset. has_filter is projected so a density
 --   computed over one is not read as a density over the table.
 --
--- EVERY STATISTIC ON EVERY USER TABLE IS READ, as 090.statistics.sql reads
--- them, so a table found in 010.objects.sql, 060.columns.sql or 090 is here
--- too. Until October 2026 this file read the 200 tables with the most rows,
--- and its header named the condition for lifting that cap: audits meeting
+-- EVERY STATISTIC ON EVERY LISTED TABLE IS READ, the tables of the shared
+-- selection of 70.schema: the user tables by rows, largest first, object_id
+-- breaking ties, for as long as their columns add up to 100 000 at most and
+-- their statistics to 70 000 at most. The same statement fills #listed_tables
+-- in 010.objects.sql, 060.columns.sql and 090.statistics.sql, and a test keeps
+-- it identical in all four, so a table found in one of them is here too.
+-- Until October 2026 this file read the 200 tables with the most rows, and
+-- its header named the condition for lifting that cap: audits meeting
 -- missing-index candidates on tables outside the largest 200. The condition
 -- was met: on one real database 51 of 206 missing-index suggestions sat on
 -- such tables, and of three real collections that carried this file one had
 -- the cap bind, at 1 109 of 1 674 statistics (docs/caps-inventory.md). Each
 -- row is already the short form, one statistic, its leading column and two
--- numbers, about 330 bytes, so there is no lighter list to fall back to. The
--- histogram read costs about 0.27 ms a statistic on the lab, so the largest
--- database seen, 13 000 statistics, would add some 3.5 s and 4.3 MB raw,
--- inside the @timeout of 300 s. counts.statistics is the number of statistics
--- read, and the listing_cap field left the root with the cap.
+-- numbers, 298 bytes measured on the lab, so there is no lighter list to fall
+-- back to. At 70 000 statistics that is 21 MB, and the histogram read, about
+-- 0.27 ms a statistic on the lab, some 19 s, inside the @timeout of 300 s.
+-- The cap came back with 060.columns.sql, which carries the measurement: a
+-- lab schema of 20 000 tables made this file 17 MB, its neighbours of
+-- 70.schema 236 MB more, and the collector 2.09 GB resident.
+-- counts.statistics is the number of statistics read and
+-- counts.statistics_total the statistics on user tables; counts.tables_covered
+-- and counts.tables_total do the same for tables. Each pair is equal unless
+-- the selection cut. listing_cap.columns and listing_cap.statistics give the
+-- two numbers.
 --
 -- NO KEY ORDER IS RECOMMENDED HERE. This file reports distribution; deciding an
 -- index is the analysis step's job, with the write cost and the query shapes in
@@ -127,6 +137,38 @@ DECLARE @density TABLE (
     [histogram_rows]     float  NULL,
     [histogram_distinct] bigint NULL);
 
+/* THE SHARED SELECTION, the same statement in 010, 060, 090 and 091, which a
+   test keeps identical. It is read here, outside the deferred batch, because
+   it touches nothing the histogram function adds; the deferred batch below
+   joins the temporary table it fills, which a nested batch can see. */
+DECLARE @listing_cap_columns int = 100000, @listing_cap_statistics int = 70000;
+
+IF OBJECT_ID('tempdb..#listed_tables') IS NOT NULL DROP TABLE #listed_tables;
+CREATE TABLE #listed_tables (object_id int NOT NULL PRIMARY KEY);
+
+INSERT INTO #listed_tables (object_id)
+SELECT r.object_id
+FROM (SELECT t.object_id,
+             SUM(ISNULL(c.n, 0)) OVER (ORDER BY p.row_count DESC, t.object_id
+                                       ROWS UNBOUNDED PRECEDING) AS columns_running,
+             SUM(ISNULL(s.n, 0)) OVER (ORDER BY p.row_count DESC, t.object_id
+                                       ROWS UNBOUNDED PRECEDING) AS statistics_running
+      FROM      sys.tables AS t
+      LEFT JOIN (SELECT ps.object_id, SUM(ps.row_count) AS row_count
+                 FROM sys.dm_db_partition_stats AS ps
+                 WHERE ps.index_id IN (0, 1)
+                 GROUP BY ps.object_id) AS p ON p.object_id = t.object_id
+      LEFT JOIN (SELECT co.object_id, COUNT(*) AS n
+                 FROM sys.columns AS co
+                 GROUP BY co.object_id) AS c ON c.object_id = t.object_id
+      LEFT JOIN (SELECT st.object_id, COUNT(*) AS n
+                 FROM sys.stats AS st
+                 GROUP BY st.object_id) AS s ON s.object_id = t.object_id
+      WHERE t.is_ms_shipped = 0) AS r
+WHERE r.columns_running    <= @listing_cap_columns
+  AND r.statistics_running <= @listing_cap_statistics
+OPTION (RECOMPILE, MAXDOP 1);
+
 /* The deferred batch carries no string literal of its own, which is why the
    schema and table names are projected as two columns rather than concatenated
    the way 090 concatenates them: a literal separator would have to be doubled
@@ -146,6 +188,7 @@ BEGIN TRY
                h.steps, h.histogram_rows, h.histogram_distinct
         FROM      sys.stats  AS st
         JOIN      sys.tables AS t ON t.object_id = st.object_id AND t.is_ms_shipped = 0
+        JOIN      #listed_tables AS lt ON lt.object_id = t.object_id
         LEFT JOIN sys.indexes AS i ON i.object_id = st.object_id
                                   AND i.index_id  = st.stats_id
         LEFT JOIN sys.stats_columns AS sc ON sc.object_id       = st.object_id
@@ -171,6 +214,15 @@ SELECT DB_NAME()                                                AS [database],
        @err                                                     AS [error_number],
        NULLIF(@msg, N'')                                        AS [error_message],
        (SELECT COUNT(*) FROM @density)                          AS [counts.statistics],
+       (SELECT COUNT(*)
+        FROM sys.stats  AS st
+        JOIN sys.tables AS t ON t.object_id = st.object_id AND t.is_ms_shipped = 0)
+                                                                AS [counts.statistics_total],
+       (SELECT COUNT(*) FROM #listed_tables)                    AS [counts.tables_covered],
+       (SELECT COUNT(*) FROM sys.tables AS t WHERE t.is_ms_shipped = 0)
+                                                                AS [counts.tables_total],
+       @listing_cap_columns                                     AS [listing_cap.columns],
+       @listing_cap_statistics                                  AS [listing_cap.statistics],
        /* A statistic with no histogram has never been populated — a filtered
           statistic whose predicate matches nothing, or one on a table that has
           never held a row. Counted rather than dropped, because a file whose
@@ -208,3 +260,5 @@ SELECT d.[schema_name]                                          AS [schema],
 FROM @density AS d
 ORDER BY d.[schema_name], d.[table_name], d.[statistic]
 OPTION (RECOMPILE, MAXDOP 1);
+
+DROP TABLE #listed_tables;

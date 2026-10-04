@@ -326,36 +326,100 @@ func TestEveryKnownWideningHasACollector(t *testing.T) {
 // statistics are missing and reads as a defect in the collector. Until October
 // 2026 010 and 060 took the 200 tables with the most rows and the 50 with the
 // most reserved pages while 090 and 091 took the 200 by rows alone, and the
-// test that kept 010 and 060 identical never looked at the other two. With no
-// cap left, the shared selection is every user table, and the way to keep the
-// four aligned is to keep any selection out of all four: none of them may take
-// a TOP, and every join to sys.tables filters on is_ms_shipped = 0, so no file
-// lists the shipped tables the others leave out.
-func TestSchemaFilesListEveryUserTable(t *testing.T) {
+// test that kept 010 and 060 identical never looked at the other two. The caps
+// were then lifted, and put back the same day in another form when a 4 000
+// table schema made 060 alone 115 MB and the collector 1.2 GB resident: the
+// four files now fill #listed_tables with one statement, largest tables first
+// while two running totals stay under two caps, and every listing joins it.
+//
+// So the test holds four things. The DECLARE that carries the caps and the
+// INSERT that fills the selection are the same text in all four files, so one
+// file cannot cap differently or order differently. Each file joins
+// #listed_tables as often as it has listings, so none reads past the
+// selection. None takes a TOP of its own, and every join to sys.tables
+// filters on is_ms_shipped = 0. And each root projects the caps and the
+// counts that say whether they bound.
+func TestSchemaFilesShareOneTableSelection(t *testing.T) {
+	type schemaFile struct {
+		name   string
+		joins  int      // listings, each of which must join #listed_tables
+		counts []string // root fields that say what the cap cut
+	}
+	files := []schemaFile{
+		{"010.objects.sql", 1, []string{"counts.tables", "counts.tables_listed"}},
+		{"060.columns.sql", 2, []string{"tables_covered", "tables_total", "columns_listed", "columns_total"}},
+		// The DMF staging read, the two lists, and statistics_listed.
+		{"090.statistics.sql", 5, []string{"tables_covered", "tables_total", "statistics_listed", "statistics_total"}},
+		{"091.statistics-density.sql", 1, []string{"counts.statistics", "counts.statistics_total",
+			"counts.tables_covered", "counts.tables_total"}},
+	}
+	caps := []string{"listing_cap.columns", "listing_cap.statistics"}
+	space := regexp.MustCompile(`\s+`)
+	declare := regexp.MustCompile(`DECLARE @listing_cap_columns int = \d+, @listing_cap_statistics int = \d+;`)
+	fill := regexp.MustCompile(`(?s)INSERT INTO #listed_tables \(object_id\).*?;`)
 	top := regexp.MustCompile(`(?i)\bTOP\s*\(`)
 	join := regexp.MustCompile(`(?i)JOIN\s+sys\.tables\s+AS\s+(\w+)\s+ON\s+([^\n]*)`)
-	for _, name := range []string{"010.objects.sql", "060.columns.sql", "090.statistics.sql", "091.statistics-density.sql"} {
-		b, err := sqlauditor.Queries.ReadFile("queries/70.schema/" + name)
+	uses := regexp.MustCompile(`JOIN\s+#listed_tables\s+AS\s+lt\s+ON\s+lt\.object_id\s+=`)
+	var firstDeclare, firstFill, firstName string
+	for _, f := range files {
+		b, err := sqlauditor.Queries.ReadFile("queries/70.schema/" + f.name)
 		if err != nil {
 			t.Fatal(err)
 		}
 		code := collect.StripSQLComments(string(b))
+		d := declare.FindAllString(code, -1)
+		s := fill.FindAllString(code, -1)
+		if len(d) != 1 || len(s) != 1 {
+			t.Errorf("%s: %d cap declarations and %d selection statements, want one of each",
+				f.name, len(d), len(s))
+			continue
+		}
+		sel := space.ReplaceAllString(s[0], " ")
+		if !strings.Contains(sel, "ORDER BY p.row_count DESC, t.object_id") ||
+			!strings.Contains(sel, "t.is_ms_shipped = 0") ||
+			!strings.Contains(sel, "<= @listing_cap_columns") ||
+			!strings.Contains(sel, "<= @listing_cap_statistics") {
+			t.Errorf("%s: the selection no longer orders by rows then object_id, filters "+
+				"shipped tables and applies both caps:\n%s", f.name, sel)
+		}
+		if firstName == "" {
+			firstDeclare, firstFill, firstName = d[0], sel, f.name
+		} else {
+			if d[0] != firstDeclare {
+				t.Errorf("%s caps the selection with\n  %s\nand %s with\n  %s",
+					f.name, d[0], firstName, firstDeclare)
+			}
+			if sel != firstFill {
+				t.Errorf("%s selects its tables with a statement that differs from %s's:\n%s\nagainst\n%s",
+					f.name, firstName, sel, firstFill)
+			}
+		}
+		if n := len(uses.FindAllString(code, -1)); n != f.joins {
+			t.Errorf("%s joins #listed_tables %d times, want %d, one per listing and count of "+
+				"what is listed", f.name, n, f.joins)
+		}
 		if loc := top.FindStringIndex(code); loc != nil {
 			end := min(loc[1]+120, len(code))
 			t.Errorf("%s takes a TOP, which selects tables the other three files may not:\n%s",
-				name, code[loc[0]:end])
+				f.name, code[loc[0]:end])
 		}
-		if strings.Contains(code, "listing_cap") {
-			t.Errorf("%s still projects a listing_cap, which names a cap it no longer has", name)
-		}
-		joins := join.FindAllStringSubmatch(code, -1)
-		if len(joins) == 0 {
-			t.Errorf("%s no longer joins sys.tables, which this test reads to know what it lists", name)
-		}
-		for _, j := range joins {
+		for _, j := range join.FindAllStringSubmatch(code, -1) {
 			if !strings.Contains(j[2], j[1]+".is_ms_shipped = 0") {
 				t.Errorf("%s joins sys.tables without is_ms_shipped = 0, so it lists tables "+
-					"the other files leave out:\n%s", name, j[0])
+					"the other files leave out:\n%s", f.name, j[0])
+			}
+		}
+		for _, field := range append(append([]string{}, caps...), f.counts...) {
+			if !strings.Contains(code, "AS ["+field+"]") {
+				t.Errorf("%s: the root no longer projects %s, so a listing cut by the "+
+					"shared selection reads as complete", f.name, field)
+			}
+		}
+		for i, field := range caps {
+			v := []string{"@listing_cap_columns", "@listing_cap_statistics"}[i]
+			if !regexp.MustCompile(regexp.QuoteMeta(v) + `\s+AS \[` + regexp.QuoteMeta(field) + `\]`).MatchString(code) {
+				t.Errorf("%s: %s is not projected from %s, so the root can state a cap "+
+					"the selection does not apply", f.name, field, v)
 			}
 		}
 	}
@@ -419,7 +483,7 @@ func TestNoCollectorEmitsAQueryStatementHandle(t *testing.T) {
 // list them in the same order. It was capped at 200 a kind until October 2026,
 // when the order decided which rows survived; it now decides only what a
 // reader sees first, and a TOP coming back would bring the old question back
-// with it, which TestSchemaFilesListEveryUserTable refuses.
+// with it, which TestSchemaFilesShareOneTableSelection refuses.
 func TestUntrustedConstraintListIsOrderedDisabledFirst(t *testing.T) {
 	b, err := sqlauditor.Queries.ReadFile("queries/70.schema/010.objects.sql")
 	if err != nil {
@@ -457,6 +521,12 @@ func TestSchemaCapsAreProjectedWithTheirTotals(t *testing.T) {
 			`(\d+)\s+AS \[listing_cap\]`, "AS [counts.rows_before_cap]"},
 		{"050.heaps.sql", `DECLARE @top int = (\d+)`,
 			`@top\s+AS \[sample\.largest_heaps_scanned\]()`, "AS [counts.eligible_partitions]"},
+		{"030.index-operational.sql",
+			`DECLARE @heaps_listing_cap int = (\d+);[\s\S]*INSERT INTO @heaps\s+SELECT TOP \(@heaps_listing_cap\)`,
+			`@heaps_listing_cap\s+AS \[heaps_listing_cap\]()`, "AS [heaps_total]"},
+		{"030.index-operational.sql",
+			`DECLARE @heaps_listing_cap int = (\d+);[\s\S]*INSERT INTO @heaps\s+SELECT TOP \(@heaps_listing_cap\)`,
+			`@heaps_listing_cap\s+AS \[heaps_listing_cap\]()`, "AS [heaps_listed]"},
 	}
 	for _, c := range cases {
 		b, err := sqlauditor.Queries.ReadFile("queries/70.schema/" + c.file)
