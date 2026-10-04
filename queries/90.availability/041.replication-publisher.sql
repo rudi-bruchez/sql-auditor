@@ -21,9 +21,17 @@
 -- IMMEDIATE_SYNC AND ALLOW_ANONYMOUS ARE WHY THIS FILE EXISTS. Together they
 -- make the distribution database keep every command for the full retention
 -- period whether or not a subscriber has taken it, which is the ordinary
--- explanation for a publisher log that will not truncate. Read beside
--- 20.databases/024.log-stats.sql, they turn log_reuse_wait = REPLICATION from
--- a symptom into a cause.
+-- explanation for a distribution database that keeps growing.
+--
+-- They do NOT hold the publisher's log, and this header said they did until
+-- 4 October 2026. log_reuse_wait = REPLICATION means transactions not yet
+-- delivered TO the distribution database (Microsoft, "The transaction log",
+-- value 6); what the distribution database keeps afterwards does not pin the
+-- publisher's log. What this file contributes to that wait is the other
+-- reading: a database flagged as published with no publication here, the
+-- usual mark of a restore that kept the replication settings, beside
+-- 20.databases/010.all-databases (log_reuse_wait, cdc) and the Log Reader's
+-- state in 042.
 --
 -- THE HOMONYM TRAP. syspublications, sysarticles and syssubscriptions exist as
 -- tables here and as views with different columns in a distribution database.

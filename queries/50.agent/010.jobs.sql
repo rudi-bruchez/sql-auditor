@@ -64,6 +64,10 @@ DECLARE @start_run_date int =
 /* The inventory. This half always works once the permission probe passed: it
    is a plain SELECT on two views the Agent reader role grants. */
 SELECT j.name                                        AS [name],
+       /* The text form 90.availability/042 uses for the same id, so the
+          replication agents join to their job by id rather than by a name
+          anyone can change. */
+       CONVERT(char(36), j.job_id)                   AS [job_id],
        CAST(j.enabled AS int)                        AS [enabled],
        c.name                                        AS [category],
        SUSER_SNAME(j.owner_sid)                      AS [owner],

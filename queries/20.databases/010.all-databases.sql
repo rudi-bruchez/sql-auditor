@@ -89,6 +89,10 @@ SELECT
     d.target_recovery_time_in_seconds                            AS [target_recovery_sec],
     d.containment_desc                                           AS [containment],
     d.log_reuse_wait_desc                                        AS [log_reuse_wait],
+    /* Change data capture produces log_reuse_wait = REPLICATION with none of
+       the replication flags set, so without this column that wait on a
+       database that publishes nothing has no explanation in the archive. */
+    d.is_cdc_enabled                                             AS [cdc],
     d.collation_name                                             AS [collation],
     SUSER_SNAME(d.owner_sid)                                     AS [owner],
     d.create_date                                                AS [create_date],

@@ -377,6 +377,10 @@ jobs:
             "$run_dir/20.databases/010.all-databases.json"
           jq -e '(.database.local_cursor_default | type) == "boolean"' \
             "$run_dir/20.databases/ci_probe/020.properties.json"
+          # cdc explains log_reuse_wait = REPLICATION on a database that
+          # publishes nothing; same shape, same reason for asserting the type.
+          jq -e 'all(.databases[]; (.cdc | type) == "boolean")' \
+            "$run_dir/20.databases/010.all-databases.json"
           # ci_probe never has a full backup, so the file carries a NULL base and
           # zero modified pages: the "no base" case, which is the one to keep
           # running on both legs. The allocated pages are required too, since
