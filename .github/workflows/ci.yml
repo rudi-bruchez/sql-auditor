@@ -196,6 +196,38 @@ jobs:
           tools -d master -Q "EXEC sp_procoption N'dbo.ci_startup_probe', 'startup', 'on';"
           tools -d master -Q "CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'Ci!MasterKey0'; CREATE CERTIFICATE ci_tde_probe WITH SUBJECT = 'ci tde probe';"
           tools -d ci_probe -Q "CREATE DATABASE ENCRYPTION KEY WITH ALGORITHM = AES_256 ENCRYPTION BY SERVER CERTIFICATE ci_tde_probe;"
+      # 50.agent/050 reads Ola Hallengren's dbo.CommandLog wherever it is
+      # installed, and no instance has one unless somebody installed it. The
+      # published table definition goes into ci_probe with three rows: a
+      # REORGANIZE that finished, the same REORGANIZE started an hour ago and
+      # never ended, and a statistics update logged after it, which is what
+      # tells a command cut off from one still running.
+      - name: plant a maintenance solution CommandLog
+        run: |
+          docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b -Q "
+              CREATE TABLE dbo.CommandLog (ID int IDENTITY(1,1) NOT NULL, DatabaseName sysname NULL,
+                SchemaName sysname NULL, ObjectName sysname NULL, ObjectType char(2) NULL,
+                IndexName sysname NULL, IndexType tinyint NULL, StatisticsName sysname NULL,
+                PartitionNumber int NULL, ExtendedInfo xml NULL, Command nvarchar(max) NOT NULL,
+                CommandType nvarchar(60) NOT NULL, StartTime datetime2(7) NOT NULL,
+                EndTime datetime2(7) NULL, ErrorNumber int NULL, ErrorMessage nvarchar(max) NULL,
+                CONSTRAINT PK_CommandLog PRIMARY KEY CLUSTERED (ID ASC));
+              INSERT dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName,
+                IndexType, PartitionNumber, ExtendedInfo, Command, CommandType, StartTime, EndTime, ErrorNumber)
+              VALUES (N'ci_probe', N'dbo', N'ix_probe', 'U', N'ix_probe_read', 2, 1,
+                N'<ExtendedInfo><PageCount>50000</PageCount><Fragmentation>12.5</Fragmentation></ExtendedInfo>',
+                N'ALTER INDEX [ix_probe_read] ON [ci_probe].[dbo].[ix_probe] REORGANIZE WITH (LOB_COMPACTION = ON)',
+                N'ALTER_INDEX', DATEADD(HOUR, -26, SYSDATETIME()), DATEADD(HOUR, -25, SYSDATETIME()), 0),
+                (N'ci_probe', N'dbo', N'ix_probe', 'U', N'ix_probe_read', 2, 1,
+                N'<ExtendedInfo><PageCount>50000</PageCount><Fragmentation>12.5</Fragmentation></ExtendedInfo>',
+                N'ALTER INDEX [ix_probe_read] ON [ci_probe].[dbo].[ix_probe] REORGANIZE WITH (LOB_COMPACTION = ON)',
+                N'ALTER_INDEX', DATEADD(HOUR, -2, SYSDATETIME()), NULL, NULL);
+              INSERT dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, StatisticsName,
+                Command, CommandType, StartTime, EndTime, ErrorNumber)
+              VALUES (N'ci_probe', N'dbo', N'ix_probe', 'U', N'ix_probe_written',
+                N'UPDATE STATISTICS [ci_probe].[dbo].[ix_probe] [ix_probe_written] WITH FULLSCAN',
+                N'UPDATE_STATISTICS', DATEADD(HOUR, -1, SYSDATETIME()), DATEADD(MINUTE, -59, SYSDATETIME()), 0);"
       # --env /dev/null is not decoration. Configuration precedence is
       # flag > .env > process environment, so a .env file appearing in the
       # workspace — generated, or committed by accident — would outrank the
@@ -289,6 +321,35 @@ jobs:
           jq -e '[.skipped_scripts[]? | select(.script == "40.security/032.server-trigger-definitions.sql")] | length == 1' \
             "$run_dir/_run.json" \
             || { jq '.skipped_scripts' "$run_dir/_run.json"; exit 1; }
+      # The planted log is found, read whole and classified: the REORGANIZE
+      # without an end is listed open, with its operation and page count read
+      # out of the command and ExtendedInfo, one later command, and the
+      # finished run of the same index as its history; the finished run is
+      # listed among the longest with two later commands and no other
+      # completed run, since its own duration must not count as its history.
+      # master has no log, and
+      # its file says so rather than being absent, which is the widening to
+      # the system databases at work on both legs.
+      - name: assert the CommandLog history
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          f="$run_dir/50.agent/ci_probe/050.commandlog.json"
+          jq -e '.present == true and .missing_columns == 0 and .readable == true
+                 and .error_number == null and .log.rows_read == 3
+                 and .counts.alter_index_without_end == 1
+                 and ([.commands[] | select(.is_open)
+                       | .operation == "REORGANIZE" and .page_count == 50000
+                         and .later_commands_same_database == 1
+                         and .same_target.other_runs == 1 and .same_target.other_max_s == 3600]
+                      == [true])
+                 and ([.commands[] | select(.command_type == "ALTER_INDEX" and (.is_open | not))
+                       | .is_longest and .duration_s == 3600
+                         and .later_commands_same_database == 2
+                         and .same_target.other_runs == 0 and .same_target.other_max_s == null]
+                      == [true])' "$f" \
+            || { jq . "$f"; exit 1; }
+          jq -e '.present == false and .commands == []' "$run_dir/50.agent/master/050.commandlog.json" \
+            || { jq . "$run_dir/50.agent/master/050.commandlog.json"; exit 1; }
       - name: assert the run is complete
         run: |
           run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"

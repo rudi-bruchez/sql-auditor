@@ -1952,3 +1952,60 @@ could fix, then the not-for-replication ones, each by schema, table and name.
 Measured on 17.0.4065.4 with 208 untrusted check constraints, 206 of them not
 for replication: the 200 listed kept the disabled one and the one enabled
 untrusted constraint whose name sorted last, and two runs listed the same rows.
+
+## Gaps recorded on 4 October 2026
+
+Opened by a topic of the private corpus on an asynchronous statistics update
+queued behind a long index REORGANIZE, whose detection could not read the one
+record of how long each REORGANIZE ran.
+
+### 29. The maintenance solution's own log is collected nowhere — closed
+
+slug: commandlog-history
+
+Ola Hallengren's IndexOptimize, DatabaseIntegrityCheck and DatabaseBackup write
+one row per command to `dbo.CommandLog` when `@LogToTable = 'Y'`, the default:
+start, end, error number, and for an index the page count and fragmentation it
+was chosen on. No collector reads it. `50.agent/020.job-steps.sql` says that a
+job calls IndexOptimize and with which parameters, when they fit in the first
+200 characters, and nothing about what any run of it did.
+
+The question it leaves open is the one an audit of index maintenance asks
+first: which ALTER INDEX commands run long, on which indexes, and which never
+ended. An `ALTER_INDEX` row with no `EndTime` is a command cut off by a killed
+job, a failover or a restart, or one still running. A REORGANIZE that takes an
+hour on one index is the window in which an asynchronous statistics update
+waits for its `Sch-M` and every compilation needing that statistic queues
+behind it. The topic had to send the reader to the client with a query.
+
+Two facts shape the collector. The table lives wherever the solution was
+installed, master by default and often a utility database, so it has to be
+found rather than assumed, and the per-database runner opens master only for
+collectors declaring `@widened: system_databases`. And its only index is the
+clustered primary key on `ID`: a filter on `StartTime` reads the whole table,
+which on an instance whose cleanup job never ran can hold millions of rows.
+
+What closes it. A per-database collector that looks the table up by
+`OBJECT_ID`, checks its columns, and reads a bounded window by `ID`; the
+command text, the error message and the `ExtendedInfo` document stay on the
+server.
+
+Closed on 4 October 2026 by `50.agent/050.commandlog.sql`. It is a
+per-database file: an instance file looping over `sys.databases` was written
+first and refused by the corpus lint, which admits neither a procedure called
+through a variable nor dynamic SQL built by concatenation, and those are the
+only ways to name another database's table. master is reached through
+`@widened: system_databases`, whose manifest notice now names the log beside
+the principals; a utility database is read when the run collects it, so a run
+narrowed by DB_INCLUDE to application databases does not see a log kept
+elsewhere. The window is 30 days by `StartTime`, found by a binary search over
+`ID` (20 seeks for a million rows) and read by `ID` range up to 100 000 rows.
+Measured on SQL Server 2025 against the published table definition holding one
+million synthetic rows (470 MB): the window's 74 000 rows read 4 459 pages by
+range where a filter on `StartTime` read 61 041, and the whole file read 36 029
+pages in 1.2 s. The listing keeps the index and statistics commands without an
+end, failed, or longest (25 per type), each with the later commands of the same
+database and the other runs of the same target, which together tell a command
+cut off from a slow one. Reading needs `SELECT` on the table, which the grant
+script cannot give for a database it does not know; a refusal is recorded as
+error 229 and the file completes.

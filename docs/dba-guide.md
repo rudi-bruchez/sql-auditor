@@ -438,6 +438,7 @@ Queries (38):
   40.security/040.encryption-certificates.sql
   50.agent/010.jobs.sql
   50.agent/020.job-steps.sql
+  50.agent/050.commandlog.sql                per database
   60.backup/010.history.sql
   60.backup/020.restore-history.sql
   60.backup/030.differential-base.sql        per database, SQL Server 13.0.5026+
@@ -597,6 +598,9 @@ output/
         025.fragmentation.json
         026.persisted-sku-features.json
         027.resumable-operations.json
+    50.agent/
+      AppDb/
+        050.commandlog.json
     60.backup/
       010.history.json
       020.restore-history.json
@@ -1325,7 +1329,7 @@ one, in these tiers:
 | --- | --- |
 | 30 s | 9 |
 | 60 s | 55 |
-| 120 s | 28 |
+| 120 s | 29 |
 | 180 s | 3 |
 | 300 s | 15 |
 | 600 s | 1 |

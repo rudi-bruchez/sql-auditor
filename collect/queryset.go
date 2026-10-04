@@ -92,7 +92,8 @@ type Script struct {
 // declares one when it is allowed to run against a database the selection
 // widened back in for a specific purpose — see SelectTargets' second pass,
 // which keeps a distribution database a narrowed run would otherwise lose, and
-// widenSystem, which brings in master and msdb for the principals collector.
+// widenSystem, which brings in master and msdb for the principals collector
+// and the maintenance log collector.
 //
 // Closed for the same reason KnownFlags is, and with a nastier failure mode: a
 // misspelt value means "ordinary collector", so the file is never offered the
@@ -124,7 +125,8 @@ var KnownWidened = map[string]WidenedNotice{
 			"databases outside this selection",
 	},
 	"system_databases": {
-		Collected: "database principals, role memberships and permissions only, " +
+		Collected: "database principals, role memberships and permissions, and " +
+			"the maintenance solution's CommandLog where one is installed; " +
 			"not a full collection",
 		Reaches: "it is a system database, kept whatever DB_INCLUDE names, and " +
 			"its users and roles govern instance-wide features such as SQL Agent",

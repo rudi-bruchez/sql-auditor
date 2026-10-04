@@ -16,9 +16,10 @@
 -- in master is how a signed module reaches a server permission. None of that
 -- is in 010.principals.sql, and the user-database-only loop never opened
 -- either database. The @widened directive above is what brings them in, and
--- it brings them to this collector alone: the other database-scoped
--- collectors are never offered them. model and tempdb are not read; a user
--- added to model is copied into every new database and shows up there.
+-- it brings them to the collectors declaring it, this one and the maintenance
+-- log of 50.agent/050.commandlog: the other database-scoped collectors are
+-- never offered them. model and tempdb are not read; a user added to model is
+-- copied into every new database and shows up there.
 --
 -- 010.principals.sql covers the server and says in its own header that
 -- database-level principals need their own database-scoped collector. This is

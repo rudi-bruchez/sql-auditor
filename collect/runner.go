@@ -550,7 +550,9 @@ func SelectTargets(c []DatabaseInfo, include, exclude string, widen map[string]b
 // the application. What the two databases do hold is security: the users and
 // roles of msdb decide who can own or run SQL Agent jobs, and a certificate
 // user in master is how module signing reaches server permissions. So the
-// principals collector reads them and the rest are never offered them.
+// principals collector reads them, and so does 50.agent/050.commandlog, because
+// master is where Ola Hallengren's maintenance solution installs its log by
+// default; the rest are never offered them.
 //
 // DB_INCLUDE does not narrow it, for the reason the distributor's widening
 // is not narrowed: the operator named application databases and these are not
