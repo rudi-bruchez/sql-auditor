@@ -1,6 +1,7 @@
 # Missing index suggestions — specification
 
-Status: the collector half is implemented; the analysis half is not. Written
+Status: both halves are implemented, the collector here and the analysis, outside
+this repository, on 4 October 2026. Written
 17 September 2026 to answer section
 10 bis of [collection-gaps-spec.md](collection-gaps-spec.md), which reserved
 this question for a document of its own. Revised the same day after a panel of
@@ -182,11 +183,16 @@ counterpart is absent rather than unreadable.
 **Families: group by equality set, keep every maximal element.** Two suggestions
 belong to the same family when their equality sets are equal. Within a family,
 an entry whose inequality and included sets are contained in another's is
-absorbed by it. Pairwise containment is not transitive, so the rule cannot be
-"two suggestions are one": with inequality sets `{x}`, `{x,y}` and `{y}`, the
-first absorbs into the second and the third into nothing, and a greedy
-implementation would answer differently depending on read order. Group, keep
-maximal elements, and report how many suggestions each stands for. A table
+absorbed by it. The trap is not containment itself but merging pair by pair:
+with inequality sets `{x}`, `{x,y}` and `{x,z}`, the first is contained in
+both others, and a greedy implementation that merges each entry into the first
+container it meets attributes it to whichever of the two it read first, so the
+answer depends on read order. (An earlier version of this paragraph gave
+`{x}`, `{x,y}`, `{y}` as the example and said the third absorbed into nothing;
+`{y}` is contained in `{x,y}`, so that example showed nothing, as the
+implementation of the analysis found on 4 October 2026.) Group, keep every
+maximal element, and report how many suggestions each stands for, counting an
+entry contained in two maximal elements under both. A table
 carries as many families as it has distinct equality sets; the first draft's
 "a table carries one entry" was wrong, since two suggestions on one table need
 not share a single equality column.
