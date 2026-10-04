@@ -50,6 +50,23 @@
 -- that speaks about partitioning is partitioned_tables, which counts objects
 -- with partition_number > 1 and is the number to quote when someone asks
 -- whether anything is partitioned.
+--
+-- LARGEST_UNCOMPRESSED IS CAPPED AT 2 000 ROWS, AND THE ROOT SAYS HOW MANY
+-- THERE WERE. A row is one index, or the heap, of one table, with at least one
+-- uncompressed partition; counts.uncompressed_indexes counts those rows before
+-- the cap, so a list cut short reads as cut. The cap was 200, with no stated
+-- reason and no total, until October 2026. Twelve real collections taken on
+-- eight client instances between August and September 2026 had it bind in 9
+-- of 27 databases, up to 1 617 uncompressed storage units against 200 rows
+-- (docs/caps-inventory.md), so the candidates for compression past the 200th
+-- largest were invisible and nothing said so. A row is about 165 bytes, so
+-- 2 000 rows are some 330 KB raw, and the cap is now there for the archive
+-- alone: the list is cut from two table variables read whole, so the server
+-- does the same work at 2 000 rows as at 200 (see the comment on the staging
+-- below). On a lab database of 2 851 storage units and 2 400 uncompressed
+-- indexes the file took 3.2 s with the old cap and 3.0 s with the new one.
+-- Size orders the list, with object_id and index_id breaking ties, so two runs
+-- over the same catalog keep the same rows.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -69,7 +86,13 @@ SELECT DB_NAME()                                                  AS [database],
        (SELECT COUNT(DISTINCT p.object_id) FROM sys.partitions AS p
         JOIN sys.tables AS t ON t.object_id = p.object_id AND t.is_ms_shipped = 0
         WHERE p.partition_number > 1)                             AS [counts.partitioned_tables],
-       200                                                        AS [listing_cap]
+       /* The rows largest_uncompressed would hold without its cap: one per
+          (table, index) with an uncompressed partition, grouped as below. */
+       (SELECT COUNT(*) FROM (SELECT DISTINCT p.object_id, p.index_id
+                              FROM sys.partitions AS p
+                              JOIN sys.tables AS t ON t.object_id = p.object_id AND t.is_ms_shipped = 0
+                              WHERE p.data_compression = 0) AS u) AS [counts.uncompressed_indexes],
+       2000                                                       AS [listing_cap]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* The estate-level answer in one table: how much data sits under each
@@ -106,39 +129,84 @@ OPTION (RECOMPILE, MAXDOP 1);
    the room an operation has must refuse to conclude on a count above one
    rather than pick a filegroup, because a partitioned object rebuilds
    partition by partition and each partition answers to its own. */
-SELECT TOP (200)
+DECLARE @uncompressed TABLE (
+    [object_id]      int           NOT NULL,
+    [index_id]       int           NOT NULL,
+    [table]          nvarchar(300) NULL,
+    [index_name]     sysname       NULL,
+    [index_type]     nvarchar(60)  NULL,
+    [storage_units]  int           NULL,
+    [rows]           bigint        NULL,
+    [reserved_mb]    decimal(18,1) NULL,
+    [reserved_pages] bigint        NULL,
+    PRIMARY KEY ([object_id], [index_id]));
+
+DECLARE @filegroups TABLE (
+    [object_id] int     NOT NULL,
+    [index_id]  int     NOT NULL,
+    [count]     int     NOT NULL,
+    [one]       sysname NULL,
+    PRIMARY KEY ([object_id], [index_id]));
+
+/* STAGED, BECAUSE THE TOP MADE THE PLAN PER ROW. Written as one statement, the
+   TOP (2000) set a row goal and the optimiser answered it with nested loops
+   that searched the catalog once per row: on the lab, 3.3 s for 2 000 rows
+   where the aggregate and the filegroups take 50 ms and 25 ms read apart, and
+   the per-row lookup grows with the number of partitions it searches. Each
+   half is read whole into a table variable, with no TOP to aim at, and the
+   list is cut from those. */
+INSERT INTO @uncompressed ([object_id], [index_id], [table], [index_name], [index_type],
+                           [storage_units], [rows], [reserved_mb], [reserved_pages])
+SELECT t.object_id,
+       p.index_id,
+       SCHEMA_NAME(t.schema_id) + '.' + t.name,
+       ISNULL(i.name, '(heap)'),
+       i.type_desc,
+       COUNT(*),
+       SUM(p.rows),
+       CAST(SUM(ps.reserved_page_count) * 8.0 / 1024 AS DECIMAL(18,1)),
+       SUM(ps.reserved_page_count)
+FROM       sys.partitions AS p
+JOIN       sys.tables     AS t  ON t.object_id = p.object_id AND t.is_ms_shipped = 0
+LEFT JOIN  sys.indexes    AS i  ON i.object_id = p.object_id AND i.index_id = p.index_id
+LEFT JOIN  sys.dm_db_partition_stats AS ps
+        ON ps.object_id = p.object_id AND ps.index_id = p.index_id
+       AND ps.partition_number = p.partition_number
+WHERE p.data_compression = 0
+GROUP BY t.schema_id, t.name, t.object_id, i.name, p.index_id, i.type_desc
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* The filegroups of every index in one pass. The two kinds of allocation unit
+   are joined apart, in-row and LOB data on the partition id and row-overflow
+   data on the hobt id, as the reference says; the OR of the two that the
+   per-row lookup used cannot be hashed. Every partition of the index counts,
+   compressed or not, as it did. */
+INSERT INTO @filegroups ([object_id], [index_id], [count], [one])
+SELECT d.object_id, d.index_id, COUNT(*), MIN(d.nom)
+FROM (SELECT pp.object_id, pp.index_id, ds.name AS nom
+      FROM sys.partitions AS pp
+      JOIN sys.allocation_units AS au
+        ON au.type IN (1,3) AND au.container_id = pp.partition_id
+      JOIN sys.data_spaces AS ds ON ds.data_space_id = au.data_space_id
+      UNION
+      SELECT pp.object_id, pp.index_id, ds.name
+      FROM sys.partitions AS pp
+      JOIN sys.allocation_units AS au
+        ON au.type = 2 AND au.container_id = pp.hobt_id
+      JOIN sys.data_spaces AS ds ON ds.data_space_id = au.data_space_id) AS d
+GROUP BY d.object_id, d.index_id
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* ISNULL keeps the 0 an index with no allocation unit has always had here. */
+SELECT TOP (2000)
        u.[table], u.[index_name], u.[index_id], u.[index_type],
        u.[storage_units], u.[rows], u.[reserved_mb],
        CASE WHEN fg.[count] = 1 THEN fg.[one] END                 AS [filegroup],
-       fg.[count]                                                 AS [filegroup_count]
-FROM (
-    SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                AS [table],
-           ISNULL(i.name, '(heap)')                               AS [index_name],
-           p.index_id                                             AS [index_id],
-           i.type_desc                                            AS [index_type],
-           COUNT(*)                                               AS [storage_units],
-           SUM(p.rows)                                            AS [rows],
-           CAST(SUM(ps.reserved_page_count) * 8.0 / 1024 AS DECIMAL(18,1)) AS [reserved_mb],
-           SUM(ps.reserved_page_count)                            AS [reserved_pages],
-           t.object_id                                            AS [object_id]
-    FROM       sys.partitions AS p
-    JOIN       sys.tables     AS t  ON t.object_id = p.object_id AND t.is_ms_shipped = 0
-    LEFT JOIN  sys.indexes    AS i  ON i.object_id = p.object_id AND i.index_id = p.index_id
-    LEFT JOIN  sys.dm_db_partition_stats AS ps
-            ON ps.object_id = p.object_id AND ps.index_id = p.index_id
-           AND ps.partition_number = p.partition_number
-    WHERE p.data_compression = 0
-    GROUP BY t.schema_id, t.name, t.object_id, i.name, p.index_id, i.type_desc) AS u
-OUTER APPLY (
-    SELECT COUNT(*) AS [count], MIN(d.nom) AS [one]
-    FROM (SELECT DISTINCT ds.name AS nom
-          FROM sys.partitions AS pp
-          JOIN sys.allocation_units AS au
-            ON (au.type IN (1,3) AND au.container_id = pp.partition_id)
-            OR (au.type = 2        AND au.container_id = pp.hobt_id)
-          JOIN sys.data_spaces AS ds ON ds.data_space_id = au.data_space_id
-          WHERE pp.object_id = u.[object_id] AND pp.index_id = u.[index_id]) AS d) AS fg
-ORDER BY u.[reserved_pages] DESC
+       ISNULL(fg.[count], 0)                                      AS [filegroup_count]
+FROM @uncompressed AS u
+LEFT JOIN @filegroups AS fg
+       ON fg.[object_id] = u.[object_id] AND fg.[index_id] = u.[index_id]
+ORDER BY u.[reserved_pages] DESC, u.[object_id], u.[index_id]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* A table whose partitions disagree. Empty is the expected result; a row here

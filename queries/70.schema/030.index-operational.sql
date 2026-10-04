@@ -38,6 +38,16 @@
 -- data, unlike sys.dm_db_index_physical_stats, which scans. There is no reason
 -- to gate this collector behind a flag.
 --
+-- THE HEAPS LISTING HAS NO CAP. It kept the 200 heaps with the most forwarded
+-- fetches until October 2026, with "the same cap as the two others" for its
+-- only reason, and no heap total beside it. Twelve real collections taken on
+-- eight client instances between August and September 2026 had it bind in 4
+-- databases, up to 810 heaps (docs/caps-inventory.md). The aggregate already
+-- read the DMV for every heap before the TOP kept 200 of them, so the whole
+-- list costs output only, about 200 bytes a heap, some 120 KB raw more on the
+-- largest seen. listing_cap, still 200, now describes contention and
+-- page_compression and not heaps.
+--
 -- IT IS STILL BLOCKABLE, AND THAT IS WHY THE READS ARE BUFFERED. Cheap is not
 -- the same as lock-free: the DMV is joined to sys.objects and sys.indexes,
 -- which need a schema stability lock, and READ UNCOMMITTED gives up locks on
@@ -185,8 +195,8 @@
 -- The rest of the file comes along: it is cheap, and splitting it would cost a
 -- second pass over the same view.
 --
--- The listing keeps the 200 partitions with the most attempts, the same cap as
--- the two others, so listing_cap still describes all three. Attempts order it
+-- The listing keeps the 200 partitions with the most attempts, the cap
+-- contention has, so listing_cap describes both. Attempts order it
 -- because they are the volume of compression work the partition asked for.
 -- Partitions with none come last, by leaf inserts, which is where a PAGE heap
 -- filled by ordinary inserts sits: past 200 partitions with attempts, such a
@@ -301,7 +311,7 @@ END CATCH
    heap that is merely written from one that is being damaged. */
 BEGIN TRY
     INSERT INTO @heaps
-    SELECT TOP (200)
+    SELECT
            SCHEMA_NAME(o.schema_id) + '.' + o.name,
            SUM(os.forwarded_fetch_count),
            SUM(os.leaf_insert_count),
@@ -317,7 +327,6 @@ BEGIN TRY
             ON ps.object_id = os.object_id AND ps.index_id = os.index_id
     WHERE os.index_id = 0
     GROUP BY o.schema_id, o.name
-    ORDER BY SUM(os.forwarded_fetch_count) DESC, SUM(os.leaf_update_count) DESC
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH

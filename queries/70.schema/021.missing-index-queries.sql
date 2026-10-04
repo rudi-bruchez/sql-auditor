@@ -27,12 +27,22 @@
 -- belonging to one suggestion while another with three queries appeared
 -- nowhere. It would also answer the file's own question in the wrong
 -- direction, since the tail of small statements is what tells a report from a
--- crowd. Twenty queries per suggestion, a thousand rows in the file, and
--- every row says how many queries its suggestion has in all.
+-- crowd. Twenty queries per suggestion, and every row says how many queries
+-- its suggestion has in all.
 --
--- THE ROWS ARE NOT BOUNDED BY THE 600 GROUPS. That bound is on suggestions;
--- one suggestion carried 625 query rows in a measurement. Saturation is read
--- from 020, which projects the instance-wide suggestion count.
+-- THE QUERY ROWS ARE NOT BOUNDED BY THE 600 GROUPS, THE LISTING IS. The engine
+-- keeps at most 600 missing-index groups for the instance, so the bound is on
+-- suggestions: one suggestion carried 625 query rows in a measurement.
+-- Saturation is read from 020, which projects the instance-wide suggestion
+-- count. Once the per-suggestion cap has applied, though, the file holds at
+-- most 600 times 20 rows, and the outer TOP is 12 000 for that reason: it
+-- cannot bind, so it never drops a suggestion. It was 1 000 until October
+-- 2026, with no reason given, and in group_handle order it dropped whole
+-- suggestions once 50 of them carried twenty queries each, against the rule
+-- the per-suggestion cap exists for. At about 300 bytes a row the file can
+-- reach 3.6 MB raw; the server work is unchanged, since the ranking already
+-- read every row. listing_cap carries the 12 000, and a test keeps it equal to
+-- the TOP and to 600 times listing_cap_per_suggestion.
 --
 -- THE VIEW IS THE EXECUTION SIDE of a group: zero until the statements have
 -- run. Its rows survive DBCC FREEPROCCACHE and do not survive taking the
@@ -123,7 +133,7 @@ SELECT DB_NAME()                                                  AS [database],
        c.[suggestions]                                            AS [counts.suggestions_with_queries_before_cap],
        c.[hashes]                                                 AS [counts.distinct_query_hashes_before_cap],
        20                                                         AS [listing_cap_per_suggestion],
-       1000                                                       AS [listing_cap]
+       12000                                                      AS [listing_cap]
 FROM (SELECT COUNT(*)                                  AS [rows],
              COUNT(DISTINCT mig.index_group_handle)    AS [suggestions],
              COUNT(DISTINCT gsq.query_hash)            AS [hashes]
@@ -137,7 +147,7 @@ OPTION (RECOMPILE, MAXDOP 1);
 
 /* Ordered by suggestion and then by the rank that chose the rows, so two
    collections of the same instance differ only where the instance did. */
-SELECT TOP (1000)
+SELECT TOP (12000)
        q.[group_handle]                                           AS [group_handle],
        q.[table]                                                  AS [table],
        q.[equality_columns]                                       AS [equality_columns],

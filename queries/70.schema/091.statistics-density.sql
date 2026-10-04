@@ -70,22 +70,20 @@
 --   Filtered statistics describe a subset. has_filter is projected so a density
 --   computed over one is not read as a density over the table.
 --
--- THE 200-TABLE CAP STAYS, AND THERE IS NO UNCAPPED SHORT FORM, although
--- 090.statistics.sql gained one in September 2026. Two reasons. Each row here
--- is already the short form: one statistic, its leading column and two
--- numbers, about 280 bytes. Nothing could be dropped to make a lighter row
--- except the density itself, so a "short form" would be this file without the
--- cap. And lifting the cap is not what the counts needed: the rules that count
--- redundant or stale statistics read 090, whose statistics_all now covers
--- every statistic. This file serves one question, the key order of an index
--- candidate, and it reads the histogram of every statistic it lists, a read
--- whose refusal is not documented the way the properties DMF's is (see
--- below). The gap that remains is named rather than hidden: a missing-index
--- candidate on a table outside the largest 200 gets no density from this
--- file. If audits start meeting such candidates, the cap is the thing to
--- lift. On the lab the histogram pass over 2,400 statistics cost the same as
--- the properties pass, 95 ms each, but those tables held at most 600 rows, so
--- that bounds nothing on a real database.
+-- EVERY STATISTIC ON EVERY USER TABLE IS READ, as 090.statistics.sql reads
+-- them, so a table found in 010.objects.sql, 060.columns.sql or 090 is here
+-- too. Until October 2026 this file read the 200 tables with the most rows,
+-- and its header named the condition for lifting that cap: audits meeting
+-- missing-index candidates on tables outside the largest 200. The condition
+-- was met: on one real database 51 of 206 missing-index suggestions sat on
+-- such tables, and of three real collections that carried this file one had
+-- the cap bind, at 1 109 of 1 674 statistics (docs/caps-inventory.md). Each
+-- row is already the short form, one statistic, its leading column and two
+-- numbers, about 330 bytes, so there is no lighter list to fall back to. The
+-- histogram read costs about 0.27 ms a statistic on the lab, so the largest
+-- database seen, 13 000 statistics, would add some 3.5 s and 4.3 MB raw,
+-- inside the @timeout of 300 s. counts.statistics is the number of statistics
+-- read, and the listing_cap field left the root with the cap.
 --
 -- NO KEY ORDER IS RECOMMENDED HERE. This file reports distribution; deciding an
 -- index is the analysis step's job, with the write cost and the query shapes in
@@ -140,15 +138,6 @@ BEGIN TRY
                           [is_index_statistic], [has_filter], [steps],
                           [histogram_rows], [histogram_distinct])
     EXEC sys.sp_executesql N'
-        WITH sized AS (
-            SELECT TOP (200) t.object_id
-            FROM sys.tables AS t
-            CROSS APPLY (SELECT SUM(p.row_count) AS row_count
-                         FROM sys.dm_db_partition_stats AS p
-                         WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)) AS ps
-            WHERE t.is_ms_shipped = 0
-            ORDER BY ps.row_count DESC, t.object_id
-        )
         SELECT SCHEMA_NAME(t.schema_id), t.name, st.name, st.stats_id,
                QUOTENAME(c.name),
                CONVERT(int, st.auto_created),
@@ -156,8 +145,7 @@ BEGIN TRY
                CONVERT(int, st.has_filter),
                h.steps, h.histogram_rows, h.histogram_distinct
         FROM      sys.stats  AS st
-        JOIN      sized      AS z ON z.object_id = st.object_id
-        JOIN      sys.tables AS t ON t.object_id = st.object_id
+        JOIN      sys.tables AS t ON t.object_id = st.object_id AND t.is_ms_shipped = 0
         LEFT JOIN sys.indexes AS i ON i.object_id = st.object_id
                                   AND i.index_id  = st.stats_id
         LEFT JOIN sys.stats_columns AS sc ON sc.object_id       = st.object_id
@@ -182,7 +170,6 @@ SELECT DB_NAME()                                                AS [database],
        CONVERT(int, @collected)                                 AS [collected],
        @err                                                     AS [error_number],
        NULLIF(@msg, N'')                                        AS [error_message],
-       200                                                      AS [listing_cap],
        (SELECT COUNT(*) FROM @density)                          AS [counts.statistics],
        /* A statistic with no histogram has never been populated — a filtered
           statistic whose predicate matches nothing, or one on a table that has

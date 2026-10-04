@@ -4,10 +4,9 @@
 -- @min_version: 11.0.3000
 -- @timeout:     180
 --
--- Every statistic in the database, in two widths: a short row for each one,
--- and the full detail for those on the largest tables. When it was last
--- updated, on how many rows, sampled how far, and how many rows have changed
--- since.
+-- Every statistic in the database, in two widths: a short row and the full
+-- detail, each for every statistic on a user table. When it was last updated,
+-- on how many rows, sampled how far, and how many rows have changed since.
 --
 -- Why this collector exists. Nothing in this archive could say when the
 -- optimiser's numbers were last refreshed. An estimate of one row against an
@@ -28,41 +27,42 @@
 -- simply describes a table nobody has touched since. Neither number means
 -- anything without the other.
 --
--- THE FULL DETAIL COVERS THE SAME 200 TABLES AS 010.objects.sql, by the same
--- ordering and the same tie-break, for the reason 060.columns.sql uses it: two
--- different caps in one directory make a table found in one file and missing
--- from another read as a collector defect. Auto-created statistics are
--- included; there are usually more of them than of the deliberate ones, and
--- they are the ones nobody knows about.
+-- THE FULL DETAIL COVERS EVERY USER TABLE, AS 010.objects.sql, 060.columns.sql
+-- and 091.statistics-density.sql do, so a table found in one of them is in the
+-- others. Auto-created statistics are included; there are usually more of them
+-- than of the deliberate ones, and they are the ones nobody knows about.
 --
--- STATISTICS_ALL IS THE SAME LIST WITHOUT THE CAP, one short row per statistic
--- on every user table. The cap alone made every count taken from this file a
--- floor: on a client database in September 2026 the detail listed 1,354 of
--- 2,235 statistics over 599 tables, so "how many statistics are redundant" or
--- "how many have not moved in a year" could only be answered for the largest
--- 200 tables, and a rule that counts has no use for a floor. The short row
--- carries what those counts need and nothing that is expensive to emit:
--- identity, columns, the auto/user/index origin, has_filter, last_updated,
--- rows, modifications_since and persisted_sample_percent. It leaves out the
--- filter text, the sampling detail and the histogram figures, which are what
--- the detail is for. statistics_total counts this array; statistics_listed
--- still counts the detail. Measured on a lab database of 600 tables and 2,400
--- statistics: the detail held 800, the short list 2,400, the file went from
--- 286 KB to 935 KB and the run from one second to two. The detail keeps its
--- key and its columns, with persisted_sample_percent added at the end, so a
--- reader of "statistics" sees nothing removed or renamed.
+-- Until October 2026 the detail covered the 200 tables with the most rows, and
+-- this header said they were the same 200 tables as 010.objects.sql. They were
+-- not: 010 and 060 took the union of those 200 and of the 50 with the most
+-- reserved pages, so a large LOB table holding few rows was in 010 and 060 and
+-- in neither statistics file. Twelve real collections taken on eight client
+-- instances between August and September 2026 (docs/caps-inventory.md) had the
+-- cap bind in 6 databases, the worst listing 5 617 of 12 996 statistics, and
+-- every count the analysis took from the detail was a floor. The DMF below was
+-- already read for every statistic, so lifting the cap costs output only:
+-- about 420 bytes a row, 3.1 MB raw on the worst of those databases.
 --
--- 091.statistics-density keeps its cap, and has no short form, for reasons
--- given in its own header.
+-- STATISTICS_ALL IS THE SHORT FORM OF THE SAME LIST, one short row per
+-- statistic on every user table. It was added in September 2026, when the
+-- detail was still capped, so that counts could be taken on every table: on a
+-- client database the detail then listed 1,354 of 2,235 statistics over 599
+-- tables. It now lists the same statistics as the detail and is kept because
+-- archives already collected carry it and the analysis reads it. The short row
+-- carries identity, columns, the auto/user/index origin, has_filter,
+-- last_updated, rows, modifications_since and persisted_sample_percent, and
+-- leaves out the filter text, the sampling detail and the histogram figures.
+-- statistics_total counts the statistics on user tables and statistics_listed
+-- those in the detail; they are equal unless the catalog moves between two
+-- reads. tables_covered counts the user tables. The listing_cap field left the
+-- root with the cap.
 --
 -- WHAT IT COSTS. sys.dm_db_stats_properties reads the header page of each
 -- statistics blob, so the work is one small read per statistic rather than a
 -- scan. It is read ONCE, for every statistic, into a table variable that both
--- lists then join, rather than applied twice; lifting the cap made the pass
--- cover every statistic, and a second pass over the capped subset would only
--- repeat reads already done. Both lists LEFT JOIN the staged rows, so a
--- statistic the DMF says nothing about is listed with NULLs rather than
--- dropped. There are two such cases and they read the same. A statistic that
+-- lists then join, rather than applied twice. Both lists LEFT JOIN the staged
+-- rows, so a statistic the DMF says nothing about is listed with NULLs rather
+-- than dropped. There are two such cases and they read the same. A statistic that
 -- has never been populated (an index created on an empty table, a filtered
 -- statistic whose predicate matches nothing) comes back from the DMF as a row
 -- of NULLs, measured on 2025; this header said "no row" until September 2026.
@@ -90,9 +90,9 @@
 -- reuses; 0 means nothing is persisted. It matters because a pinned 1% on a
 -- table that has since grown tenfold is a sampling decision nobody sees being
 -- made again. Measured on 2025: after WITH SAMPLE 50 PERCENT,
--- PERSIST_SAMPLE_PERCENT = ON on two statistics, one inside the 200 tables and
--- one outside, the detail showed 50 on the first, statistics_all 50 on both,
--- and 0 everywhere else.
+-- PERSIST_SAMPLE_PERCENT = ON on two statistics, one inside the 200 tables the
+-- detail then covered and one outside, the detail showed 50 on the first,
+-- statistics_all 50 on both, and 0 everywhere else.
 --
 -- It is asked for by existence rather than by build number, the shape
 -- 10.system/050.tempdb.sql and 20.databases/020.properties.sql use for
@@ -169,26 +169,17 @@ ELSE
     CROSS APPLY sys.dm_db_stats_properties(st.object_id, st.stats_id) AS sp
     OPTION (RECOMPILE, MAXDOP 1);
 
-WITH sized AS (
-    SELECT TOP (200) t.object_id
-    FROM sys.tables AS t
-    CROSS APPLY (SELECT SUM(p.row_count) AS row_count
-                 FROM sys.dm_db_partition_stats AS p
-                 WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)) AS ps
-    WHERE t.is_ms_shipped = 0
-    ORDER BY ps.row_count DESC, t.object_id
-)
 SELECT DB_NAME()                                                  AS [database],
        CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_at],
-       200                                                        AS [listing_cap],
-       (SELECT COUNT(*) FROM sized)                               AS [tables_covered],
+       (SELECT COUNT(*) FROM sys.tables AS t WHERE t.is_ms_shipped = 0) AS [tables_covered],
        (SELECT COUNT(*)
         FROM sys.stats  AS st
         JOIN sys.tables AS t ON t.object_id = st.object_id AND t.is_ms_shipped = 0)
                                                                   AS [statistics_total],
        (SELECT COUNT(*)
-        FROM sys.stats AS st
-        JOIN sized     AS z ON z.object_id = st.object_id)        AS [statistics_listed],
+        FROM sys.stats  AS st
+        JOIN sys.tables AS t ON t.object_id = st.object_id AND t.is_ms_shipped = 0)
+                                                                  AS [statistics_listed],
        /* The database-level switches that decide whether any of the dates below
           could have moved on their own. A database with AUTO_UPDATE_STATISTICS
           off and an old date is a different story from one with it on. */
@@ -201,15 +192,6 @@ SELECT DB_NAME()                                                  AS [database],
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* One row per statistic, ordered by table then name. */
-WITH sized AS (
-    SELECT TOP (200) t.object_id
-    FROM sys.tables AS t
-    CROSS APPLY (SELECT SUM(p.row_count) AS row_count
-                 FROM sys.dm_db_partition_stats AS p
-                 WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)) AS ps
-    WHERE t.is_ms_shipped = 0
-    ORDER BY ps.row_count DESC, t.object_id
-)
 SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
        st.name                                                    AS [statistic],
        st.stats_id                                                AS [stats_id],
@@ -272,8 +254,7 @@ SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
           the next one will. */
        sp.persisted_sample_percent                                AS [persisted_sample_percent]
 FROM       sys.stats    AS st
-JOIN       sized        AS z ON z.object_id = st.object_id
-JOIN       sys.tables   AS t ON t.object_id = st.object_id
+JOIN       sys.tables   AS t ON t.object_id = st.object_id AND t.is_ms_shipped = 0
 LEFT JOIN  sys.indexes  AS i ON i.object_id = st.object_id AND i.index_id = st.stats_id
 /* LEFT, not inner: a caller the DMF refuses gets no row for any statistic,
    and an inner join would turn "not readable" into "no statistics". */
@@ -281,9 +262,10 @@ LEFT JOIN  @props       AS sp ON sp.object_id = st.object_id AND sp.stats_id = s
 ORDER BY t.schema_id, t.name, st.name
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* statistics_all: one short row per statistic on every user table, uncapped.
-   The columns are the detail's, under the same names, so a reader can join
-   the two on table and statistic; see the header for what is left out. */
+/* statistics_all: one short row per statistic on every user table, the same
+   statistics as the detail. The columns are the detail's, under the same
+   names, so a reader can join the two on table and statistic; see the header
+   for what is left out. */
 SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
        st.name                                                    AS [statistic],
        st.stats_id                                                AS [stats_id],

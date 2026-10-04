@@ -39,13 +39,24 @@
 -- with what error number, so an empty array is never mistaken for an empty
 -- database. See 020.index-usage.sql for the measurement behind the pattern.
 --
--- WHAT IS COUNTED AND WHAT IS LISTED ARE DIFFERENT DECISIONS. Object counts
--- are exhaustive because they are cheap and bounded by the number of types.
--- Tables are capped at the union of the 200 largest by row count and the 50
--- largest by reserved pages, up to 250 tables in all, and both caps are
--- reported: a database with 5 000 tables would otherwise produce an archive
--- nobody opens, and the tail of that list is empty tables. Constraints (200
--- of each kind) and deprecated columns (200) are capped by the same reasoning.
+-- NOTHING IS CAPPED. Every user table is listed, every untrusted or disabled
+-- constraint and every column of a retired type. Until October 2026 the tables
+-- were the union of the 200 largest by row count and the 50 largest by
+-- reserved pages, and the constraint and type lists stopped at 200, on the
+-- reasoning that a database with 5 000 tables would otherwise produce an
+-- archive nobody opens and that the tail of the table list is empty tables.
+-- Twelve real collections taken on eight client instances between August and
+-- September 2026 said otherwise (docs/caps-inventory.md): the table cap was
+-- hit in 7 of 27 databases, cutting 7 to 646 tables, and the tail was empty
+-- in only 4 of them; in the other 3 the 200th table held 1 095, 3 214 and
+-- 472 542 rows, and 52, 382 and 646 non-empty tables were cut. The size
+-- branch never added a table. A table row is about 300 bytes, so the worst of
+-- those databases grows by some 200 KB raw, and the row and page counts were
+-- already read for every table to rank them. The constraint and type lists
+-- never reached their cap (160 and 173 at most) and cost nothing to keep
+-- whole. The listing_cap and listing_cap_by_size fields left the root with
+-- the caps: counts.tables now gives the length of the tables array, as
+-- counts.untrusted_* and counts.deprecated_type_columns give that of theirs.
 --
 -- is_not_trusted is the point of the constraints result set, and it is not a
 -- style question. A foreign key or check constraint left untrusted after a
@@ -73,14 +84,13 @@
 -- not-for-replication ones are counted apart, in
 -- counts.untrusted_foreign_keys_not_for_replication and
 -- counts.untrusted_check_constraints_not_for_replication, so the share a
--- revalidation cannot fix is known even when the list is capped.
+-- revalidation cannot fix is known without reading the list.
 --
--- The list is capped at 200 rows PER KIND, foreign keys and check constraints
--- separately, so it holds up to 400 rows. Within a kind the rows kept are the
--- disabled ones first, then the enabled ones a revalidation could fix, then the
--- not-for-replication ones, each by schema, table and constraint name, with
--- object_id breaking ties: a capped list keeps what is worth acting on, and
--- two runs over the same catalog keep the same rows.
+-- Within a kind the rows come disabled first, then the enabled ones a
+-- revalidation could fix, then the not-for-replication ones, each by schema,
+-- table and constraint name, with object_id breaking ties: what is worth
+-- acting on comes first, and two runs over the same catalog list the same
+-- rows in the same order.
 --
 -- text, ntext and image were replaced by varchar(max), nvarchar(max) and
 -- varbinary(max) in SQL Server 2005 and have been announced for removal ever
@@ -221,10 +231,10 @@ BEGIN CATCH
     SELECT @err_object_counts = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
 END CATCH
 
-/* The 200 largest tables by row count, with the two structural facts that a
-   row count alone cannot supply. A heap of nine rows and a heap of nine
-   hundred million are the same fact and completely different problems, which
-   is why this is ordered by size rather than by name.
+/* Every user table, with the two structural facts that a row count alone
+   cannot supply. A heap of nine rows and a heap of nine hundred million are
+   the same fact and completely different problems, which is why this is
+   ordered by size rather than by name.
 
    FOUR SIZES, NOT ONE, and the split is the whole point. This used to project a
    single [size.reserved_mb] summed over index_id IN (0, 1) — the heap or the
@@ -278,29 +288,10 @@ BEGIN TRY
                  FROM sys.dm_db_partition_stats AS p
                  WHERE p.object_id = t.object_id) AS ps
     WHERE t.is_ms_shipped = 0
-      AND t.object_id IN (
-          SELECT by_rows.object_id
-          FROM (SELECT TOP (200) t2.object_id
-                FROM sys.tables AS t2
-                CROSS APPLY (SELECT SUM(p.row_count) AS row_count
-                             FROM sys.dm_db_partition_stats AS p
-                             WHERE p.object_id = t2.object_id AND p.index_id IN (0, 1)) AS r
-                WHERE t2.is_ms_shipped = 0
-                ORDER BY r.row_count DESC, t2.object_id) AS by_rows
-          UNION
-          SELECT by_size.object_id
-          FROM (SELECT TOP (50) t2.object_id
-                FROM sys.tables AS t2
-                CROSS APPLY (SELECT SUM(p.reserved_page_count) AS reserved_pages
-                             FROM sys.dm_db_partition_stats AS p
-                             WHERE p.object_id = t2.object_id) AS r
-                WHERE t2.is_ms_shipped = 0
-                ORDER BY r.reserved_pages DESC, t2.object_id) AS by_size)
-    /* Membership is decided by the IN list above: the union of the 200 tables
-       with the most rows and the 50 with the most reserved pages, so a large LOB
-       table holding few rows is kept. object_id breaks the ties of each TOP, and
-       060.columns.sql repeats the same selection twice; a test keeps the three
-       copies identical. This ORDER BY only orders the rows. */
+    /* No selection: every user table, as 060.columns.sql, 090.statistics.sql
+       and 091.statistics-density.sql read every user table, so a table found
+       in one of the four files is in the others. A test keeps all four free of
+       a table selection. */
     ORDER BY ps.row_count DESC, t.object_id
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
@@ -314,41 +305,30 @@ END CATCH
    not-for-replication one is a third case with no fix: it is untrusted by
    construction, and revalidating it changes nothing. */
 BEGIN TRY
-    /* Each branch takes its own TOP inside a derived table so that it can carry
-       its own ORDER BY: a TOP in a UNION ALL branch without one keeps whichever
-       200 rows the scan meets first, which is a different sample on every run. */
     INSERT INTO @constraints
-    SELECT fk.* FROM (
-        SELECT TOP (200)
-               'FOREIGN_KEY' AS [kind],
-               SCHEMA_NAME(f.schema_id) + '.' + OBJECT_NAME(f.parent_object_id) AS [table],
-               f.name AS [constraint_name],
-               CAST(f.is_disabled AS int) AS [is_disabled],
-               CAST(f.is_not_trusted AS int) AS [is_not_trusted],
-               CAST(f.is_not_for_replication AS int) AS [is_not_for_replication],
-               SCHEMA_NAME(f.schema_id) AS [schema_name],
-               OBJECT_NAME(f.parent_object_id) AS [table_name],
-               f.object_id AS [object_id]
-        FROM sys.foreign_keys AS f
-        WHERE f.is_not_trusted = 1 OR f.is_disabled = 1
-        ORDER BY f.is_disabled DESC, f.is_not_for_replication,
-                 SCHEMA_NAME(f.schema_id), OBJECT_NAME(f.parent_object_id), f.name, f.object_id) AS fk
+    SELECT 'FOREIGN_KEY',
+           SCHEMA_NAME(f.schema_id) + '.' + OBJECT_NAME(f.parent_object_id),
+           f.name,
+           CAST(f.is_disabled AS int),
+           CAST(f.is_not_trusted AS int),
+           CAST(f.is_not_for_replication AS int),
+           SCHEMA_NAME(f.schema_id),
+           OBJECT_NAME(f.parent_object_id),
+           f.object_id
+    FROM sys.foreign_keys AS f
+    WHERE f.is_not_trusted = 1 OR f.is_disabled = 1
     UNION ALL
-    SELECT ck.* FROM (
-        SELECT TOP (200)
-               'CHECK_CONSTRAINT' AS [kind],
-               SCHEMA_NAME(k.schema_id) + '.' + OBJECT_NAME(k.parent_object_id) AS [table],
-               k.name AS [constraint_name],
-               CAST(k.is_disabled AS int) AS [is_disabled],
-               CAST(k.is_not_trusted AS int) AS [is_not_trusted],
-               CAST(k.is_not_for_replication AS int) AS [is_not_for_replication],
-               SCHEMA_NAME(k.schema_id) AS [schema_name],
-               OBJECT_NAME(k.parent_object_id) AS [table_name],
-               k.object_id AS [object_id]
-        FROM sys.check_constraints AS k
-        WHERE k.is_not_trusted = 1 OR k.is_disabled = 1
-        ORDER BY k.is_disabled DESC, k.is_not_for_replication,
-                 SCHEMA_NAME(k.schema_id), OBJECT_NAME(k.parent_object_id), k.name, k.object_id) AS ck
+    SELECT 'CHECK_CONSTRAINT',
+           SCHEMA_NAME(k.schema_id) + '.' + OBJECT_NAME(k.parent_object_id),
+           k.name,
+           CAST(k.is_disabled AS int),
+           CAST(k.is_not_trusted AS int),
+           CAST(k.is_not_for_replication AS int),
+           SCHEMA_NAME(k.schema_id),
+           OBJECT_NAME(k.parent_object_id),
+           k.object_id
+    FROM sys.check_constraints AS k
+    WHERE k.is_not_trusted = 1 OR k.is_disabled = 1
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
@@ -357,7 +337,7 @@ END CATCH
 
 BEGIN TRY
     INSERT INTO @deprecated
-    SELECT TOP (200)
+    SELECT
            SCHEMA_NAME(t.schema_id),
            t.name,
            c.column_id,
@@ -369,7 +349,6 @@ BEGIN TRY
     JOIN sys.types  AS ty ON ty.user_type_id = c.user_type_id
     JOIN sys.tables AS t  ON t.object_id = c.object_id AND t.is_ms_shipped = 0
     WHERE ty.name IN ('text', 'ntext', 'image')
-    ORDER BY SCHEMA_NAME(t.schema_id), t.name, c.column_id
     OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
@@ -391,8 +370,6 @@ SELECT DB_NAME()                                                  AS [database],
        @n_nfr_fk                                                  AS [counts.untrusted_foreign_keys_not_for_replication],
        @n_nfr_ck                                                  AS [counts.untrusted_check_constraints_not_for_replication],
        @n_deprecated_cols                                         AS [counts.deprecated_type_columns],
-       200                                                        AS [listing_cap],
-       50                                                         AS [listing_cap_by_size],
        CASE WHEN @err_counts        = 0 THEN 1 ELSE 0 END         AS [collected.counts],
        CASE WHEN @err_object_counts = 0 THEN 1 ELSE 0 END         AS [collected.object_counts],
        CASE WHEN @err_tables        = 0 THEN 1 ELSE 0 END         AS [collected.tables],

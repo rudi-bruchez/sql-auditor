@@ -42,8 +42,8 @@
 -- heap into the buffer pool, and 159 of a 15,110-page heap whose extents were
 -- interleaved with another table's, 27 September 2026.
 --
--- The cap of 50 heaps is a count, and a count bounds nothing: fifty heaps of
--- 9,000 pages are 450,000 pages read in full. So each candidate is priced
+-- The cap of 100 heaps is a count, and a count bounds nothing: a hundred heaps
+-- of 9,000 pages are 900,000 pages read in full. So each candidate is priced
 -- before it is read, allocation unit by allocation unit from metadata, at its
 -- used pages below 10,000 and at 1 percent of them from there on, and the
 -- heaps are read largest first until @page_budget would be exceeded. A heap
@@ -53,6 +53,20 @@
 -- exhaustive and why. The LIMITED call made for fragmentation reads allocation
 -- pages only and is not priced. A heap is still read whole or not at all: the
 -- budget decides which heaps are read, not how much of one.
+--
+-- THE CAP WAS 50 UNTIL OCTOBER 2026, AND NOTHING SAID HOW MANY HEAPS IT LEFT.
+-- counts.eligible_partitions now counts the heap partitions above 128 used
+-- pages, the population the candidates are taken from, so the cap reads
+-- against it: measured_heaps, skipped_budget and skipped_locked say what
+-- happened to the first 100, and eligible_partitions how many there were. It
+-- is read from the catalog and the allocation units, like the candidates, so
+-- a locked heap does not cost it. Twelve real collections taken on eight
+-- client instances between August and September 2026 (docs/caps-inventory.md)
+-- had the 50 bind in 4 databases under 0.18.0, holding 108 to 810 heaps, and
+-- in none of those taken by 0.21.0 or 0.23.0. The page and time budgets
+-- are unchanged, so raising the count to 100 reads more heaps only where the
+-- budgets have room for them: the worst case is still 200,000 pages and
+-- 240 s.
 --
 -- NO JUDGEMENT IS APPLIED. A heap is not a defect. Staging tables that are
 -- truncated and bulk-loaded are legitimately heaps, and rebuilding one that is
@@ -100,7 +114,7 @@
 -- SAMPLED and 14,603 of 14,603 in DETAILED. Read it as a share of page_count,
 -- not as an exact number of pages.
 --
--- It covers the heaps this file reads and no others: the 50 largest
+-- It covers the heaps this file reads and no others: the 100 largest
 -- partitions above 128 used pages that fit the page budget. A smaller PAGE
 -- heap has no row here; 030 counts the row-only shape of all of them at its
 -- root, in page_partitions.heaps_without_attempts.
@@ -164,9 +178,10 @@ BEGIN CATCH
 END CATCH
 
 DECLARE @err_counts int = 0, @err_heaps int = @replica_err, @msg nvarchar(2048) = @replica_msg,
-        @heap_count int, @heaps_with_nc int, @heap_total_mb decimal(18,1);
+        @heap_count int, @heaps_with_nc int, @heap_total_mb decimal(18,1),
+        @eligible int;
 
-DECLARE @top int = 50, @page_budget bigint = 200000, @pages_spent bigint = 0,
+DECLARE @top int = 100, @page_budget bigint = 200000, @pages_spent bigint = 0,
         @batch_started datetime2 = SYSDATETIME(), @budget_sec int = 240,
         @measured int = 0, @skipped_locked int = 0, @skipped_budget int = 0,
         @i int = 1, @obj int, @pid bigint, @part int, @est_pages bigint,
@@ -227,12 +242,24 @@ BEGIN TRY
        JOIN sys.allocation_units AS au ON au.container_id = p.partition_id
       WHERE p.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0
     OPTION (RECOMPILE, MAXDOP 1);
+
+    -- The population the candidates below are taken from, before their TOP:
+    -- the same filter on the same two catalogs, so the two cannot disagree.
+    SELECT @eligible = COUNT(*)
+       FROM sys.partitions AS p
+       JOIN sys.objects AS o ON o.object_id = p.object_id
+       CROSS APPLY (SELECT SUM(au.used_pages) AS used_pages
+                    FROM sys.allocation_units AS au
+                    WHERE au.container_id = p.partition_id) AS a
+      WHERE p.index_id = 0 AND o.type = 'U' AND o.is_ms_shipped = 0
+        AND a.used_pages > 128
+    OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
     SELECT @err_counts = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
 END CATCH
 
-/* The fifty largest heaps, scanned in SAMPLED mode. Chosen by page count from
+/* The hundred largest heaps, scanned in SAMPLED mode. Chosen by page count from
    metadata first, so the expensive scan only touches the objects that could
    matter. The estimate follows the reference: a unit of fewer than 10,000 pages
    is read whole, a larger one at 1 percent. */
@@ -326,7 +353,7 @@ SELECT
     -- forty in silence.
     --
     -- It cannot be deduced from the rows of this result set. The list is the
-    -- fifty largest heaps, and within those only the partitions that passed
+    -- hundred largest heaps, and within those only the partitions that passed
     -- the page-count filter, so a single row means either one partition or
     -- siblings that did not make the cut. This reads metadata, so neither the
     -- cap nor the SAMPLED scan reaches it.
@@ -398,6 +425,9 @@ SELECT
     @heap_count                                                 AS [counts.heaps],
     @heaps_with_nc                                              AS [counts.heaps_with_nonclustered],
     @heap_total_mb                                              AS [counts.total_mb],
+    -- Heap partitions above 128 used pages, the population the cap below is
+    -- taken from.
+    @eligible                                                   AS [counts.eligible_partitions],
     -- The cap, so a reader never mistakes the list below for the whole story.
     @top                                                        AS [sample.largest_heaps_scanned],
     'SAMPLED'                                                   AS [sample.mode],

@@ -369,6 +369,50 @@ jobs:
           jq -e '[.skipped_scripts[]? | select(.script == "40.security/032.server-trigger-definitions.sql")] | length == 1' \
             "$run_dir/_run.json" \
             || { jq '.skipped_scripts' "$run_dir/_run.json"; exit 1; }
+      # 010, 060, 090 and 091 list every user table since their caps were
+      # lifted, so each list is as long as the count beside it and no root
+      # still names a cap.
+      - name: assert the schema listings are whole
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          d="$run_dir/70.schema/ci_probe"
+          jq -e '(has("listing_cap") | not) and (.tables | length) == .counts.tables
+                 and any(.tables[]; .table == "dbo.ix_probe")' "$d/010.objects.json" \
+            || { jq 'del(.tables, .object_counts)' "$d/010.objects.json"; exit 1; }
+          jq -e '(has("listing_cap") | not) and .tables_covered == .tables_total
+                 and .columns_listed == .columns_total
+                 and (.columns | length) == .columns_total' "$d/060.columns.json" \
+            || { jq 'del(.columns)' "$d/060.columns.json"; exit 1; }
+          jq -e '(has("listing_cap") | not) and .statistics_listed == .statistics_total
+                 and (.statistics | length) == .statistics_total
+                 and (.statistics_all | length) == .statistics_total' "$d/090.statistics.json" \
+            || { jq 'del(.statistics, .statistics_all)' "$d/090.statistics.json"; exit 1; }
+          jq -e '(has("listing_cap") | not) and .counts.statistics == (.density | length)
+                 and any(.density[]; .table == "ix_probe")' "$d/091.statistics-density.json" \
+            || { jq 'del(.density)' "$d/091.statistics-density.json"; exit 1; }
+      # 040, 045 and 050 keep a cap and count what it would cut: ix_probe,
+      # planted above with a primary key and two indexes, none compressed,
+      # gives 040 rows to count; 045 and 050 find no columnstore and no heap
+      # above 128 pages in ci_probe, so their counts are asserted as numbers
+      # and against the list, which a renamed alias breaks.
+      - name: assert the kept schema caps are counted
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          d="$run_dir/70.schema/ci_probe"
+          jq -e '.listing_cap == 2000 and .counts.uncompressed_indexes >= 3
+                 and (.largest_uncompressed | length)
+                     == ([.counts.uncompressed_indexes, .listing_cap] | min)' "$d/040.compression.json" \
+            || { jq 'del(.largest_uncompressed)' "$d/040.compression.json"; exit 1; }
+          jq -e '.listing_cap == 2000 and .listing_cap_trim_reasons == 2000
+                 and (.counts.index_partitions | type) == "number"
+                 and (.columnstore | length) == ([.counts.index_partitions, .listing_cap] | min)
+                 and (.trim_reasons | length)
+                     == ([.counts.trim_reason_rows, .listing_cap_trim_reasons] | min)' "$d/045.columnstore.json" \
+            || { jq . "$d/045.columnstore.json"; exit 1; }
+          jq -e '.sample.largest_heaps_scanned == 100
+                 and (.counts.eligible_partitions | type) == "number"
+                 and (.heaps | length) <= .counts.eligible_partitions' "$d/050.heaps.json" \
+            || { jq . "$d/050.heaps.json"; exit 1; }
       # The planted log is found, read whole and classified: the REORGANIZE
       # without an end is listed open, with its operation and page count read
       # out of the command and ExtendedInfo, one later command, and the
