@@ -93,7 +93,7 @@ END CATCH;
    The header above says the log is localised and that a parser keyed on
    English words returns nothing at all on half the estate, silently. The
    notable set below is exactly such a parser: twelve hand-written English
-   LIKE patterns. Most of them are nets — %CHECKDB% covers 38 messages,
+   LIKE patterns, and three more for lines the engine never localises. Most of them are nets — %CHECKDB% covers 38 messages,
    %deadlock% 13 — and a net is left alone. Two messages carry a DECISION
    instead, and those are derived here from their number:
 
@@ -543,7 +543,31 @@ WHERE f.n <= 20
       restarts or cycles one database repeatedly, not an instance with many
       databases. That is what the recovery set below is for. */
    OR (@p9017 IS NOT NULL AND l.Txt COLLATE Latin1_General_BIN2 LIKE @p9017 ESCAPE N'\')
-   OR (@p3421 IS NOT NULL AND l.Txt COLLATE Latin1_General_BIN2 LIKE @p3421 ESCAPE N'\'))
+   OR (@p3421 IS NOT NULL AND l.Txt COLLATE Latin1_General_BIN2 LIKE @p3421 ESCAPE N'\')
+   /* A long checkpoint. Since SQL Server 2012 the engine writes these lines
+      when a checkpoint on a database outlasts the recovery interval, and for
+      every checkpoint under trace flag 3504. Two shapes, both measured on
+      SQL Server 2025 on 4 October 2026 with 3504 on:
+
+        automatic checkpoint (TARGET_RECOVERY_TIME = 0), four lines:
+          FlushCache: cleaned up 270 bufs with 22 writes in 348 ms (...) for db 10:0
+          average writes per second:  63.22 writes/sec
+          average throughput:   5.75 MB/sec, I/O saturation: 0, context switches 54
+          last target outstanding: 128, avgWriteLatency 8
+        indirect checkpoint, the default for databases created since 2016:
+          DirtyPageMgr::ForceCatchupOrFlushCache: cleaned up 2574 dirty pages in 56 ms for db 10
+
+      The first pattern takes both headers, the other two the lines that
+      carry the I/O figures. None of them is in sys.messages, so they are not
+      localised and English literals are the right filter. Their numbers sit
+      inside the eighty characters the rarity filter groups on, so occurrences
+      rarely share a prefix. An instance running 3504 permanently writes one
+      set per checkpoint and can fill the cap of this set; the cap is
+      reported. Absent from fifteen real archives checked the same day, which
+      says only that their retained logs held no long checkpoint. */
+   OR l.Txt LIKE '%FlushCache: cleaned up%'
+   OR l.Txt LIKE '%I/O saturation%'
+   OR l.Txt LIKE '%avgWriteLatency%')
 ORDER BY l.LogDate
 OPTION (RECOMPILE, MAXDOP 1);
 
