@@ -32,9 +32,13 @@ import (
 // table expression, the actions of a MERGE, and the CASE ... ELSE ... END of a
 // select list.
 //
-// It is not a parser and does not pretend to be one. The ways it can be wrong
-// are loud: a construct it misreads makes it see a statement without a hint,
-// or a count of result sets that disagrees, and the file is refused.
+// It is not a parser and does not pretend to be one. Most of the ways it can
+// be wrong are loud: a construct it misreads makes it see a statement without
+// a hint, or a count of result sets that disagrees, and the file is refused.
+// Not all of them. A statement that opens with a parenthesis, such as
+// (SELECT ...) UNION (SELECT ...), is not seen as opening one, so an
+// unterminated statement before it takes its hint; a review found that form
+// and no file of the corpus uses it.
 
 // stmtKind is the keyword a scanned statement opened with.
 type stmtKind string
@@ -161,16 +165,20 @@ func scanDataStatements(code string) ([]scannedStatement, []unhintable) {
 		closeAt(at)
 		cur = &scannedStatement{kind: kind, start: at}
 	}
+	numberEnd := -1
 	for i := 0; i < len(code); {
 		c := code[i]
 		switch {
 		case c == '[':
-			j := strings.IndexByte(code[i:], ']')
-			if j < 0 {
-				i = len(code)
-			} else {
-				i += j + 1
+			// ]] is an escaped bracket inside the name, not its end.
+			j := i + 1
+			for j < len(code) && (code[j] != ']' || j+1 < len(code) && code[j+1] == ']') {
+				if code[j] == ']' {
+					j++
+				}
+				j++
 			}
+			i = j + 1
 			continue
 		case c == '"':
 			j := strings.IndexByte(code[i+1:], '"')
@@ -201,13 +209,27 @@ func scanDataStatements(code string) ([]scannedStatement, []unhintable) {
 			prev = [2]string{}
 		case isWordByte(c):
 			j := i
-			for j < len(code) && isWordByte(code[j]) {
-				j++
+			if c >= '0' && c <= '9' {
+				// A number ends where its digits do: the server reads
+				// 1SELECT and 1.SELECT as a number then a keyword.
+				hex := strings.HasPrefix(code[i:], "0x") || strings.HasPrefix(code[i:], "0X")
+				if hex {
+					j += 2
+				}
+				for j < len(code) && (code[j] >= '0' && code[j] <= '9' || code[j] == '.' ||
+					hex && strings.IndexByte("abcdefABCDEF", code[j]) >= 0) {
+					j++
+				}
+				numberEnd = j
+			} else {
+				for j < len(code) && isWordByte(code[j]) {
+					j++
+				}
 			}
 			word := strings.ToUpper(code[i:j])
 			// A word after a dot is a column or a method (c.Command,
 			// x.value), and a word starting with @ or # is a name.
-			qualified := i > 0 && code[i-1] == '.'
+			qualified := i > 0 && code[i-1] == '.' && i != numberEnd
 			if c == '@' || c == '#' || qualified || (c >= '0' && c <= '9') {
 				if depth == 0 && cur != nil && cur.leading {
 					// The first item of a select list decides whether the
@@ -429,7 +451,7 @@ func excerpt(stmt string) string {
 // literals blanked here, so dynamic SQL, which this program reads into
 // table variables rather than emits, is not counted.
 func EmittingStatements(sql string) []string {
-	code := BlankSQLStrings(StripSQLComments(sql))
+	code := BlankSQLStrings(normalizeSeparators(StripSQLComments(sql)))
 	stmts, _ := scanDataStatements(code)
 	var out []string
 	for _, s := range stmts {

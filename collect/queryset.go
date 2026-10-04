@@ -1142,7 +1142,7 @@ func contractLint(sql string, results []ResultSpec) string {
 		return fmt.Sprintf("SET LOCK_TIMEOUT %s: the contract allows at most %d milliseconds, and never 0 or -1 — a collector that waits indefinitely on a lock is the defect this setting exists to prevent",
 			m[1], maxLockTimeoutMS)
 	}
-	code := BlankSQLStrings(sql)
+	code := BlankSQLStrings(normalizeSeparators(sql))
 	stmts, msg := hintLint(code)
 	if msg != "" {
 		return msg

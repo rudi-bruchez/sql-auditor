@@ -625,6 +625,18 @@ func TestLintRequiresTheHintOnEveryStatementThatReads(t *testing.T) {
 		{"hint in another form on a buffering statement",
 			"CREATE TABLE #t (x int);\nINSERT INTO #t (x) SELECT database_id FROM sys.databases OPTION (MAXDOP 1);\n" + emit,
 			"in another form"},
+		{"a no-break space between a keyword and its select list",
+			"CREATE TABLE #t (x int);\nINSERT INTO #t (x) SELECT database_id FROM sys.databases;\n" + emit,
+			"INSERT INTO #t"},
+		{"an escaped bracket in an identifier before an unhinted update",
+			"CREATE TABLE #t ([x]](y] int);\nUPDATE #t SET [x]](y] = 2 FROM #t JOIN sys.databases AS d ON 1 = 1;\n" + emit,
+			"UPDATE #t"},
+		{"a keyword glued to a number",
+			"DECLARE @n int;\nSET @n = 1SELECT database_id INTO #t FROM sys.databases;\n" + emit,
+			"SELECT database_id INTO #t"},
+		{"a keyword after a number with a trailing dot",
+			"DECLARE @n int;\nSET @n = 1.SELECT database_id INTO #t FROM sys.databases;\n" + emit,
+			"SELECT database_id INTO #t"},
 
 		{"hinted delete, update and select into are not result sets",
 			"CREATE TABLE #t (x int);\nINSERT INTO #t (x) SELECT database_id FROM sys.databases" + hint + ";\n" +
