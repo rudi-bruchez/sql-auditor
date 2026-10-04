@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -400,6 +401,21 @@ func NewManifest(name, version, commit string) *Manifest {
 	}
 }
 
+// warn records warnings, each once. A warning that names a script but not a
+// database is raised again by every database the script runs on, and the copies
+// say nothing the first did not: a lab run once listed the same Showplan
+// sentence 8 times for each of four collectors, 32 of its 35 warnings.
+// Every collect-time warning goes through here, so the next one raised per unit
+// cannot repeat itself either. A warning that differs by a database name is a
+// different warning and is kept.
+func (m *Manifest) warn(msgs ...string) {
+	for _, msg := range msgs {
+		if !slices.Contains(m.Warnings, msg) {
+			m.Warnings = append(m.Warnings, msg)
+		}
+	}
+}
+
 const (
 	manifestJSONName  = "_run.json"
 	manifestHumanName = "MANIFEST.txt"
@@ -710,15 +726,14 @@ What is in here that names things:
 		fmt.Fprintln(b, "    their execution plans in XML, and their runtime statistics per")
 		fmt.Fprintln(b, "    interval. A plan carries the compiled parameter values, the literal")
 		fmt.Fprintln(b, "    predicates and the name of every object the query touches.")
-		// The disclosure also latches when a default collector's query text
-		// carries the Showplan namespace (see discloseWrites), and then the
-		// option was not passed: saying it was would be false in the archive.
+		// The disclosure also latches when a collector the option does not
+		// gate writes the root element of a plan (see discloseWrites), and
+		// then the option was not passed: saying it was would be false.
 		if m.Config[FlagQueryStoreDetail] == "true" {
 			fmt.Fprintln(b, "    Collected because --query-store-detail was passed.")
 		} else {
 			fmt.Fprintln(b, "    Declared without --query-store-detail: a file of this archive carries")
-			fmt.Fprintln(b, "    the Showplan XML namespace, which may be collected query text that")
-			fmt.Fprintln(b, "    mentions it rather than a plan. The warnings in _run.json name the files.")
+			fmt.Fprintln(b, "    the root element of an execution plan. The warnings name the files.")
 		}
 	}
 	if m.Collected.QueryStoreProfiledPlans {

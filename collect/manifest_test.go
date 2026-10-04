@@ -973,3 +973,24 @@ func TestApplicationTextIsDeclaredAndDisclosed(t *testing.T) {
 		}
 	}
 }
+
+// A warning that names a script and not a database is raised by every
+// database the script runs on. The copies carry nothing, and on the lab 32 of
+// them buried the other 3.
+func TestManifestKeepsEachWarningOnce(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "abc")
+	s := Script{Path: "90.foreign/010.dump.sql"}
+	for range 3 {
+		m.Collected.QueryStoreDetail = false
+		rw := newRunWriter(t.TempDir(), 1<<20)
+		rw.sawShowplan = true
+		discloseWrites(m, rw, s, WriteResult{})
+	}
+	m.warn("another warning", "another warning")
+	if len(m.Warnings) != 2 {
+		t.Fatalf("want each distinct warning once, got %d: %q", len(m.Warnings), m.Warnings)
+	}
+	if h := m.Human(); strings.Count(h, "90.foreign/010.dump.sql: a payload") != 1 {
+		t.Errorf("MANIFEST.txt repeats the warning:\n%s", h)
+	}
+}
