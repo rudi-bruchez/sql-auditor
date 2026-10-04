@@ -216,7 +216,7 @@ in one of two ways, and they fail differently:
 `@permissions` is for a permission without which the document has nothing to
 say. `@optional_permissions` is for one that a single part of the document
 needs, when the rest stands on its own: the encryption keys beside the
-certificate list. Both are
+certificate list, the backup dates beside a database's properties. Both are
 probed by `check` and asked for by the generated script, which marks an
 optional need as such under the collector's name, so you can weigh refusing it
 knowing it costs part of a document rather than the whole of it.
@@ -225,8 +225,11 @@ The collectors that use an optional permission today:
 
 | Collector | Optional | Lost without it |
 | --- | --- | --- |
+| `20.databases/020.properties.sql` | `MSDB READ` | the last full, differential and log backup dates |
 | `40.security/040.encryption-certificates.sql` | `VIEW SERVER SECURITY STATE` | which certificate protects each database encrypted with TDE |
 | `40.security/040.encryption-certificates.sql` | `MSDB READ` | the encryptors found in the backup history |
+| `70.schema/010.objects.sql` | `VIEW SERVER STATE` | the tables listing, with its row and page counts |
+| `70.schema/050.heaps.sql` | `VIEW SERVER STATE` | the per-heap measurement; the root's heap counts and size remain |
 
 ### Three of those deserve a second look
 
