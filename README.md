@@ -17,12 +17,22 @@ What it does to your instance:
   exception: where Ola Hallengren's maintenance solution is installed, it reads
   that solution's own `dbo.CommandLog` (object names, timings, page counts),
   and leaves the command text and error messages on the server;
+- it **does** carry, by default, text your applications wrote into SQL
+  Server's own records: the first 500
+  characters of the statement text of up to 200 Query Store queries per
+  database and per ranking, and up to 1 000 characters of each error log line
+  it keeps, which include messages an application logged with `RAISERROR ...
+  WITH LOG` and deadlock graphs written by trace flags 1204 and 1222. A
+  literal value in a statement can travel with it. `MANIFEST.txt` lists what
+  the archive carries; read it before you hand the archive over;
 - it does **not** write to your databases;
 - it does **not** change any configuration;
 - read-only is not the same as free or lock-free. One collector samples pages
   of the largest heaps in each database to count forwarded records, which is
-  real I/O on a large instance, and every read holds the locks a read holds
-  while it runs. Run it first off-peak. On an availability group readable
+  real I/O on a large instance, three others parse the XML of up to a
+  thousand cached plans each, which costs CPU in proportion to the size of
+  those plans, and every read holds the locks a read holds while it runs. Run
+  it first off-peak. On an availability group readable
   secondary the physical reads are skipped, because their lock can hold up
   REDO; run it on the primary for those. [What it costs the
   instance](docs/dba-guide.md#what-the-default-run-costs-a-large-instance) says
