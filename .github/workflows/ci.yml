@@ -167,24 +167,6 @@ jobs:
               CREATE INDEX ix_probe_written ON dbo.ix_probe (w);
               EXEC sys.sp_executesql N'SELECT id FROM dbo.ix_probe WHERE r = 5;';
               EXEC sys.sp_executesql N'UPDATE dbo.ix_probe SET w = w + 1 WHERE id = 7;';"
-      # 80.workload/030 names the column a cached plan converts to nvarchar,
-      # and the form it exists for is the silent one: a varchar column under a
-      # Windows collation, sought with nvarchar parameters, which the engine
-      # turns into a range seek with no PlanAffectingConvert warning and the
-      # conversion of both columns left in the residual predicate (measured on
-      # SQL Server 2025). The predicate also converts the two parameters, so a
-      # reading that took any ColumnReference would count four and could name
-      # @p. Five thousand executions put the statement among the heaviest by
-      # logical reads, since 030 looks only at the two hundred heaviest
-      # candidates. One statement per sqlcmd call, for the 1 KB limit below.
-      - name: plant an implicit conversion of an indexed column
-        run: |
-          tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
-            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b "$@"; }
-          tools -Q "CREATE TABLE dbo.ic_probe (id int IDENTITY PRIMARY KEY, code varchar(20) COLLATE Latin1_General_CI_AS NOT NULL, region varchar(10) COLLATE Latin1_General_CI_AS NOT NULL);"
-          tools -Q "INSERT dbo.ic_probe (code, region) SELECT TOP (1000) CONCAT('c', ROW_NUMBER() OVER (ORDER BY (SELECT 1))), CONCAT('r', ROW_NUMBER() OVER (ORDER BY (SELECT 1)) % 10) FROM sys.all_columns;"
-          tools -Q "CREATE INDEX ic_probe_code ON dbo.ic_probe (code, region);"
-          tools -Q "SET NOCOUNT ON; DECLARE @i int = 0; WHILE @i < 5000 BEGIN EXEC sys.sp_executesql N'SELECT id FROM dbo.ic_probe WHERE code = @p AND region = @r;', N'@p nvarchar(20), @r nvarchar(10)', N'c5', N'r5'; SET @i += 1; END;" > /dev/null
       # 70.schema/010.objects lists untrusted constraints with
       # is_not_for_replication, which is what tells a constraint a
       # revalidation can fix from one it cannot: NOT FOR REPLICATION makes a
@@ -254,6 +236,33 @@ jobs:
               VALUES (N'ci_probe', N'dbo', N'ix_probe', 'U', N'ix_probe_written',
                 N'UPDATE STATISTICS [ci_probe].[dbo].[ix_probe] [ix_probe_written] WITH FULLSCAN',
                 N'UPDATE_STATISTICS', DATEADD(HOUR, -1, SYSDATETIME()), DATEADD(MINUTE, -59, SYSDATETIME()), 0);"
+      # 80.workload/030 names the column a cached plan converts to nvarchar,
+      # and the form it exists for is the silent one: a varchar column under a
+      # Windows collation, sought with nvarchar parameters, which the engine
+      # turns into a range seek with no PlanAffectingConvert warning and the
+      # conversion of both columns left in the residual predicate (measured on
+      # SQL Server 2025). The predicate also converts the two parameters, so a
+      # reading that took any ColumnReference would count four and could name
+      # @p. Five thousand executions put the statement among the heaviest by
+      # logical reads, since 030 looks only at the two hundred heaviest
+      # candidates. One statement per sqlcmd call, for the 1 KB limit above.
+      # THIS STEP IS LAST, just before the collection, because what it plants
+      # lives in the plan cache and sp_procoption empties it: the procedure
+      # ends with RECONFIGURE WITH OVERRIDE, and on SQL Server 2017
+      # (14.0.3550.4) that flushes every cached plan, measured as 12 plans
+      # before the call and none after. Planted before the startup procedure,
+      # as it was until 4 October 2026, the statement was gone by the time 030
+      # read the cache, and the 2017 leg failed on a file holding no ic_probe
+      # row; the 2022 leg kept it. Anything else the cache must hold goes here
+      # too, after every step that may reconfigure.
+      - name: plant an implicit conversion of an indexed column
+        run: |
+          tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b "$@"; }
+          tools -Q "CREATE TABLE dbo.ic_probe (id int IDENTITY PRIMARY KEY, code varchar(20) COLLATE Latin1_General_CI_AS NOT NULL, region varchar(10) COLLATE Latin1_General_CI_AS NOT NULL);"
+          tools -Q "INSERT dbo.ic_probe (code, region) SELECT TOP (1000) CONCAT('c', ROW_NUMBER() OVER (ORDER BY (SELECT 1))), CONCAT('r', ROW_NUMBER() OVER (ORDER BY (SELECT 1)) % 10) FROM sys.all_columns;"
+          tools -Q "CREATE INDEX ic_probe_code ON dbo.ic_probe (code, region);"
+          tools -Q "SET NOCOUNT ON; DECLARE @i int = 0; WHILE @i < 5000 BEGIN EXEC sys.sp_executesql N'SELECT id FROM dbo.ic_probe WHERE code = @p AND region = @r;', N'@p nvarchar(20), @r nvarchar(10)', N'c5', N'r5'; SET @i += 1; END;" > /dev/null
       # --env /dev/null is not decoration. Configuration precedence is
       # flag > .env > process environment, so a .env file appearing in the
       # workspace — generated, or committed by accident — would outrank the
@@ -380,7 +389,10 @@ jobs:
       # as 70.schema names it, unbracketed: code and not region (the second
       # converted column), not @p (a converted parameter), two columns and not
       # four, and the length in bytes the plan carries, 40 for nvarchar(20).
-      # No warning, because the seek survived the conversion.
+      # No warning, because the seek survived the conversion. And no row names
+      # a table variable as the converted table: showplan spells an aliased
+      # one Table="@x" with no Database, and 10.system/040's @derived was
+      # reported that way on the 2017 leg until 4 October 2026.
       - name: assert the converted column in the implicit conversions
         run: |
           run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
@@ -390,7 +402,8 @@ jobs:
                     and .converted.database == "ci_probe" and .converted.schema == "dbo"
                     and .converted.column == "code" and .converted.to_type == "nvarchar"
                     and .converted.to_length_bytes == 40
-                    and .converted.columns_in_expression == 2] == [true]' "$f" \
+                    and .converted.columns_in_expression == 2] == [true]
+                 and all(.conversions[]; (.converted.table // "") | startswith("@") | not)' "$f" \
             || { jq . "$f"; exit 1; }
       - name: assert the run is complete
         run: |

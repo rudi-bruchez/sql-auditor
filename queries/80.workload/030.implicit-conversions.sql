@@ -19,7 +19,8 @@
 -- alone does not say what is inside it: measured on 17.0.4065.4, a varchar
 -- parameter sought against an nvarchar column matches too, in the seek key.
 -- Which column is converted is projected (converted.*, below), and a row whose
--- converted.column is NULL converted a parameter, not a column.
+-- converted.column is NULL converted something that is not a column of a
+-- table: a parameter, a variable, or a column of a table variable.
 --
 -- WHERE THE PATTERN IS LOOKED FOR IS AS IMPORTANT AS THE PATTERN, and until
 -- 25 September 2026 this file got it wrong. It cast the whole plan to text and
@@ -62,6 +63,11 @@
 -- residual keeps the conversion of the column that got the range as well as of
 -- the others, and the range itself comes from GetRangeThroughConvert applied
 -- to the parameter, so the conversion of the column is found in the Predicate.
+-- The same plan, node for node, on 14.0.3550.4 (SQL Server 2017 CU31) with a
+-- varchar(20) and a varchar(10) column under Latin1_General_CI_AS sought on
+-- one index with two nvarchar parameters: StartRange and EndRange on
+-- [Expr1007] and [Expr1008], and both column conversions in the residual
+-- Predicate of the seek, with no warning.
 --
 -- Under a legacy SQL_ collation the two sort orders differ, no range is
 -- possible, the seek is lost outright, and only then does the warning appear.
@@ -83,7 +89,11 @@
 --
 -- IT SEES ONLY WHAT IS STILL CACHED, which on a busy instance can be hours
 -- rather than days, and nothing at all for statements that never cache. The
--- plan cache age is reported for the same reason.
+-- plan cache age is reported for the same reason. A RECONFIGURE can empty it
+-- outright: measured on 14.0.3550.4, sp_procoption, which ends with
+-- RECONFIGURE WITH OVERRIDE, took the cache from twelve plans to none, so a
+-- young cache.oldest_plan on a 2017 instance may mean a reconfiguration
+-- rather than a restart.
 --
 -- NO STATEMENT TEXT IS COLLECTED, and the first version of this file got that
 -- wrong. It projected 300 characters of sys.dm_exec_sql_text, which is
@@ -287,10 +297,24 @@ FROM @candidates AS a
    WHICH COLUMN IS CONVERTED is read on the node already bound, never by a
    second walk of the plan: under the matched ScalarOperator, the first Convert
    that is implicit, targets nvarchar and has a table column as its operand, and
-   the ColumnReference inside it. The [@Table] test is what separates the column
-   from a parameter: showplan writes [@p] as a ColumnReference too, with no
-   Database, Schema or Table. Measured on 17.0.4065.4 with a varchar(20) column
-   compared to an nvarchar(20) parameter, the residual predicate reads
+   the ColumnReference inside it. The [@Database] test is what separates the
+   column from a parameter: showplan writes [@p] as a ColumnReference too, with
+   no Database, Schema or Table.
+
+   It was [@Table] until 4 October 2026, and that let a table variable through.
+   Showplan names the table variable in Table when the query gives it an alias,
+   unbracketed and with no Database or Schema: Table="@t" Alias="[x]", measured
+   on 14.0.3550.4, and Column alone without the alias. The 2017 leg of the CI
+   reported this tool's own 10.system/040, in master, as converting column
+   pattern of table "@derived". A column of a real table always carries
+   Database, a temporary table's included (Database="[tempdb]" Table="[#tt]",
+   same build), so requiring it keeps those and leaves the table variable's
+   row with a NULL converted.column, which is what such a row should say: the
+   point of converted.* is a column that 70.schema can find. The statement is
+   still reported, since what is detected did not change.
+
+   Measured on 17.0.4065.4 with a varchar(20) column compared to an
+   nvarchar(20) parameter, the residual predicate reads
 
      <ScalarOperator ScalarString="CONVERT_IMPLICIT(nvarchar(20),[db].[s].[t].[Code],0)=[@p]">
        <Compare><ScalarOperator><Convert DataType="nvarchar" Length="40" Implicit="1">
@@ -316,9 +340,9 @@ OUTER APPLY (SELECT TOP (1) 1 AS hit,
                     cr.n.value('@Column', 'nvarchar(128)')                 AS [col],
                     cv.n.value('@DataType', 'nvarchar(128)')               AS [to_type],
                     cv.n.value('@Length', 'int')                           AS [to_length],
-                    so.n.value('count(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference/@Table])', 'int') AS [n_cols]
+                    so.n.value('count(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference[@Database]])', 'int') AS [n_cols]
              FROM a.[px].nodes('//Predicate//ScalarOperator[contains(@ScalarString,"CONVERT_IMPLICIT(nvarchar")]') AS so(n)
-             OUTER APPLY so.n.nodes('(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference/@Table])[1]') AS cv(n)
+             OUTER APPLY so.n.nodes('(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference[@Database]])[1]') AS cv(n)
              OUTER APPLY cv.n.nodes('ScalarOperator/Identifier/ColumnReference') AS cr(n)) AS pred
 /* The second place a conversion can sit. Until 4 October 2026 this comment
    said that under a Windows collation the engine, having achieved a range seek
@@ -347,9 +371,9 @@ OUTER APPLY (SELECT TOP (1) 1 AS hit,
                     cr.n.value('@Column', 'nvarchar(128)')                 AS [col],
                     cv.n.value('@DataType', 'nvarchar(128)')               AS [to_type],
                     cv.n.value('@Length', 'int')                           AS [to_length],
-                    so.n.value('count(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference/@Table])', 'int') AS [n_cols]
+                    so.n.value('count(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference[@Database]])', 'int') AS [n_cols]
              FROM a.[px].nodes('//SeekPredicates//ScalarOperator[contains(@ScalarString,"CONVERT_IMPLICIT(nvarchar")]') AS so(n)
-             OUTER APPLY so.n.nodes('(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference/@Table])[1]') AS cv(n)
+             OUTER APPLY so.n.nodes('(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference[@Database]])[1]') AS cv(n)
              OUTER APPLY cv.n.nodes('ScalarOperator/Identifier/ColumnReference') AS cr(n)) AS seek
 /* The predicate's column if it named one, else the seek key's. */
 OUTER APPLY (SELECT TOP (1) x.[db], x.[sch], x.[tbl], x.[col], x.[to_type], x.[to_length], x.[n_cols]
