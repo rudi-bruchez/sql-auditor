@@ -994,3 +994,60 @@ func TestManifestKeepsEachWarningOnce(t *testing.T) {
 		t.Errorf("MANIFEST.txt repeats the warning:\n%s", h)
 	}
 }
+
+// Every @discloses token must say which family it belongs to, because the
+// family is what decides whether MANIFEST.txt may close on "metadata about the
+// estate". A token added to KnownDisclosures without a family would be read as
+// names only, and a new kind of application text would leave the archive
+// described as metadata again.
+func TestEveryDisclosureHasAFamily(t *testing.T) {
+	for name := range KnownDisclosures {
+		switch disclosureFamilies[name] {
+		case DisclosesNames, DisclosesApplicationText:
+		default:
+			t.Errorf("@discloses %q has no family in disclosureFamilies", name)
+		}
+	}
+	for name := range disclosureFamilies {
+		if _, ok := KnownDisclosures[name]; !ok {
+			t.Errorf("disclosureFamilies classifies %q, which KnownDisclosures does not know", name)
+		}
+	}
+}
+
+// The last paragraph of "What this archive contains" follows the list above
+// it. Until 4 October 2026 it ignored @discloses altogether, so a default run
+// that listed Query Store text, job failure messages and error log lines still
+// told the reader it was metadata about the estate rather than the data held
+// in it.
+func TestClosingParagraphFollowsWhatWasDisclosed(t *testing.T) {
+	const metadata = "That is metadata about the estate rather than the data held in it"
+	const personal = "potentially containing personal data"
+	for name, family := range disclosureFamilies {
+		m := NewManifest("sql-auditor", "test", "abc")
+		m.Sources = map[string]SourceInfo{"queries": {From: "embedded", SHA256: "abc"}}
+		m.Disclosed = []string{name}
+		h := flatten(m.Human())
+		switch family {
+		case DisclosesApplicationText:
+			if strings.Contains(h, metadata) || !strings.Contains(h, personal) ||
+				!strings.Contains(h, "personal data among them") {
+				t.Errorf("%s is application text and the closing paragraph should say it can "+
+					"quote values and personal data:\n%s", name, m.Human())
+			}
+		case DisclosesNames:
+			if !strings.Contains(h, metadata) || strings.Contains(h, personal) {
+				t.Errorf("%s only names things and the archive should still be described "+
+					"as metadata:\n%s", name, m.Human())
+			}
+		}
+	}
+
+	m := NewManifest("sql-auditor", "test", "abc")
+	m.Sources = map[string]SourceInfo{"queries": {From: "embedded", SHA256: "abc"}}
+	m.Collected.PlanCachePlans = true
+	if h := flatten(m.Human()); strings.Contains(h, metadata) || !strings.Contains(h, personal) {
+		t.Errorf("plans from the plan cache were written and the archive is described as metadata:\n%s",
+			m.Human())
+	}
+}
