@@ -19,6 +19,10 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Changed
+
+- The collector lint now compares the result sets a file declares in `@resultsets` with the hinted statements that return rows, and refuses a file where the two differ, saying which way the count is off. It used to require only at least as many `OPTION (RECOMPILE, MAXDOP 1)` hints as declarations, so a file that lost an entry from `@resultsets` kept its hints, passed every test, and was refused by the runner at execution ("returned more result sets than declared"). A hinted `SELECT @var =` assignment and a hinted `INSERT INTO` a table variable or `#temp` table are not counted, since they emit nothing. Measured on the embedded corpus: the raw hint count matched the declarations in 80 of 114 files, and the count of emitting statements matches in all 114.
+
 ## [0.37.0] - 2026-10-04
 
 This release lets a collector lose one guarded part instead of the whole

@@ -244,6 +244,13 @@ var (
 	lockTimeoutPatt   = regexp.MustCompile(`(?i)\bSET\s+LOCK_TIMEOUT\s+(\d+)\b`)
 	queryHintPattern  = regexp.MustCompile(`(?i)\bOPTION\s*\(\s*RECOMPILE\s*,\s*MAXDOP\s+1\s*\)`)
 	optionWordPattern = regexp.MustCompile(`(?i)\bOPTION\s*\(`)
+
+	// The two kinds of hinted statement that return no rows, and the only
+	// two the corpus contains: a SELECT that assigns into a variable, and an
+	// INSERT that buffers a read into a table variable or a #temp table (the
+	// guard pattern of the blockable collectors). See emittingStatements.
+	assignmentPattern = regexp.MustCompile(`(?is)\bSELECT\s+@\w+\s*=`)
+	bufferingPattern  = regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+[@#]\w+`)
 )
 
 // Discover walks root, parses header directives and lints each file. Lint
@@ -994,6 +1001,11 @@ func lint(sql string, results []ResultSpec) string {
 // and none on another. It catches the omission that actually happens: an
 // author appending a result set and forgetting the hint.
 //
+// A second count then runs the other way: the hinted statements that return
+// rows, as emittingStatements tells them apart, must equal the declared result
+// sets. The first count alone could not see a declaration removed from
+// @resultsets, since the hints stay; only the runner did, at execution.
+//
 // sql must already have had its comments stripped, or a file explaining why it
 // removed a hint would satisfy the check by talking about it.
 func contractLint(sql string, results []ResultSpec) string {
@@ -1032,18 +1044,63 @@ func contractLint(sql string, results []ResultSpec) string {
 			m[1], maxLockTimeoutMS)
 	}
 	hints := len(queryHintPattern.FindAllString(sql, -1))
-	if hints >= len(results) {
-		return ""
-	}
-	// A malformed hint is the likelier mistake once one is present at all, so
-	// say which of the two problems this is.
-	if len(optionWordPattern.FindAllString(sql, -1)) > hints {
-		return fmt.Sprintf("every result set needs OPTION (RECOMPILE, MAXDOP 1) written exactly so; "+
-			"found %d of the %d declared in @resultsets, and at least one OPTION clause in another form",
+	if hints < len(results) {
+		// A malformed hint is the likelier mistake once one is present at all,
+		// so say which of the two problems this is.
+		if len(optionWordPattern.FindAllString(sql, -1)) > hints {
+			return fmt.Sprintf("every result set needs OPTION (RECOMPILE, MAXDOP 1) written exactly so; "+
+				"found %d of the %d declared in @resultsets, and at least one OPTION clause in another form",
+				hints, len(results))
+		}
+		return fmt.Sprintf("every result set needs OPTION (RECOMPILE, MAXDOP 1); found %d for the %d declared in @resultsets",
 			hints, len(results))
 	}
-	return fmt.Sprintf("every result set needs OPTION (RECOMPILE, MAXDOP 1); found %d for the %d declared in @resultsets",
-		hints, len(results))
+	// Enough hints is not the same as the right number of result sets. A file
+	// that drops an entry from @resultsets keeps its hints and passed the count
+	// above; the runner then refused it at execution, with "returned more
+	// result sets than declared", and no test saw it first.
+	switch emit := emittingStatements(sql); {
+	case emit > len(results):
+		return fmt.Sprintf("%d hinted statements return rows but @resultsets declares %d: "+
+			"declare every result set the file emits, in order, or the runner refuses the extra one at execution",
+			emit, len(results))
+	case emit < len(results):
+		return fmt.Sprintf("@resultsets declares %d result sets but only %d hinted statements return rows "+
+			"(a SELECT @var = assignment and an INSERT INTO @table or #temp emit nothing): "+
+			"remove the extra declaration, or give the statement that emits it its own OPTION (RECOMPILE, MAXDOP 1)",
+			len(results), emit)
+	}
+	return ""
+}
+
+// emittingStatements counts the hinted statements that return rows: each
+// OPTION (RECOMPILE, MAXDOP 1), less those whose statement assigns into a
+// variable or buffers into a table variable or #temp table. The statement that
+// owns a hint is taken as the text after the last ";" before it, the same
+// approximation TestEmbeddedCorpusHasNoTopLevelKeyCollision makes.
+//
+// It is not a parser and does not try to be one. It was measured on the
+// embedded corpus when it was introduced: raw hints matched the declared
+// result sets in 80 of 114 files, and this count matched in all 114. The ways
+// it can be wrong are loud rather than silent: an IF that emits from both
+// branches, or a buffering INSERT and an emitting SELECT with no ";" between
+// them, make the count disagree and the lint fail, never pass a file it
+// should refuse.
+//
+// sql must already be comment-stripped and string-blanked, as contractLint's
+// input is, so a hint inside dynamic SQL is not counted.
+func emittingStatements(sql string) int {
+	n, prev := 0, 0
+	for _, loc := range queryHintPattern.FindAllStringIndex(sql, -1) {
+		chunk := sql[prev:loc[0]]
+		prev = loc[1]
+		stmt := chunk[strings.LastIndex(chunk, ";")+1:]
+		if assignmentPattern.MatchString(stmt) || bufferingPattern.MatchString(stmt) {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // BlankSQLStrings replaces the contents of single-quoted literals with spaces,
