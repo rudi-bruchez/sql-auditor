@@ -78,6 +78,12 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
+/* The same number as 023.query-store-most-executed.sql, so the two files rank
+   the same population; a test holds them equal. It was 50 until 4 October
+   2026, hit in the one real collection that carried this file, and nothing
+   said so. */
+DECLARE @listing_cap int = 200;
+
 /* ───────── root ─────────
    The denominator every share below is computed against, stated once rather
    than repeated on each row, and the Query Store's state so that an empty
@@ -87,12 +93,19 @@ SELECT DB_NAME()                                                   AS [database]
        (SELECT MIN(start_time) FROM sys.query_store_runtime_stats_interval) AS [window.oldest],
        (SELECT MAX(end_time) FROM sys.query_store_runtime_stats_interval)   AS [window.newest],
        CAST((SELECT actual_state_desc FROM sys.database_query_store_options) AS NVARCHAR(60)) AS [state.actual],
-       CAST((SELECT query_capture_mode_desc FROM sys.database_query_store_options) AS NVARCHAR(60)) AS [state.capture_mode]
+       CAST((SELECT query_capture_mode_desc FROM sys.database_query_store_options) AS NVARCHAR(60)) AS [state.capture_mode],
+       @listing_cap                                                AS [listing_cap],
+       /* The population by_query is ranked over, as in 023: above
+          listing_cap, the listing is the head of the store. */
+       (SELECT COUNT(DISTINCT p.query_id)
+          FROM sys.query_store_plan AS p
+         WHERE EXISTS (SELECT 1 FROM sys.query_store_runtime_stats AS rs
+                        WHERE rs.plan_id = p.plan_id))             AS [counts.queries]
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* ───────── by_query ─────────
-   TOP (50) by call count, like 023, so the two files rank the same population
-   and can be read side by side.
+   TOP (@listing_cap) by call count, like 023, so the two files rank the same
+   population and can be read side by side.
 
    per_interval collapses the plans of one query inside one interval before
    anything is measured. Without it, peak_interval_executions would be the
@@ -122,7 +135,7 @@ WITH per_interval AS (
     JOIN       sys.query_store_runtime_stats_interval     AS i  ON i.runtime_stats_interval_id = rs.runtime_stats_interval_id
     GROUP BY q.query_id, q.object_id, i.runtime_stats_interval_id
 )
-SELECT TOP (50)
+SELECT TOP (@listing_cap)
        pi.query_id                                                AS [query_id],
        CASE
            WHEN pi.object_id IS NULL OR pi.object_id = 0

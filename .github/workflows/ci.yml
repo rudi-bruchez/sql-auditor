@@ -628,6 +628,29 @@ jobs:
             || { jq -c '.results[] | select(.script == "80.workload/026.query-store-interrupted.sql")' "$run_dir/_run.json"
                  jq '{executions, aborted: [.aborted[]?.text], exceptions: [.exceptions[]?.text]}' \
                    "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json"; exit 1; }
+          # 020, 023 and 024 cap their listings at listing_cap and carry the
+          # population the listing is taken from, so that a listing cut by the
+          # cap reads as the head of the store. ci_probe's store is far below
+          # the cap, so each listing must hold its whole population: a count
+          # that lost its population, or a listing cut short of it, fails.
+          # 020's counts.queries includes queries with no runtime statistics
+          # left, which no listing ranks, hence <= there.
+          jq -e '.listing_cap == 200
+                 and (.top_queries | length) >= 1
+                 and (.top_queries | length) <= ([.counts.queries, .listing_cap] | min)
+                 and (.by_query_hash | length) <= ([.counts.query_hashes, .listing_cap] | min)' \
+            "$run_dir/80.workload/ci_probe/020.query-store.json" \
+            || { jq 'del(.top_queries, .by_query_hash)' "$run_dir/80.workload/ci_probe/020.query-store.json"; exit 1; }
+          jq -e '.listing_cap == 200 and .counts.queries >= 1
+                 and (.by_query | length) == ([.counts.queries, .listing_cap] | min)
+                 and (.by_query_hash | length) == ([.counts.query_hashes, .listing_cap] | min)' \
+            "$run_dir/80.workload/ci_probe/023.query-store-most-executed.json" \
+            || { jq '{listing_cap, counts, by_query: (.by_query | length), by_query_hash: (.by_query_hash | length)}' \
+                   "$run_dir/80.workload/ci_probe/023.query-store-most-executed.json"; exit 1; }
+          jq -e '.listing_cap == 200 and .counts.queries >= 1
+                 and (.by_query | length) == ([.counts.queries, .listing_cap] | min)' \
+            "$run_dir/80.workload/ci_probe/024.query-store-rowcount.json" \
+            || { jq 'del(.by_query)' "$run_dir/80.workload/ci_probe/024.query-store-rowcount.json"; exit 1; }
           # 027 shreds OptimizerStatsUsage out of the stored plans. ci_probe's
           # few user tables are barely queried, so statistics_used may be empty
           # here and an assertion on its contents would assert nothing. What is

@@ -49,7 +49,7 @@
 -- the second is worth asking for.
 --
 -- THE ROOT CARRIES THE WINDOW'S TOTALS, and they are not the sum of the rows a
--- reader might add up. The top 50 is a sample of the heaviest by duration, CPU
+-- reader might add up. The top 200 is a sample of the heaviest by duration, CPU
 -- and logical reads in turn, and says nothing about the share of the whole it
 -- represents; a finding that five queries carry half
 -- the CPU needs the denominator, which only this file can compute. The totals
@@ -101,6 +101,15 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
+/* THE LISTING CAP, one number for both rankings and the root. It was 50 until
+   4 October 2026, and 50 was hit in 9 of the 11 non-empty stores among the
+   real collections (238 to 42 630 queries). The whole store is already
+   aggregated and ranked to choose the 50, so 200 costs the server nothing
+   more; it costs the archive 30 to 43 KB per 50 rows, so 100 to 130 KB more
+   per database. listing_cap against counts.queries and counts.query_hashes
+   says whether a listing is the whole store or its head. */
+DECLARE @listing_cap int = 200;
+
 SELECT DB_NAME()                                                  AS [database],
        SYSDATETIME()                                              AS [collected_at],
        o.actual_state_desc                                        AS [state.actual],
@@ -128,7 +137,7 @@ SELECT DB_NAME()                                                  AS [database],
        CAST(ISNULL(tot.nested_cpu_us, 0) / 1000.0 AS DECIMAL(18,1)) AS [totals.excluded.nested_cpu_ms],
        ISNULL(tot.unresolved_queries, 0)                          AS [totals.unresolved.queries],
        CAST(ISNULL(tot.unresolved_cpu_us, 0) / 1000.0 AS DECIMAL(18,1)) AS [totals.unresolved.cpu_ms],
-       50                                                         AS [listing_cap]
+       @listing_cap                                               AS [listing_cap]
 FROM sys.database_query_store_options AS o
 OUTER APPLY (
     -- Nested means run from inside another statement that is recorded too:
@@ -167,7 +176,7 @@ OPTION (RECOMPILE, MAXDOP 1);
    Ranked on duration alone, the list missed the query that leads logical
    reads while waiting on nothing. Execution count is left to
    023.query-store-most-executed.sql, which exists for it. query_id is the
-   tie-break, so two collections of an unchanged store list the same fifty. */
+   tie-break, so two collections of an unchanged store list the same rows. */
 WITH agg AS (
     SELECT q.query_id, q.object_id,
            COUNT(DISTINCT p.plan_id)                                       AS plans,
@@ -196,7 +205,7 @@ best AS (
     CROSS APPLY (VALUES (1, r.rn_duration), (2, r.rn_cpu), (3, r.rn_reads)) AS m(metric_order, rn)
 ),
 capped AS (            /* ORDER BY rn, metric_order IS the round robin */
-    SELECT TOP (50) query_id, rn, metric_order
+    SELECT TOP (@listing_cap) query_id, rn, metric_order
     FROM best
     WHERE dedupe = 1
     ORDER BY rn, metric_order, query_id
@@ -325,7 +334,7 @@ best AS (
     CROSS APPLY (VALUES (1, r.rn_duration), (2, r.rn_cpu), (3, r.rn_reads)) AS m(metric_order, rn)
 ),
 capped AS (
-    SELECT TOP (50) query_hash, rn, metric_order
+    SELECT TOP (@listing_cap) query_hash, rn, metric_order
     FROM best
     WHERE dedupe = 1
     ORDER BY rn, metric_order, query_hash
