@@ -764,7 +764,7 @@ run, scale with the size of the instance rather than with the number of objects:
 
 | What | Where | What it actually does |
 | --- | --- | --- |
-| Sampled page reads on heaps | `70.schema/050.heaps.sql` | `sys.dm_db_index_physical_stats(..., 'SAMPLED')` on the 50 largest heaps **in every collected database**, within a budget of 200,000 estimated pages (1.6 GB) per database. SAMPLED works allocation unit by allocation unit: a unit of fewer than 10,000 pages is read in full, a larger one at about 1 %. Measured on SQL Server 2025 from a cold buffer pool on 27 September 2026, a 25,000-page heap brought 265 pages in and a scattered 15,110-page heap 159; a measurement of 14 September on the same version found 8 to 12 % for large units, and what separates the two is not known. The budget prices a large heap at 1 %, so if the higher figure holds on an instance the reads of large heaps can exceed it several times over. Most heaps are read whole, and for them the budget is exact. |
+| Sampled page reads on heaps | `70.schema/050.heaps.sql` | `sys.dm_db_index_physical_stats(..., 'SAMPLED')` on the 100 largest heaps **in every collected database**, within a budget of 200,000 estimated pages (1.6 GB) per database. SAMPLED works allocation unit by allocation unit: a unit of fewer than 10,000 pages is read in full, a larger one at about 1 %. Measured on SQL Server 2025 from a cold buffer pool on 27 September 2026, a 25,000-page heap brought 265 pages in and a scattered 15,110-page heap 159; a measurement of 14 September on the same version found 8 to 12 % for large units, and what separates the two is not known. The budget prices a large heap at 1 %, so if the higher figure holds on an instance the reads of large heaps can exceed it several times over. Most heaps are read whole, and for them the budget is exact. |
 | The whole current error log | `10.system/040.error-log.sql` | copied into a `#temp` table before it is summarised. An instance that never cycles its log can carry hundreds of megabytes, so the log's size is read first with `sp_enumerrorlogs` and a log above 50 MB is not read at all: the collector's status says `skipped_for_size` and gives the size. Cycling the log with `sp_cycle_errorlog` is what brings it back. |
 | A string search over cached plans | `80.workload/030.implicit-conversions.sql`, `80.workload/053.plan-warnings.sql` | the 2 500 statements with the most reads (030) or the 1 000 with the most CPU (053) are taken from `sys.dm_exec_query_stats` first, then each of their batch plans is read as text from `sys.dm_exec_text_query_plan` and searched once with a binary, case-sensitive `LIKE`. CPU, proportional to the size of those plans and not of the whole cache: about 18 ms per megabyte of plan text for 030 and 21 for 053, measured on one 2025 build under a `SQL_` collation on a lab schema, against 79 and 117 when the plan was built as `xml`, cast back to text and searched case-insensitively (until 27 September 2026). The xml is then built only for the candidates, the statements whose plan passed the search, up to 1 000 for 030 and 500 for 053; each root reports how many matched (`bounds.matched`) and how many were read (`bounds.candidates`). On a 2025 lab cache of about 5 000 statements, 030 took 9 to 10 s and 053 18.5 s. Until 27 September 2026 as well, every plan in the cache was searched before the cap applied. |
 | Statement costs read from cached plans | `80.workload/042.parallel-cost-distribution.sql` | the 1 000 statements with the most CPU are taken from `sys.dm_exec_query_stats` first, then each statement's own plan fragment is fetched with `sys.dm_exec_text_query_plan` and its estimated cost is found by a text search, never by converting the plan to `xml`. The cost is fetching those 1 000 fragments, proportional to their size and not to the whole cache: 4.2 s for 145 MB of plan text on one 2025 lab build (1.7 s for the 75 MB of the 500 the file read until 4 October 2026, where the earlier conversion took 8.2 s). The file projects its own `examined.plan_kb` and `examined.duration_ms`, so the cost on your instance is in the archive. |
@@ -775,7 +775,7 @@ The heap scan is the one to know about. `SET LOCK_TIMEOUT 10000` bounds
 waiting for a lock and this takes none worth waiting on, and `@timeout: 300`
 bounds how long it runs while the cost is buffer-pool eviction: cancelling the
 query does not put the evicted pages back. What bounds the eviction is a page
-budget. Each of the 50 largest heaps is priced from metadata before it is read,
+budget. Each of the 100 largest heaps is priced from metadata before it is read,
 at its used pages below 10,000 and at 1 % of them above, and heaps are read
 largest first until the next one would take the database past 200,000
 estimated pages. A heap that does not fit is skipped, and a smaller one after
@@ -2012,9 +2012,9 @@ no attention event, and `sys.dm_exec_query_stats` does not count the
 interrupted execution at all.
 
 The Query Store records it. `80.workload/026.query-store-interrupted.sql` lists,
-per database, the 50 queries with the most executions stopped by the client
+per database, the 200 queries with the most executions stopped by the client
 (`Aborted`, where timeouts land, along with a user's Cancel and a lost
-connection) and the 50 with the most executions stopped by an error
+connection) and the 200 with the most executions stopped by an error
 (`Exception`: a lock timeout, a deadlock victim, a division by zero, all without
 an error number). The design and the measurements are in
 `docs/query-store-interrupted-spec.md`.
