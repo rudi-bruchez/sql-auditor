@@ -2029,7 +2029,17 @@ func queryStoreUnits(cfg *Config, s Script, folders []DatabaseFolder) ([]Databas
 // set a Collected field back to false would let a database with the Query Store
 // off retract the disclosure of the database collected before it.
 func discloseWrites(m *Manifest, rw *runWriter, s Script, res WriteResult) {
-	if rw.takeShowplan() {
+	// A plan from the plan cache is a plan too, and the choke point cannot tell
+	// it from a Query Store one: both are the same root element. Until 4
+	// October 2026 every plan latched QueryStoreDetail, so a run with
+	// --plan-cache-plans alone had MANIFEST.txt announce Query Store plans
+	// "declared without --query-store-detail" and send the reader to warnings
+	// that named no file. The writer is what knows the origin, and the plan
+	// cache's own disclosure is set below from the files it counted.
+	saw := rw.takeShowplan() // read once: it consumes the flag
+	if saw && s.Writer == "plan-cache-plans" {
+		m.Collected.PlanCachePlans = true
+	} else if saw {
 		m.Collected.QueryStoreDetail = true
 		// The check reads the root element of a plan, not the namespace alone
 		// (see containsShowplan): until 4 October 2026 it matched the namespace
