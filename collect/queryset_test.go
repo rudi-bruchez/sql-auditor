@@ -534,6 +534,51 @@ func TestLintAcceptsMoreHintsThanResultSets(t *testing.T) {
 	}
 }
 
+// The hint count only ever refused too many declarations. Removing an entry
+// from @resultsets left the hints in place, so the lint passed and the runner
+// refused the file at execution ("returned more result sets than declared").
+// The count of statements that return rows closes that, in both directions.
+func TestLintComparesEmittingStatementsWithResultSets(t *testing.T) {
+	const two = "SELECT 1 AS a OPTION (RECOMPILE, MAXDOP 1);\nSELECT 2 AS b OPTION (RECOMPILE, MAXDOP 1);"
+	tests := []struct {
+		name, resultsets, body, want string
+	}{
+		{"one declaration removed", "a:array", two, "2 hinted statements return rows but @resultsets declares 1"},
+		{"declaration for an assignment", "a:array, b:array",
+			"DECLARE @n int;\nSELECT @n = COUNT(*) FROM sys.databases OPTION (RECOMPILE, MAXDOP 1);\n" +
+				"SELECT @n AS n OPTION (RECOMPILE, MAXDOP 1);",
+			"declares 2 result sets but only 1 hinted statements return rows"},
+		{"declaration for a buffering insert", "a:array, b:array",
+			"DECLARE @t TABLE (x int);\nINSERT INTO @t (x) SELECT 1 OPTION (RECOMPILE, MAXDOP 1);\n" +
+				"SELECT x FROM @t OPTION (RECOMPILE, MAXDOP 1);",
+			"declares 2 result sets but only 1 hinted statements return rows"},
+		{"as many as declared", "a:array, b:array", two, ""},
+		{"temp table buffered then emitted", "a:array",
+			"CREATE TABLE #t (x int);\nINSERT INTO #t (x) SELECT 1 OPTION (RECOMPILE, MAXDOP 1);\n" +
+				"SELECT x FROM #t OPTION (RECOMPILE, MAXDOP 1);",
+			""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "-- @resultsets: " + tc.resultsets + "\n-- @timeout: 60\n" + contractPreamble + tc.body
+			fsys := fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}
+			got, err := Discover(fsys, "queries")
+			if err != nil {
+				t.Fatalf("Discover: %v", err)
+			}
+			if tc.want == "" {
+				if got[0].LintError != "" {
+					t.Errorf("unexpected lint error: %s", got[0].LintError)
+				}
+				return
+			}
+			if !strings.Contains(got[0].LintError, tc.want) {
+				t.Errorf("lint error = %q, want it to contain %q", got[0].LintError, tc.want)
+			}
+		})
+	}
+}
+
 // @scope: databases used to fall through to the instance default, so a
 // per-database collector ran once against master and the run silently held one
 // file where it should have held one per database.

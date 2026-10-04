@@ -29,6 +29,10 @@ release workflow refuses a tag that disagrees with either this file or
   them a direct sign of a write path that cannot keep up. Both shapes were
   produced and matched on SQL Server 2025 under trace flag 3504.
 
+### Changed
+
+- The collector lint now compares the result sets a file declares in `@resultsets` with the hinted statements that return rows, and refuses a file where the two differ, saying which way the count is off. It used to require only at least as many `OPTION (RECOMPILE, MAXDOP 1)` hints as declarations, so a file that lost an entry from `@resultsets` kept its hints, passed every test, and was refused by the runner at execution ("returned more result sets than declared"). A hinted `SELECT @var =` assignment and a hinted `INSERT INTO` a table variable or `#temp` table are not counted, since they emit nothing. Measured on the embedded corpus: the raw hint count matched the declarations in 80 of 114 files, and the count of emitting statements matches in all 114.
+
 ### Fixed
 
 - The `VIEW SERVER STATE` capability is labelled "Read the server state views (VIEW SERVER STATE)" instead of "Read performance counters (VIEW SERVER STATE)", in `check`, MANIFEST.txt and the skip reason of every collector gated on it, and the grant script's section for it is titled the same way. The old label was printed in the skip reason of collectors that read no counter, such as `10.system/042.connection-security.sql`, and told the reader the wrong thing about what was lost. The capability's name in `_run.json`, `view_server_state`, is unchanged.
