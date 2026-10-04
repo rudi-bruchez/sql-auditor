@@ -21,13 +21,7 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Added
 
-- `10.system/040.error-log` keeps long-checkpoint lines in `notable`: the
-  `FlushCache: cleaned up` header of an automatic checkpoint and its
-  `I/O saturation` and `avgWriteLatency` lines, and the single
-  `DirtyPageMgr::ForceCatchupOrFlushCache` line of an indirect one. The engine
-  writes them when a checkpoint outlasts the recovery interval, which makes
-  them a direct sign of a write path that cannot keep up. Both shapes were
-  produced and matched on SQL Server 2025 under trace flag 3504.
+- `10.system/040.error-log` keeps long-checkpoint lines in `notable`: the `FlushCache: cleaned up` header of an automatic checkpoint and its `I/O saturation` and `avgWriteLatency` lines, and the single `DirtyPageMgr::ForceCatchupOrFlushCache` line of an indirect one. The engine writes them when a checkpoint outlasts the recovery interval, which makes them a direct sign of a write path that cannot keep up. Both shapes were produced and matched on SQL Server 2025 under trace flag 3504.
 
 ### Changed
 
