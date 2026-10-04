@@ -19,6 +19,10 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Fixed
+
+- A same-day rerun no longer deletes the run of another target that was filed under the same folder. When a server gives no name, the run is filed under the address it was reached at, so a nameless target at address `SQL01` shared the folder of a server calling itself `SQL01`, and a rerun of either set the other's run aside and deleted it once it completed; the comparison of what each run collected did not catch it when both read databases of the same names. The run set aside is now kept when its `_run.json` names another server than this run's (case ignored), or records no server name at all, and the reason goes to the screen with the path and into the manifest's warnings. Two nameless targets whose addresses fold to the same folder, such as address `A` with `SQL_DATABASE=B` and address `A_B`, are still not told apart: `_run.json` records the name the server gave and not the address.
+
 ## [0.37.0] - 2026-10-04
 
 This release lets a collector lose one guarded part instead of the whole
