@@ -1,12 +1,17 @@
 # Bounding the duration of a collection
 
-Status: proposed on 4 October 2026, not implemented. Written on 4 October 2026
-from the decision taken that day to bound the collection as a whole, then
-revised three times the same day, each time after a panel of five readers ran
-the draft against the tree and the lab's SQL Server 2025; the third panel was
-aimed at the rules the second revision had added. What they found, and what
+Status: proposed on 4 October 2026, not implemented; version 5, of 5 October
+2026. Written on 4 October 2026 from the decision taken that day to bound the
+collection as a whole, then revised three times the same day, each time after
+a panel of five readers ran the draft against the tree and the lab's SQL
+Server 2025; the third panel was aimed at the rules the second revision had
+added. A fourth panel read version 4 on 5 October, and version 5 answers it
+by changing how the run knows the bound cut it: the bound is recorded as a
+fact read from its context, no longer inferred from how an error is worded,
+which deletes several rules of version 4. What the panels found, and what
 became of each finding, is in "Review of 4 October 2026", "Second review of
-4 October 2026" and "Third review of 4 October 2026" at the end. The first
+4 October 2026", "Third review of 4 October 2026" and "Fourth review of
+5 October 2026" at the end. The first
 step of the same proposal is already shipped: `check` and the wizard's third
 screen print a ceiling (`4cd14c3`, `collect/duration.go`). So is a correction
 the second review found on the way and that does not depend on the bound: the
@@ -188,6 +193,10 @@ Where the setting is added, as a checklist the change is reviewed against:
   (below), and the changelog.
 - `docs/dba-guide.md`, "The recognised keys", which lists the closed set and
   says every other key stops the run.
+- `runConfig` (`collect/collect.go`), which builds the `config` map of
+  `_run.json` key by key: it writes `max_duration_sec` when
+  `Config.MaxDuration` is set, and nothing when it is not. Without this line
+  every other item can be done and no manifest records the bound.
 - The paragraph of `MANIFEST.txt` that lists what the run settings in
   `_run.json` contain (`collect/manifest.go`), which gains the bound.
 
@@ -270,6 +279,46 @@ other clock: every question this document asks about the bound is
 `boundReached`. The cause, and not `bound.Err()`, because a `ctrl-c` cancels
 `bound` too, with the cause `context.Canceled`.
 
+### The bound as a fact
+
+A context keeps the first cause it was cancelled with. Measured on 5 October
+2026 with contexts built as `Run` will build them: a bound that fires and a
+run context cancelled afterwards leave `Cause(bound)` at
+`errMaxDurationReached`, and so does a query context under it; a run context
+cancelled first leaves `Cause(bound)` at `context.Canceled` when the deadline
+later passes. So `boundReached` answers, at any later moment, whether the
+bound fired before the operator stopped the run, and nothing that happens
+afterwards changes the answer. That is the fact the run records, and the only
+thing the run's verdict is built from.
+
+Version 4 built the verdict from errors instead. A unit counted as cut by the
+bound when its error had become a `*maxDurationError`; a step before the run
+folder, when a classifier, `preambleStop`, ruled the error the bound's rather
+than the operator's or the server's. Each of those rules was right alone and
+wrong when a second cause landed in the same few seconds: a `ctrl-c` during
+the driver's wait for the cancellation erased the bound, a SQL Server error
+number on the last unit erased it, the preflight rewords its failure and
+drops the number the exemption looked for. Version 5 separates two questions
+version 4 answered together:
+
+- Did the bound cut the run? Answered by `boundReached` at three moments,
+  and by nothing else: when a step before the run folder fails or the check
+  before `lockRun` is reached ("Before the first unit"); when the loop skips
+  a unit for the bound (`skipBefore` answers `byBound`); and when a unit's
+  server work fails, sampled by `runUnit` at the return of the failing call
+  ("During a unit"). Each sets `run.max_duration_reached`. That field is the
+  run-level record: `settleRun`, `Finished`, `MANIFEST.txt`, the summary line,
+  the note after the loop and the wizard all read it, and none of them looks
+  at an error to decide.
+- What does an error say? Answered per call, by the innermost context
+  (`maxDurationOr`, "During a unit"), and only for the words of the message.
+  A misclassified message costs a sentence, never the flag, the exit code or
+  the wizard's verdict.
+
+The operator's stop is recorded beside the bound, by `stopRequested` as
+today, and the two can both be set. When both are, the bound came first,
+since a stop first would have given `bound` the cause `context.Canceled`.
+
 The cause is a constant and the deadline an instant, so neither carries the
 duration the operator set, which every message of this feature names. The
 helpers below that build a message take it as an argument, `limit
@@ -325,35 +374,51 @@ after it, in today's order (`collect/collect.go`: `prepareRunFolder`, then
 treated differently on each side, because what a cut leaves on disk differs.
 
 Before the run folder. `stoppedOr`, the path of every server step before the
-run folder that can fail, asks one function, `preambleStop(ctx, bound
-context.Context, err error) (byOperator, byBound bool)`, in this order: a
-dead run context is the operator's stop, as today; otherwise an error that
-carries a SQL Server error number is the step's own failure and keeps its
-words and its exit code, as `maxDurationOr` does in the loop (step 3 below);
-otherwise, when `boundReached`, it is the bound's. A login refused with 18456
-as the bound passes is then reported as a refused login, exit 1, rather than
-as a bound the operator would raise to no effect (measured on the lab:
-`Connect` with a wrong password returns an error from which
-`sqlErrorNumber`, through the `cannot reach the instance: %w` wrapping, reads
-18456). For the bound's case the run sets `run.max_duration_reached`, drops
-the error (it describes the cut, as a `ctrl-c`'s does), records a warning,
-and finishes with exit 2, returning the same sentence as its error:
+run folder that can fail, asks two facts and no question about the error:
+`boundReached(bound)`, and `stopRequested(ctx, m)`, which sets
+`run.cancelled` when the run's context is dead, as today. Both are asked
+every time, so that a run cut by the bound and then stopped records both.
+When the bound has fired, the run sets `run.max_duration_reached`, records
+one warning, and finishes with exit 2, returning the bound's sentence as its
+error:
 `the collection reached its maximum duration of 1m00s (60 s) before the first collector: nothing was collected`.
+The warning is that sentence followed by `; the step in progress returned: `
+and the step's error as it came back, for instance `cannot reach the
+instance: context deadline exceeded`. The step's error is kept in those
+words, not dropped and not filed under `errors`: it may describe the cut, or
+a failure of the server's own that landed in the same seconds, and the run
+does not try to tell which. When the bound has not fired, `stoppedOr` does
+what it does today, a stop first and then the step's error.
 Without this, a `Connect` cut by the bound comes back as exit 1 with
-`cannot reach the instance: context deadline exceeded` (measured on the lab:
-`Connect` on an expired context returns that error in 29 µs), about an
-instance that was answering.
+`cannot reach the instance: context deadline exceeded` as the run's error
+(measured on the lab: `Connect` on an expired context returns that error in
+29 µs), about an instance that was answering.
 The preflight does not return an error: probes cut by the bound come back as
 `error` statuses, `PreflightExitCode` returns 1, and the run reaches
-`stoppedOr` with an error of its own that carries no number, so the bound's
-path applies. And the run asks `boundReached` once more just
-before `lockRun`, after the listing, and takes the same path when it has
-passed, so that a bound reached during the last server step before the run
-folder, or during the local steps after it, does not go on to set the
-previous run aside.
+`stoppedOr` with an error of its own, which the rule above handles like any
+other. And the run asks `boundReached` once more just before `lockRun`, after
+the listing, and takes the same path when it has passed (with no step error
+to quote, so the warning is the sentence alone), so that a bound reached
+during the last server step before the run folder, or during the local steps
+after it, does not go on to set the previous run aside.
+
+The rule gives up two things version 4 kept, on purpose. A login refused with
+18456, or any step failing with a SQL Server error number, in the same
+instant as the bound, exits 2 for the bound rather than 1, with the refusal
+quoted in the warning; and a step whose own `SQL_QUERY_TIMEOUT_SEC` expired
+first, with the bound passing while the driver waited for the cancellation,
+is filed the same way. Both need the bound to fire within seconds of the
+step's own failure. Version 4 exempted the first by its error number, which
+the preflight's reworded error does not carry, and did not see the second;
+an exemption that holds on some steps and not others is the kind of rule
+version 5 removes.
 
 Such a run ends before the run folder exists, so its manifest goes where
-every failed run's goes, and the previous run of the day is not touched.
+every failed run's goes, and the previous run of the day is not touched. It
+records no `skipped_scripts`, which departs from the decision's "every unit
+that did not start is recorded as an omission": before the listing the units
+cannot be named, and a list made after it would describe a plan the run never
+reached. The warning and the flag are its record.
 
 The check before `lockRun` is the one rule of this section a test cannot
 reach from outside `Run`: a bound short enough to pass before it passes before
@@ -361,12 +426,24 @@ reach from outside `Run`: a bound short enough to pass before it passes before
 and the run then leaves through `stoppedOr` and never comes near `lockRun`,
 with or without the check. So `Run` gains a test seam, a package variable
 `pauseHook func(point string, bound context.Context)`, nil outside tests,
-called at two points: `"before the run folder"`, immediately before the check
-before `lockRun`, and `"before the session id"`, immediately before
-the session id is read, after `prepareRunFolder` and `planUnits`. A test sets
-it to wait on `bound.Done()` at one of the two points, which places the
-bound exactly there (criteria 5 and 16). It is the first seam of its kind in `collect`; the alternative was
-to leave the check with no criterion.
+called at three points:
+
+- `"before the run folder"`, immediately before the check before `lockRun`,
+  after the listing;
+- `"before the blocking watch"`, immediately before the check before the
+  watch's start, after the session id was read;
+- `"after a unit"`, immediately after `runUnit` returns, before the loop
+  asks the stop, the catalog check or `recordUnitFailure` anything.
+
+A test sets it to wait on `bound.Done()` at one point, which places the bound
+exactly there, and may then cancel the run's context, which places a stop
+after the bound (criteria 5, 6 and 16). It is the first seam of its kind in
+`collect`, unexported, so every test that sets it lives in `collect`, where
+the live harness is (`liveConfig`). A test there cannot use the command
+line's gauge, which is package `main`; such tests record what `Run` passes to
+its `Observer` and what it writes to `Options.Progress`, and criterion 13
+tests the gauge on what it is fed. The alternative was to leave these
+checks with no criterion.
 
 After the run folder. A bound that passes between `lockRun` and the first
 unit is not a step failing: the run folder exists and the previous run has
@@ -378,18 +455,23 @@ as any partial rerun does. Of the two server steps on this side, reading the
 session id runs under `bound`; then, before the blocking watch starts, `Run`
 asks the bound once more. Once it has passed, the watch is not started, and
 `blocking_watch.reason` says `not started: the collection reached its maximum
-duration before the first collector`. A failure to read the session id whose
-cause is the bound is treated the same way, so that a run cut there does not
-carry the warning that the watch is off for an unreadable session id.
+duration before the first collector`. The same reason replaces the session
+id's error when the read failed and the bound has fired.
 
-Nor does it carry the rest of today's warning. When the watch is off, `Run`
-records `the blocking watch is off, <reason>: nothing will cancel a collector
-that other sessions are waiting on` and prints `note: the blocking watch is
-off, <reason>` on stderr. When the reason is the bound, no collector will
-start, and both sentences would describe a risk the run no longer runs. So a
-watch not started for the bound adds no warning and no stderr note:
-`blocking_watch.reason` and the bound's own records (the flag, the skips, the
-note after the loop) say what happened.
+When the watch is off, `Run` records today `the blocking watch is off,
+<reason>: nothing will cancel a collector that other sessions are waiting on`
+and prints `note: the blocking watch is off, <reason>` on stderr. Once the
+bound has fired, no collector will start, and both sentences describe a risk
+the run no longer runs. So the warning and the note are decided by one
+function, `watchOffNotice(reason string, boundFired bool) (warning, note
+string)`, called with `boundReached(bound)` at the moment the run would write
+them, whatever the reason: it returns two empty strings when the bound has
+fired, and today's sentences otherwise. Asking at that moment, and not only
+when the reason is the bound's, covers the case where the watch's start began
+before the bound and failed after it, which keeps its own reason (a
+connection or a first poll that failed) and still adds no warning, since no
+collector follows. A session id that failed for a reason of its own with the
+bound not reached keeps today's warning.
 
 ### Before each unit
 
@@ -425,9 +507,36 @@ deadline and its cause. The run's context is not touched, for the reason
 `recordUnitFailure` gives: a dead run context means the operator stopped the
 run, and the bound must not be filed as a `ctrl-c`.
 
-How a stopped unit's error is told apart. One helper,
+Which units the bound cut. `runUnit` returns, beside its error, a second
+result, `cut bool`: true when one of its server calls under the unit's
+context failed and `boundReached(bound)` was true at the return of that
+call. The calls are the four the bound can interrupt, the first reset, the
+`USE`, `QueryContext` and `ReadResultSets`, and the sample is taken at each of
+their error returns, not when `runUnit` returns, so that a file write failing
+after the bound is not a cut. A unit whose server calls all succeeded is not
+cut, even when the bound fires while it writes its files. Nothing in this
+reads the error: a coincident SQL Server error number, a call whose own limit
+expired a moment before the bound, or a watch cancellation answered during
+the driver's wait all give `cut` true once the bound has fired before the
+call returned. The loop, given `cut`:
+
+- sets `run.max_duration_reached`;
+- records the unit's error as today, through `recordUnitFailure`, which still
+  drops it when the operator has stopped the run;
+- does not set `exit` from that error. `settleRun` makes the run 2 for the
+  bound in any case, and leaving `exit` alone keeps it the record of a
+  failure of the run's own (a lint error, a collector failing before the
+  bound), which the wizard needs ("Exit code and the previous run of the
+  day");
+- counts the unit for the stopped clause of the note after the loop.
+
+The loop does not decide what it does next from the error either. After the
+unit it asks `boundReached` ("After a unit"), so a cut unit is followed by
+the bound's skips whatever its error says.
+
+What a cut unit's error says. One helper,
 `maxDurationOr(parent, call context.Context, limit time.Duration, err error)
-error`, decides, in this order:
+error`, writes the words, and only the words, in this order:
 
 1. The run's context is dead: `err` unchanged. The stop is
    `recordUnitFailure`'s to file, and it will drop the error.
@@ -440,8 +549,12 @@ error`, decides, in this order:
    `errMaxDurationReached`), and a call whose own deadline expired first.
 3. The error carries a SQL Server error number: `err` unchanged, as
    `outOfTime` already does for its own deadline.
-4. Otherwise, a `*maxDurationError` that names the bound and wraps the
-   driver's error.
+4. Otherwise `fmt.Errorf("stopped when %s: %w", maxDurationText(limit),
+   err)`, which names the bound and keeps the driver's words.
+
+Version 4 made the fourth case a type, `*maxDurationError`, and the loop
+recognised the type to set the flag. The type is gone: the flag comes from
+`cut`, and nothing recognises the message.
 
 Why the innermost context. The query runs on `qctx`, the `USE` on `uctx`, the
 first reset on a deadline context of its own, each a child of the unit's
@@ -452,33 +565,47 @@ ten, and the bound can pass during that wait. Measured with contexts built as
 context of 50 ms under that, read after the bound): `Cause(qctx)` is
 `context deadline exceeded`, the query's own, while `Cause(unitCtx)` is
 `errMaxDurationReached`, which the bound propagated after the fact. Asking the
-unit's context would file a real `@timeout` expiry as a bound cut. Asking
-`call` gives the right answer in the three orders: when the bound passes
-first, `Cause(qctx)` is the bound's cause and `qctx.Err()` is
+unit's context would name the bound in the message of a real `@timeout`
+expiry. Asking `call` gives the right words in the three orders: when the
+bound passes first, `Cause(qctx)` is the bound's cause and `qctx.Err()` is
 `DeadlineExceeded`; when the watch cancels first, both carry the
-`*blockedError`.
+`*blockedError`. Such a unit is still `cut` when the bound fired during the
+wait: its message names the limit that expired, and the flag says the bound
+fired before the run's server work was over, which are both true.
 
-It is applied on each return of `runUnit` that comes from a server call made
-under the unit's context, with that call's context: the first reset (which
-`runUnit` then writes as `dctx := deadline(unitCtx, cfg)` and
-`ResetSession(dctx, ...)` rather than through `resetWithDeadline`, so that it
-holds the context it must ask), the `USE` with `uctx` (whose error today
-reaches only `blockedOr`, so a cut `USE` would be filed as a bare "context
-deadline exceeded", as one reader measured on a prototype), and, inside
-`outOfTime`, the query and `ReadResultSets` with `qctx`. In `outOfTime` it comes after the parent test
-and the SQL error number test, and before the `@timeout` message, which would
-otherwise name a limit that did not expire: the query context
-(`context.WithTimeout(unitCtx, timeout)`) inherits the bound's deadline when
-it is earlier, and `qctx.Err()` is then `DeadlineExceeded`. `blockedOr` stays
-outermost, as today. It is not applied to the writing of files, which takes no
+Each server call's error goes through the helper exactly once, at its own
+return, with that call's context: the first reset (which `runUnit` then
+writes as `dctx := deadline(unitCtx, cfg)` and `ResetSession(dctx, ...)`
+rather than through `resetWithDeadline`, so that it holds the context it must
+ask), the `USE` with `uctx` (whose error today reaches only `blockedOr`, so a
+cut `USE` would be filed as a bare "context deadline exceeded", as one reader
+measured on a prototype), and the query and `ReadResultSets` with `qctx`,
+inside `outOfTime`, which becomes:
+
+```go
+func outOfTime(parent, call context.Context, limit, bound time.Duration, knob string, err error) error {
+	if parent.Err() != nil || call.Err() != context.DeadlineExceeded {
+		return err
+	}
+	if sqlErrorNumber(err) != 0 {
+		return err
+	}
+	if context.Cause(call) == errMaxDurationReached {
+		return fmt.Errorf("stopped when %s: %w", maxDurationText(bound), err)
+	}
+	return fmt.Errorf("still running when %s of %s expired: %w", knob, limit, err)
+}
+```
+
+Today's guard on `DeadlineExceeded` stays first: a query context under a
+bound that fired has `Err()` `DeadlineExceeded` (measured), so the guard lets
+both expiries through, and the cause, asked after the number, tells the bound
+from the unit's own `@timeout`. The two return lines of the query path,
+`return blocked(outOfTime(...))`, are not wrapped again by `maxDurationOr`:
+`outOfTime` is that call's one classification, and a second would print the
+sentence twice (criterion 6 counts it). `blockedOr` stays outermost, as
+today. Neither helper is applied to the writing of files, which takes no
 context: a disk error after the bound is a disk error.
-
-`*maxDurationError` is a type, as `*blockedError` is, because the loop has to
-recognise it (`errors.As`) to set `run.max_duration_reached` for a unit
-stopped rather than skipped. The loop does not decide what it does next from
-the error, though. It asks `boundReached`, which is true whatever the error
-became, so a unit stopped at the bound with a coincident SQL error is recorded
-with its SQL error and still followed by the bound's skips.
 
 What a stopped unit costs:
 
@@ -490,9 +617,12 @@ What a stopped unit costs:
   driver's words are whatever it returned: on a statement the server took
   longer than five seconds to cancel, one reader measured `Invalid TDS stream:
   did not get cancellation confirmation from the server (current response:
-  context deadline exceeded)`. An error and not a skip, because it started:
-  the time it consumed is the most useful fact in the record, and only
-  `ErrorEntry` carries a duration.
+  context deadline exceeded)`. On the lab on 5 October 2026, a `WAITFOR
+  DELAY '00:01:00'` under a two-second bound returned 2.003 s after the start
+  with `context deadline exceeded`, and the driver had closed the connection
+  (a ping afterwards failed at once). An error and not a skip, because it
+  started: the time it consumed is the most useful fact in the record, and
+  only `ErrorEntry` carries a duration.
 - It leaves no partial file. `runUnit` reads every result set into memory
   (`ReadResultSets`) before it writes anything, and a writer receives
   `WriteRequest` with no connection and no context. The bound can land in the
@@ -512,14 +642,13 @@ What a stopped unit costs:
   watch's 5s limit" (one reader built the case on a copy of the tree and got
   `session 70 had been waiting on this collector for 5.3 s (...), under the
   blocking watch's 5s limit`). So the switch gains a case of its own, after
-  the `*blockedError` case and before `fired`: an error that is a
-  `*maxDurationError` with `fired` set writes `<script> on <target>: <worst
-  wait>; the collector was being stopped at the collection's maximum duration
-  when the blocking watch reached its 5s limit`, and the unit is not counted
-  in `cancelled_units`. A `*maxDurationError` without `fired` falls through
-  to the existing cases unchanged. A unit stopped at the bound whose error
-  kept a coincident SQL error number (step 3) is not a `*maxDurationError`,
-  and still gets the `fired` sentence; that coincidence is left as it is.
+  the `*blockedError` case and before `fired`: `cut` with `fired` set writes
+  `<script> on <target>: <worst wait>; the collector was being stopped at the
+  collection's maximum duration when the blocking watch reached its 5s
+  limit`, and the unit is not counted in `cancelled_units`. `cut` without
+  `fired` falls through to the existing cases unchanged. The case reads
+  `cut`, a local of `runUnit` the deferred function sees, and not the error,
+  so a cut unit whose error kept a SQL Server number gets the same sentence.
 
 ### After a unit
 
@@ -595,13 +724,19 @@ after the bound, in full:
   milliseconds as a rule, at most `SQL_QUERY_TIMEOUT_SEC`.
 - The start of the blocking watch, if the bound passes during it: 388 ms on
   the lab, 37.5 seconds at most on the defaults.
-- A poll of the blocking watch in flight when the bound passes. The watch
-  polls only while a unit is armed, and after the bound no unit is, so there
-  is at most one; but its retries wait on the run's context (20.5 seconds by
-  the watch's own comment, plus a read of the session's identity), and `Run`
+- The blocking watch's polls while the stopped unit is still armed, and one
+  in flight when it is disarmed. The watch polls once a second while a unit is
+  armed, and `runUnit` disarms in its deferred function, after the driver has
+  returned; so while the driver waits for the cancellation of a unit stopped
+  at the bound, up to about ten seconds, the watch goes on polling, one read
+  of the DMVs a second on its own connection. That is deliberate: a unit
+  being cancelled can still hold the locks others wait on, and those polls
+  are what record such a wait (the `cut` and `fired` case of "During a
+  unit"). After the last disarm no unit is armed, so at most one poll is left
+  in flight; but its retries wait on the run's context (20.5 seconds by the
+  watch's own comment, plus a read of the session's identity), and `Run`
   waits for the watch's goroutine when it returns, after the manifest and the
-  zip. It is a read of the DMVs on the watch's own connection, and it delays
-  `Run`'s return, not the archive.
+  zip. It delays `Run`'s return, not the archive.
 - Local work: the files of a unit that finished reading, the manifest, and the
   zip (0.05 seconds on the lab's 108-second run).
 
@@ -659,20 +794,20 @@ In `_run.json`:
 
 - `run.max_duration_reached: true`, `omitempty`, for the same reason
   `run.cancelled` is: every manifest written before it, and every run the bound
-  did not reach, stays byte-identical in that field. It is set when the bound
-  cut something: a unit skipped for it (`skipBefore` answered `byBound`), a
-  unit stopped by it (a `*maxDurationError`), or a step before the run folder
-  (`stoppedOr` through `preambleStop`, or the check before `lockRun`). It is
+  did not reach, stays byte-identical in that field. It is set at the three
+  moments of "The bound as a fact", when `boundReached` is true: a step before
+  the run folder failing or the check before `lockRun` reached, a unit
+  skipped for the bound (`skipBefore` answered `byBound`), a unit `cut`. It is
   not set merely because the bound passed: a bound that passes during the last
-  unit's `leave`, the manifest or the zip cut nothing, and the run is
-  complete. Nor is it set when the operator's stop lands first in the
-  unit's own classification: a `ctrl-c` pressed while the driver waits for
-  the cancellation of a unit the bound has just cut (the moment an operator
-  watching a gauge frozen at the bound is likeliest to press it) makes
-  `maxDurationOr` return the error unchanged at step 1, `recordUnitFailure`
-  drops it, and the loop breaks with `run.cancelled` set and no bound skips.
-  The run is recorded as stopped by the operator, which it also was; the
-  command line exits 2 either way, and the wizard exits 0 as for any stop.
+  unit's `leave`, its files, the manifest or the zip cut nothing, and the run
+  is complete. A `ctrl-c` pressed after the bound fired does not unset it: a
+  `ctrl-c` while the driver waits for the cancellation of a unit the bound has
+  just cut (the moment an operator watching a gauge frozen at the bound is
+  likeliest to press it) leaves the unit `cut`, `recordUnitFailure` drops its
+  error as a stop's, and the loop breaks with both `run.cancelled` and
+  `run.max_duration_reached` set. Version 4 recorded that run as stopped by
+  the operator alone, and the wizard exited 0 on it even before the run
+  folder, with nothing to send.
 - `config.max_duration_sec`, the bound in seconds as a string, `"7200"`, in
   the unit of `duration_sec` beside it. The key is absent when no bound was
   set, so that its absence means the same thing in this version's manifests
@@ -685,9 +820,10 @@ In `_run.json`:
 - The unit stopped at the bound, if any, in `errors`, as described above.
 - For a cut before the run folder, a warning carrying the sentence the run
   returns, `the collection reached its maximum duration of 1m00s (60 s) before
-  the first collector: nothing was collected`. `stoppedOr` drops the step's
-  error, as it does for a stop, so without the warning nothing in that
-  manifest but the flag would say what happened.
+  the first collector: nothing was collected`, followed by the step's own
+  error when one failed ("Before the first unit"). The step's error is not
+  filed under `errors`, so without the warning nothing in that manifest but
+  the flag would say what happened.
 
 In `MANIFEST.txt`:
 
@@ -728,15 +864,26 @@ On the screens:
   | 0 | yes | `note: the collection reached its maximum duration of 2h00m (7200 s); the collector running then was stopped` |
 
   It is printed only when `max_duration_reached` is set, so the case of
-  nothing skipped and nothing stopped does not arise. A cut before the run
-  folder never reaches the loop and prints no note; the command line prints
-  the error `Run` returns, which is the bound's sentence.
+  nothing skipped and nothing stopped does not arise. "A unit stopped" is a
+  unit `cut`, whatever its error says. It is written to `Options.Progress`,
+  which is stderr on the command line, as `note: the blocking watch is off`
+  is today. A cut before the run folder never reaches the loop and prints no
+  note; the command line prints the error `Run` returns, which is the bound's
+  sentence. A run also stopped by the operator gets the note too: the loop
+  broke on the stop, so "not started" counts the units skipped for the bound
+  before the break, usually none, and the unit `cut` is the one stopped.
   The loop takes milliseconds once the bound has passed, since it no longer
   touches the server. The summary line scripts parse gains a token, as it
   does for a stop:
   `102 result(s), 210 skipped, 1 error(s), max duration reached`
   (illustrative, for the 301 units of the lab's run with both cost options:
-  12 skipped by the plan, 198 by the bound, one stopped).
+  12 skipped by the plan, 198 by the bound, one stopped). Its skipped count is
+  every skip of the run, as today, and is not the note's count of the bound's
+  skips; the two answer two questions, and the note says which one it
+  answers. When both flags are set the line ends `, max duration reached,
+  cancelled`, in the order the two happened (the bound first, as "The bound as
+  a fact" shows it must be). The tokens are built by one function of the
+  manifest, `summaryTail(m)`, so that the order is tested without a server.
 - The observer is told each skip through `UnitDone` with a `*UnitSkipped`,
   as `heldBack` does, so the gauge reaches its total. But neither screen may
   print it per unit, as both do for the watch's skips today. The command
@@ -757,15 +904,49 @@ On the screens:
   one error and 198 skips with the bound's reason, today's final screen reads
   `289 collected, 198 skipped, 1 error, 0 permissions denied` (measured on the
   tree of `f723563`). The over-count exists today for failed units and the
-  watch's skips, a handful at most; the bound makes it the whole tail of the plan, on the
-  screen the operator reads before mailing the archive. So `State` gains
-  `CollectedUnits`, raised by a `UnitDone` with no error, and `summaryLine`
-  prints it; the gauge keeps `DoneUnits` against `Units`. The same count
-  decides the wizard's exit (next section).
-- `Observer.Finished` carries the bound as well as the cancellation,
-  `Finished(cancelled, maxDurationReached bool)`, from the same manifest
-  fields; the wizard's `observer.Finished` puts both into its
-  `finishedEvent`, and `State` gains `MaxDurationReached`. The wizard's last
+  watch's skips, a handful at most; the bound makes it the whole tail of the
+  plan, on the screen the operator reads before mailing the archive. The
+  count cannot be kept from the events either: a unit the operator
+  interrupted reaches the observer as a `UnitDone` with a nil error, because
+  `recordUnitFailure` returns no report for a stop, which is how "context
+  canceled" is kept off the screen (measured: `code 0, cancelled true, report
+  <nil>`). So the count is `Run`'s, which knows: a unit is collected when
+  `runUnit` returned no error and its database was not found dropped. It
+  reaches the wizard through `Finished` (below), `State` gains
+  `CollectedUnits`, set from it, and `summaryLine` prints it; the gauge keeps
+  `DoneUnits` against `Units`. `summaryLine` is drawn only on the last
+  screen, after `Finished`. The same count decides the wizard's exit (next
+  section).
+- `Observer.Finished` carries the run's verdict, taken from the manifest it
+  has just written, as one value rather than a growing list of booleans:
+
+  ```go
+  type Verdict struct {
+  	Cancelled          bool // run.cancelled
+  	MaxDurationReached bool // run.max_duration_reached
+  	// Failed is the run's own failure, before the stop or the bound is
+  	// applied: exit was 2 before settleRun, from a lint error or a unit
+  	// that failed and was not cut by the bound.
+  	Failed    bool
+  	Collected int // units whose runUnit returned no error, drops excluded
+  }
+
+  Finished(v Verdict)
+  ```
+
+  The signature changes in every implementation, and the compiler lists them,
+  but the checklist names them so that none is changed by guesswork: the
+  interface and its nil-safe wrapper in `collect/observer.go`, the command
+  line's gauge in `cmd/sql-auditor/progress.go` (which ignores the verdict,
+  as it ignores the cancellation today), the wizard's `observer` in
+  `tui/observer.go`, the test doubles `recordingObserver`
+  (`collect/observer_test.go`) and `dropOnObserver`
+  (`collect/dropped_live_test.go`), and the calls in
+  `cmd/sql-auditor/progress_test.go`. `finish` builds the `Verdict` from
+  `m.Run` and from two counts the loop keeps, `exit` before `settleRun` and
+  the collected units. The wizard's `observer.Finished` puts the verdict into
+  its `finishedEvent`, and `State` gains `MaxDurationReached`, `RunFailed` and
+  `CollectedUnits`. The wizard's last
   screen fits the bound into `renderDone`'s switch, which since `3a8cc59`
   tests `ZipPath == ""` before `Cancelled`, with the bound before the stop in
   each branch, since the bound came first when both are set:
@@ -799,12 +980,12 @@ time limit that the collection had succeeded". A bound reached is that case
 with the tool holding the clock. A run whose bound passed after its last unit
 exits as it would have without one.
 
-Where `exit` becomes 2. A unit stopped at the bound is a failed unit, and
-`recordUnitFailure` already returns 2 for it. But a run whose bound passed
-between two units, or during a reset or a ping, fails no unit: every unit left
-is skipped, `runUnit` is never called again, `exit` stays 0, and
-`settleRun(0, false)` returns 0 and allows the previous run to be deleted
-(one reader checked it by reproducing `settleRun`). So `settleRun` takes the
+Where `exit` becomes 2. A unit cut by the bound no longer sets `exit`
+("During a unit"), and a run whose bound passed between two units, or during
+a reset or a ping, fails no unit at all: every unit left is skipped,
+`runUnit` is never called again, `exit` stays 0, and `settleRun(0, false)`
+returns 0 and allows the previous run to be deleted (one reader checked it by
+reproducing `settleRun`). So `settleRun` takes the
 bound beside the cancellation: it is called as `settleRun(exit,
 m.Run.Cancelled || m.Run.MaxDurationReached)`, and its second parameter is
 renamed for what it now means, a run cut short, by the operator or by the
@@ -812,8 +993,9 @@ bound. The rule inside does not change: a cut run that would exit 0 exits 2.
 A cut before the run folder exits 2 through `stoppedOr`, above; a cut after
 it goes through the loop and `settleRun`.
 
-In the wizard, a bounded run that is cut, produced an archive and collected
-at least one unit exits 0, as a stopped one does. The README gives the reason
+In the wizard, a bounded run that is cut, produced an archive, collected at
+least one unit and had not failed before the bound exits 0, as a stopped one
+does. The README gives the reason
 for a stop: "an operator who stops the collection from the wizard has read
 the screen that calls the archive partial, and the wizard exits 0". The bound
 is the same decision taken in advance: the wizard shows it on its third screen
@@ -827,6 +1009,15 @@ the defaults, that second case is what a too-short bound actually produces.
 Both exit 2 in the wizard, as on the command line: a scheduler wrapping the
 wizard must not record success for a run with nothing to send.
 
+Nor does the bound forgive a failure the run had already earned. The README
+promises exit 2 for a failed collector, and the wizard exempts only an
+operator's stop from it. A bounded run in which a collector failed for a
+reason of its own before the bound (or a lint error was found) has earned 2,
+and the bound arriving later does not turn it into 0. The wizard reads that
+from `Verdict.Failed`, which is `exit` before `settleRun`; a unit `cut` by the
+bound does not set `exit`, so the unit the bound stopped is not counted
+against the run, while a unit that failed before the bound is.
+
 How the wizard knows. Today `collectDoneEvent.exitStatus()` takes no
 argument and sees only `Run`'s code, its error and whether the wizard's own
 context was cancelled; the run's verdict reaches the wizard as a separate
@@ -838,16 +1029,16 @@ selects on the channel and on `r.done`. That `select` can drop the
 `collectDoneEvent`, but only once `r.done` is closed, when the wizard is
 quitting and the loop no longer reads; it cannot reorder it. So every
 `unitDoneEvent` and the `finishedEvent` are applied before the
-`collectDoneEvent`. The design uses that order: `finishedEvent` carries
-`maxDurationReached` into `State`, `unitDoneEvent` raises `CollectedUnits`,
-the `coded` interface becomes `exitStatus(s State) int` (`panicEvent`'s
-ignores the state and still returns 2), and the loop passes the state as it
-stands before the event is applied. `collectDoneEvent.exitStatus`
+`collectDoneEvent`. The design uses that order: `finishedEvent` carries the
+`Verdict` into `State` (`MaxDurationReached`, `RunFailed`,
+`CollectedUnits`), the `coded` interface becomes `exitStatus(s State) int`
+(`panicEvent`'s ignores the state and still returns 2), and the loop passes
+the state as it stands before the event is applied. `collectDoneEvent.exitStatus`
 then decides in this order:
 
-1. `s.MaxDurationReached` is set: 0 when `Run` returned no error and
-   `s.CollectedUnits` is above zero, and otherwise `Run`'s code, which is 2
-   for every run the bound cut.
+1. `s.MaxDurationReached` is set: 0 when `Run` returned no error,
+   `s.RunFailed` is false and `s.CollectedUnits` is above zero, and otherwise
+   `Run`'s code, which is 2 for every run the bound cut.
 2. The wizard's own context was cancelled: 0, as today.
 3. Otherwise `Run`'s code, as today.
 
@@ -858,9 +1049,13 @@ the cancellation first, that run would exit 0 with no archive (two readers
 drove exactly these two events through `loop` with the previous draft's rule
 and got 0). With the bound first it exits 2, as the command line does. A
 `ctrl-c` after a bound that cut a run with an archive and something collected
-exits 0 under either order. A stop that lands before the bound is asked
-(step 1 of `maxDurationOr`, in "How a bounded run is recorded") leaves
-`MaxDurationReached` unset and is a stop.
+exits 0 under either order. Version 4 could not make the first of these
+cases exit 2 when the stop landed while the step cut by the bound was still
+returning: its classifier asked the run's context first and filed the run as
+a stop, so `MaxDurationReached` never reached the wizard (codex, by running
+version 4's order on contexts built that way). Recorded as a fact, the bound
+is set in that case too. A stop that lands before the bound gives `bound` the
+cause `context.Canceled`, leaves `MaxDurationReached` unset, and is a stop.
 
 `Run` returning no error is the test for "an archive was produced", and not
 the presence of a `.zip` at the run's name. That rule is already on main:
@@ -870,8 +1065,8 @@ as an earlier run's, with its time (`PreviousZip`). The bound relies on that
 rule and adds nothing to it.
 
 The README's paragraph on the wizard's exit code names the bound beside the
-stop, and says that a bound that cut the run before anything was collected
-exits 2.
+stop, and says that a bound that cut the run before anything was collected,
+or a bounded run in which a collector had failed before the bound, exits 2.
 
 The previous run of the same server and day is kept, by two locks:
 
@@ -915,7 +1110,7 @@ Duration, a ceiling and not an estimate:
   8 databases; costly collectors on: 70.schema/041.compression-savings.sql, 70.schema/055.page-density.sql;
     at most 6h00m (21600 s) if every one of their 12 units runs to its @timeout
   all 301 units: at most 15h31m (55890 s) if every one runs to its @timeout
-  bounded by MAX_DURATION=2h (from .env): no collector starts after 2h00m (7200 s), and the one running then is stopped;
+  bounded by MAX_DURATION at 2h00m (7200 s), from .env: no collector starts after it, and the one running then is stopped;
     the costly collectors run last; the 289 units before them: at most 9h31m (34290 s), above the bound
 ```
 
@@ -952,10 +1147,19 @@ stop around the fortieth unit for a run that collects all 289 in 108 seconds,
 and a forecast three hundred times too pessimistic misleads more than it
 informs.
 
-The provenance, `(from .env)`, `(from --max-duration)` or `(from the
-environment)`, is printed because the precedence of this tool is the reverse
-of most, a `.env` beating an exported variable, and a bound nobody remembers
-setting is the one that will be argued about.
+The value is written by `formatCeiling`, as every duration of this feature
+is, and not as the operator typed it. `Config.MaxDuration` is a
+`time.Duration` and keeps no spelling: printed with `String()`, `2h` reads
+`2h0m0s`, and `90m`, `1.5h` and `5400s` all read `1h30m0s` (measured). A
+third field to keep the typed text would contradict "its only home"; the
+key's name is printed as fixed text so that the operator still learns what to
+look for in `.env`.
+
+The provenance, `from .env`, `from --max-duration` or `from the
+environment`, is `MaxDurationFrom` as `Resolve` records it, and is printed
+because the precedence of this tool is the reverse of most, a `.env` beating
+an exported variable, and a bound nobody remembers setting is the one that
+will be argued about.
 
 The wizard's third screen shows the same lines under the same ceiling,
 displayed and never edited, as the Query Store window is: `.env` stays the
@@ -967,7 +1171,8 @@ place where settings live. The last screen's wording is above.
   duration, and a time of day raises the question of whose clock, which the
   Query Store window already had to answer for the server's.
 - Bounding the post-loop phases (the manifest and the zip), the blocking
-  watch's start, and a poll the watch has in flight when the bound passes.
+  watch's start, its polls while a stopped unit drains, and a poll it has in
+  flight after the last unit is disarmed.
 - Bounding the server's rollback of a cancelled statement, which no client
   can.
 - A finer ordering of the corpus than "costly last".
@@ -986,10 +1191,16 @@ scripts, as `collect/unit_live_test.go` builds its probes; its preamble took
 and drops it.
 
 A criterion that cannot fail is a defect of this document, not a detail, and
-the third panel found three. So each criterion written or changed by the
+the third panel found three. So each criterion written or changed since the
 third revision ends with "Fails when", the change to the future code that
 makes it fail; the review of the implementation makes that change and watches
 the test fall before it believes the test.
+
+Every test that sets `pauseHook` lives in `collect`, beside `liveConfig`,
+since the hook is unexported. Such a test cannot use the command line's
+gauge, which is package `main`, and does not pretend to: it records what
+`Run` hands its `Observer` and writes to `Options.Progress`, which is what
+`Run` decides, and criterion 13 tests what the gauge does with it.
 
 1. Format and floor. `Resolve` with `MAX_DURATION` set to `90m`, `2h`,
    `1h30m`, `1.5h` and `5400s` gives the same 5 400 seconds for the third,
@@ -1024,77 +1235,123 @@ the test fall before it believes the test.
    reason), when `byBound` is computed as `boundReached` rather than from the
    question that answered (the same row answers true), or when the reason is
    built from anything but `limit` (the string differs).
-4. The classification. `maxDurationOr`, as a table, with contexts built in the
-   test as `Run` and `runUnit` build them (`bound`, the unit's
-   `WithCancelCause` child, a call context with its own timeout under it), a
-   two-hour `limit` and no server. Rows that leave the error unchanged: the
-   run's context cancelled after the bound has passed (built in that order:
-   the bound passes first, so that `Cause(call)` is the bound's, then the run's
-   context is cancelled; a row built as a plain `ctrl-c` with the bound an hour
-   away cannot tell the order of the tests, since step 2 already returns its
-   error unchanged, as one reader measured); a unit context cancelled by a
+4. The words. `maxDurationOr`, as a table, with contexts built in the test as
+   `Run` and `runUnit` build them (`bound`, the unit's `WithCancelCause`
+   child, a call context with its own timeout under it), a two-hour `limit`
+   and no server. Rows that leave the error unchanged: the run's context
+   cancelled after the bound has passed (built in that order: the bound passes
+   first, so that `Cause(call)` is the bound's, then the run's context is
+   cancelled; a row built as a plain `ctrl-c` with the bound an hour away
+   cannot tell the order of the tests, since step 2 already returns its error
+   unchanged, as one reader measured); a unit context cancelled by a
    `*blockedError` before the bound passed; a call context whose own timeout
    expired first; the straddling case, where the call context's own timeout
    expires and then the bound passes before the error is classified (the
    driver's wait for the cancellation); and a SQL Server error number
    coinciding with the bound. The row that changes it: a bare context error
-   after the bound becomes a `*maxDurationError` whose message is exactly
-   `stopped when the collection reached its maximum duration of 2h00m (7200
-   s): context deadline exceeded`. Fails when the bound's test is moved before
-   the parent test (the first row is relabelled), before the SQL error number
-   test (the last unchanged row is relabelled), or asks the unit's context
-   instead of the call's (the straddling row is relabelled).
-5. A bound passed before the run folder, live, in three parts.
-   a. `preambleStop`, as a table without a server: the run's context
-   cancelled after the bound passed gives `byOperator`; the bound passed and
-   a bare context error give `byBound`; the bound passed and an error wrapping
-   an `mssql.Error` numbered 18456 inside `cannot reach the instance: %w`
-   give neither; the bound not passed gives neither. Fails when the bound is
-   asked before the stop (first row) or before the SQL error number (third
-   row).
-   b. `Run` with a `Config` whose `MaxDuration` is one millisecond, which has
+   after the bound becomes exactly `stopped when the collection reached its
+   maximum duration of 2h00m (7200 s): context deadline exceeded`. The same
+   rows through `outOfTime`, with a 30-minute `@timeout`: the bound passed
+   first gives the bound's sentence and not `still running when @timeout of
+   30m0s expired`; the call's own timeout first gives the `@timeout` sentence.
+   Fails when the bound's test is moved before the parent test (the first row
+   is relabelled), before the SQL error number test (the numbered row is
+   relabelled), or asks the unit's context instead of the call's (the
+   straddling row is relabelled), or when `outOfTime` keeps today's body (the
+   bound's row names `@timeout`).
+5. A bound passed before the run folder, live, in three parts. Each records
+   what `Run` passes to `Observer.Finished` with a recording observer, and
+   what it writes to `Options.Progress` and `Options.Debug`, in buffers.
+   a. `Run` with a `Config` whose `MaxDuration` is one millisecond, which has
    expired before `Connect`: `run.max_duration_reached` is true,
    `run.cancelled` is absent, the exit code is 2 and not 1, the returned error
-   and a warning in `_run.json` are exactly the bound's sentence ending
-   "before the first collector: nothing was collected", the returned error
-   does not begin with `cannot reach the instance`, and `MANIFEST.txt` has a
-   duration line naming the bound although the run took less than a second.
-   Fails when `stoppedOr` does not ask `preambleStop` (measured: `Connect` on
-   an expired context returns `cannot reach the instance: context deadline
-   exceeded`, and the run exits 1), or when the duration line keeps today's
-   test on a positive `duration_sec`.
-   c. `Run` with a bound of three seconds and `pauseHook` set to wait on
+   is exactly the bound's sentence ending "before the first collector: nothing
+   was collected", a warning in `_run.json` begins with that sentence and goes
+   on with `; the step in progress returned: cannot reach the instance: `,
+   `errors` is empty, the recorder saw `Verdict{MaxDurationReached: true}`,
+   and `MANIFEST.txt` has a duration line naming the bound although the run
+   took less than a second. Fails when `stoppedOr` does not ask the bound
+   (measured: `Connect` on an expired context returns `cannot reach the
+   instance: context deadline exceeded`, and the run exits 1), when the
+   step's error is filed under `errors`, or when the duration line keeps
+   today's test on a positive `duration_sec`.
+   b. `Run` with a bound of three seconds and `pauseHook` set to wait on
    `bound.Done()` at `"before the run folder"`, in an output directory where
    the test has planted a folder and a `.zip` at the run's name (from
    `RunFolderFor`, with the server name the test reads on its own connection
-   and the `Now` it passes): the hook was called, the exit code is 2,
+   and the `Now` it passes): the hook was called, and when it was, the
+   `Debug` buffer already held the line `listing the databases` (so the hook,
+   and the check after it, sit after the listing); the exit code is 2,
    `run.max_duration_reached` is true, no run folder was prepared, nothing
    named `.superseded-*` exists, and the planted folder and `.zip` are still
    at their names. If the preamble outlasts three seconds the hook is never
    called and the test fails saying so, rather than passing on the
-   `stoppedOr` path. Fails when the check before `lockRun` is missing, or
-   placed before the hook's point (the run goes on to `prepareRunFolder` and
-   sets the planted run aside).
-6. A unit stopped at the bound, live. A first instance-scope script with
-   `@timeout` 1800 and a `WAITFOR DELAY '00:01:00'`, followed by a second
-   script, under a bound of two seconds: the first unit's error names the
-   maximum duration and not `@timeout`; `run.cancelled` is absent; no file
-   for that unit exists in the run folder; the second unit is skipped with the
-   bound's reason; with the command line's gauge as the observer, wrapped by
-   a recorder of `Finished`, stderr carries the first unit's `!!` line and
-   exactly the note `note: the collection reached its maximum duration of
-   0m02s (2 s); 1 collector was not started, and the one running then was
-   stopped` (`formatCeiling` writes two seconds as `0m02s (2 s)`), no `-- `
-   line for the second unit, and nothing saying `connection lost`; the
-   recorder saw `Finished(false, true)`; the exit code is 2; `duration_sec`
-   is at least 2; the first unit returned within twelve seconds of the start
-   (the bound and two waits of the driver). Fails when the cause check in
-   `outOfTime` is broken (the message names `@timeout`), when `finish` passes
-   `false` for the bound to `Finished` (the recorder), or when the second
-   unit's skip is not marked `MaxDuration` (a `-- ` line).
+   `stoppedOr` path (a two-unit `Run` took 0.49 s on the lab on 5 October
+   2026). Fails when the check before `lockRun` is missing, or placed before
+   the hook's point (the run goes on to `prepareRunFolder` and sets the
+   planted run aside), or when the hook and the check are both moved before
+   the listing (the `Debug` line is not yet written).
+   c. The bound, then a stop. As b, but the hook, once `bound.Done()` has
+   returned, cancels the run's context: the exit code is 2, both
+   `run.max_duration_reached` and `run.cancelled` are true, the returned
+   error is the bound's sentence, and the recorder saw `Verdict{Cancelled:
+   true, MaxDurationReached: true}`. Fails when the stop is asked first and
+   ends the path, which is version 4's order (the flag is absent and the
+   error is the stop's sentence); criterion 14's fourth row takes that
+   verdict on to the wizard's exit.
+6. A unit stopped at the bound, live, in three parts, each with a recording
+   observer and a `Progress` buffer, and `Config.Database` set to `master`,
+   as `TestLiveRunAddressReachesTheRerunGuard` sets it (an instance-scope
+   unit run with an empty one fails with 911 on the lab).
+   a. A first instance-scope script with `@timeout` 1800 and a `WAITFOR DELAY
+   '00:01:00'`, followed by a second script, under a bound of two seconds:
+   the first unit's error begins with `stopped when the collection reached its
+   maximum duration of 0m02s (2 s): ` and holds that sentence once
+   (`formatCeiling` writes two seconds as `0m02s (2 s)`); `run.cancelled` is
+   absent; no file for that unit exists in the run folder; the second unit is
+   skipped with the bound's reason, and the recorder saw its `UnitDone` carry
+   a `*UnitSkipped` with `MaxDuration` set; `Progress` holds exactly the note
+   `note: the collection reached its maximum duration of 0m02s (2 s); 1
+   collector was not started, and the one running then was stopped` and
+   nothing saying `connection lost`; the recorder saw
+   `Verdict{MaxDurationReached: true, Failed: false, Collected: 0}`; the exit
+   code is 2; `duration_sec` is at least 2; the first unit returned within
+   twelve seconds of the start (the bound and two waits of the driver; this
+   statement returned at 2.003 s on the lab on 5 October 2026). Fails when
+   the cause check in `outOfTime` is broken (the message names `@timeout`),
+   when `finish` builds the verdict without the bound (the recorder), when the
+   second unit's skip is not marked `MaxDuration`, when the classification is
+   applied twice (the sentence appears twice), or when a cut unit sets `exit`
+   (`Failed` is true).
+   b. The bound, then a stop, during the unit. The same corpus, with
+   `pauseHook` at `"after a unit"` waiting on `bound.Done()` and then
+   cancelling the run's context, which places a `ctrl-c` exactly where an
+   operator presses it while the driver returns: the exit code is 2; both
+   `run.cancelled` and `run.max_duration_reached` are true; `errors` holds no
+   entry for the first unit (the stop drops it) and the second unit is not
+   recorded (the loop broke); `Progress` holds the note `...; the collector
+   running then was stopped`; the recorder saw `Verdict{Cancelled: true,
+   MaxDurationReached: true}`. Fails when the flag is taken from the unit's
+   error rather than from `cut` (version 4: the stop leaves the error
+   unclassified and the flag absent).
+   c. A failure earned before the bound. A first script that fails on its own
+   at once, `SELECT * FROM dbo.ZzMaxDurMissing` (error 208, measured on the
+   lab; it creates nothing), then a second, under a bound of three seconds,
+   with `pauseHook` at `"after a unit"` waiting on `bound.Done()`, so that the
+   bound passes after the first unit's failure has returned and before the
+   loop's checks: the exit code is 2; `run.max_duration_reached` is true; the
+   first unit's error keeps its own words and the number 208; the second unit
+   is skipped with the bound's reason; `Progress` holds nothing saying
+   `connection lost`; the recorder saw `Verdict{MaxDurationReached: true,
+   Failed: true}`. Fails when the loop pings before it asks the bound (a ping
+   on the expired bound fails at once, `connection lost` is printed and the
+   reconnect ends the run with exit 1), or when `cut` is sampled in the loop
+   after the unit rather than in `runUnit` at the failing call (`Failed` is
+   false, and criterion 14's second row shows the wizard then exits 0 on a run
+   whose collector had failed).
 7. The first reset, live. `runUnit` called directly with a `bound` whose
-   deadline has already passed returns a `*maxDurationError`, from the first
-   reset, and writes no file.
+   deadline has already passed returns `cut` true and an error beginning
+   with the stopped sentence, from the first reset, and writes no file.
 8. The order. For a plan with both cost options on, every unit whose script's
    `RequiresFlag` is in `CostFlags` comes after every unit whose script's is
    not, and the order within each group is the order before the move. The test
@@ -1102,89 +1359,115 @@ the test fall before it believes the test.
    `PlannedDuration` and `Run` see the same order. For a plan with no cost
    option, the order is the one `planUnits` gives today.
 9. The record. `max_duration_reached` is true when one unit was skipped or
-   stopped for the bound, or the bound cut a step before the run folder, and
-   absent otherwise, including when the bound passes after the last unit;
-   `config.max_duration_sec` is present exactly when a bound was set.
-   `MANIFEST.txt` prints the duration line and one grouped entry. The manifest
-   of a run with no bound has neither key and today's duration line; for a run
-   with no cost option, the order of `results` is today's.
+   cut by the bound, or the bound fired before the run folder, and absent
+   otherwise, including when the bound passes after the last unit;
+   `config.max_duration_sec` is present exactly when a bound was set, and
+   parses as the bound's whole seconds. `MANIFEST.txt` prints the duration
+   line and one grouped entry. The manifest of a run with no bound has neither
+   key and today's duration line; for a run with no cost option, the order of
+   `results` is today's.
 10. The exit code. A run the bound cut exits 2 on the command line, including
-    one cut only between units (the case where `exit` was 0); its summary line
-    ends with `max duration reached`. `TestSettleRun` gains the case of a run
-    cut by the bound with no failed unit. The live case with no failed unit is
-    criterion 16. The wizard's rule is criterion 14. Fails when `settleRun`
-    is called with the cancellation alone (the new case returns 0).
+    one cut only between units (the case where `exit` was 0). `TestSettleRun`
+    gains the case of a run cut by the bound with no failed unit. The live
+    case with no failed unit is criterion 16. `summaryTail`, as a table: the
+    bound alone ends `, max duration reached`, the stop alone `, cancelled` as
+    today, both `, max duration reached, cancelled`. The wizard's rule is
+    criterion 14. Fails when `settleRun` is called with the cancellation
+    alone (the new case returns 0), or when the tokens are ordered the other
+    way.
 11. The previous run. `skipLoses` returns true for the bound's reason,
     asserted by name in its table test. `settingsLost` names nothing for two
     runs differing only by the bound. That a same-day rerun cut by the bound
     keeps the run it replaced is shown live by criterion 16.
 12. What check prints. For each of the three comparisons, a `check` against a
-    fixture `VerifyResult` prints the bound's lines with the provenance;
-    without a bound the Duration block is byte-identical to today's.
-13. The screens, without a server. The command line's `progress`, fed 198
-    `UnitDone` calls carrying a `*UnitSkipped` with `MaxDuration` set, prints
-    none of them, tty or not, and its count reaches the total; one carrying a
-    watch's skip still prints its `-- ` line. `maxDurationNote`, as a table
-    over the four rows of "How a bounded run is recorded", gives those exact
-    strings. The wizard, fed through `unitDoneEvent.apply` the events of the
-    measured case (289 planned, 90 successes, one error, 198 bound skips) and
+    fixture `VerifyResult` prints the bound's lines with the provenance, the
+    value written as `2h00m (7200 s)` for `MAX_DURATION=2h`; without a bound
+    the Duration block is byte-identical to today's.
+13. The screens, without a server. This is where the command line's gauge is
+    tested, since a live test in `collect` cannot reach it. Its `progress`,
+    fed 198 `UnitDone` calls carrying a `*UnitSkipped` with `MaxDuration` set,
+    prints none of them, tty or not, and its count reaches the total; one
+    carrying a watch's skip still prints its `-- ` line. `maxDurationNote`, as
+    a table over the four rows of "How a bounded run is recorded", gives those
+    exact strings. The wizard, fed through its `observer{ch}` the events of
+    the measured case (289 planned, 90 successes, one error, 198 bound skips)
+    and then `Finished(Verdict{MaxDurationReached: true, Collected: 90})`, and
     rendered with `renderDone`, shows the summary line `90 collected, 198
     skipped, 1 error, 0 permissions denied` and none of the 198 skips among
-    its notes. Fails when the stopped clause of the note is unconditional
-    (second row), when `summaryLine` keeps printing `DoneUnits` (it reads
-    `289 collected`), or when the wizard's skip adds a note.
+    its notes; fed three planned units, two successes and one `UnitDone` with
+    a nil error for a unit the operator interrupted (what the loop sends
+    after `recordUnitFailure` swallowed the stop), then
+    `Finished(Verdict{Cancelled: true, Collected: 2})`, it shows `2
+    collected`. Fails when the stopped clause of the note is unconditional
+    (second row), when `summaryLine` keeps printing `DoneUnits` (it reads `289
+    collected`), when the wizard counts collected units from `UnitDone` (the
+    second case reads `3 collected`), or when the wizard's skip adds a note.
 14. The wizard's exit and last screen, without a server. The events are
     produced by the wizard's own `observer{ch}` methods, `UnitDone` and
     `Finished`, in the order `Run` calls them, then a `collectDoneEvent`, all
     driven through `loop`; none is built by hand, since a hand-built
     `finishedEvent` passes with an `observer.Finished` that drops the bound
     (one reader planted that slip and the hand-built version stayed green
-    while the observer-built one failed). Rows and exit codes:
+    while the observer-built one failed). A row with an archive gives the
+    `collectDoneEvent` a `zipPath` and a size, as `archiveOf` does in
+    production after a nil error, since `renderDone` chooses its branch on
+    `ZipPath` and not on `Run`'s error. Rows and exit codes:
 
-    | Units done | `Finished` | `collectDoneEvent` | Exit |
+    | Units done | `Verdict` | `collectDoneEvent` | Exit |
     | --- | --- | --- | --- |
-    | one success | `(false, true)` | code 2, no error | 0 |
-    | none | `(false, true)` | code 2, the bound's "nothing was collected" error | 2 |
-    | none | `(false, true)` | the same, with the wizard's context cancelled | 2 |
-    | three bound skips | `(false, true)` | code 2, no error | 2 |
-    | none | `(true, false)` | code 2, a stop's error, context cancelled | 0 |
+    | one success | bound, collected 1 | code 2, no error, a `zipPath` | 0 |
+    | one success | bound, failed, collected 1 | code 2, no error, a `zipPath` | 2 |
+    | none | bound | code 2, the bound's "nothing was collected" error, no `zipPath` | 2 |
+    | none | bound, cancelled | the same, with the wizard's context cancelled | 2 |
+    | three bound skips | bound | code 2, no error, a `zipPath` | 2 |
+    | none | cancelled | code 2, a stop's error, context cancelled, no `zipPath` | 0 |
 
-    And `Render` of the final state of the first and second rows shows the
+    And `Render` of the final state of the first and third rows shows the
     first lines of "How a bounded run is recorded" for an archive and for
-    none. Fails when `observer.Finished` drops its second argument (first row
-    exits 2), when the cancellation is asked before the bound (third row exits
-    0), when `CollectedUnits` is not consulted (fourth row exits 0), or when
+    none. Fails when `observer.Finished` drops a field of the verdict (the
+    first or second row), when the cancellation is asked before the bound
+    (fourth row exits 0), when `CollectedUnits` is not consulted (fifth row
+    exits 0), when `RunFailed` is not consulted (second row exits 0), or when
     the bound's case is missing from either branch of `renderDone`'s switch.
 15. The watch's record after a bound stop. `runUnit`'s deferred switch, given
-    a `*maxDurationError` with `fired` set and a worst wait of 5.3 s, writes
-    exactly the warning `... ; the collector was being stopped at the
-    collection's maximum duration when the blocking watch reached its 5s
-    limit`, and neither "had already read its rows" nor "under the blocking
-    watch's", and does not count the unit in `cancelled_units`. Fails when
-    the case falls to `fired` or to the worst wait's case, which is how the
-    previous draft's version of this criterion passed while writing a
-    sentence that contradicted itself.
-16. A bound passed after the run folder, live. A same-day rerun without
-    `--keep`: the test runs a first unbounded collection of a two-script
-    corpus, then a second with a bound of three seconds and `pauseHook` set
-    to wait on `bound.Done()` at `"before the session id"`, with the command
-    line's gauge as the observer. The second run exits 2;
-    `run.max_duration_reached` is true; `results` is empty and both units are
-    in `skipped_scripts` with the bound's reason; `blocking_watch.enabled` is
-    false and its reason is `not started: the collection reached its maximum
-    duration before the first collector`; no warning contains "nothing will
-    cancel"; stderr has no `note: the blocking watch is off`, no `-- ` line,
-    and exactly the note `...; 2 collectors were not started`, with no clause
-    about a unit stopped; its archive exists; the first run is kept as
-    `.superseded-*`, with the warning that says so. Fails when `settleRun` is
-    not given the bound (exit 0, and the first run is deleted), when the
-    note's stopped clause is unconditional, when the watch's warning is left
-    as today, or when neither the reading of the session id nor the check
-    before the watch asks the bound (the watch is started). Either one alone
-    keeps the watch off in this test, since the session id is read after the
-    bound has passed; the check before the watch is there for a bound that
-    passes between a successful read and the watch's start, which no test
-    places.
+    `cut` with `fired` set and a worst wait of 5.3 s, writes exactly the
+    warning `... ; the collector was being stopped at the collection's maximum
+    duration when the blocking watch reached its 5s limit`, and neither "had
+    already read its rows" nor "under the blocking watch's", and does not
+    count the unit in `cancelled_units`; and writes the same warning when the
+    unit's error carries a SQL Server error number. Fails when the case falls
+    to `fired` or to the worst wait's case, which is how the second draft's
+    version of this criterion passed while writing a sentence that
+    contradicted itself, or when it reads the error instead of `cut` (the
+    numbered row gets the `fired` sentence).
+16. A bound passed after the run folder, live, in two parts.
+    a. A same-day rerun without `--keep`: the test runs a first unbounded
+    collection of a two-script corpus, then a second with a bound of three
+    seconds and `pauseHook` set to wait on `bound.Done()` at `"before the
+    blocking watch"`, after the session id was read under a bound not yet
+    passed, with a recording observer and a `Progress` buffer. The second run
+    exits 2; `run.max_duration_reached` is true; `results` is empty and both
+    units are in `skipped_scripts` with the bound's reason, each told to the
+    recorder with `MaxDuration` set; `blocking_watch.enabled` is false and its
+    reason is `not started: the collection reached its maximum duration before
+    the first collector`; no warning contains "nothing will cancel";
+    `Progress` has no `note: the blocking watch is off` and exactly the note
+    `...; 2 collectors were not started`, with no clause about a unit
+    stopped; its archive exists; the first run is kept as `.superseded-*`,
+    with the warning that says so. Fails when `settleRun` is not given the
+    bound (exit 0, and the first run is deleted), when the note's stopped
+    clause is unconditional, when the watch's warning is left as today, or
+    when the check before the watch is missing (the session id was read
+    before the bound, so the watch starts and `enabled` is true). Version 4
+    placed the hook before the session id, where the read failing on the
+    bound kept the watch off alone and the check could be deleted with the
+    criterion green (codex, DeepSeek).
+    b. `watchOffNotice`, as a table, without a server: with the bound fired
+    it returns no warning and no note for the bound's reason, for an
+    unreadable session id and for a watch whose start failed; with the bound
+    not fired it returns today's two sentences for the last two. Fails when
+    the suppression keys on the reason's text rather than on the bound (the
+    failed start's row with the bound fired prints its warning).
 
 The `USE` path has no live test of its own: a `USE` that waits until a bound
 passes is not cheap to produce (measured: a `USE` of a database whose
@@ -1214,9 +1497,15 @@ review of the change checks that the `USE`'s error goes through it.
 - Should the wizard exit 2 for a run the bound cut, as the first draft said,
   on the ground that the operator did not stop it at that moment? This draft
   follows the README's reason for a stop instead, for a run that produced an
-  archive and collected something, and exits 2 for one that did not.
+  archive, collected something and had not failed before the bound, and
+  exits 2 otherwise.
+- The wizard forgives an earned failure on a stop: a wizard run in which a
+  collector failed and that the operator then stopped exits 0 today, as the
+  README says. Version 5 does not let the bound do the same. Should the stop
+  keep that exemption, now that the two differ?
 - The wizard's "N collected" over-count exists without the bound, for the
-  watch's skips and for every failed unit. Should `CollectedUnits` land on its
+  watch's skips, for every failed unit and for a unit the operator
+  interrupted. Should `Verdict.Collected` and `CollectedUnits` land on their
   own, before this feature, as `archiveOf` did?
 - Should the blocking watch's start run under the bound too? It would need its
   connections and first poll on one context and its lifetime on another.
@@ -1658,3 +1947,236 @@ defect of the previous rounds came from:
   as an error; a bound that passes between the session id read and the
   watch's start goes through the check before the watch, which no test
   places.
+
+## Fourth review of 5 October 2026
+
+Five readers ran version 4 (`21637e0`, read on `1bc0ac8`) with prompts aimed at
+the rules the third revision had added: codex with the directive and the
+neutral prompts, DeepSeek V4 Pro with the directive and the neutral prompts,
+in the two seats of agy, whose quota was exhausted, and a Claude subagent with
+the neutral prompt. The lab instance had been killed for lack of memory
+before the panel started, so no reader could test anything live: Claude found
+nothing listening on port 11533, codex's live tests failed with `connection
+refused`, and DeepSeek could not connect. The readers ran the suite, wrote
+programs and tests on temporary copies of the tree, and read. The instance
+was back, with `max server memory` set to 4 GB, by the time the author
+revised; what was measured on it then is said where it is used, and all of it
+was read-only (a two-unit `Run`, a `WAITFOR` cut by a bound, a query of a
+missing table), with nothing created.
+
+Most of version 4's defects came from one design choice rather than from one
+rule each: the run inferred that the bound had cut it from the error a step
+or a unit returned (`maxDurationOr`, `preambleStop`, the SQL error number
+exemption, the `*maxDurationError` type as the only carrier of "the bound cut
+this"), so the verdict was lost or misattributed whenever another cause
+landed in the same seconds. Version 5 records the bound as a fact instead,
+`Cause(bound)`, which a context keeps from the first cancellation, sampled at
+three moments and written once to `run.max_duration_reached`, which every
+consumer reads ("The bound as a fact"). The error is classified only for its
+words. The rules this removes from version 4:
+
+- `preambleStop`, its order of three questions, and the table of criterion
+  5a that tested it.
+- The exemption, before the run folder, of an error carrying a SQL Server
+  number, which the preflight's reworded error never carried.
+- The `*maxDurationError` type, and the loop's recognition of it to set the
+  flag.
+- The paragraph by which a `ctrl-c` during the driver's wait after a bound
+  cut was recorded as a stop alone, which left the wizard exiting 0 with
+  nothing to send.
+- The case, listed among version 4's least sure, of a unit stopped at the
+  bound with a coincident SQL error number: old `fired` sentence, not counted
+  as stopped, flag unset when it was the last unit.
+- The hook point `"before the session id"`, and the paragraph conceding that
+  criterion 16 could not tell the check before the watch from the session id
+  read.
+- The special case of a session id that failed because of the bound, now one
+  function asked with the fact at the moment the warning would be written.
+- `CollectedUnits` raised by `unitDoneEvent.apply`, which could not tell an
+  interrupted unit from a collected one.
+
+The union of what the readers found, and what became of each:
+
+1. A bound that fires first and an operator's stop that lands afterwards were
+   filed as a stop alone: in the preamble, the wizard then exits 0 with no
+   archive; during the last unit, `_run.json` says only `cancelled` (codex
+   directive, by running the existing `outOfTime` and `recordUnitFailure` on
+   contexts cancelled in that order, and version 4's order of `preambleStop`
+   on the same contexts, `byOperator=true, byBound=false`; codex neutral, by
+   reading, as the same defect in the correction of the third review's
+   finding 7). Verified by the author: after the bound fires and the run's
+   context is then cancelled, `Cause(bound)` and the cause of a query context
+   under it stay `errMaxDurationReached`; a stop first leaves `Cause(bound)`
+   at `context canceled`. Taken, and the reason for the change of design:
+   the first cause decides the flag, the stop is recorded beside it, both can
+   be set; criteria 5c and 6b produce the two cases on a server, and
+   criterion 14's fourth row takes the verdict on to the wizard.
+2. A SQL Server error number on the last unit hides that the bound cut its
+   call (codex directive, by running: cause the bound, number 911, code 2,
+   `cancelled` false, and no `*maxDurationError` to set the flag). Verified by
+   reading; version 4 itself listed the case among its least sure. Taken:
+   `runUnit` reports `cut` from the fact at the failing call, and the deferred
+   switch reads `cut`; criterion 15 has a numbered row.
+3. The preflight drops the SQL Server number before `preambleStop` can exempt
+   it (codex directive, by running a fake probe refused with 297: status
+   `error`, exit 1, run error `the instance did not answer the preflight;
+   nothing was collected`, number 0). Verified by reading: the run builds that
+   error with `errors.New`. Taken by deletion: no step before the run folder
+   is exempted any more, and the step's error is quoted in the bound's
+   warning, whatever it says.
+4. `preambleStop` asks the bound's context, so a step whose own
+   `SQL_QUERY_TIMEOUT_SEC` expired first, with the bound passing during the
+   driver's wait, is filed as the bound's (Claude, by running a Go program:
+   `Cause(step)` the step's own deadline, `byBound=true`). Verified by the
+   author with the same construction. Not patched, decided: under version 5
+   the bound did fire before the run's server work was over, so the flag is
+   set and the run exits 2 rather than 1, with the step's words in the
+   warning. The window is the driver's wait; on the lab a `WAITFOR` whose own
+   one-second limit expired under a 1.3-second bound returned at 1.002 s,
+   before the bound, so on a statement that cancels at once the window is
+   milliseconds. Listed below among the rules this version is least sure of.
+5. A bound reached after an independent collector failure turns the wizard's
+   exit 2 into 0, against the README's promise for a failed collector (codex
+   neutral, by reading; Claude noted the same masking and thought it
+   intended). Verified by reading: after a failed collector the run writes
+   its archive and returns `(2, nil)`, which version 4's rule turned into 0.
+   Taken: a unit `cut` by the bound no longer sets `exit`, `Verdict.Failed`
+   carries `exit` before `settleRun`, and the wizard exits 0 for the bound
+   only when it is false; criterion 6c produces such a run on a server,
+   criterion 14's second row takes it to the wizard, and the README's
+   paragraph says it. The stop keeps its exemption; an open question asks
+   whether it should.
+6. Criterion 16 could not be written: `pauseHook` is unexported in `collect`,
+   the gauge is in package `main`, and a test of `collect` importing the
+   command is an import cycle; criterion 6 needed the gauge too, and no live
+   harness exists in `cmd/sql-auditor` (Claude, by compiling both). Verified
+   by the author: a test of `cmd/sql-auditor` naming `collect.pauseHook` fails
+   with `undefined: collect.pauseHook`. Taken: every test that sets the hook
+   lives in `collect`, records what `Run` passes to its observer and writes to
+   `Progress`, and criterion 13 tests the gauge on what it is fed.
+7. Criterion 14's first row rendered the no-archive screen: its
+   `collectDoneEvent` had no `zipPath`, and `renderDone` chooses on `ZipPath`
+   (Claude, by driving the loop). Verified by reading `renderDone`. Taken:
+   the rows with an archive carry a `zipPath`.
+8. `CollectedUnits` counted a unit the operator interrupted, since
+   `recordUnitFailure` returns no report for a stop and the loop sends
+   `UnitDone` with a nil error (Claude, by running); and the increment sat on
+   the fall-through of `unitDoneEvent.apply` (DeepSeek directive). Verified by
+   the author: `code 0, cancelled true, report <nil>`. Taken: the count is
+   `Run`'s, carried by `Verdict.Collected`; criterion 13 has a row with an
+   interrupted unit.
+9. `check` would print `2h0m0s` for `2h`, and `1h30m0s` for `90m`, `1.5h`
+   and `5400s`, from a field that keeps no spelling (Claude, by running).
+   Verified by the author. Taken: the value is written by `formatCeiling`, the
+   key's name as fixed text, and no third field.
+10. Criterion 5c could pass with the hook and the check both moved before the
+    listing (codex directive, by reading). Taken: the test records the
+    `Debug` timeline and asserts that `listing the databases` was written
+    before the hook ran.
+11. Criterion 16 could not fail when the check before the watch was deleted,
+    since the session id read failing on the bound kept the watch off alone
+    (codex directive, by running a successful read followed by the bound;
+    DeepSeek directive, by reading; version 4 conceded it). Taken: the hook
+    moves to `"before the blocking watch"`, after a read made before the
+    bound.
+12. The watch goes on polling while the driver waits for the cancellation of
+    a unit stopped at the bound, because the unit is disarmed only when
+    `runUnit` returns (codex neutral, by reading and from
+    `TestWatchCancelsTheArmedUnitAtTheLimit`). Verified by reading `runUnit`
+    and `watchPollEvery`. Taken as text in "What the bound holds": the polls
+    are kept, since they record a wait on a unit being cancelled.
+13. A watch whose start began before the bound and failed after it kept its
+    own reason, so version 4's suppression, keyed on the bound's reason, let
+    `nothing will cancel a collector` through on a run where none would start
+    (codex neutral, by reading). Taken: `watchOffNotice` is asked with the
+    fact at the moment of writing; criterion 16b.
+14. The change of `Observer.Finished` did not name the gauge nor the nil-safe
+    wrapper in `collect/observer.go` (DeepSeek, both prompts). Taken, with the
+    test doubles the author found by searching the tree, and the signature
+    becomes one `Verdict` rather than a third boolean.
+15. `maxDurationOr` could be applied twice on the query path, printing its
+    sentence twice, and criterion 4 feeds it one error at a time (DeepSeek
+    directive). Taken: one classification per call, `outOfTime` being the
+    query's; criterion 6a counts the sentence.
+16. What becomes of `outOfTime`'s guard on `DeadlineExceeded` was not said
+    (DeepSeek, both prompts). Verified by the author: a query context under a
+    bound that fired first has `Err()` `DeadlineExceeded`. Taken: the body of
+    `outOfTime` is written out, the guard first and the cause after the
+    number.
+17. `runConfig`, which writes the `config` map key by key, was missing from
+    the checklist, so every item could be done and no manifest record the
+    bound (DeepSeek neutral). Verified by reading `runConfig`. Taken.
+18. The summary line's skipped count and the note's count differ by the
+    plan's skips (DeepSeek directive). Taken as a sentence: they answer two
+    questions.
+19. `stoppedOr`'s new branches were tested only through a helper (DeepSeek
+    neutral). Taken by the change: no helper is left, and criteria 5a to 5c
+    go through `stoppedOr` and the check before `lockRun` on a server.
+20. A session id that fails for a reason of its own, with the bound not
+    reached, must keep today's warning (DeepSeek neutral). Taken: a row of
+    criterion 16b.
+21. A cut before the run folder records no omission, against the decision's
+    opening sentence, without saying so (Claude). Taken: a paragraph in
+    "Before the first unit".
+22. `run.cancelled` and `run.max_duration_reached` can both be set, and the
+    screens were not told what to print (Claude). Taken: both are recorded,
+    the summary line carries both tokens in the order they happened
+    (`summaryTail`, criterion 10), the note is printed, the wizard asks the
+    bound first.
+23. A bound passing after a unit failed on its own, through the ping and the
+    reconnect, had no live criterion (DeepSeek neutral). Taken: criterion 6c,
+    which places the bound there with the hook.
+24. `config.max_duration_sec` is a string beside an integer `duration_sec`
+    (DeepSeek directive). Taken in part: criterion 9 asserts that it parses as
+    the bound's whole seconds. The type stays: `config` is a map of strings,
+    and every value in it is one.
+
+Rejected or set aside:
+
+- That no criterion asserts `config.max_duration_sec` when
+  `max_duration_reached` is absent (DeepSeek directive): criterion 9 already
+  requires the key exactly when a bound was set, reached or not.
+- That keeping today's guard after the new test in `outOfTime` would be a
+  compile error for dead code (DeepSeek directive): Go reports no such error;
+  the point about the order is taken as finding 16.
+- That criterion 14 builds its events by hand (DeepSeek directive): version 4
+  required the wizard's own observer and said why; the point about the
+  fall-through is taken as finding 8.
+- That the coincidence of a real drop with the bound needs a live test
+  (codex directive): agreed and not cheap, since it needs a database dropped
+  in the instant of the bound; carried over in the list below.
+- codex neutral's runs of the unmodified tree and of `check` with the
+  literal key: confirmations of today's behaviour, no finding.
+
+The readers left nothing behind: the real repository's `git status` is clean,
+and their live attempts reached no server.
+
+The rules version 5 is least sure of, for whoever reads it next. They are
+mostly the price of the simplification, which is where a defect should be
+looked for first:
+
+- A unit is `cut` whenever its server work failed after the bound fired,
+  whatever stopped it first: a watch cancellation or the unit's own
+  `@timeout`, answered while the driver waited, counts as the bound's, does
+  not set `exit`, and the wizard may then exit 0 where the unit alone would
+  have earned 2. The window is the driver's wait, up to about ten seconds.
+- Before the run folder, a refused login or a step timing out within seconds
+  of the bound exits 2 for the bound rather than 1, and its words are only in
+  the warning; an operator who raises the bound learns of the refusal on the
+  next run.
+- The step's error before the run folder goes into the bound's warning and
+  not into `errors`, so a reader of `errors` alone finds an empty list for a
+  run that failed.
+- The wizard now treats an earned failure differently under a bound and
+  under a stop.
+- `Verdict.Collected` is `Run`'s count, delivered by `Finished`. A panic sends
+  no `Finished`, and its last screen reads `0 collected`.
+- `runUnit` samples the fact at the four returns of its server calls. A
+  server call added to it later must sample too, or its failure after the
+  bound is not a cut; the bound's skips still follow, but on a last unit the
+  flag would stay unset.
+- `pauseHook` now has three points, one inside the loop.
+- Still not tested live: `databaseExists` under `bound` filing a real drop
+  coinciding with the bound as an error; a watch whose start began before the
+  bound and failed after it (tested as a table only); and the cut of a
+  statement slow to cancel, which only the first panel measured.
