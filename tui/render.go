@@ -556,6 +556,14 @@ func renderOptions(s State, width int) []string {
 		out = append(out, screen.Wrap(fmt.Sprintf("Profile %s: %d collectors will run on this instance, "+
 			"computed from the resolved plan.", s.Profile, s.collectors()), width, pad)...)
 	}
+	// Recomputed on every toggle, from the same plan as the count above: the
+	// two cost options are on this screen, and the ceiling is what they cost.
+	if b, ok := collect.PlannedDuration(s.Verify, s.Profile, s.Flags); ok && b.Units > 0 {
+		out = append(out, "", pad+"Duration, a ceiling and not an estimate:")
+		for _, l := range b.Lines() {
+			out = append(out, screen.Wrap(l, width, fieldPad)...)
+		}
+	}
 	out = append(out, "")
 	profileDesc := "none, the whole corpus"
 	if s.Profile != "" {

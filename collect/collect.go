@@ -1446,6 +1446,22 @@ func Check(ctx context.Context, o Options) (int, error) {
 				fmt.Printf("  - %s (%s)\n", SafeForTerminal(s.Name), s.Reason)
 			}
 		}
+		// The ceiling sits under the list it multiplies: a per-database
+		// collector is paid once per line above. It is announced here because
+		// nothing bounds a collection as a whole, and an operator about to
+		// start one in the evening has to know whether the worst case is ten
+		// minutes or four hours before choosing the flags, not after.
+		// Nothing is printed for an empty plan: "all 0 units" would be a
+		// figure about a collection that cannot start.
+		switch b, ok := PlannedDuration(v, o.Profile, o.Flags); {
+		case !ok:
+			fmt.Println("\nDuration : not computed; without the server's version the plan is unknown.")
+		case b.Units > 0:
+			fmt.Println("\nDuration, a ceiling and not an estimate:")
+			for _, l := range b.Lines() {
+				fmt.Printf("  %s\n", l)
+			}
+		}
 	}
 
 	// The grant script comes last because it needs everything above: the
@@ -2686,12 +2702,7 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 			return blocked(err)
 		}
 	}
-	timeout := o.Config.QueryTimeout
-	knob := "SQL_QUERY_TIMEOUT_SEC"
-	if s.TimeoutSec > 0 {
-		timeout = time.Duration(s.TimeoutSec) * time.Second
-		knob = "@timeout"
-	}
+	timeout, knob := unitTimeout(s, o.Config)
 	qctx, cancel := context.WithTimeout(unitCtx, timeout)
 	defer cancel()
 

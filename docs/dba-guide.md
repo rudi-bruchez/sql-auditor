@@ -498,6 +498,33 @@ They are the conditions attached to a query:
 | `runs without ... if refused` | the permissions the query declares optional: refused, it runs and loses the part that needs them |
 | a sentence after those | on the two Query Store lines: the collector writes a directory rather than a single JSON document |
 
+### The duration ceiling
+
+Under the database list, `check` prints the longest the collectors can take,
+from the same plan `collect` will walk. Here with `--profile space
+--measure-page-density --estimate-compression` on five databases:
+
+```
+Duration, a ceiling and not an estimate:
+  5 databases; costly collectors on: 70.schema/041.compression-savings.sql, 70.schema/055.page-density.sql;
+    at most 5h00m (18000 s) if every one of their 10 units runs to its @timeout
+  all 106 units: at most 8h47m (31620 s) if every one runs to its @timeout
+```
+
+Each figure is a sum of `@timeout` values, a per-database collector counted
+once per database. It is a ceiling, not a forecast: the two figures say how bad
+it can get, not how long it will take. The two collections it was checked
+against finished at a quarter of the second figure and at a seventh of it.
+
+The costly collectors are the two behind an option that is off for cost rather
+than for disclosure, `--estimate-compression` and `--measure-page-density`,
+each with an 1800-second timeout per database. They are what to turn off, or
+narrow with `DB_INCLUDE`, when the first figure does not fit the window you
+have. The second figure covers everything else as well, and it is the only one
+that bounds the collectors as a whole; it is hours on most instances, because
+each of the small collectors has a timeout of its own. Neither covers the
+connection, the writing of the archive, or a reconnect.
+
 ### A `denied` line is a warning, not a failure
 
 On a login without `VIEW ANY DEFINITION` and `VIEW SERVER STATE`:
