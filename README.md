@@ -13,7 +13,10 @@ What it does to your instance:
 
 - it issues read-only `SELECT` statements against system catalog views and
   dynamic management views;
-- it does **not** read the contents of user or application tables;
+- it does **not** read the contents of user or application tables, with one
+  exception: where Ola Hallengren's maintenance solution is installed, it reads
+  that solution's own `dbo.CommandLog` (object names, timings, page counts),
+  and leaves the command text and error messages on the server;
 - it does **not** write to your databases;
 - it does **not** change any configuration;
 - read-only is not the same as free or lock-free. One collector samples pages
