@@ -301,11 +301,11 @@ func TestCoverageDoesNotReportATransportFailureAsADenial(t *testing.T) {
 func TestHumanPrintsCapabilityLabelsAndJSONKeepsIdentifiers(t *testing.T) {
 	dir := t.TempDir()
 	m := &Manifest{Preflight: []CapabilityCheck{
-		{Name: "view_server_state", Label: "Read performance counters (VIEW SERVER STATE)",
+		{Name: "view_server_state", Label: "Read the server state views (VIEW SERVER STATE)",
 			Status: "denied", Impact: "wait statistics not collected"},
 	}}
 	h := m.Human()
-	if !strings.Contains(h, "Read performance counters (VIEW SERVER STATE)") {
+	if !strings.Contains(h, "Read the server state views (VIEW SERVER STATE)") {
 		t.Errorf("MANIFEST.txt should name the capability in English:\n%s", h)
 	}
 	if strings.Contains(h, "view_server_state (") {

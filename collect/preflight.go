@@ -76,7 +76,7 @@ func Capabilities() []Capability {
 			SQL:       "SELECT TOP 1 database_id FROM sys.master_files",
 			Impact:    "instance configuration and database file layout not collected",
 			NeedsRows: true},
-		{Name: "view_server_state", Label: "Read performance counters (VIEW SERVER STATE)",
+		{Name: "view_server_state", Label: "Read the server state views (VIEW SERVER STATE)",
 			SQL:    "SELECT TOP 1 wait_type FROM sys.dm_os_wait_stats",
 			Impact: "wait statistics, schedulers, memory and tempdb usage not collected"},
 		// The security half of the server state, probed apart from the

@@ -237,7 +237,7 @@ func BuildGrantScript(in GrantScriptInput) (string, bool) {
 	wantSecurity := denied["view_server_security_state"]
 
 	if wantState || (wantErrorLog && major < 16) || (wantSecurity && major < 16) {
-		s := grantSection{title: "Read performance counters"}
+		s := grantSection{title: "Read the server state views"}
 		if major >= 16 {
 			s.statement = []string{fmt.Sprintf("GRANT VIEW SERVER PERFORMANCE STATE TO %s;", login)}
 			s.why = append(s.why,

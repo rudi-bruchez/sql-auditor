@@ -174,7 +174,7 @@ func securityInput(version string, denied ...string) GrantScriptInput {
 	return in
 }
 
-// From 2022 the grant for the performance counters is VIEW SERVER PERFORMANCE
+// From 2022 the grant for the server state views is VIEW SERVER PERFORMANCE
 // STATE, and sys.dm_database_encryption_keys is refused under it with Msg 300.
 // A login built from this script lost the database keys in silence until the
 // security half had a grant of its own.

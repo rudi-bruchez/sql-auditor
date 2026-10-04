@@ -327,6 +327,15 @@ func TestSkipReasonForDeniedPermission(t *testing.T) {
 	if strings.Contains(reason, "view_server_state") {
 		t.Errorf("reason %q leaks the internal capability key", reason)
 	}
+	// The label has to be true of every collector gated on the permission.
+	// It once read "performance counters", printed in the skip reason of
+	// 10.system/042.connection-security.sql, which reads none.
+	cs := Script{Path: "10.system/042.connection-security.sql", Permissions: []string{"view_server_state"}}
+	reason, _ = skipReason(cs, "", map[string]bool{"view_server_state": true}, nil, nil)
+	const want = "the login cannot read the server state views (VIEW SERVER STATE), which this query declares in @permissions"
+	if reason != want {
+		t.Errorf("reason = %q, want %q", reason, want)
+	}
 	// "connect" is handled before any script is considered: an unreachable
 	// instance abandons the run rather than skipping the scripts that declare
 	// CONNECT while the rest carry on describing a server never reached.
