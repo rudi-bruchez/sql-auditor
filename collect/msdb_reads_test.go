@@ -42,9 +42,6 @@ var msdbSameRoute = map[string][]string{
 // each with what it costs. The test fails when an entry stops being needed, so
 // the list cannot outlive the fix.
 var msdbKnownUnguarded = map[string]string{
-	// A login built from the grant script (SQLAgentReaderRole and SELECT on
-	// sysjobsteps) passes both probes and is refused the proxy join.
-	"50.agent/020.job-steps.sql sysproxies": "loses every job step",
 }
 
 func TestUndeclaredMsdbReadsAreGuarded(t *testing.T) {

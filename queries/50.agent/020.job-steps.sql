@@ -17,10 +17,11 @@
 -- that refuses them loses this collector and nothing else.
 --
 -- The steps are declared, but they are not the only permission this file
--- reads. The job names come from sysjobs_view and the proxy names from
--- sysproxies, so AGENT JOBS is declared too: a login granted SELECT on
--- sysjobsteps but denied SQLAgentReaderRole fails on the join, and the
--- manifest must be able to say so.
+-- reads. The job names come from sysjobs_view, so AGENT JOBS is declared
+-- too: a login granted SELECT on sysjobsteps but denied SQLAgentReaderRole
+-- fails on the join, and the manifest must be able to say so. The proxy names
+-- come from sysproxies, which neither declaration covers, and are read apart
+-- inside TRY (see below the header).
 --
 -- What it buys: an archive can already say that a maintenance job exists and
 -- ran successfully. It cannot say what it did. On a real audit, heap
@@ -57,7 +58,32 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
+DECLARE @proxy_err int = 0,
+        @proxy_msg nvarchar(2048) = N'';
+
+DECLARE @proxies TABLE (
+    [proxy_id] int     NOT NULL PRIMARY KEY,
+    [name]     sysname NOT NULL);
+
+/* Deferred and caught, as in 40.security/030: on a default msdb only
+   TargetServersRole holds SELECT on sysproxies, so the AGENT JOBS and AGENT
+   JOB STEPS this file declares do not cover it, and a login built from the
+   grant script would lose every step on the join. A refusal now costs the
+   proxy names only: proxy is NULL on every step and the root says why. */
+BEGIN TRY
+    INSERT INTO @proxies ([proxy_id], [name])
+    EXEC sys.sp_executesql
+        N'SELECT p.proxy_id, p.name FROM msdb.dbo.sysproxies AS p
+          OPTION (RECOMPILE, MAXDOP 1)';
+END TRY
+BEGIN CATCH
+    SELECT @proxy_err = ERROR_NUMBER(), @proxy_msg = ERROR_MESSAGE();
+END CATCH
+
 SELECT
+    CAST(CASE WHEN @proxy_err = 0 THEN 1 ELSE 0 END AS bit)     AS [proxies.readable],
+    NULLIF(@proxy_err, 0)                                       AS [proxies.error_number],
+    NULLIF(@proxy_msg, N'')                                     AS [proxies.error_message],
     (SELECT COUNT(*) FROM msdb.dbo.sysjobsteps)                 AS [counts.steps],
     (SELECT COUNT(DISTINCT job_id) FROM msdb.dbo.sysjobsteps)   AS [counts.jobs_with_steps],
     (SELECT COUNT(*) FROM msdb.dbo.sysjobsteps
@@ -107,6 +133,6 @@ SELECT
     s.last_run_outcome                                          AS [last_run_outcome_raw]
 FROM msdb.dbo.sysjobsteps AS s
 JOIN msdb.dbo.sysjobs_view AS j ON j.job_id = s.job_id
-LEFT JOIN msdb.dbo.sysproxies AS p ON p.proxy_id = s.proxy_id
+LEFT JOIN @proxies AS p ON p.proxy_id = s.proxy_id
 ORDER BY j.name, s.step_id
 OPTION (RECOMPILE, MAXDOP 1);
