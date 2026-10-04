@@ -244,8 +244,9 @@ jobs:
       # SQL Server 2025). The predicate also converts the two parameters, so a
       # reading that took any ColumnReference would count four and could name
       # @p. Five thousand executions put the statement among the heaviest by
-      # logical reads, since 030 looks only at the two hundred heaviest
-      # candidates. One statement per sqlcmd call, for the 1 KB limit above.
+      # logical reads, since 030 looks only at a window of the heaviest
+      # statements (2 500) and reads at most 1 000 candidates out of it. One
+      # statement per sqlcmd call, for the 1 KB limit above.
       # THIS STEP IS LAST, just before the collection, because what it plants
       # lives in the plan cache and sp_procoption empties it: the procedure
       # ends with RECONFIGURE WITH OVERRIDE, and on SQL Server 2017
@@ -392,7 +393,12 @@ jobs:
       # No warning, because the seek survived the conversion. And no row names
       # a table variable as the converted table: showplan spells an aliased
       # one Table="@x" with no Database, and 10.system/040's @derived was
-      # reported that way on the 2017 leg until 4 October 2026.
+      # reported that way on the 2017 leg until 4 October 2026. The bounds
+      # must account for the cut: the window filled no further than its cap
+      # nor than the cache (a CI cache is far below 2 500, so a root that
+      # reported the cap as the count would fail), and the candidates are the
+      # matched statements up to their cap, so a candidate count that lost
+      # track of matched fails here whatever the runner's cache holds.
       - name: assert the converted column in the implicit conversions
         run: |
           run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
@@ -403,7 +409,12 @@ jobs:
                     and .converted.column == "code" and .converted.to_type == "nvarchar"
                     and .converted.to_length_bytes == 40
                     and .converted.columns_in_expression == 2] == [true]
-                 and all(.conversions[]; (.converted.table // "") | startswith("@") | not)' "$f" \
+                 and all(.conversions[]; (.converted.table // "") | startswith("@") | not)
+                 and .bounds.examined_cap == 2500 and .bounds.candidate_cap == 1000
+                 and .bounds.statements_examined <= .bounds.examined_cap
+                 and .bounds.statements_examined <= .bounds.plans_in_cache
+                 and .bounds.matched >= 1 and .bounds.matched <= .bounds.statements_examined
+                 and .bounds.candidates == ([.bounds.matched, .bounds.candidate_cap] | min)' "$f" \
             || { jq . "$f"; exit 1; }
       - name: assert the run is complete
         run: |

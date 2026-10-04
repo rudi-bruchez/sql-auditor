@@ -79,13 +79,33 @@
 -- the estates most likely to be affected. server_raised_warning is projected
 -- so the analysis layer can see that split rather than infer it.
 --
--- BOUNDED, AND THE BOUND IS REPORTED. Rendering a plan as text costs CPU in
--- proportion to its size, so only the heaviest cached plans are examined,
--- heaviest by logical reads, since that is the quantity this defect inflates.
--- What the search costs per megabyte is set out beside the prefilter below. A
--- count of how many plans were examined out of how many exist travels with
--- the result, because "no conversions found" means nothing without knowing
--- how much of the cache was looked at.
+-- BOUNDED TWICE, AND BOTH BOUNDS ARE REPORTED. Rendering a plan as text costs
+-- CPU in proportion to its size, so only the heaviest cached statements are
+-- examined, heaviest by logical reads, since that is the quantity this defect
+-- inflates: 2 500 of them (bounds.statements_examined, against
+-- bounds.plans_in_cache). Of those, the ones whose batch plan passes the text
+-- prefilter are counted (bounds.matched) and at most 1 000 are parsed as xml
+-- and read node by node (bounds.candidates, against bounds.candidate_cap). A
+-- result means nothing without both: "no conversions found" needs to say how
+-- much of the cache was looked at, and how many of the statements that could
+-- have converted were actually read.
+--
+-- THE TWO NUMBERS ARE MEASURED, 4 October 2026. Until then the window was
+-- 1 000 statements and the candidates 200, and the second cut was silent: on
+-- the lab (17.0.4065.4, a cache of about 2 500 statements) 466 statements
+-- matched the prefilter and 200 were read, and reading 1 000 found 18
+-- conversions instead of 15, for 7.6 s instead of 5.9 s. Taking the whole
+-- cache as the window cost 6.2 s against 5.9 s there. Measured again the same
+-- day on a busier lab cache of 4 000 to 5 000 statements, through the
+-- collector: the old pair took 5.7 to 6.1 s and found 21 to 29 conversions,
+-- this pair 9.0 to 10.0 s and 26 to 33, with 547 to 724 statements matched in
+-- the window and all of them read. The window then held 230 MB of batch plan
+-- text, and the candidates' fragments averaged 120 KB as text. On a client
+-- instance the cost follows the bytes of plan text in the window, not the
+-- count: the 1.2 s measured below for 66 MB puts a 500 MB window near 10 s,
+-- well inside the timeout. Real collections taken with the older 200-plan
+-- window hit it on 9 instances of 9, which is what the wider window is for.
+-- What the search costs per megabyte is set out beside the prefilter below.
 --
 -- IT SEES ONLY WHAT IS STILL CACHED, which on a busy instance can be hours
 -- rather than days, and nothing at all for statements that never cache. The
@@ -121,28 +141,18 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-DECLARE @examined int = 1000;
+DECLARE @examined int = 2500;
+DECLARE @candidate_cap int = 1000;
 
-SELECT SYSDATETIME()                                              AS [collected_at],
-       @examined                                                  AS [bounds.statements_examined],
-       (SELECT COUNT(*) FROM sys.dm_exec_query_stats)             AS [bounds.plans_in_cache],
-       (SELECT MIN(qs.creation_time) FROM sys.dm_exec_query_stats AS qs) AS [cache.oldest_plan],
-       (SELECT MAX(qs.last_execution_time) FROM sys.dm_exec_query_stats AS qs) AS [cache.newest_execution],
-       (SELECT CAST(value_in_use AS int) FROM sys.configurations
-        WHERE name = 'optimize for ad hoc workloads')             AS [cache.optimize_for_ad_hoc]
-OPTION (RECOMPILE, MAXDOP 1);
-
-/* reads_per_execution is the column to read first. A statement converting a
-   column and reading four rows per execution is a curiosity; one reading two
-   hundred thousand to return one is the finding, and the ratio says which is
-   which without needing the plan. */
 /* THE CANDIDATES ARE MATERIALISED, and that is not tidiness, it is the whole
    cost. A common table expression is not a temporary table: every reference to
    it re-runs it. The shredded plan is read by three APPLYs below, so leaving it
    in a CTE re-fetched and re-parsed each plan three times, which measured 15 s
-   on 17.0.4065.4 against 2.1 s for the same test run once. Twelve rows of
-   roughly 100 KB is a megabyte of table variable and it buys back thirteen
-   seconds. */
+   on 17.0.4065.4 against 2.1 s for the same test run once. The table variable
+   holds one statement fragment per candidate, at most @candidate_cap of them:
+   on the lab 570 candidates held 67 MB of fragment text, so a full set is of
+   the order of 100 MB in tempdb, paid once, against the same plans parsed
+   three times over. */
 DECLARE @candidates TABLE (
     [query_hash]          binary(8),
     [execution_count]     bigint,
@@ -163,12 +173,14 @@ DECLARE @candidates TABLE (
    match, so on a production cache of several gigabytes of plans the read ran
    into the 300-second timeout and returned nothing. Found by a harm review.
 
-   Now the thousand statements with the most logical reads are taken from the
-   DMV first, which reads no plan, and only their batch plans are searched,
-   each plan once. This changes what is found as well as what it costs: a
-   converting statement outside the thousand heaviest is no longer seen. The
+   Now the @examined statements with the most logical reads are taken from
+   the DMV first, which reads no plan, and only their batch plans are
+   searched, each plan once. This changes what is found as well as what it
+   costs: a converting statement outside the window is no longer seen. The
    finding is about statements that read a lot, so the heaviest are where it
-   is, and bounds.statements_examined says how wide the window was. */
+   is, and bounds.statements_examined says how wide the window was. The window
+   was a thousand statements until 4 October 2026; the header says what the
+   two thousand five hundred cost. */
 DECLARE @window TABLE (
     [plan_handle]            varbinary(64),
     [statement_start_offset] int,
@@ -209,8 +221,9 @@ OPTION (RECOMPILE, MAXDOP 1);
    measured. Repeated on a second lab cache the same day, 62 MB in the
    window: this step went from 4.6 s to 1.1 s and the whole file from 6.0 s
    to 2.5 s, output unchanged. The xml is still built, but only by the
-   TRY_CAST below, on the statement fragments of the two hundred candidates,
-   and with the node reads that is most of the 1.4 s left.
+   TRY_CAST below, on the statement fragments of the candidates, and with the
+   node reads that is most of the 1.4 s left. (These figures were taken with a
+   window of 1 000 statements and 200 candidates.)
 
    BIN2 is case sensitive, so the pattern is spelt as showplan spells it, and
    that loses nothing: the exact test below uses XPath contains(), which is
@@ -224,8 +237,9 @@ OPTION (RECOMPILE, MAXDOP 1);
    allows. Such a batch can now pass here. If its statement's fragment is
    shallow, the statement is examined where it used to be skipped; if the
    fragment is deep too, TRY_CAST gives NULL and the final WHERE drops it, but
-   only after it has taken one of the two hundred places, which matters only
-   when more than two hundred statements match. */
+   only after it has taken one of the @candidate_cap places, which matters only
+   when more statements match than there are places, and bounds.matched against
+   bounds.candidate_cap says when that happened. */
 DECLARE @matching TABLE ([plan_handle] varbinary(64) PRIMARY KEY);
 
 INSERT INTO @matching
@@ -241,7 +255,7 @@ SELECT c.query_hash, c.execution_count, c.total_logical_reads, c.total_worker_ti
        c.creation_time, c.last_execution_time, tp.dbid, tp.objectid,
        TRY_CAST(tp.query_plan AS xml)
 FROM (
-    SELECT TOP (200) w.*
+    SELECT TOP (@candidate_cap) w.*
     FROM @window AS w
     JOIN @matching AS m ON m.plan_handle = w.plan_handle
     ORDER BY w.total_logical_reads DESC) AS c
@@ -256,6 +270,31 @@ CROSS APPLY sys.dm_exec_text_query_plan(c.plan_handle, c.statement_start_offset,
                                         c.statement_end_offset) AS tp
 OPTION (RECOMPILE, MAXDOP 1);
 
+/* THE ROOT COMES AFTER THE CANDIDATES, so that it can count them. Until
+   4 October 2026 it came first and reported @examined, the cap, as the number
+   of statements examined, which overstated it on a cache holding fewer, and
+   it said nothing of the candidate cut. statements_examined is now the window
+   as filled, matched is how many of its statements passed the prefilter, and
+   candidates is how many of those were read: matched above candidate_cap is
+   the cut, and its size. */
+SELECT SYSDATETIME()                                              AS [collected_at],
+       (SELECT COUNT(*) FROM @window)                             AS [bounds.statements_examined],
+       @examined                                                  AS [bounds.examined_cap],
+       (SELECT COUNT(*) FROM sys.dm_exec_query_stats)             AS [bounds.plans_in_cache],
+       (SELECT COUNT(*) FROM @window AS w
+          JOIN @matching AS m ON m.plan_handle = w.plan_handle)   AS [bounds.matched],
+       (SELECT COUNT(*) FROM @candidates)                         AS [bounds.candidates],
+       @candidate_cap                                             AS [bounds.candidate_cap],
+       (SELECT MIN(qs.creation_time) FROM sys.dm_exec_query_stats AS qs) AS [cache.oldest_plan],
+       (SELECT MAX(qs.last_execution_time) FROM sys.dm_exec_query_stats AS qs) AS [cache.newest_execution],
+       (SELECT CAST(value_in_use AS int) FROM sys.configurations
+        WHERE name = 'optimize for ad hoc workloads')             AS [cache.optimize_for_ad_hoc]
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* reads_per_execution is the column to read first. A statement converting a
+   column and reading four rows per execution is a curiosity; one reading two
+   hundred thousand to return one is the finding, and the ratio says which is
+   which without needing the plan. */
 WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')
 SELECT DB_NAME(a.[dbid])                                          AS [database],
        OBJECT_SCHEMA_NAME(a.[objectid], a.[dbid])
@@ -332,7 +371,8 @@ FROM @candidates AS a
 
    The reads cost something. On the lab, 17.0.4065.4, two hundred candidates
    and about a dozen rows out, the whole file went from about 4.0 s to
-   between 4.7 and 5.3 s over three runs each, wall clock through sqlcmd. */
+   between 4.7 and 5.3 s over three runs each, wall clock through sqlcmd.
+   They run once per candidate, so they scale with bounds.candidates. */
 OUTER APPLY (SELECT TOP (1) 1 AS hit,
                     PARSENAME(cr.n.value('@Database', 'nvarchar(258)'), 1) AS [db],
                     PARSENAME(cr.n.value('@Schema', 'nvarchar(258)'), 1)   AS [sch],
