@@ -316,6 +316,10 @@ type collectDoneEvent struct {
 	ctxCancelled bool
 	zipPath      string
 	zipBytes     int64
+	// previousZip is an archive left at this run's name by an earlier run,
+	// set only when this run wrote none. See archiveOf.
+	previousZip     string
+	previousZipTime time.Time
 }
 
 func (e collectDoneEvent) apply(s State) State {
@@ -323,6 +327,7 @@ func (e collectDoneEvent) apply(s State) State {
 	s.Stopping = false
 	s.Total = e.total
 	s.ZipPath, s.ZipBytes = e.zipPath, e.zipBytes
+	s.PreviousZip, s.PreviousZipTime = e.previousZip, e.previousZipTime
 	if e.err != nil {
 		// Counted as well as written down. This is the fatal error collect.Run
 		// came back with — a lost connection, a reconnect that failed — and it
@@ -564,18 +569,47 @@ func (r *runner) collect(ctx context.Context, s State) {
 		total:        time.Since(start),
 		ctxCancelled: ctx.Err() != nil,
 	}
-	// The size comes from the file itself, not from a counter: what the
-	// operator is about to attach is the archive on disk, and a total of the
-	// bytes written before compression would be a different, larger number
-	// presented as the same thing.
+	e.zipPath, e.zipBytes, e.previousZip, e.previousZipTime = archiveOf(folder, err, start)
+	r.send(e)
+}
+
+// archiveOf says what the final screen may offer, given the folder the run
+// was named after, what Run returned and when it started.
+//
+// Run's nil error is the evidence that this run wrote an archive, not a file
+// at the run's name: Run returns nil only on its last line, after Zip, and
+// every path that ends without an archive returns an error. The file is not
+// evidence. On a same-day rerun without --keep the previous run's archive sits
+// at exactly that name until prepareRunFolder moves it aside, and a run that
+// fails before that point (an unreachable instance, a refused preflight, a
+// stop during the preamble) leaves it there. Statting the name regardless put
+// that archive under "Send this file", as if this run had produced it.
+//
+// When this run wrote nothing, a file older than the run is returned
+// separately with its modification time, so the screen can name it for what
+// it is. A file at least as recent as the run is this run's own unfinished
+// archive (Zip failed), and is offered as neither.
+//
+// The size comes from the file itself, not from a counter: what the operator
+// is about to attach is the archive on disk, and a total of the bytes written
+// before compression would be a different, larger number presented as the
+// same thing.
+func archiveOf(folder string, runErr error, start time.Time) (path string, bytes int64, previous string, previousTime time.Time) {
 	zip := folder + ".zip"
 	if abs, aerr := filepath.Abs(zip); aerr == nil {
 		zip = abs
 	}
-	if fi, serr := os.Stat(zip); serr == nil {
-		e.zipPath, e.zipBytes = zip, fi.Size()
+	fi, serr := os.Stat(zip)
+	if serr != nil {
+		return "", 0, "", time.Time{}
 	}
-	r.send(e)
+	if runErr == nil {
+		return zip, fi.Size(), "", time.Time{}
+	}
+	if fi.ModTime().Before(start) {
+		return "", 0, zip, fi.ModTime()
+	}
+	return "", 0, "", time.Time{}
 }
 
 // applyState overlays what the operator typed and ticked onto the resolved
