@@ -901,7 +901,7 @@ Named here because a limit an operator can plan around is worth more than a
 limit nobody wrote down. Each was raised in the adversarial harm review of
 4 September 2026 and each was left alone on purpose.
 
-**The 256 MB run budget is neither a memory bound nor a disk bound.** It
+**The 1 GiB run budget is neither a memory bound nor a disk bound.** It
 caps the collector documents one run may write into its folder, and a write
 that would pass it is refused. It does not bound memory: every result set of
 a collector is read into memory, and encoded there, before the budget is
@@ -916,7 +916,7 @@ beside the run folder, not inside it, and counts against nothing, so a run
 occupies its folder plus its archive. A run that replaced an earlier one of
 the same day keeps that one on disk until it has finished, or for good when
 it kept it. Plan the free space from the folder size of a previous run of
-the same instance, not from 256 MB.
+the same instance, not from 1 GiB.
 
 **The run folder is named from the server's own answer.** A same-day rerun
 replaces the previous run of the same name, and that name is what
@@ -1980,8 +1980,8 @@ The size is measured with `DATALENGTH`, which counts bytes, and the plan XML is
 million characters of XML. That is a very large plan; a query with a few hundred
 operators is nowhere near it.
 
-**256 MiB for the whole run.** When the run reaches it, further files are refused
-with the omission recorded as `the run reached the 256 MiB extraction cap`.
+**1 GiB for the whole run** (256 MiB until 4 October 2026). When the run reaches it, further files are refused
+with the omission recorded as `the run reached the 1024 MiB cap on what the whole collection may write`.
 `_index.json` itself is written outside that budget, so the record of what was
 left out cannot be the thing that gets left out.
 

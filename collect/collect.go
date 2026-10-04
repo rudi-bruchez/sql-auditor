@@ -2472,7 +2472,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	}
 	m.BlockingWatch.Enabled, m.BlockingWatch.Reason = watch != nil, reason
 	if watch == nil {
-		m.warn("the blocking watch is off, "+reason+
+		m.warn("the blocking watch is off, " + reason +
 			": nothing will cancel a collector that other sessions are waiting on")
 		fmt.Fprintf(o.progress(), "note: the blocking watch is off, %s\n", reason)
 	}
@@ -2627,7 +2627,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	if discardPrevious {
 		if keptBecause = previousRunLost(superseded, m); keptBecause != "" {
 			discardPrevious = false
-			m.warn(keptBecause+", so the run it replaced was kept at "+
+			m.warn(keptBecause + ", so the run it replaced was kept at " +
 				strings.Join(superseded, " and "))
 		}
 	}

@@ -60,7 +60,7 @@ view, `mssqlsystemresource` and the Linux model copies included):
 
 At scale: a reviewer added 100 databases on 2022 and measured 87 rows and
 14.4 KB per database, three quarters of them zeros. At 2,000 databases the
-file is about 29 MB. Every collector of a run shares one budget of 256 MiB
+file is about 29 MB. Every collector of a run shares one budget of 1 GiB
 uncompressed (`maxRunBytes`), and a write that would exceed it is refused
 whole; 078 would reach that alone past about 18,000 databases. The file
 compresses about 37 to 1, so the zip barely notices it.

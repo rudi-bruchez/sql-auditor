@@ -28,7 +28,7 @@
 -- the collector 1.17 GB resident; 20 000 tables of 20 columns made it 190 MB
 -- and the collector 2.09 GB, with the five files of 70.schema that list
 -- tables, columns, statistics and heaps writing 253 MB of the 256 MiB the
--- whole run may write. An ERP schema (some 90 000 tables and millions of
+-- whole run could then write (1 GiB since). An ERP schema (some 90 000 tables and millions of
 -- columns for SAP) would go past what an operator's machine holds, and the
 -- collector holds every row of a result in memory before it writes or
 -- refuses the file, so the whole collection would be lost, not this file.

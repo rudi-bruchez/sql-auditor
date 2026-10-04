@@ -10,12 +10,14 @@ import (
 // maxRunBytes bounds the collector payloads written into a run folder, not
 // the run folder itself: MANIFEST.txt and _run.json are written outside this
 // budget, because an archive that cannot describe itself is worse than a
-// truncated one. The name and the value (256 MiB) date from when this budget
-// covered Query Store plan extraction alone; it now covers every collector
-// in the run, which is far less data than 256 MiB in practice. The number
-// stayed generous on purpose rather than being retuned down, so a reader
-// should not infer from its size that it was sized for plans specifically.
-const maxRunBytes = 256 << 20
+// truncated one. It was 256 MiB, sized when it covered Query Store plan
+// extraction alone, until 4 October 2026, when the schema listings were
+// raised: one ERP-sized database cut at its caps writes 120 to 145 MB of
+// schema files (measured on a lab schema of 20 000 tables), so a second one
+// on the same instance would have had its files refused. 1 GiB holds
+// several. It is still not a memory bound: a result is read whole before
+// this budget is consulted, and the per-collector caps are what bound memory.
+const maxRunBytes = 1 << 30
 
 // showplanNS is the XML namespace SQL Server stamps onto every execution
 // plan it emits, as the default namespace of the plan's root element.

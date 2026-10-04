@@ -75,7 +75,7 @@
 -- plan we can get" means "every plan already materialised in the cache". And it
 -- does not collect all procedures. Eight hundred procedures whose plans run
 -- from 0.5 to 2 MB would be up to 1.6 GB of plans; the run budget
--- (maxRunBytes, 256 MiB) would stop them first and name the rest as omitted,
+-- (maxRunBytes, 1 GiB since 4 October 2026) would stop them first and name the rest as omitted,
 -- so the archive would not grow past it, but it would be filled by the tail
 -- of the cache in rank order and leave nothing for the collectors that run
 -- after this one. The cap keeps the plans that matter and the budget for the
