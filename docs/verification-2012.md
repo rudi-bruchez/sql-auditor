@@ -104,6 +104,7 @@ provides. The gated files and their floors:
 | `10.system/051.version-store.sql` | `13.0.5026` | SQL Server 2016 SP2 |
 | `20.databases/011.all-databases-2014.sql` | `12` | SQL Server 2014 |
 | `20.databases/012.all-databases-query-store.sql` | `13` | SQL Server 2016 |
+| `20.databases/013.all-databases-2019.sql` | `15` | SQL Server 2019 |
 | `20.databases/021.properties-2014.sql` | `12` | SQL Server 2014 |
 | `20.databases/022.query-store.sql` | `13` | SQL Server 2016 |
 | `20.databases/023.log-vlf.sql` | `13.0.5026` | SQL Server 2016 SP2 |

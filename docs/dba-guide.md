@@ -394,6 +394,7 @@ Queries (38):
   20.databases/010.all-databases.sql
   20.databases/011.all-databases-2014.sql    SQL Server 12+
   20.databases/012.all-databases-query-store.sql SQL Server 13+
+  20.databases/013.all-databases-2019.sql    SQL Server 15+
   20.databases/020.properties.sql            per database
   20.databases/021.properties-2014.sql       per database, SQL Server 12+
   20.databases/022.query-store.sql           per database, SQL Server 13+
@@ -555,6 +556,7 @@ output/
       010.all-databases.json
       011.all-databases-2014.json
       012.all-databases-query-store.json
+      013.all-databases-2019.json
       AppDb/
         020.properties.json
         021.properties-2014.json
@@ -1287,7 +1289,7 @@ one, in these tiers:
 | `@timeout` | Files |
 | --- | --- |
 | 30 s | 9 |
-| 60 s | 54 |
+| 60 s | 55 |
 | 120 s | 28 |
 | 180 s | 3 |
 | 300 s | 15 |

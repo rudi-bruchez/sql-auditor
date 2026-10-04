@@ -40,6 +40,7 @@
 20.databases/010.all-databases.sql @profiles: space
 20.databases/011.all-databases-2014.sql
 20.databases/012.all-databases-query-store.sql
+20.databases/013.all-databases-2019.sql
 20.databases/020.properties.sql @profiles: space
 20.databases/021.properties-2014.sql
 20.databases/022.query-store.sql @profiles: space

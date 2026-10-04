@@ -505,7 +505,7 @@ it costs, so the operator decides per instance.
 | `80.workload/*` | about time spent, not space occupied |
 | `10.system/020.host-services.sql` | instant file initialisation decides how fast a file grows, not how large it is |
 | `10.system/040.error-log.sql` | discloses the error log for one marginal question, the size of the log file itself |
-| `20.databases/011.all-databases-2014.sql`, `012.all-databases-query-store.sql`, `021.properties-2014.sql` | additive version extensions of members, carrying delayed durability, incremental statistics and the requested Query Store state; none bears on size, and `022.query-store` carries the storage figures |
+| `20.databases/011.all-databases-2014.sql`, `012.all-databases-query-store.sql`, `013.all-databases-2019.sql`, `021.properties-2014.sql` | additive version extensions of members, carrying delayed durability, incremental statistics, the requested Query Store state and accelerated database recovery; none bears on size, `022.query-store` carries the storage figures, and the ADR bit says where a persistent version store would live, not how large it is |
 
 ### What the profile cannot say
 

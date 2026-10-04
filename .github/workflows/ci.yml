@@ -240,6 +240,26 @@ jobs:
           jq -e '[.skipped_scripts[]? | select(.script == "70.schema/021.missing-index-queries.sql")] | length >= 1' \
             "$run_dir/_run.json" \
             || { jq '[.skipped_scripts[]? | select(.script | test("021"))]' "$run_dir/_run.json"; exit 1; }
+      # 20.databases/013 is @min_version 15 like 70.schema/021, so it is
+      # asserted per leg for the same reason. tempdb is the row the ADR topic
+      # reads, and a renamed alias would leave the key absent and type null.
+      - name: assert accelerated database recovery per database (2022)
+        if: matrix.mssql == '2022-latest'
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          f="$run_dir/20.databases/013.all-databases-2019.json"
+          jq -e '(.databases_2019_options | length) > 0
+                 and all(.databases_2019_options[]; (.accelerated_database_recovery | type) == "boolean")
+                 and any(.databases_2019_options[]; .db_id == 2)' "$f" \
+            || { jq . "$f"; exit 1; }
+      - name: assert accelerated database recovery is skipped (2017)
+        if: matrix.mssql == '2017-latest'
+        run: |
+          run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
+          test ! -f "$run_dir/20.databases/013.all-databases-2019.json"
+          jq -e '[.skipped_scripts[]? | select(.script == "20.databases/013.all-databases-2019.sql")] | length >= 1' \
+            "$run_dir/_run.json" \
+            || { jq '[.skipped_scripts[]? | select(.script | test("013"))]' "$run_dir/_run.json"; exit 1; }
       # The planted foreign key comes back untrusted and flagged, and is counted
       # apart. 032 exports server trigger source and runs only under
       # --include-object-definitions, which this run does not pass, so the run
