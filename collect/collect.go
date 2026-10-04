@@ -404,6 +404,12 @@ func keepSuperseded(paths []string, why string, progress io.Writer) {
 // opt-ins it had on, the profile that narrowed it, the databases it read, and
 // every unit it planned, as a result, an error or a skip.
 type runScope struct {
+	// Server is the name the server gave, which is what the run was filed
+	// under unless it gave none. A pointer, so that a manifest without the key
+	// is told apart from a server that answered with no name.
+	Server struct {
+		Name *string `json:"name"`
+	} `json:"server"`
 	Config  map[string]string `json:"config"`
 	Profile struct {
 		Name string `json:"name"`
@@ -435,6 +441,8 @@ type scopeSkip struct {
 
 func scopeOfManifest(m *Manifest) runScope {
 	var s runScope
+	name := m.Server.Name
+	s.Server.Name = &name
 	s.Config = m.Config
 	s.Profile.Name = m.Profile.Name
 	for _, d := range m.Targets.Databases {
@@ -749,6 +757,9 @@ func previousRunLost(superseded []string, m *Manifest) string {
 	if err != nil {
 		return "this run could not be compared with the run it replaced (" + err.Error() + ")"
 	}
+	if why := otherServer(prev, m.Server.Name); why != "" {
+		return why
+	}
 	lost := scopeLost(prev, scopeOfManifest(m))
 	if len(lost) == 0 {
 		return ""
@@ -781,6 +792,47 @@ func previousRunLost(superseded []string, m *Manifest) string {
 	}
 	lost = named
 	return "this run did not collect " + strings.Join(lost, ", ") + ", which the run it replaced did"
+}
+
+// otherServer is why the run set aside may belong to another target than this
+// one, or "" when both name the same server. The folder they share does not
+// say: RunServerName falls back to the address when the server gives no name,
+// so a nameless target at address SQL01 is filed where a server calling itself
+// SQL01 is, and a rerun of either deleted the other's archive of the day once
+// it completed. scopeLost does not see it when the two read databases of the
+// same names, two Azure logical servers each holding a SALESDB being the case
+// that matters, because every unit of the one has its match in the other.
+//
+// It is called from previousRunLost rather than from discardSuperseded because
+// previousRunLost is the one gate on discardPrevious: nothing deletes a run set
+// aside without it returning "" first, and a reason returned there reaches both
+// the manifest's warnings and the operator's screen through keepSuperseded.
+//
+// A manifest without a server name is kept, as one that cannot be read is:
+// nothing shows it is this server's, keeping a run too many costs a folder,
+// and deleting the wrong one costs a day that cannot be collected again. Case
+// is ignored because Windows ignores it, and two names that differ only by
+// case collide there only when they are the same server's.
+//
+// What it cannot see is two nameless targets: _run.json records the name the
+// server gave and not the address, so address A with SQL_DATABASE=B and
+// address A_B without one both record "" and still compare equal.
+func otherServer(prev runScope, cur string) string {
+	if prev.Server.Name == nil {
+		return "the run it replaced records no server name, so it cannot be shown to be this server's"
+	}
+	if p := *prev.Server.Name; !strings.EqualFold(p, cur) {
+		return fmt.Sprintf("the run it replaced is of server %s and this run of server %s, "+
+			"two different targets filed under the same folder", nameOrNone(p), nameOrNone(cur))
+	}
+	return ""
+}
+
+func nameOrNone(name string) string {
+	if name == "" {
+		return "(no name, filed under its address)"
+	}
+	return name
 }
 
 // RunNameTaken and RunFolderFor are exported for one caller and one reason:

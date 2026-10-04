@@ -187,6 +187,66 @@ func TestAnUnreadablePreviousRunIsKept(t *testing.T) {
 	}
 }
 
+// RunServerName is not one to one: a nameless target is filed under its
+// address, and the address SQL01 lands where a server calling itself SQL01 is.
+// Reading the same databases, the rerun of the one covered the other by every
+// measure scopeLost has, and deleted it.
+func TestAnotherServerFiledUnderTheSameFolderIsKept(t *testing.T) {
+	named := func(name string) *Manifest {
+		m := scopeManifest("", nil, "SALESDB")
+		m.Server.Name = name
+		return m
+	}
+	cases := []struct {
+		name      string
+		prev, cur string
+		kept      bool
+	}{
+		{"nameless before a named server", "", "SQL01", true},
+		{"a named server before a nameless one", "SQL01", "", true},
+		{"the same server", "SQL01", "SQL01", false},
+		{"the same server in another case", "SQL01", "sql01", false},
+		{"two nameless runs", "", "", false},
+	}
+	for _, c := range cases {
+		for _, where := range []string{"folder", "archive only"} {
+			t.Run(c.name+", "+where, func(t *testing.T) {
+				aside := writeSetAside(t, named(c.prev), where == "folder", true)
+				why := previousRunLost(aside, named(c.cur))
+				if !c.kept {
+					if why != "" {
+						t.Fatalf("previousRunLost = %q, want the run it replaced deleted", why)
+					}
+					return
+				}
+				if !strings.Contains(why, "two different targets") {
+					t.Fatalf("previousRunLost = %q, want it kept as another target's", why)
+				}
+				var out strings.Builder
+				keepSuperseded(aside, why, &out)
+				for _, p := range aside {
+					if !strings.Contains(out.String(), p) {
+						t.Errorf("the notice does not name %s: %q", p, out.String())
+					}
+				}
+			})
+		}
+	}
+}
+
+// A manifest that does not record the server's name cannot show it is this
+// server's run, and is kept like one that cannot be read.
+func TestAPreviousRunWithoutAServerNameIsKept(t *testing.T) {
+	aside := writeSetAside(t, scopeManifest("", nil, "SALESDB"), true, false)
+	body := `{"config":{},"targets":{"databases":[{"name":"SALESDB"}]}}`
+	if err := os.WriteFile(filepath.Join(aside[0], manifestJSONName), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if why := previousRunLost(aside, scopeManifest("", nil, "SALESDB")); !strings.Contains(why, "no server name") {
+		t.Errorf("previousRunLost = %q", why)
+	}
+}
+
 // Codex review: the settings with a value decide which units run and how much
 // they return without changing targets.databases, since queryStoreUnits drops
 // the Query Store units after the targets are recorded. A rerun that narrowed
