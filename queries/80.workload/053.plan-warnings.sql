@@ -183,6 +183,7 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
 DECLARE @examined int = 1000;
+DECLARE @candidate_cap int = 500;
 
 DECLARE @candidates TABLE (
     [query_hash]          binary(8),
@@ -251,8 +252,9 @@ BEGIN TRY
        on a second lab cache the same day, 67 MB in the window: this step went
        from 5.0 s to 1.1 s and the whole file from 8.5 s to 4.6 s, output
        unchanged. The xml is still built, but only by the TRY_CAST below, on
-       the statement fragments of the two hundred candidates, and with the
-       node reads that is most of the 3.5 s left.
+       the statement fragments of the candidates, and with the node reads
+       that is most of the 3.5 s left. (These figures were taken with 200
+       candidates; the header of the candidate cut below says what 500 cost.)
 
        BIN2 is case sensitive, so each pattern is spelt as showplan spells it:
        the element names Warnings and CursorPlan, the attribute names, and the
@@ -267,7 +269,7 @@ BEGIN TRY
        levels the xml type allows. Such a batch can now pass here: a shallow
        statement of it is examined where it used to be skipped, and a deep one
        fails the TRY_CAST and is counted in bounds.plans_unparsed rather than
-       being invisible, at the price of one of the two hundred places. */
+       being invisible, at the price of one of the @candidate_cap places. */
     INSERT INTO @matching
     SELECT h.plan_handle
     FROM (SELECT DISTINCT w.plan_handle FROM @window AS w) AS h
@@ -281,12 +283,28 @@ BEGIN TRY
         OR x.t LIKE N'%Optimized="true"%')
     OPTION (RECOMPILE, MAXDOP 1);
 
+    /* THE CANDIDATE CUT, and it is the one that binds. Measured on the lab
+       (17.0.4065.4, a cache of about 2 500 statements), 4 October 2026: 894
+       statements of the window passed the prefilter and 200 were read. Read
+       up to 1 000, the counts went from 16 to 38 missing join predicates,
+       86 to 209 plan-affecting converts and 50 to 157 optimizer timeouts,
+       for 9 s against 27 s: the two hundred were reporting a third of what
+       the window held. 500 is the middle of that. Measured the same day
+       through the collector on a busier cache (5 000 statements, 930 of the
+       window matched): 9.2 to 9.4 s and 83 KB at 200, 18.4 to 18.8 s and
+       209 KB at 500, 32.7 to 33.8 s and 365 to 387 KB at 1 000; missing
+       join predicates 33 to 41 at 200 and 150 at 500, optimizer give-ups 26
+       against 82 to 89. The cost is the xml parse and the node reads, once per
+       candidate, so it follows the candidates and not the window. And
+       bounds.matched against bounds.candidate_cap says whether the cut took
+       anything and how much, which until then bounds.candidates = 200 said
+       only by its value. */
     INSERT INTO @candidates
     SELECT c.query_hash, c.execution_count, c.total_worker_time,
            c.total_logical_reads, c.creation_time, c.last_execution_time,
            tp.dbid, tp.objectid, TRY_CAST(tp.query_plan AS xml)
     FROM (
-        SELECT TOP (200) w.*
+        SELECT TOP (@candidate_cap) w.*
         FROM @window AS w
         JOIN @matching AS m ON m.plan_handle = w.plan_handle
         ORDER BY w.total_worker_time DESC) AS c
@@ -301,9 +319,17 @@ END CATCH;
 WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')
 SELECT
     CONVERT(varchar(23), SYSDATETIME(), 126)                    AS [collected_at],
-    @examined                                                   AS [bounds.statements_examined],
+    /* The window as filled, not its cap: on a cache holding fewer statements
+       than @examined the cap overstated it, until 4 October 2026. */
+    (SELECT COUNT(*) FROM @window)                              AS [bounds.statements_examined],
+    @examined                                                   AS [bounds.examined_cap],
     (SELECT COUNT(*) FROM sys.dm_exec_query_stats)              AS [bounds.statements_in_cache],
+    /* Statements of the window whose batch plan passed the prefilter, before
+       the candidate cut. Above candidate_cap, the counts below are a floor. */
+    (SELECT COUNT(*) FROM @window AS w
+       JOIN @matching AS m ON m.plan_handle = w.plan_handle)    AS [bounds.matched],
     (SELECT COUNT(*) FROM @candidates)                          AS [bounds.candidates],
+    @candidate_cap                                              AS [bounds.candidate_cap],
     /* A plan the engine returned as text and that did not parse back into XML.
        It is invisible to every read below, so it is counted: a zero here is
        what makes the counts that follow mean anything. */

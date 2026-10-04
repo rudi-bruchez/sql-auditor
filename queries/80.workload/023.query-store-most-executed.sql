@@ -1,5 +1,5 @@
 -- @scope:       database
--- @resultsets:  by_query:array, by_object:array, by_query_hash:array
+-- @resultsets:  root:object, by_query:array, by_object:array, by_query_hash:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     120
 -- @min_version: 13
@@ -47,11 +47,18 @@
 -- projected beside it in both result sets, so a rate can be checked against
 -- what backs it before it is quoted.
 --
--- No root: this is a listing keyed by query and by object, not a single-row
--- state. On a database whose Query Store is off, both joins below return no
--- rows and the file is three empty arrays — that is the decision, not an
--- oversight, and it is how the rest of the corpus already says "nothing
--- here". Suppressing the file instead would make "the Query Store is off"
+-- THE ROOT SAYS HOW MUCH THE LISTINGS LEFT OUT, and until 4 October 2026
+-- there was none. by_query and by_query_hash were capped at 50 with nothing
+-- beside them to say so, and the cap was hit in 9 of the 11 non-empty stores
+-- among the real collections. Both are now capped at listing_cap, 200, and
+-- the root counts the queries and the query hashes the rankings ran over, so a
+-- listing shorter than its population is visible as one. The server cost of
+-- the raise is nil, since the whole store is aggregated to rank it either way
+-- (42 to 70 s on the largest real stores); the archive grows by about 100 KB
+-- a database. by_object stays uncapped: the number of objects is bounded by
+-- what exists. On a database whose Query Store is off, the counts are zero
+-- and the arrays empty, which is how the rest of the corpus says "nothing
+-- here"; suppressing the file instead would make "the Query Store is off"
 -- indistinguishable from "this collector never ran".
 --
 -- Durations are converted from microseconds to milliseconds, as everywhere
@@ -64,9 +71,26 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
+/* The same number as 024.query-store-rowcount.sql, so the two files rank the
+   same population; a test holds them equal. */
+DECLARE @listing_cap int = 200;
+
+/* ───────── root ─────────
+   The populations the two capped rankings are taken from: queries and query
+   hashes with runtime statistics, the rows by_query and by_query_hash are
+   ranked over. Above listing_cap, the listing is the head of the store. */
+SELECT @listing_cap                                               AS [listing_cap],
+       COUNT(DISTINCT q.query_id)                                 AS [counts.queries],
+       COUNT(DISTINCT q.query_hash)                               AS [counts.query_hashes]
+FROM       sys.query_store_query         AS q
+JOIN       sys.query_store_plan          AS p  ON p.query_id = q.query_id
+WHERE EXISTS (SELECT 1 FROM sys.query_store_runtime_stats AS rs WHERE rs.plan_id = p.plan_id)
+OPTION (RECOMPILE, MAXDOP 1);
+
 /* ───────── by_query ─────────
-   TOP (50) by call count, not by cost: this is the RBAR-hunting ranking, and
-   a loop's total cost can be unremarkable even while its call count is not.
+   TOP (@listing_cap) by call count, not by cost: this is the RBAR-hunting
+   ranking, and a loop's total cost can be unremarkable even while its call
+   count is not.
    window.since and window.last_execution bound the observation for THIS
    query specifically; window.span_seconds and window.intervals say how much
    of that bound is actually backed by data, which is what keeps
@@ -75,7 +99,7 @@ SET LOCK_TIMEOUT 10000;
    single ISNULL would collapse into one: no object_id at all (ad hoc), an
    object_id that no longer resolves (dropped since capture), and a resolved
    name. */
-SELECT TOP (50)
+SELECT TOP (@listing_cap)
        q.query_id                                                 AS [query_id],
        CASE
            WHEN q.object_id IS NULL OR q.object_id = 0
@@ -152,7 +176,7 @@ ORDER BY SUM(rs.count_executions) DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* ───────── by_query_hash ─────────
-   by_query again with query_hash as the key, TOP (50) by call count.
+   by_query again with query_hash as the key, TOP (@listing_cap) by call count.
    query_ids is how many ids the row folds together; the text is that of the
    most executed of them, and sample_query_id says which. The window columns
    are the union across the hash, as by_object's are across an object. */
@@ -166,7 +190,7 @@ WITH perQuery AS (
     JOIN       sys.query_store_runtime_stats AS rs ON rs.plan_id = p.plan_id
     GROUP BY q.query_hash, q.query_id, q.query_text_id
 )
-SELECT TOP (50)
+SELECT TOP (@listing_cap)
        CONVERT(varchar(18), q.query_hash, 1)                      AS [query_hash],
        COUNT(DISTINCT q.query_id)                                 AS [query_ids],
        SUM(rs.count_executions)                                   AS [executions],

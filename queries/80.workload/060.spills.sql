@@ -91,10 +91,19 @@
 -- a restart, memory pressure, most sp_configure changes and an explicit flush
 -- take them. The instance start time is projected beside the counts so a reader
 -- knows how much time they cover.
+--
+-- THE LISTING IS CAPPED AT listing_cap, 200 since 4 October 2026, and
+-- statements.spilling is the population it is cut from, so a listing shorter
+-- than it is the head. It was 50. Every spilling statement is already read to
+-- sort them, so the raise costs the archive about 600 bytes a row and the
+-- server the plan attributes of the extra rows; no real collection carries
+-- this file yet.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
+
+DECLARE @listing_cap int = 200;
 
 SELECT
     CONVERT(varchar(23), SYSDATETIME(), 126)                    AS [collected_at],
@@ -109,15 +118,16 @@ SELECT
     (SELECT CAST(SUM(total_spills) * 8.0 / 1024 AS DECIMAL(18,1))
        FROM sys.dm_exec_query_stats)                            AS [spilled.total_mb],
     (SELECT CAST(MAX(max_spills) * 8.0 / 1024 AS DECIMAL(18,1))
-       FROM sys.dm_exec_query_stats)                            AS [spilled.largest_single_execution_mb]
+       FROM sys.dm_exec_query_stats)                            AS [spilled.largest_single_execution_mb],
+    @listing_cap                                                AS [listing_cap]
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* The fifty heaviest spillers, by pages spilled. Ordered that way because the
+/* The heaviest spillers, by pages spilled, up to listing_cap. Ordered that way because the
    list is read to decide where to look first, and a statement that spilled a
    gigabyte once is a better place to start than one that spilled a page a
    thousand times — the second is in the list too, and its execution count says
    which it is. */
-SELECT TOP (50)
+SELECT TOP (@listing_cap)
     DB_NAME(pa.dbid)                                            AS [database],
     -- NULL for anything but a compiled module, on purpose: see the header.
     CASE WHEN cp.objtype = 'Proc'

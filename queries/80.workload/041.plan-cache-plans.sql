@@ -30,11 +30,19 @@
 -- times. The statistics are therefore SUMMED per plan_handle here, and the
 -- statement count is projected so a reader knows how many rows went into them.
 --
--- FOUR METRICS, TWENTY-FIVE EACH, ONE HUNDRED PLANS. The same argument 021
--- makes: the archive should hold the plans that matter by any of four
--- definitions of mattering — total CPU, total duration, total reads and
--- execution count — rather than by one. A plan ranking well on several is
--- selected once, so the hundred is a ceiling and not a quota.
+-- FOUR METRICS, FIFTY EACH, TWO HUNDRED PLANS. The same argument 021 makes:
+-- the archive should hold the plans that matter by any of four definitions of
+-- mattering — total CPU, total duration, total reads and execution count —
+-- rather than by one. A plan ranking well on several is selected once, so the
+-- two hundred is a ceiling and not a quota.
+--
+-- The depth was twenty-five until 4 October 2026. Three real collections
+-- selected 41, 41 and 56 plans with it, 2.6 to 4.6 MB of archive, and the
+-- ceiling of a hundred could not bind, being four times the depth. Fifty puts
+-- those at about 5 to 9 MB. It reaches deeper into the same kind of data and
+-- behind the same flag: the operator who passed it already chose to let the
+-- cache's statement text into the archive, and this changes how many
+-- statements, not what kind of data, leave the server.
 --
 -- THREE THINGS THIS FILE MUST SAY ABOUT ITSELF, and the writer repeats them in
 -- the index:
@@ -65,14 +73,20 @@
 -- SHOWPLAN, which needs parameter values the collector cannot invent, compiles
 -- on the production instance, and would break the read-only promise. "Every
 -- plan we can get" means "every plan already materialised in the cache". And it
--- does not collect all procedures: eight hundred procedures whose plans run
--- from 0.5 to 2 MB would produce a multi-gigabyte archive, and the cap is what
--- makes the collector usable at all.
+-- does not collect all procedures. Eight hundred procedures whose plans run
+-- from 0.5 to 2 MB would be up to 1.6 GB of plans; the run budget
+-- (maxRunBytes, 256 MiB) would stop them first and name the rest as omitted,
+-- so the archive would not grow past it, but it would be filled by the tail
+-- of the cache in rank order and leave nothing for the collectors that run
+-- after this one. The cap keeps the plans that matter and the budget for the
+-- rest. (Until 4 October 2026 this paragraph said "a multi-gigabyte archive",
+-- which the run budget has made untrue.)
 --
 -- The two caps below are also Go constants, and
 -- TestPlanCacheCapsAreTheSameNumbersInTheCorpus fails on any drift. A Go
--- constant raised above a stale SQL literal would make plan 101 arrive NULL and
--- be reported as a plan the cache does not hold — a false fact about the server.
+-- constant raised above a stale SQL literal would make the plan past the SQL cap
+-- arrive NULL and be reported as a plan the cache does not hold — a false fact
+-- about the server.
 --
 -- SQL Server 2012 is the floor. Nothing read here is newer.
 
@@ -91,8 +105,8 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                     AS [collecte
                                                                     AS [cache.oldest_plan],
        (SELECT MAX(qs.last_execution_time) FROM sys.dm_exec_query_stats AS qs)
                                                                     AS [cache.newest_execution],
-       100                                                          AS [cap.plans],
-       25                                                           AS [cap.per_metric],
+       200                                                          AS [cap.plans],
+       50                                                           AS [cap.per_metric],
        4194304                                                      AS [cap.plan_bytes]
 OPTION (RECOMPILE, MAXDOP 1);
 
@@ -123,8 +137,8 @@ ranked AS (
 selected AS (
     SELECT r.*
     FROM ranked AS r
-    WHERE r.r_cpu <= 25 OR r.r_duration <= 25
-       OR r.r_reads <= 25 OR r.r_executions <= 25
+    WHERE r.r_cpu <= 50 OR r.r_duration <= 50
+       OR r.r_reads <= 50 OR r.r_executions <= 50
 ),
 numbered AS (
     /* The rank is computed in its own step because a window function may not
@@ -179,6 +193,6 @@ OUTER APPLY (
     WHERE qs2.plan_handle = s.plan_handle
     ORDER BY qs2.total_worker_time DESC
 ) AS st
-WHERE s.plan_rank <= 100
+WHERE s.plan_rank <= 200
 ORDER BY s.plan_rank
 OPTION (RECOMPILE, MAXDOP 1);

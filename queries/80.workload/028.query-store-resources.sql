@@ -56,6 +56,15 @@
 -- query_id order. query_id is the tie-break, so two collections of an
 -- unchanged store list the same queries.
 --
+-- THE ROUND ROBIN STOPS AT listing_cap, 200 since 4 October 2026. It was 50,
+-- with no reason given, and nothing said whether it had been reached: each
+-- measure got about twelve places. counts.queries_eligible is now the number
+-- of queries above zero on at least one measure, the population the round
+-- robin draws from, so a listing shorter than it is visibly the head. The
+-- whole store is aggregated and ranked either way, so the raise costs the
+-- archive and not the server. No real collection carries this file yet; the
+-- number follows 020's, where 50 was hit in 9 stores of 11.
+--
 -- IDLE AND USER WAIT ARE PROJECTED, NOT DROPPED, AND NOT RANKED ON. The
 -- documentation files WAITFOR, WAIT_FOR_RESULTS and BROKER_RECEIVE_WAITFOR
 -- under User Wait (category 18), and SLEEP_%, LOGMGR_QUEUE, CHECKPOINT_QUEUE
@@ -118,36 +127,7 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-/* ───────── root ─────────
-   Scalar subqueries rather than a FROM over sys.database_query_store_options:
-   that view has no row on a database whose store was never enabled, and a
-   root with no row is an encoder error. The aggregate over the wait view
-   always returns one row, so it can stand as the FROM.
-
-   waits_recorded is the plain sum of the view by class, every query
-   included. It is there for the queries no listing below can show: one whose
-   only wait is Idle or User Wait enters on no measure, and a Service Broker
-   reader waiting in WAITFOR (RECEIVE ...) would otherwise be invisible. It is
-   not a denominator for shares: statements of functions and triggers are
-   counted inside their caller too. */
-SELECT DB_NAME()                                                   AS [database],
-       (SELECT COUNT(*) FROM sys.query_store_runtime_stats_interval) AS [window.intervals_total],
-       (SELECT MIN(start_time) FROM sys.query_store_runtime_stats_interval) AS [window.oldest],
-       (SELECT MAX(end_time) FROM sys.query_store_runtime_stats_interval)   AS [window.newest],
-       CAST((SELECT actual_state_desc FROM sys.database_query_store_options) AS NVARCHAR(60)) AS [state.actual],
-       CAST((SELECT query_capture_mode_desc FROM sys.database_query_store_options) AS NVARCHAR(60)) AS [state.capture_mode],
-       CAST((SELECT wait_stats_capture_mode_desc FROM sys.database_query_store_options) AS NVARCHAR(60)) AS [state.wait_stats_capture_mode],
-       w.wait_rows                                                 AS [counts.wait_stat_rows],
-       ISNULL(w.resource_ms, 0)                                    AS [waits_recorded.resource_ms],
-       ISNULL(w.idle_ms, 0)                                        AS [waits_recorded.idle_ms],
-       ISNULL(w.user_wait_ms, 0)                                   AS [waits_recorded.user_wait_ms],
-       50                                                          AS [listing_cap]
-FROM (SELECT COUNT(*)                                                         AS wait_rows,
-             SUM(CASE WHEN wait_category NOT IN (11, 18) THEN total_query_wait_time_ms END) AS resource_ms,
-             SUM(CASE WHEN wait_category = 11 THEN total_query_wait_time_ms END)            AS idle_ms,
-             SUM(CASE WHEN wait_category = 18 THEN total_query_wait_time_ms END)            AS user_wait_ms
-      FROM sys.query_store_wait_stats) AS w
-OPTION (RECOMPILE, MAXDOP 1);
+DECLARE @listing_cap int = 200;
 
 CREATE TABLE #retained (
     query_id      bigint       NOT NULL PRIMARY KEY,
@@ -169,7 +149,8 @@ CREATE TABLE #retained (
     rn_tempdb     bigint       NOT NULL,
     rn_reads      bigint       NOT NULL,
     slot_rn       bigint       NOT NULL,
-    slot_metric   int          NOT NULL
+    slot_metric   int          NOT NULL,
+    eligible      bigint       NOT NULL
 );
 
 /* Waits are aggregated by plan first, with no join, then folded into the
@@ -228,7 +209,11 @@ best AS (
     WHERE m.value > 0
 ),
 capped AS (            /* ORDER BY rn, metric_order IS the round robin */
-    SELECT TOP (50) query_id, rn, metric_order
+    /* eligible is counted before the TOP: a window function is evaluated
+       before TOP applies, so every row carries the size of the population
+       the cap was taken from. */
+    SELECT TOP (@listing_cap) query_id, rn, metric_order,
+           COUNT(*) OVER ()                                         AS eligible
     FROM best
     WHERE dedupe = 1
     ORDER BY rn, metric_order, query_id
@@ -237,9 +222,46 @@ INSERT INTO #retained
 SELECT r.query_id, r.object_id, r.plans, r.executions, r.duration_us, r.cpu_us,
        r.log_bytes, r.log_bytes_max, r.tempdb_pages, r.tempdb_max,
        r.read_ops, r.read_pages, r.waits_ms, r.waits_ranked,
-       r.rn_waits, r.rn_log, r.rn_tempdb, r.rn_reads, c.rn, c.metric_order
+       r.rn_waits, r.rn_log, r.rn_tempdb, r.rn_reads, c.rn, c.metric_order,
+       c.eligible
 FROM capped AS c
 JOIN ranked AS r ON r.query_id = c.query_id
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* ───────── root ─────────
+   AFTER the retained set, so that it can say how much of the population the
+   cap kept; no statement before this one returns rows, so it is still the
+   first result set.
+
+   Scalar subqueries rather than a FROM over sys.database_query_store_options:
+   that view has no row on a database whose store was never enabled, and a
+   root with no row is an encoder error. The aggregate over the wait view
+   always returns one row, so it can stand as the FROM.
+
+   waits_recorded is the plain sum of the view by class, every query
+   included. It is there for the queries no listing below can show: one whose
+   only wait is Idle or User Wait enters on no measure, and a Service Broker
+   reader waiting in WAITFOR (RECEIVE ...) would otherwise be invisible. It is
+   not a denominator for shares: statements of functions and triggers are
+   counted inside their caller too. */
+SELECT DB_NAME()                                                   AS [database],
+       (SELECT COUNT(*) FROM sys.query_store_runtime_stats_interval) AS [window.intervals_total],
+       (SELECT MIN(start_time) FROM sys.query_store_runtime_stats_interval) AS [window.oldest],
+       (SELECT MAX(end_time) FROM sys.query_store_runtime_stats_interval)   AS [window.newest],
+       CAST((SELECT actual_state_desc FROM sys.database_query_store_options) AS NVARCHAR(60)) AS [state.actual],
+       CAST((SELECT query_capture_mode_desc FROM sys.database_query_store_options) AS NVARCHAR(60)) AS [state.capture_mode],
+       CAST((SELECT wait_stats_capture_mode_desc FROM sys.database_query_store_options) AS NVARCHAR(60)) AS [state.wait_stats_capture_mode],
+       w.wait_rows                                                 AS [counts.wait_stat_rows],
+       ISNULL(w.resource_ms, 0)                                    AS [waits_recorded.resource_ms],
+       ISNULL(w.idle_ms, 0)                                        AS [waits_recorded.idle_ms],
+       ISNULL(w.user_wait_ms, 0)                                   AS [waits_recorded.user_wait_ms],
+       @listing_cap                                                AS [listing_cap],
+       ISNULL((SELECT MAX(eligible) FROM #retained), 0)            AS [counts.queries_eligible]
+FROM (SELECT COUNT(*)                                                         AS wait_rows,
+             SUM(CASE WHEN wait_category NOT IN (11, 18) THEN total_query_wait_time_ms END) AS resource_ms,
+             SUM(CASE WHEN wait_category = 11 THEN total_query_wait_time_ms END)            AS idle_ms,
+             SUM(CASE WHEN wait_category = 18 THEN total_query_wait_time_ms END)            AS user_wait_ms
+      FROM sys.query_store_wait_stats) AS w
 OPTION (RECOMPILE, MAXDOP 1);
 
 /* ───────── by_query ───────── */

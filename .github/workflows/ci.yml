@@ -257,8 +257,9 @@ jobs:
       # SQL Server 2025). The predicate also converts the two parameters, so a
       # reading that took any ColumnReference would count four and could name
       # @p. Five thousand executions put the statement among the heaviest by
-      # logical reads, since 030 looks only at the two hundred heaviest
-      # candidates. One statement per sqlcmd call, for the 1 KB limit above.
+      # logical reads, since 030 looks only at a window of the heaviest
+      # statements (2 500) and reads at most 1 000 candidates out of it. One
+      # statement per sqlcmd call, for the 1 KB limit above.
       # THIS STEP IS LAST, just before the collection, because what it plants
       # lives in the plan cache and sp_procoption empties it: the procedure
       # ends with RECONFIGURE WITH OVERRIDE, and on SQL Server 2017
@@ -449,7 +450,12 @@ jobs:
       # No warning, because the seek survived the conversion. And no row names
       # a table variable as the converted table: showplan spells an aliased
       # one Table="@x" with no Database, and 10.system/040's @derived was
-      # reported that way on the 2017 leg until 4 October 2026.
+      # reported that way on the 2017 leg until 4 October 2026. The bounds
+      # must account for the cut: the window filled no further than its cap
+      # nor than the cache (a CI cache is far below 2 500, so a root that
+      # reported the cap as the count would fail), and the candidates are the
+      # matched statements up to their cap, so a candidate count that lost
+      # track of matched fails here whatever the runner's cache holds.
       - name: assert the converted column in the implicit conversions
         run: |
           run_dir="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -type d)"
@@ -460,7 +466,12 @@ jobs:
                     and .converted.column == "code" and .converted.to_type == "nvarchar"
                     and .converted.to_length_bytes == 40
                     and .converted.columns_in_expression == 2] == [true]
-                 and all(.conversions[]; (.converted.table // "") | startswith("@") | not)' "$f" \
+                 and all(.conversions[]; (.converted.table // "") | startswith("@") | not)
+                 and .bounds.examined_cap == 2500 and .bounds.candidate_cap == 1000
+                 and .bounds.statements_examined <= .bounds.examined_cap
+                 and .bounds.statements_examined <= .bounds.plans_in_cache
+                 and .bounds.matched >= 1 and .bounds.matched <= .bounds.statements_examined
+                 and .bounds.candidates == ([.bounds.matched, .bounds.candidate_cap] | min)' "$f" \
             || { jq . "$f"; exit 1; }
       # The two planted backups share a directory and are one destination,
       # and recent lists every backup of the window while it is under its cap,
@@ -528,13 +539,28 @@ jobs:
           # cost: without the showplan namespace every path read returns NULL
           # and all of them land in unknown, which the sums alone accept.
           jq -e '([.bands[].band] == ["lt_5","5_25","25_50","50_100","100_500","ge_500","unknown"])
-                 and .examined.statements <= .examined.cap
+                 and .examined.cap == 1000 and .examined.statements <= .examined.cap
                  and ([.bands[] | select(.band != "unknown") | .statements] | add) > 0
                  and ([.bands[].statements] | add) == .examined.statements
                  and (.unknown.no_plan + .unknown.not_xml + .unknown.no_cost)
                        == (.bands[] | select(.band == "unknown") | .statements)' \
             "$run_dir/80.workload/042.parallel-cost-distribution.json" \
             || { jq '.' "$run_dir/80.workload/042.parallel-cost-distribution.json"; exit 1; }
+          # 053 cuts the statements that passed its text prefilter down to
+          # candidate_cap, and the cut has to show: matched is counted before
+          # it and candidates after it, so the second is the first up to the
+          # cap. The window is the cache up to its cap, never the cap itself
+          # (a CI cache is far below a thousand statements). A read that
+          # failed would leave every count at zero and pass the rest, so the
+          # collection must report success.
+          jq -e '.collected.plan_warnings == 1 and .errors.plan_warnings == 0
+                 and .bounds.examined_cap == 1000 and .bounds.candidate_cap == 500
+                 and .bounds.statements_examined <= .bounds.examined_cap
+                 and .bounds.statements_examined <= .bounds.statements_in_cache
+                 and .bounds.matched <= .bounds.statements_examined
+                 and .bounds.candidates == ([.bounds.matched, .bounds.candidate_cap] | min)' \
+            "$run_dir/80.workload/053.plan-warnings.json" \
+            || { jq 'del(.statements)' "$run_dir/80.workload/053.plan-warnings.json"; exit 1; }
           # 040 read the database keys and the backup history inside TRY
           # blocks, so a typo in either dynamic statement would land in the
           # CATCH and leave an empty array that looks like an instance with
@@ -682,6 +708,65 @@ jobs:
             || { jq -c '.results[] | select(.script == "80.workload/026.query-store-interrupted.sql")' "$run_dir/_run.json"
                  jq '{executions, aborted: [.aborted[]?.text], exceptions: [.exceptions[]?.text]}' \
                    "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json"; exit 1; }
+          # 020, 023 and 024 cap their listings at listing_cap and carry the
+          # population the listing is taken from, so that a listing cut by the
+          # cap reads as the head of the store. ci_probe's store is far below
+          # the cap, so each listing must hold at least its population: a
+          # listing cut short of it fails, and so does a count that went
+          # missing (null would pass a comparison, hence the type checks).
+          # At least, not exactly: the store captures ALL, so the collector's
+          # own root statement enters it before the listing is read. Measured
+          # on SQL Server 2025 with a fresh store: 023 counted 8 queries and
+          # listed 9, 024 counted 12 and listed 13; a second run, the
+          # collector's statements already known, matched exactly. 020's
+          # counts.queries also holds queries with no runtime statistics,
+          # which no listing ranks, so only the cap bounds its listings.
+          jq -e '.listing_cap == 200
+                 and (.counts.queries | type) == "number"
+                 and (.counts.query_hashes | type) == "number"
+                 and (.top_queries | length) >= 1
+                 and (.top_queries | length) <= .listing_cap
+                 and (.by_query_hash | length) <= .listing_cap' \
+            "$run_dir/80.workload/ci_probe/020.query-store.json" \
+            || { jq 'del(.top_queries, .by_query_hash)' "$run_dir/80.workload/ci_probe/020.query-store.json"; exit 1; }
+          jq -e '.listing_cap == 200
+                 and (.counts.queries | type) == "number" and .counts.queries >= 1
+                 and (.counts.query_hashes | type) == "number"
+                 and (.by_query | length) >= ([.counts.queries, .listing_cap] | min)
+                 and (.by_query | length) <= .listing_cap
+                 and (.by_query_hash | length) >= ([.counts.query_hashes, .listing_cap] | min)
+                 and (.by_query_hash | length) <= .listing_cap' \
+            "$run_dir/80.workload/ci_probe/023.query-store-most-executed.json" \
+            || { jq '{listing_cap, counts, by_query: (.by_query | length), by_query_hash: (.by_query_hash | length)}' \
+                   "$run_dir/80.workload/ci_probe/023.query-store-most-executed.json"; exit 1; }
+          jq -e '.listing_cap == 200
+                 and (.counts.queries | type) == "number" and .counts.queries >= 1
+                 and (.by_query | length) >= ([.counts.queries, .listing_cap] | min)
+                 and (.by_query | length) <= .listing_cap' \
+            "$run_dir/80.workload/ci_probe/024.query-store-rowcount.json" \
+            || { jq 'del(.by_query)' "$run_dir/80.workload/ci_probe/024.query-store-rowcount.json"; exit 1; }
+          # 026, 028 and 060 cap their listings the same way. 026's root
+          # counts the queries behind each listing, 028's the queries above
+          # zero on at least one of its four measures, 060's the spilling
+          # statements; each listing must be its population up to the cap.
+          # The collector's own statements neither abort nor fail, and 028
+          # counts and lists in one statement, so these two are exact; 060
+          # compares with <= because the spill counters move between its two
+          # reads of the cache.
+          jq -e '.listing_cap == 200
+                 and (.aborted | length) == ([.queries.with_aborted, .listing_cap] | min)
+                 and (.exceptions | length) == ([.queries.with_exception, .listing_cap] | min)' \
+            "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json" \
+            || { jq '{listing_cap, queries, aborted: (.aborted | length), exceptions: (.exceptions | length)}' \
+                   "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json"; exit 1; }
+          jq -e '.listing_cap == 200
+                 and (.by_query | length) == ([.counts.queries_eligible, .listing_cap] | min)' \
+            "$run_dir/80.workload/ci_probe/028.query-store-resources.json" \
+            || { jq 'del(.by_query, .waits)' "$run_dir/80.workload/ci_probe/028.query-store-resources.json"; exit 1; }
+          jq -e '.listing_cap == 200
+                 and (.top_spills | length) <= ([.statements.spilling, .listing_cap] | min)' \
+            "$run_dir/80.workload/060.spills.json" \
+            || { jq 'del(.top_spills)' "$run_dir/80.workload/060.spills.json"; exit 1; }
           # 027 shreds OptimizerStatsUsage out of the stored plans. ci_probe's
           # few user tables are barely queried, so statistics_used may be empty
           # here and an assertion on its contents would assert nothing. What is

@@ -195,9 +195,13 @@
 -- tables, the collector's own table variables among them, are not drop
 -- candidates. They are counted in root as temporary_indexes_excluded.
 --
--- THE CAP IS 2 000 AND THE SPEC SAID 5 000. Measured here at 12 to 17 ms per
--- plan, 5 000 plans is one to one and a half minutes of client CPU per
--- database, and the corpus runs this against every database that has a store.
+-- THE CAP IS 2 000 AND THE SPEC SAID 5 000. Measured when the cap was set at
+-- 12 to 17 ms per plan, 5 000 plans was one to one and a half minutes of
+-- client CPU per database, and the corpus runs this against every database
+-- that has a store. That per-plan figure no longer prices the cap: it was
+-- taken on small plans, and the next paragraph measures 56 ms a plan on a
+-- store of larger ones, where the 2 000 alone cost nearly two minutes. What
+-- bounds the cost now is the byte budget below, not the count.
 -- The spec chose the number to cover the largest store seen on a real estate,
 -- 6 515 plans in one database, but covering it is not what this file is for:
 -- the question it feeds is whether a statistic may be dropped, the order is by
@@ -300,10 +304,13 @@
 -- THE CAP AND THE BUDGET ARE CONSTANTS AND NOT OPTIONS, which the spec left
 -- open for the cap. The
 -- corpus has no directive for a per-collector parameter, and the collectors
--- that bound themselves (80.workload/030.implicit-conversions and
--- 70.schema/090.statistics) do it with a DECLARE and report the value they
--- used. Adding a command-line flag for a number nobody has yet asked to change
--- would be the first of its kind, and both values travel in root either way.
+-- that bound a plan read (80.workload/030.implicit-conversions,
+-- 053.plan-warnings and 042.parallel-cost-distribution) do it with a DECLARE
+-- and report the value they used. 70.schema/090.statistics was named here
+-- until 4 October 2026, wrongly: it bounded its listing with a literal TOP,
+-- not a DECLARE. Adding a command-line flag for a number nobody has yet asked
+-- to change would be the first of its kind, and both values travel in root
+-- either way.
 --
 -- ON A DATABASE WHOSE QUERY STORE IS OFF, statistics_used is empty and root
 -- reports plans_total = 0 with state.actual = OFF. That is not an error and

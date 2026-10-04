@@ -42,10 +42,20 @@
 -- It reads the WHOLE RETAINED HISTORY and takes no parameter, like 023: a
 -- query that timed out every night for a month is the finding. The text is
 -- cut at 500 characters, which is why it carries no flag.
+--
+-- EACH LISTING IS CAPPED AT listing_cap, 200 since 4 October 2026, and the
+-- root says when the cap cut it: queries.with_aborted and
+-- queries.with_exception count the whole population of each listing. It was
+-- 50 with no reason given. The whole history is already aggregated to rank
+-- the listings, so a deeper one costs the archive a few hundred bytes a row
+-- and the server nothing; no real collection carries this file yet, so the
+-- number rests on 020's, where 50 was hit in 9 stores of 11.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
+
+DECLARE @listing_cap int = 200;
 
 /* ───────── root ─────────
    A LEFT JOIN from sys.databases, as in 021: a database whose store was never
@@ -67,7 +77,7 @@ SELECT DB_NAME()                                                  AS [database],
        CASE WHEN o.actual_state_desc IS NOT NULL THEN ISNULL(t.exception, 0) END AS [executions.exception],
        CASE WHEN o.actual_state_desc IS NOT NULL THEN ISNULL(t.q_aborted, 0) END   AS [queries.with_aborted],
        CASE WHEN o.actual_state_desc IS NOT NULL THEN ISNULL(t.q_exception, 0) END AS [queries.with_exception],
-       50                                                         AS [listing_cap]
+       @listing_cap                                               AS [listing_cap]
 FROM sys.databases AS d
 LEFT JOIN sys.database_query_store_options AS o ON 1 = 1
 OUTER APPLY (SELECT MIN(i.start_time) AS oldest_interval, MAX(i.end_time) AS newest_interval,
@@ -109,7 +119,7 @@ WITH perType AS (
     WHERE rs.execution_type IN (0, 3, 4)
     GROUP BY p.query_id, rs.execution_type
 )
-SELECT TOP (50)
+SELECT TOP (@listing_cap)
        x.query_id                                                 AS [query_id],
        CASE
            WHEN q.object_id IS NULL OR q.object_id = 0
@@ -161,7 +171,7 @@ WITH perType AS (
     WHERE rs.execution_type IN (0, 3, 4)
     GROUP BY p.query_id, rs.execution_type
 )
-SELECT TOP (50)
+SELECT TOP (@listing_cap)
        x.query_id                                                 AS [query_id],
        CASE
            WHEN q.object_id IS NULL OR q.object_id = 0
