@@ -100,9 +100,10 @@ DECLARE @configured nvarchar(400) = NULL;
 DECLARE @running   nvarchar(max) = NULL;
 DECLARE @err_number int          = NULL;
 DECLARE @err_message nvarchar(400) = NULL;
-DECLARE @threshold int =
-    (SELECT CAST(c.value_in_use AS int) FROM sys.configurations AS c
-      WHERE c.name = 'blocked process threshold (s)');
+DECLARE @threshold int;
+SELECT @threshold = CAST(c.value_in_use AS int) FROM sys.configurations AS c
+ WHERE c.name = 'blocked process threshold (s)'
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* The session that both subscribes to the event and writes to a file. A session
    capturing to a ring buffer only is not readable this way and is left out
@@ -126,7 +127,8 @@ LEFT JOIN sys.server_event_session_fields  AS f  ON f.event_session_id = s.event
 LEFT JOIN sys.dm_xe_sessions               AS rs ON rs.name = s.name
 LEFT JOIN sys.dm_xe_session_targets        AS rt ON rt.event_session_address = rs.address
                                                 AND rt.target_name = 'event_file'
-ORDER BY CASE WHEN rs.name IS NULL THEN 1 ELSE 0 END, s.event_session_id;
+ORDER BY CASE WHEN rs.name IS NULL THEN 1 ELSE 0 END, s.event_session_id
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* The directory from the running target, the stem from the definition, and a
    wildcard between them so the rollover files come too. When the session is not
@@ -224,7 +226,8 @@ BEGIN
         FROM sys.fn_xe_file_target_read_file(@path, NULL, NULL, NULL) AS t
         CROSS APPLY (SELECT CAST(t.event_data AS xml)) AS e(x)
         OUTER APPLY x.nodes('/event/data[@name="blocked_process"]/value/blocked-process-report') AS b(d)
-        WHERE t.object_name = 'blocked_process_report';
+        WHERE t.object_name = 'blocked_process_report'
+        OPTION (RECOMPILE, MAXDOP 1);
     END TRY
     BEGIN CATCH
         SET @err_number  = ERROR_NUMBER();

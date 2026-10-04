@@ -142,7 +142,8 @@ SELECT @source = CASE
              AND (SELECT COUNT(*) FROM @subs) > 0 THEN 'MSreplication_subscriptions'
         WHEN @apply_procs > 0                     THEN 'apply_procedures'
         WHEN @is_subscribed = 1                   THEN 'is_subscribed'
-        ELSE 'none' END;
+        ELSE 'none' END
+OPTION (RECOMPILE, MAXDOP 1);
 
 SET @applies = CASE WHEN @source = 'none' THEN 0 ELSE 1 END;
 

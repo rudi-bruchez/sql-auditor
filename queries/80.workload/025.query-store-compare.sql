@@ -111,7 +111,8 @@ IF @m > 0 AND @excl_to < @now AND @oldest < @excl_from
     SELECT @side_minutes = MIN(x.minutes) / @m * @m
     FROM (VALUES (DATEDIFF_BIG(second, @excl_to, @now) / 60),
                  (DATEDIFF_BIG(second, @oldest, @excl_from) / 60),
-                 (CAST(10080 AS bigint))) AS x(minutes);
+                 (CAST(10080 AS bigint))) AS x(minutes)
+    OPTION (RECOMPILE, MAXDOP 1);
 
 /* Each interval on one side or none, decided once. Whole intervals only: a
    side never takes a part of an interval, at either end. */

@@ -1524,6 +1524,15 @@ buys is that the sentence `MANIFEST.txt` prints — *nothing on this server is
 created, altered or deleted* — is now something the program checked before the
 run rather than something it asserted afterwards.
 
+The same check holds every statement that reads rows to `OPTION (RECOMPILE,
+MAXDOP 1)`, not only the ones that return a result set: an `INSERT ... SELECT`
+into a `#temp` table, an `UPDATE` or a `DELETE` on one, an assignment from a
+table, and the same statements inside dynamic SQL. A statement that only
+buffers rows can go parallel on a large table like any other, and on a
+200 000-row maintenance log one of the shipped collectors did. A subquery in a
+`DECLARE`, `SET`, `IF` or `WHILE` cannot carry the hint and is refused: assign
+it with `SELECT @x = ... OPTION (RECOMPILE, MAXDOP 1)` and test the variable.
+
 The refusal looks like this, and the run exits `2`:
 
 ```

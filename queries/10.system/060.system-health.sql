@@ -56,11 +56,12 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
-DECLARE @ring xml =
-    (SELECT CAST(t.target_data AS xml)
-       FROM sys.dm_xe_session_targets AS t
-       JOIN sys.dm_xe_sessions AS s ON s.address = t.event_session_address
-      WHERE s.name = 'system_health' AND t.target_name = 'ring_buffer');
+DECLARE @ring xml;
+SELECT @ring = CAST(t.target_data AS xml)
+  FROM sys.dm_xe_session_targets AS t
+  JOIN sys.dm_xe_sessions AS s ON s.address = t.event_session_address
+ WHERE s.name = 'system_health' AND t.target_name = 'ring_buffer'
+OPTION (RECOMPILE, MAXDOP 1);
 
 DECLARE @events TABLE (
     event_name  sysname,
@@ -73,7 +74,8 @@ SELECT
     x.value('@name', 'sysname'),
     x.value('@timestamp', 'datetime2(3)'),
     x.value('(data[@name="error_number"]/value)[1]', 'int')
-FROM @ring.nodes('/RingBufferTarget/event') AS e(x);
+FROM @ring.nodes('/RingBufferTarget/event') AS e(x)
+OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT
     CAST(CASE WHEN @ring IS NULL THEN 0 ELSE 1 END AS bit)      AS [session.running],

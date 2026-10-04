@@ -124,26 +124,29 @@ SET LOCK_TIMEOUT 10000;
    guessing that it is not a secondary. */
 DECLARE @readable_secondary bit = 0, @replica_err int = 0, @replica_msg nvarchar(2048) = N'';
 BEGIN TRY
-    IF EXISTS (SELECT 1
-               FROM sys.databases AS d
-               JOIN sys.dm_hadr_availability_replica_states AS ars
-                 ON ars.replica_id = d.replica_id AND ars.is_local = 1
-               WHERE d.database_id = DB_ID() AND ars.role = 2)
-        SET @readable_secondary = 1;
+    /* Assignments rather than IF EXISTS, which cannot carry the query hint:
+       a SELECT that finds no row leaves the variables as they were. */
+    SELECT @readable_secondary = 1
+    FROM sys.databases AS d
+    JOIN sys.dm_hadr_availability_replica_states AS ars
+      ON ars.replica_id = d.replica_id AND ars.is_local = 1
+    WHERE d.database_id = DB_ID() AND ars.role = 2
+    OPTION (RECOMPILE, MAXDOP 1);
 END TRY
 BEGIN CATCH
-    IF EXISTS (SELECT 1 FROM sys.databases
-               WHERE database_id = DB_ID() AND replica_id IS NOT NULL)
-        SELECT @readable_secondary = 1, @replica_err = ERROR_NUMBER(),
-               @replica_msg = N'availability replica state unreadable, physical reads skipped: '
-                              + ERROR_MESSAGE();
+    SELECT @readable_secondary = 1, @replica_err = ERROR_NUMBER(),
+           @replica_msg = N'availability replica state unreadable, physical reads skipped: '
+                          + ERROR_MESSAGE()
+    FROM sys.databases
+    WHERE database_id = DB_ID() AND replica_id IS NOT NULL
+    OPTION (RECOMPILE, MAXDOP 1);
 END CATCH
 
 DECLARE @top int = 50;
 DECLARE @eligible int = NULL, @indexes_covered int = NULL;
 DECLARE @err int = @replica_err, @msg nvarchar(2048) = @replica_msg;
 DECLARE @batch_started datetime2 = SYSDATETIME(), @budget_sec int = 1500,
-        @measured int = 0, @i int = 1, @skipped_locked int = 0;
+        @measured int = 0, @i int = 1, @skipped_locked int = 0, @candidate_count int = 0;
 DECLARE @obj int, @idx int, @part int;
 DECLARE @candidates TABLE (
     [n]                int IDENTITY(1,1) PRIMARY KEY,
@@ -221,7 +224,7 @@ BEGIN TRY
       AND a.in_row_used_pages > 128
     OPTION (RECOMPILE, MAXDOP 1);
 
-    SELECT @eligible = COUNT(*) FROM @sizes;
+    SELECT @eligible = COUNT(*) FROM @sizes OPTION (RECOMPILE, MAXDOP 1);
 
     INSERT INTO @candidates ([object_id], [index_id], [partition_number],
                              [index_name], [index_type], [fill_factor], [data_compression],
@@ -233,18 +236,25 @@ BEGIN TRY
     FROM @sizes
     ORDER BY [in_row_reserved_pages] DESC, [object_id], [index_id], [partition_number]
     OPTION (RECOMPILE, MAXDOP 1);
+    SET @candidate_count = @@ROWCOUNT;
 END TRY
 BEGIN CATCH
     SELECT @err = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
 END CATCH
 
+/* The loop runs while @i <= @candidate_count, the number of rows the INSERT above put
+   in the candidates. [n] is an IDENTITY filled by that one INSERT, so it runs
+   1 to @candidate_count without a gap, and this is the test EXISTS (SELECT 1 FROM the
+   candidates WHERE [n] = @i) made; but a subquery in a WHILE cannot carry
+   OPTION (RECOMPILE, MAXDOP 1), and the contract wants it on every read. */
 WHILE @err = 0
-      AND EXISTS (SELECT 1 FROM @candidates WHERE [n] = @i)
+      AND @i <= @candidate_count
       AND DATEDIFF(second, @batch_started, SYSDATETIME()) < @budget_sec
 BEGIN
     SELECT @obj = [object_id], @idx = [index_id], @part = [partition_number]
     FROM @candidates
-    WHERE [n] = @i;
+    WHERE [n] = @i
+    OPTION (RECOMPILE, MAXDOP 1);
 
     BEGIN TRY
         /* The DMV is called with scalars, not through a CROSS APPLY filtered on
@@ -287,7 +297,8 @@ END
 END
 
 SELECT @indexes_covered = COUNT(*)
-FROM (SELECT DISTINCT [table], index_id FROM @density) AS d;
+FROM (SELECT DISTINCT [table], index_id FROM @density) AS d
+OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT DB_NAME()                                   AS [database],
        CONVERT(varchar(23), SYSDATETIME(), 126)    AS [collected_at],

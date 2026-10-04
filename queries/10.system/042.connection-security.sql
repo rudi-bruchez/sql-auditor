@@ -151,7 +151,8 @@ FROM sys.dm_exec_connections AS c
 JOIN sys.dm_exec_sessions AS s ON s.session_id = c.session_id
 WHERE s.is_user_process = 1
   AND c.net_transport <> N'Session'
-GROUP BY s.host_name, s.program_name, s.login_name;
+GROUP BY s.host_name, s.program_name, s.login_name
+OPTION (RECOMPILE, MAXDOP 1);
 
 SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                 AS [collected_at],
        CASE WHEN @registry_rows > 0 THEN 1 ELSE 0 END           AS [registry_readable],

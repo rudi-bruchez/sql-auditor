@@ -239,18 +239,9 @@ var (
 	// The auditor contract, as patterns. Whitespace is loose because the
 	// contract is about what the server is asked to do, not about how the
 	// author laid the statement out.
-	nocountPattern    = regexp.MustCompile(`(?i)\bSET\s+NOCOUNT\s+ON\b`)
-	isolationPattern  = regexp.MustCompile(`(?i)\bSET\s+TRANSACTION\s+ISOLATION\s+LEVEL\s+READ\s+UNCOMMITTED\b`)
-	lockTimeoutPatt   = regexp.MustCompile(`(?i)\bSET\s+LOCK_TIMEOUT\s+(\d+)\b`)
-	queryHintPattern  = regexp.MustCompile(`(?i)\bOPTION\s*\(\s*RECOMPILE\s*,\s*MAXDOP\s+1\s*\)`)
-	optionWordPattern = regexp.MustCompile(`(?i)\bOPTION\s*\(`)
-
-	// The two kinds of hinted statement that return no rows, and the only
-	// two the corpus contains: a SELECT that assigns into a variable, and an
-	// INSERT that buffers a read into a table variable or a #temp table (the
-	// guard pattern of the blockable collectors). See emittingStatements.
-	assignmentPattern = regexp.MustCompile(`(?is)\bSELECT\s+@\w+\s*=`)
-	bufferingPattern  = regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+[@#]\w+`)
+	nocountPattern   = regexp.MustCompile(`(?i)\bSET\s+NOCOUNT\s+ON\b`)
+	isolationPattern = regexp.MustCompile(`(?i)\bSET\s+TRANSACTION\s+ISOLATION\s+LEVEL\s+READ\s+UNCOMMITTED\b`)
+	lockTimeoutPatt  = regexp.MustCompile(`(?i)\bSET\s+LOCK_TIMEOUT\s+(\d+)\b`)
 )
 
 // Discover walks root, parses header directives and lints each file. Lint
@@ -1046,19 +1037,12 @@ func lint(sql string, results []ResultSpec) string {
 	if msg := statementLint(stripped); msg != "" {
 		return msg
 	}
-	// Blanked, because contractLint counts hints against the number of declared
-	// result sets and a hint inside dynamic SQL emits nothing. The guard pattern
-	// repeats the hint in every sp_executesql string, so 042 offered seventeen
-	// hints for seven result sets when this was measured (twenty-five for nine
-	// since the agent profiles were added), and the raw count passes with
-	// enough slack to hide several missing ones on the statements that really
-	// do emit. Blanking leaves a count that can still fail.
-	return contractLint(BlankSQLStrings(stripped), results)
+	return contractLint(stripped, results)
 }
 
 // contractLint enforces the auditor contract: every collector runs with
-// NOCOUNT on, at READ UNCOMMITTED, and with OPTION (RECOMPILE, MAXDOP 1) on
-// every statement that returns rows.
+// NOCOUNT on, at READ UNCOMMITTED, with a bounded LOCK_TIMEOUT, and with
+// OPTION (RECOMPILE, MAXDOP 1) on every statement that can read rows.
 //
 // It exists because the fourteen files in the corpus comply by review rather
 // than by rule, and review does not scale to the fifteenth. The rule is the
@@ -1073,22 +1057,56 @@ func lint(sql string, results []ResultSpec) string {
 // Sch-S holds up every reader of the table behind it; that is what the
 // blocking watch in watch.go is for.
 //
-// The OPTION check is an approximation and is deliberately a weak one: telling
-// a rowset-producing statement from an assignment or a DECLARE needs a SQL
-// parser, which this program does not have. Instead it requires at least as
-// many OPTION (RECOMPILE, MAXDOP 1) clauses as there are declared result sets.
-// That cannot pass a file which omits one from a SELECT — every result set
-// needs its own — but it can pass a file that puts two hints on one statement
-// and none on another. It catches the omission that actually happens: an
-// author appending a result set and forgetting the hint.
+// THE HINT is checked as two separate rules, by the statement scanner of
+// hintlint.go.
 //
-// A second count then runs the other way: the hinted statements that return
-// rows, as emittingStatements tells them apart, must equal the declared result
-// sets. The first count alone could not see a declaration removed from
-// @resultsets, since the hints stay; only the runner did, at execution.
+// First, every statement that can read rows carries it: a SELECT that returns
+// rows or reads a table (an assignment included), SELECT ... INTO, INSERT ...
+// SELECT, UPDATE, DELETE and MERGE, whether the target is a table variable or
+// a #temp table or the client. That holds in the code and inside every literal
+// the file executes as dynamic SQL. A statement that only buffers into a work
+// table is as able to go parallel as one that emits, and whether it does
+// depends on the client's data volume, which no review of the file can know.
+// This was the defect of the first form of the rule, which counted hints
+// against @resultsets and so never saw a buffering statement: measured on SQL
+// Server 2025, 050.commandlog.sql's unhinted INSERT INTO #sel compiled at DOP
+// 22 over a 200 000-row CommandLog.
+//
+// A subquery standing where no statement can carry the hint (DECLARE @x =
+// (SELECT ...), SET @x = (SELECT ...), IF EXISTS (SELECT ...), WHILE (SELECT
+// ...)) is refused, and is written as SELECT @x = ... OPTION (RECOMPILE,
+// MAXDOP 1) followed by a test of the variable.
+//
+// What the rule does not reach, and why that is bounded:
+//
+//   - INSERT ... EXEC cannot take an OPTION clause. What it executes is either
+//     a literal handed to sp_executesql, checked by the same rule, or one of
+//     the procedures statementLint allows, whose own statements this program
+//     cannot hint. The error log readers read files, not tables. The Agent job
+//     history reads msdb's sysjobhistory, whose size the Agent's retention
+//     setting bounds. sp_estimate_data_compression_savings does sample user
+//     tables, and may go parallel doing it; that is one reason it only runs
+//     under --estimate-compression, on the twenty largest candidates.
+//   - A function in an expression reads without a SELECT: OBJECT_ID,
+//     FILEPROPERTY, HAS_PERMS_BY_NAME and the like. They are metadata lookups
+//     that compile no plan of their own, so there is nothing to parallelise.
+//   - The scanner is not a parser. What it misreads it reports as a statement
+//     without the hint, or as a count of result sets that disagrees, so the
+//     failure is a refused file and never a passed one; but a construct it has
+//     never met could in principle be skipped, and the corpus is what it was
+//     measured on.
+//
+// Second, the statements that return rows to the client, as the scanner
+// tells them apart, must equal the declared result sets. A hinted DELETE,
+// UPDATE, INSERT ... SELECT or SELECT ... INTO returns nothing and counts
+// toward the first rule only; before the two were separated, a hinted DELETE
+// on a table variable failed the lint as a result set too many, which is why
+// files left them bare.
 //
 // sql must already have had its comments stripped, or a file explaining why it
-// removed a hint would satisfy the check by talking about it.
+// removed a hint would satisfy the check by talking about it. Literals are
+// blanked here, so a hint inside dynamic SQL is credited to the dynamic
+// statement and to nothing in the code around it.
 func contractLint(sql string, results []ResultSpec) string {
 	if !nocountPattern.MatchString(sql) {
 		return "missing SET NOCOUNT ON: rowcount messages travel in the result stream and the collector must not emit them"
@@ -1124,64 +1142,57 @@ func contractLint(sql string, results []ResultSpec) string {
 		return fmt.Sprintf("SET LOCK_TIMEOUT %s: the contract allows at most %d milliseconds, and never 0 or -1 — a collector that waits indefinitely on a lock is the defect this setting exists to prevent",
 			m[1], maxLockTimeoutMS)
 	}
-	hints := len(queryHintPattern.FindAllString(sql, -1))
-	if hints < len(results) {
-		// A malformed hint is the likelier mistake once one is present at all,
-		// so say which of the two problems this is.
-		if len(optionWordPattern.FindAllString(sql, -1)) > hints {
-			return fmt.Sprintf("every result set needs OPTION (RECOMPILE, MAXDOP 1) written exactly so; "+
-				"found %d of the %d declared in @resultsets, and at least one OPTION clause in another form",
-				hints, len(results))
-		}
-		return fmt.Sprintf("every result set needs OPTION (RECOMPILE, MAXDOP 1); found %d for the %d declared in @resultsets",
-			hints, len(results))
+	code := BlankSQLStrings(sql)
+	stmts, msg := hintLint(code)
+	if msg != "" {
+		return msg
 	}
-	// Enough hints is not the same as the right number of result sets. A file
-	// that drops an entry from @resultsets keeps its hints and passed the count
-	// above; the runner then refused it at execution, with "returned more
-	// result sets than declared", and no test saw it first.
-	switch emit := emittingStatements(sql); {
+	for _, lit := range executedLiterals(normalizeSeparators(sql)) {
+		if msg := dynamicHintLint(lit, 1); msg != "" {
+			return msg
+		}
+	}
+	emit := 0
+	for _, s := range stmts {
+		if s.emits() {
+			emit++
+		}
+	}
+	// Every emitting statement is hinted by now, so this is the count of
+	// hinted statements that return rows. A file that drops an entry from
+	// @resultsets used to pass a hint count and be refused by the runner at
+	// execution, with "returned more result sets than declared".
+	switch {
 	case emit > len(results):
 		return fmt.Sprintf("%d hinted statements return rows but @resultsets declares %d: "+
 			"declare every result set the file emits, in order, or the runner refuses the extra one at execution",
 			emit, len(results))
 	case emit < len(results):
 		return fmt.Sprintf("@resultsets declares %d result sets but only %d hinted statements return rows "+
-			"(a SELECT @var = assignment and an INSERT INTO @table or #temp emit nothing): "+
+			"(an assignment, SELECT ... INTO, and an INSERT, UPDATE or DELETE without OUTPUT emit nothing): "+
 			"remove the extra declaration, or give the statement that emits it its own OPTION (RECOMPILE, MAXDOP 1)",
 			len(results), emit)
 	}
 	return ""
 }
 
-// emittingStatements counts the hinted statements that return rows: each
-// OPTION (RECOMPILE, MAXDOP 1), less those whose statement assigns into a
-// variable or buffers into a table variable or #temp table. The statement that
-// owns a hint is taken as the text after the last ";" before it, the same
-// approximation TestEmbeddedCorpusHasNoTopLevelKeyCollision makes.
-//
-// It is not a parser and does not try to be one. It was measured on the
-// embedded corpus when it was introduced: raw hints matched the declared
-// result sets in 80 of 114 files, and this count matched in all 114. The ways
-// it can be wrong are loud rather than silent: an IF that emits from both
-// branches, or a buffering INSERT and an emitting SELECT with no ";" between
-// them, make the count disagree and the lint fail, never pass a file it
-// should refuse.
-//
-// sql must already be comment-stripped and string-blanked, as contractLint's
-// input is, so a hint inside dynamic SQL is not counted.
-func emittingStatements(sql string) int {
-	n, prev := 0, 0
-	for _, loc := range queryHintPattern.FindAllStringIndex(sql, -1) {
-		chunk := sql[prev:loc[0]]
-		prev = loc[1]
-		stmt := chunk[strings.LastIndex(chunk, ";")+1:]
-		if assignmentPattern.MatchString(stmt) || bufferingPattern.MatchString(stmt) {
-			continue
-		}
-		n++
+// dynamicHintLint applies the first hint rule to a literal the file executes,
+// and to the literals that one executes in turn. statementLint has already
+// bounded the nesting, so depth only guards against a text it did not see.
+func dynamicHintLint(lit string, depth int) string {
+	if depth > maxDynamicDepth {
+		return ""
 	}
-	return n
+	sql := normalizeSeparators(StripSQLComments(lit))
+	if _, msg := hintLint(BlankSQLStrings(sql)); msg != "" {
+		return msg + " (inside the dynamic SQL this file executes)"
+	}
+	for _, inner := range executedLiterals(sql) {
+		if msg := dynamicHintLint(inner, depth+1); msg != "" {
+			return msg
+		}
+	}
+	return ""
 }
 
 // BlankSQLStrings replaces the contents of single-quoted literals with spaces,

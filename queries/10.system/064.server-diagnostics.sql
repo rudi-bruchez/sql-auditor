@@ -160,11 +160,12 @@ SET LOCK_TIMEOUT 10000;
 
 DECLARE @err_diag int = 0, @msg nvarchar(2048) = N'';
 
-DECLARE @ring xml =
-    (SELECT CAST(t.target_data AS xml)
-       FROM sys.dm_xe_session_targets AS t
-       JOIN sys.dm_xe_sessions AS s ON s.address = t.event_session_address
-      WHERE s.name = 'system_health' AND t.target_name = 'ring_buffer');
+DECLARE @ring xml;
+SELECT @ring = CAST(t.target_data AS xml)
+  FROM sys.dm_xe_session_targets AS t
+  JOIN sys.dm_xe_sessions AS s ON s.address = t.event_session_address
+ WHERE s.name = 'system_health' AND t.target_name = 'ring_buffer'
+OPTION (RECOMPILE, MAXDOP 1);
 
 DECLARE @intervals TABLE (
     [event_time]                datetime2(0) PRIMARY KEY,

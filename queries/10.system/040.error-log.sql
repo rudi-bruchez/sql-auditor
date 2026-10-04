@@ -73,7 +73,7 @@ DECLARE @size_limit bigint = 52428800, @log_bytes bigint = NULL,
 CREATE TABLE #logs (archive int, log_date nvarchar(64), size_bytes bigint);
 BEGIN TRY
     INSERT INTO #logs (archive, log_date, size_bytes) EXEC sys.sp_enumerrorlogs;
-    SELECT @log_bytes = size_bytes FROM #logs WHERE archive = 0;
+    SELECT @log_bytes = size_bytes FROM #logs WHERE archive = 0 OPTION (RECOMPILE, MAXDOP 1);
     IF @log_bytes IS NULL
         SET @size_msg = N'sys.sp_enumerrorlogs returned no size for the current log (archive 0)';
 END TRY
@@ -250,7 +250,8 @@ CREATE TABLE #frag (message_id int, language_id int, seq int, ordinal int, fstar
 CREATE TABLE #tally (n int PRIMARY KEY);
 INSERT INTO #tally (n)
 SELECT TOP (2048) CONVERT(int, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)))
-FROM sys.all_objects AS a CROSS JOIN sys.all_objects AS b;
+FROM sys.all_objects AS a CROSS JOIN sys.all_objects AS b
+OPTION (RECOMPILE, MAXDOP 1);
 
 WITH tpl AS (
     SELECT m.message_id, m.language_id,
@@ -306,7 +307,8 @@ SELECT e.message_id, e.language_id, e.seq,
 FROM       edge AS e
 JOIN       tpl  AS t ON t.message_id = e.message_id AND t.language_id = e.language_id
 CROSS APPLY (SELECT frag = CONVERT(nvarchar(2048), SUBSTRING(t.tmpl, e.fstart,
-                 CASE WHEN e.fend - e.fstart > 0 THEN e.fend - e.fstart ELSE 0 END))) AS f;
+                 CASE WHEN e.fend - e.fstart > 0 THEN e.fend - e.fstart ELSE 0 END))) AS f
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* The language, by verification against the lines that are actually there.
    Only the longest usable fragment of each message is tried: an earlier
@@ -324,7 +326,8 @@ SELECT @lang = COALESCE((
     JOIN #log AS l ON l.Txt COLLATE Latin1_General_BIN2 LIKE N'%' + f.esc + N'%' ESCAPE N'\'
     WHERE f.rn = 1
     GROUP BY f.language_id
-    ORDER BY COUNT(*) DESC, CASE WHEN f.language_id = 1033 THEN 0 ELSE 1 END, f.language_id), 1033);
+    ORDER BY COUNT(*) DESC, CASE WHEN f.language_id = 1033 THEN 0 ELSE 1 END, f.language_id), 1033)
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* One copy of the retained language's catalog, in the binary collation, so
    the uniqueness check below reads 16 750 rows instead of 368 500. */
@@ -332,7 +335,8 @@ CREATE TABLE #cat (message_id int, txt nvarchar(2048) COLLATE Latin1_General_BIN
 INSERT INTO #cat (message_id, txt)
 SELECT k.message_id, CONVERT(nvarchar(2048), k.text)
 FROM sys.messages AS k
-WHERE k.language_id = @lang;
+WHERE k.language_id = @lang
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* The candidates, and how many messages of this catalog each one matches.
    The WHERE line carrying CHARINDEX(N'%', ...) is requirement 3: a fragment
@@ -349,7 +353,8 @@ FROM #frag AS f
 WHERE f.language_id = @lang
   AND f.message_id <> @header
   AND DATALENGTH(f.frag) > 0
-  AND CHARINDEX(N'%', f.frag) = 0;
+  AND CHARINDEX(N'%', f.frag) = 0
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* The delimiters of every parameter, which is what an extraction needs and a
    unique fragment does not give. The left literal is empty for parameter 1 of
@@ -370,7 +375,8 @@ FROM (SELECT a.message_id, a.ordinal, lit_left = a.frag, pos_left = a.fstart,
                      AND b.language_id = a.language_id
                      AND b.seq = a.seq + 1
       WHERE a.language_id = @lang) AS z
-WHERE z.rn = 1;
+WHERE z.rn = 1
+OPTION (RECOMPILE, MAXDOP 1);
 
 DECLARE @derived TABLE (message_id int, language_id int, template nvarchar(2048),
                         fragment nvarchar(2048), pattern nvarchar(4000),
@@ -413,7 +419,8 @@ OUTER APPLY (SELECT TOP (1) u.frag, u.esc, u.hits
              WHERE u.message_id = w.message_id AND u.hits = 1
              ORDER BY u.flen DESC, u.seq) AS best
 LEFT JOIN @bounds AS b ON b.message_id = w.message_id AND b.ordinal = 1
-LEFT JOIN @bounds AS h ON h.message_id = @header AND h.ordinal = 1;
+LEFT JOIN @bounds AS h ON h.message_id = @header AND h.ordinal = 1
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* notable reads these two, and the recovery set below reads the delimiters of
    3421. Parameter 3 of 3421 is the elapsed seconds in every language: the
@@ -423,7 +430,8 @@ DECLARE @p9017 nvarchar(4000), @p3421 nvarchar(4000), @p17137 nvarchar(4000);
 SELECT @p9017  = MAX(CASE WHEN message_id = 9017  THEN pattern END),
        @p3421  = MAX(CASE WHEN message_id = 3421  THEN pattern END),
        @p17137 = MAX(CASE WHEN message_id = 17137 THEN pattern END)
-FROM @derived;
+FROM @derived
+OPTION (RECOMPILE, MAXDOP 1);
 
 DECLARE @db_left nvarchar(2048), @db_right nvarchar(2048),
         @sec_left nvarchar(2048), @sec_right nvarchar(2048),
@@ -431,15 +439,20 @@ DECLARE @db_left nvarchar(2048), @db_right nvarchar(2048),
         @vlf_left nvarchar(2048), @vlf_right nvarchar(2048),
         @cnt_left nvarchar(2048), @cnt_right nvarchar(2048);
 SELECT @db_left = lit_left, @db_right = lit_right
-FROM @bounds WHERE message_id = 3421 AND ordinal = 1;
+FROM @bounds WHERE message_id = 3421 AND ordinal = 1
+OPTION (RECOMPILE, MAXDOP 1);
 SELECT @sec_left = lit_left, @sec_right = lit_right
-FROM @bounds WHERE message_id = 3421 AND ordinal = 3;
+FROM @bounds WHERE message_id = 3421 AND ordinal = 3
+OPTION (RECOMPILE, MAXDOP 1);
 SELECT @mnt_left = lit_left, @mnt_right = lit_right
-FROM @bounds WHERE message_id = 17137 AND ordinal = 1;
+FROM @bounds WHERE message_id = 17137 AND ordinal = 1
+OPTION (RECOMPILE, MAXDOP 1);
 SELECT @vlf_left = lit_left, @vlf_right = lit_right
-FROM @bounds WHERE message_id = 9017 AND ordinal = 1;
+FROM @bounds WHERE message_id = 9017 AND ordinal = 1
+OPTION (RECOMPILE, MAXDOP 1);
 SELECT @cnt_left = lit_left, @cnt_right = lit_right
-FROM @bounds WHERE message_id = 9017 AND ordinal = 2;
+FROM @bounds WHERE message_id = 9017 AND ordinal = 2
+OPTION (RECOMPILE, MAXDOP 1);
 
 /* The lines notable emits further down, kept here first and in full, so that
    status can say how many matched before the cap: notable_matched against

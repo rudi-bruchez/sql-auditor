@@ -429,11 +429,14 @@ OPTION (RECOMPILE, MAXDOP 1);
    The extra row is then dropped and never read. A store holding exactly @cap
    plans reports truncated 0, which is the truth; the previous test, cap
    reached therefore truncated, called a complete scan partial. */
-DECLARE @cap_reached bit = CASE WHEN (SELECT COUNT_BIG(*) FROM @scan) > @cap THEN 1 ELSE 0 END;
-DELETE FROM @scan WHERE rn > @cap;
+DECLARE @scanned bigint;
+SELECT @scanned = COUNT_BIG(*) FROM @scan OPTION (RECOMPILE, MAXDOP 1);
+DECLARE @cap_reached bit = CASE WHEN @scanned > @cap THEN 1 ELSE 0 END;
+DELETE FROM @scan WHERE rn > @cap OPTION (RECOMPILE, MAXDOP 1);
 
-DECLARE @plans_selected bigint = (SELECT COUNT_BIG(*) FROM @scan);
-DECLARE @plans_total    bigint = (SELECT COUNT_BIG(*) FROM sys.query_store_plan);
+DECLARE @plans_selected bigint, @plans_total bigint;
+SELECT @plans_selected = COUNT_BIG(*) FROM @scan OPTION (RECOMPILE, MAXDOP 1);
+SELECT @plans_total = COUNT_BIG(*) FROM sys.query_store_plan OPTION (RECOMPILE, MAXDOP 1);
 
 /* ───────── the fragments, a hundred plans at a time, within the budget ─────────
    Three statements per chunk. The first measures the plans of the chunk,
@@ -494,11 +497,13 @@ BEGIN
           WHERE s.rn >= @lo AND s.rn < @lo + @chunk) AS z
     OPTION (RECOMPILE, MAXDOP 1);
 
-    SET @spent = @spent + ISNULL((SELECT SUM(z.plan_bytes) FROM @sized AS z
-                                  WHERE z.rn >= @lo AND z.rn < @lo + @chunk
-                                    AND z.is_read = 1), 0);
+    SELECT @spent = @spent + ISNULL(SUM(z.plan_bytes), 0)
+    FROM @sized AS z
+    WHERE z.rn >= @lo AND z.rn < @lo + @chunk
+      AND z.is_read = 1
+    OPTION (RECOMPILE, MAXDOP 1);
 
-    DELETE FROM @plan;
+    DELETE FROM @plan OPTION (RECOMPILE, MAXDOP 1);
     INSERT INTO @plan (plan_id, x)
     SELECT s.plan_id,
            TRY_CAST(p.query_plan AS xml)
@@ -524,14 +529,15 @@ BEGIN
 
     SET @lo = @lo + @chunk;
 END
-DELETE FROM @plan;
+DELETE FROM @plan OPTION (RECOMPILE, MAXDOP 1);
 
 DECLARE @finished datetime2(3) = SYSDATETIME();
 
 /* Plans the budget let through, and those it did not. A plan never sized
    because the loop stopped before its chunk is a plan not read, like one
    sized and refused. */
-DECLARE @plans_read    bigint = (SELECT COUNT_BIG(*) FROM @sized WHERE is_read = 1);
+DECLARE @plans_read    bigint;
+SELECT @plans_read = COUNT_BIG(*) FROM @sized WHERE is_read = 1 OPTION (RECOMPILE, MAXDOP 1);
 DECLARE @plans_skipped bigint = @plans_selected - @plans_read;
 
 /* Plans whose XML actually parsed. It is @plans_read on every instance
@@ -539,7 +545,8 @@ DECLARE @plans_skipped bigint = @plans_selected - @plans_read;
    or where a plan left the store between the pin and its chunk, and reporting
    the count that was really read is what keeps the share below honest when
    that happens. */
-DECLARE @plans_examined bigint = (SELECT COUNT_BIG(*) FROM @frag);
+DECLARE @plans_examined bigint;
+SELECT @plans_examined = COUNT_BIG(*) FROM @frag OPTION (RECOMPILE, MAXDOP 1);
 
 /* truncated is the one bit for a reader who checks nothing else: the store
    held plans this run did not read, because the cap left them out of the pin
