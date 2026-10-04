@@ -184,8 +184,15 @@ OPTION (RECOMPILE, MAXDOP 1);
 /* Every internal table, not only the tracking ones. They share one property
    that makes them worth listing together: none of them appears in an object
    inventory, so all of them can hold space that nothing accounts for. The
-   type says which feature is responsible. */
-SELECT TOP (200)
+   type says which feature is responsible.
+
+   Every one that holds a page, with no cap. There was a TOP (200) here, with
+   no reason stated and no count of the non-empty ones beside it
+   (counts.internal_tables_all counts the empty ones too), so a list of 200
+   could not say whether it was complete. The view holds tens of rows in
+   practice, 48 in master on a lab instance, most of them empty and filtered
+   out by the used_mb predicate below. */
+SELECT
     it.internal_type_desc                                       AS [type],
     it.name                                                     AS [name],
     CASE WHEN it.parent_id > 0
