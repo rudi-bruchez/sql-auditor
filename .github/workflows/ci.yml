@@ -631,32 +631,48 @@ jobs:
           # 020, 023 and 024 cap their listings at listing_cap and carry the
           # population the listing is taken from, so that a listing cut by the
           # cap reads as the head of the store. ci_probe's store is far below
-          # the cap, so each listing must hold its whole population: a count
-          # that lost its population, or a listing cut short of it, fails.
-          # 020's counts.queries includes queries with no runtime statistics
-          # left, which no listing ranks, hence <= there.
+          # the cap, so each listing must hold at least its population: a
+          # listing cut short of it fails, and so does a count that went
+          # missing (null would pass a comparison, hence the type checks).
+          # At least, not exactly: the store captures ALL, so the collector's
+          # own root statement enters it before the listing is read. Measured
+          # on SQL Server 2025 with a fresh store: 023 counted 8 queries and
+          # listed 9, 024 counted 12 and listed 13; a second run, the
+          # collector's statements already known, matched exactly. 020's
+          # counts.queries also holds queries with no runtime statistics,
+          # which no listing ranks, so only the cap bounds its listings.
           jq -e '.listing_cap == 200
+                 and (.counts.queries | type) == "number"
+                 and (.counts.query_hashes | type) == "number"
                  and (.top_queries | length) >= 1
-                 and (.top_queries | length) <= ([.counts.queries, .listing_cap] | min)
-                 and (.by_query_hash | length) <= ([.counts.query_hashes, .listing_cap] | min)' \
+                 and (.top_queries | length) <= .listing_cap
+                 and (.by_query_hash | length) <= .listing_cap' \
             "$run_dir/80.workload/ci_probe/020.query-store.json" \
             || { jq 'del(.top_queries, .by_query_hash)' "$run_dir/80.workload/ci_probe/020.query-store.json"; exit 1; }
-          jq -e '.listing_cap == 200 and .counts.queries >= 1
-                 and (.by_query | length) == ([.counts.queries, .listing_cap] | min)
-                 and (.by_query_hash | length) == ([.counts.query_hashes, .listing_cap] | min)' \
+          jq -e '.listing_cap == 200
+                 and (.counts.queries | type) == "number" and .counts.queries >= 1
+                 and (.counts.query_hashes | type) == "number"
+                 and (.by_query | length) >= ([.counts.queries, .listing_cap] | min)
+                 and (.by_query | length) <= .listing_cap
+                 and (.by_query_hash | length) >= ([.counts.query_hashes, .listing_cap] | min)
+                 and (.by_query_hash | length) <= .listing_cap' \
             "$run_dir/80.workload/ci_probe/023.query-store-most-executed.json" \
             || { jq '{listing_cap, counts, by_query: (.by_query | length), by_query_hash: (.by_query_hash | length)}' \
                    "$run_dir/80.workload/ci_probe/023.query-store-most-executed.json"; exit 1; }
-          jq -e '.listing_cap == 200 and .counts.queries >= 1
-                 and (.by_query | length) == ([.counts.queries, .listing_cap] | min)' \
+          jq -e '.listing_cap == 200
+                 and (.counts.queries | type) == "number" and .counts.queries >= 1
+                 and (.by_query | length) >= ([.counts.queries, .listing_cap] | min)
+                 and (.by_query | length) <= .listing_cap' \
             "$run_dir/80.workload/ci_probe/024.query-store-rowcount.json" \
             || { jq 'del(.by_query)' "$run_dir/80.workload/ci_probe/024.query-store-rowcount.json"; exit 1; }
           # 026, 028 and 060 cap their listings the same way. 026's root
           # counts the queries behind each listing, 028's the queries above
           # zero on at least one of its four measures, 060's the spilling
           # statements; each listing must be its population up to the cap.
-          # 060 compares with <= because the spill counters move between its
-          # two reads of the cache.
+          # The collector's own statements neither abort nor fail, and 028
+          # counts and lists in one statement, so these two are exact; 060
+          # compares with <= because the spill counters move between its two
+          # reads of the cache.
           jq -e '.listing_cap == 200
                  and (.aborted | length) == ([.queries.with_aborted, .listing_cap] | min)
                  and (.exceptions | length) == ([.queries.with_exception, .listing_cap] | min)' \
