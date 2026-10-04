@@ -151,7 +151,8 @@ DECLARE @hist TABLE ([leg] varchar(40), [agent_id] int, [runstatus] int,
                      [last_comment] nvarchar(512) NULL);
 
 DECLARE @errs TABLE ([id] int, [time] datetime, [error_code] sysname NULL,
-                     [error_text] nvarchar(512) NULL, [source_type_id] int NULL);
+                     [error_text] nvarchar(512) NULL, [source_type_id] int NULL,
+                     [in_window] int NULL);
 
 DECLARE @size TABLE ([table_name] sysname, [row_count] bigint);
 IF @applies = 1
@@ -347,11 +348,18 @@ BEGIN
     BEGIN CATCH
         SELECT @err_hist = ERROR_NUMBER(), @msg = ERROR_MESSAGE();
     END CATCH
+    /* The 50 newest errors of the window, and how many the window held.
+       COUNT(*) OVER () is computed before the TOP, so the count rides on the
+       read that lists the rows and costs no second pass over MSrepl_errors.
+       Without it, 50 rows read as "50 errors in seven days" whether the
+       window held 50 or 50 000, and an analysis counting the array writes
+       exactly that sentence. The listing stays at 50, which is enough to
+       name the errors; it is the count that says how often. */
     BEGIN TRY
         INSERT INTO @errs
         EXEC sys.sp_executesql N'
             SELECT TOP (50) e.id, e.[time], e.error_code, LEFT(CONVERT(nvarchar(4000), e.error_text), 512),
-                   e.source_type_id
+                   e.source_type_id, COUNT(*) OVER ()
             FROM dbo.MSrepl_errors AS e
             WHERE e.[time] >= DATEADD(day, -@days, GETDATE())
             ORDER BY e.[time] DESC
@@ -434,6 +442,13 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)     AS [collected_at],
        (SELECT COUNT(*) FROM @pubs)                 AS [counts.publications],
        (SELECT COUNT(*) FROM @arts)                 AS [counts.articles],
        (SELECT COUNT(*) FROM @agents)               AS [counts.agents],
+       /* Every error of the window, not the 50 listed in repl_errors. NULL
+          when MSrepl_errors could not be read; 0 when it was and the window
+          held none. */
+       CASE WHEN @applies = 0 OR @err_errs <> 0 THEN NULL
+            ELSE ISNULL((SELECT MAX([in_window]) FROM @errs), 0)
+       END                                          AS [counts.repl_errors_in_window],
+       50                                           AS [repl_errors_listing_cap],
        /* The number this section exists for: agents that skip errors, by
           their profile or their job step. A count above zero stands whatever
           else failed, as a floor. Zero is only emitted when the agents, the
