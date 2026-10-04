@@ -2031,29 +2031,20 @@ func queryStoreUnits(cfg *Config, s Script, folders []DatabaseFolder) ([]Databas
 func discloseWrites(m *Manifest, rw *runWriter, s Script, res WriteResult) {
 	if rw.takeShowplan() {
 		m.Collected.QueryStoreDetail = true
-		// The latch stays as it is, and the instruction goes.
-		//
-		// The check is over the bytes written, and it is deliberately coarse:
-		// over-disclosure is the safe side, so a payload that merely carries the
-		// Showplan namespace latches the disclosure. But the namespace reaches a
-		// payload two ways. It is in a plan, and it is also in captured
-		// application SQL — 020 and 023 put up to 500 characters of collected
-		// query text into their JSON, and a query written with the standard
-		// WITH XMLNAMESPACES('…/showplan' AS p) idiom, common in exactly the
-		// workloads whose Query Store is being read, puts those bytes there
-		// verbatim. Telling the operator to add @requires_flag to a collector
-		// that emits no plan is an instruction that cannot be right in that
-		// case, and it names the wrong file. So the warning reports the
-		// observation and leaves the reading of it to whoever knows the corpus.
+		// The check reads the root element of a plan, not the namespace alone
+		// (see containsShowplan): until 4 October 2026 it matched the namespace
+		// anywhere, and query text that merely named it, in a WITH
+		// XMLNAMESPACES clause kept by 020 or 023, latched this disclosure on
+		// a default run and raised this warning once per database. What is
+		// left is a real plan root, or text holding a whole plan as a literal,
+		// which is rare enough to read the file for.
 		if s.RequiresFlag == "" {
-			m.Warnings = append(m.Warnings, fmt.Sprintf(
-				"%s: a payload written by this collector carries the Showplan XML namespace, "+
-					"and the script declares no @requires_flag. The archive discloses execution "+
-					"plans on that basis, which is the safe side of the check. Two things look "+
-					"alike here: the collector really emits plan XML, or it collected query text "+
-					"that itself mentions the namespace (WITH XMLNAMESPACES over a plan is an "+
-					"ordinary thing for an audited query to do). Read the file before concluding "+
-					"the corpus emits plans by default.",
+			m.warn(fmt.Sprintf(
+				"%s: a payload written by this collector carries the root element of an "+
+					"execution plan (Showplan XML), and the script declares no @requires_flag. "+
+					"The archive discloses execution plans on that basis. Read the file: "+
+					"either the collector emits plan XML by default and should be gated, or "+
+					"it collected text that holds a whole plan as a literal.",
 				s.Path))
 		}
 	}
@@ -2140,7 +2131,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	var watch *blockingWatch
 	finish := func(runFolder string, code int) (int, error) {
 		m.BlockingWatch.Stopped = watch.stoppedReason()
-		m.Warnings = append(m.Warnings, watch.warnings()...)
+		m.warn(watch.warnings()...)
 		m.Run.FinishedUTC = nowUTC()
 		m.Run.DurationSec = int(time.Since(started).Seconds())
 		m.Run.ExitCode = code
@@ -2299,7 +2290,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// that belongs in the archive as much as on the operator's screen — the
 	// person reviewing the manifest is the one who cares which login ran it.
 	if excess := si.ExcessPrivilege(); excess != "" {
-		m.Warnings = append(m.Warnings, excess)
+		m.warn(excess)
 		fmt.Fprintf(o.progress(), "note: %s\n", excess)
 	}
 
@@ -2317,7 +2308,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		return finishWith("", 2, err)
 	}
 	if windowNote != "" {
-		m.Warnings = append(m.Warnings, windowNote)
+		m.warn(windowNote)
 	}
 	o.QueryStore.From, o.QueryStore.To = windowFrom, windowTo
 	if o.QueryStoreCompareAt != "" {
@@ -2379,7 +2370,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// forbids it — so this is a --queries-dir corpus. The archive is
 		// disclosed correctly either way; the warning is so the operator
 		// learns their corpus is collecting more than the flag suggests.
-		m.Warnings = append(m.Warnings, fmt.Sprintf(
+		m.warn(fmt.Sprintf(
 			"%s reads sys.dm_exec_sql_text without declaring @requires_flag: %s. "+
 				"This archive contains session statement text and says so, but the "+
 				"query should carry the gate so the default run does not collect it.",
@@ -2394,7 +2385,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		if !readsObjectDefinitions(p.Script) {
 			continue
 		}
-		m.Warnings = append(m.Warnings, fmt.Sprintf(
+		m.warn(fmt.Sprintf(
 			"%s reads module definitions without declaring @requires_flag: %s. "+
 				"If it exports them, this archive holds source code written here — which "+
 				"can name linked servers and embed credentials — and the query should carry "+
@@ -2471,7 +2462,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	}
 	m.BlockingWatch.Enabled, m.BlockingWatch.Reason = watch != nil, reason
 	if watch == nil {
-		m.Warnings = append(m.Warnings, "the blocking watch is off, "+reason+
+		m.warn("the blocking watch is off, "+reason+
 			": nothing will cancel a collector that other sessions are waiting on")
 		fmt.Fprintf(o.progress(), "note: the blocking watch is off, %s\n", reason)
 	}
@@ -2626,7 +2617,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	if discardPrevious {
 		if keptBecause = previousRunLost(superseded, m); keptBecause != "" {
 			discardPrevious = false
-			m.Warnings = append(m.Warnings, keptBecause+", so the run it replaced was kept at "+
+			m.warn(keptBecause+", so the run it replaced was kept at "+
 				strings.Join(superseded, " and "))
 		}
 	}
@@ -2768,11 +2759,11 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 		case errors.As(err, &be):
 			m.BlockingWatch.CancelledUnits++
 		case fired:
-			m.Warnings = append(m.Warnings, fmt.Sprintf(
+			m.warn(fmt.Sprintf(
 				"%s on %s: %s; the collector had already read its rows, and the waiter was released when the session left the database",
 				s.Path, orInstance(u.Name), worst))
 		case worst.seen():
-			m.Warnings = append(m.Warnings, fmt.Sprintf(
+			m.warn(fmt.Sprintf(
 				"%s on %s: %s, under the blocking watch's %s limit",
 				s.Path, orInstance(u.Name), worst, watchCancelAfter))
 		}
@@ -2796,7 +2787,7 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 
 	args, note := queryStoreArgs(o, s, u)
 	if note != "" {
-		m.Warnings = append(m.Warnings, note)
+		m.warn(note)
 	}
 
 	start := time.Now()
@@ -2819,7 +2810,7 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	// see them. Without this the run prints "0 error(s)" over a database whose
 	// schema it half collected.
 	if areas, total := reportedErrors(sets); len(areas) > 0 {
-		m.Warnings = append(m.Warnings, partialWarning(s.Path, u.Name, areas, total))
+		m.warn(partialWarning(s.Path, u.Name, areas, total))
 		m.PartialUnits++
 	}
 
@@ -2841,14 +2832,14 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 		res, writeErr = w(WriteRequest{
 			Out: rw, Script: s, Unit: u, Sets: sets,
 			State: o.QueryStore,
-			Warn:  func(msg string) { m.Warnings = append(m.Warnings, msg) },
+			Warn:  func(msg string) { m.warn(msg) },
 		})
 	} else {
 		payload, warnings, encErr := Encode(sets)
 		if encErr != nil {
 			return encErr
 		}
-		m.Warnings = append(m.Warnings, warnings...)
+		m.warn(warnings...)
 		rel := ResultRelativePath(s.Dir, s.Base, u.Folder)
 		n, werr := rw.write(rel, payload)
 		res, writeErr = WriteResult{Rel: rel, Bytes: n}, werr

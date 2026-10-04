@@ -582,10 +582,38 @@ func knownWriterNames() []string {
 // it says what the text IS rather than which DMV it came from, and it says the
 // worst thing that can plausibly be in it.
 var KnownDisclosures = map[string][]string{
+	// The count is stated because it was raised from 50 to 200 on 4 October
+	// 2026, and "the heaviest queries" let a reader picture a handful. It is
+	// per ranking, not per database: 020, 023, 024, 026 and 028 each draw
+	// their own rankings, and forced_plans in 020 has no cap at all.
 	"query_text": {
-		"the first 500 characters of the SQL of the heaviest queries the Query",
-		"Store recorded, which is application code and can carry the literal",
-		"values a statement was written with",
+		"the first 500 characters of the SQL of the queries the Query Store",
+		"recorded, for at most 200 queries in each ranking per database",
+		"(heaviest, most executed, most rows, interrupted, by resource) and for",
+		"every query with a forced plan; this is application code and can",
+		"carry the literal values a statement was written with",
+	},
+	"job_messages": {
+		"the message of the last failed run of each SQL Server Agent job, up",
+		"to 512 characters, with each job's description and each alert's",
+		"notification message; the run message is written by whatever the",
+		"job ran and can quote the statement or the values that made it fail",
+	},
+	"replication_messages": {
+		"the latest history comment of each replication agent and the 50",
+		"newest replication errors of the last seven days, up to 512",
+		"characters each; they are written by the agents and can quote a",
+		"replicated row, a duplicate key value for instance",
+	},
+	"log_shipping_messages": {
+		"the 200 newest log shipping error messages, up to 4 000 characters",
+		"each, which name backup files, shares and servers and can quote the",
+		"error a restore or a copy raised",
+	},
+	"schema_expressions": {
+		"the full text of computed column definitions, default constraints",
+		"and the filters of filtered indexes and statistics, which are code",
+		"written for these databases and can carry literal values",
 	},
 	"job_step_text": {
 		"the first 200 characters of every step of every SQL Server Agent job,",

@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, usage:array, missing:array
 -- @permissions: CONNECT, VIEW SERVER STATE, VIEW ANY DEFINITION
 -- @timeout:     120
+-- @discloses:   schema_expressions
 -- @profiles:    space
 --
 -- Index usage counters and optimizer index suggestions, complete and

@@ -65,7 +65,7 @@ func droppedBefore(on map[string]bool, db string) (string, bool) {
 func noteDropped(m *Manifest, on map[string]bool, script, db string, err error) error {
 	on[db] = true
 	m.Skipped = append(m.Skipped, SkippedScript{Script: script, Target: db, Reason: skipDroppedDuringRun})
-	m.Warnings = append(m.Warnings, fmt.Sprintf(
+	m.warn(fmt.Sprintf(
 		"database %s was dropped during the collection: %s found it gone (%v), and its remaining collectors were not run",
 		db, script, err))
 	return &UnitSkipped{Reason: skipDroppedDuringRun}

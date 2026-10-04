@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, columns:array
 -- @permissions: CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
 -- @timeout:     120
+-- @discloses:   schema_expressions
 -- @profiles:    space
 --
 -- The columns of every user table: type, nullability, identity, computed

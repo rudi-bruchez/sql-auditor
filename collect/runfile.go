@@ -18,19 +18,41 @@ import (
 const maxRunBytes = 256 << 20
 
 // showplanNS is the XML namespace SQL Server stamps onto every execution
-// plan it emits, in any of the shapes a plan reaches disk (a standalone
-// .sqlplan file, an XML column inside a Query Store JSON blob, and so on).
-// Testing for its presence in raw bytes is cheaper and harder to get wrong
-// than trying to enumerate those shapes.
-var showplanNS = []byte("http://schemas.microsoft.com/sqlserver/2004/07/showplan")
+// plan it emits, as the default namespace of the plan's root element.
+var showplanNS = "http://schemas.microsoft.com/sqlserver/2004/07/showplan"
 
-// containsShowplan reports whether payload contains an execution plan, by
-// looking for the showplan XML namespace anywhere in the bytes. A false
-// positive over-discloses — it can only make the archive claim to contain a
-// plan that isn't really one — which is the acceptable side of this error,
-// so no more precise a check is attempted.
+// showplanRoots are the shapes the opening of a plan takes in bytes written to
+// disk: the root element with its namespace declaration, as SQL Server writes
+// it, either raw (a .sqlplan file, an XML document) or as the start of a JSON
+// string value. encoding/json escapes '<' as \u003c and '"' as \", and a
+// payload written without HTML escaping keeps the '<'.
+var showplanRoots = [][]byte{
+	[]byte(`<ShowPlanXML xmlns="` + showplanNS + `"`),
+	[]byte(`"\u003cShowPlanXML xmlns=\"` + showplanNS + `\"`),
+	[]byte(`"<ShowPlanXML xmlns=\"` + showplanNS + `\"`),
+}
+
+// containsShowplan reports whether payload contains an execution plan: the
+// root element of one, with its namespace, where a file or a JSON value
+// starts.
+//
+// It used to look for the namespace anywhere in the bytes, on the ground that
+// a false positive only over-discloses. The false positive was not rare. The
+// namespace is also in application SQL, in the WITH XMLNAMESPACES clause of
+// any query that reads a plan, and the default run keeps 500 characters of
+// such queries from the Query Store, this collector's own plan-reading
+// queries among them once they have run in a database. On the lab, a default
+// run with no plan in it had MANIFEST.txt announce Showplan plans and print
+// 32 warnings, the same sentence 8 times for each of 020, 023, 024 and 028. A manifest that says plans are there when they are not stops
+// being read as a record. The root element is what a plan is and what a query
+// mentioning one is not.
 func containsShowplan(payload []byte) bool {
-	return bytes.Contains(payload, showplanNS)
+	for _, root := range showplanRoots {
+		if bytes.Contains(payload, root) {
+			return true
+		}
+	}
+	return false
 }
 
 // runWriter is the single choke point through which every collector payload

@@ -98,3 +98,41 @@ func TestRunWriterNoticesAPlan(t *testing.T) {
 		t.Error("a plan written straight to disk was not noticed")
 	}
 }
+
+// A query that reads plans names the Showplan namespace in its text, and the
+// default run keeps 500 characters of Query Store text. That text, encoded as
+// 020 and 023 encode it, must not count as a plan; a plan encoded the same
+// way, as the value of a field, must. Both go through the real encoder, since
+// the escaping it applies is what the check reads.
+func TestContainsShowplanTellsAPlanFromTextThatNamesOne(t *testing.T) {
+	encode := func(col, val string) []byte {
+		b, _, err := Encode([]NamedResultSet{{
+			Spec: ResultSpec{Name: "top_queries", Shape: ShapeArray},
+			Set:  ResultSet{Columns: []string{col}, Types: []string{"NVARCHAR"}, Rows: [][]any{{val}}},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	for _, text := range []string{
+		`WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan') ` +
+			`SELECT qp.query_plan.value('(//StmtSimple/@StatementText)[1]', 'nvarchar(4000)') FROM sys.dm_exec_query_plan(@h) AS qp`,
+		`WITH XMLNAMESPACES ('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p) ` +
+			`SELECT n.value('@PhysicalOp', 'sysname') FROM @plan.nodes('/p:ShowPlanXML//p:RelOp') AS x(n)`,
+	} {
+		if containsShowplan(encode("text", text)) {
+			t.Errorf("query text that names the namespace was taken for a plan: %s", text)
+		}
+		if containsShowplan([]byte(text)) {
+			t.Errorf("the raw text was taken for a plan: %s", text)
+		}
+	}
+	plan := `<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan" Version="1.6" Build="17.0.4065.4"><BatchSequence/></ShowPlanXML>`
+	if !containsShowplan(encode("query_plan", plan)) {
+		t.Error("a plan in a field, through the ordinary encoder, was not detected")
+	}
+	if !containsShowplan([]byte(plan)) {
+		t.Error("a plan written as a .sqlplan file was not detected")
+	}
+}

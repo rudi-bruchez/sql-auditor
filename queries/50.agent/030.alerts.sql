@@ -2,6 +2,7 @@
 -- @resultsets:  root:object, alerts:array, operators:array, notifications:array
 -- @permissions: CONNECT, AGENT ALERTS
 -- @timeout:     60
+-- @discloses:   job_messages
 --
 -- Whether anyone is told when this instance breaks.
 --

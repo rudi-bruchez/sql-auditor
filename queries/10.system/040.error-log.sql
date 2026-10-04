@@ -46,9 +46,16 @@
 -- is in the order of 400 000 lines and 70 MB of tempdb: a log that size has
 -- gone unrecycled for a long time, and the copy costs the instance more than
 -- the summary is worth. The remedy is sp_cycle_errorlog, which is the
--- operator's to run, and the next collection reads the new, short log. If the
--- size cannot be read, the log is read as before and status carries why the
--- size is missing.
+-- operator's to run, and the next collection reads the new, short log.
+--
+-- A LOG WHOSE SIZE CANNOT BE READ IS NOT READ EITHER. Until 4 October 2026 it
+-- was read as before, which lifted the bound exactly where nothing said the log
+-- was small. The two procedures do not always go together: measured on SQL
+-- Server 2025, a login granted EXECUTE on sp_readerrorlog and denied it on
+-- sp_enumerrorlogs fails the size read with error 229 and still reads the
+-- whole log. status then says collected = 0 with skipped_size_unknown = 1, and
+-- size_error_message carries the error, or says that the list held no row for
+-- the current log. The remedy is the grant on sp_enumerrorlogs.
 --
 -- SQL Server 2012 is the floor. sp_readerrorlog and sp_enumerrorlogs predate it.
 
@@ -60,12 +67,15 @@ DECLARE @collected bit = 1, @err int = 0, @msg nvarchar(2048) = N'';
 
 -- The size guard. See the header: 50 MB, in bytes.
 DECLARE @size_limit bigint = 52428800, @log_bytes bigint = NULL,
-        @skipped_for_size bit = 0, @size_msg nvarchar(2048) = N'';
+        @skipped_for_size bit = 0, @skipped_size_unknown bit = 0,
+        @size_msg nvarchar(2048) = N'';
 
 CREATE TABLE #logs (archive int, log_date nvarchar(64), size_bytes bigint);
 BEGIN TRY
     INSERT INTO #logs (archive, log_date, size_bytes) EXEC sys.sp_enumerrorlogs;
     SELECT @log_bytes = size_bytes FROM #logs WHERE archive = 0;
+    IF @log_bytes IS NULL
+        SET @size_msg = N'sys.sp_enumerrorlogs returned no size for the current log (archive 0)';
 END TRY
 BEGIN CATCH
     SELECT @size_msg = ERROR_MESSAGE();
@@ -77,7 +87,9 @@ CREATE TABLE #log (LogDate datetime, ProcessInfo nvarchar(100), Txt nvarchar(400
    log being rolled over mid-read, or a text column longer than the table
    accepts all fail here — and an empty summary must never be readable as
    "nothing was logged". status carries the difference. */
-IF @log_bytes > @size_limit
+IF @log_bytes IS NULL
+    SELECT @collected = 0, @skipped_size_unknown = 1;
+ELSE IF @log_bytes > @size_limit
     SELECT @collected = 0, @skipped_for_size = 1;
 ELSE
 BEGIN TRY
@@ -518,6 +530,7 @@ SELECT @collected                                                 AS [collected]
        @log_bytes                                                 AS [log_size_bytes],
        @size_limit                                                AS [log_size_limit_bytes],
        @skipped_for_size                                          AS [skipped_for_size],
+       @skipped_size_unknown                                      AS [skipped_size_unknown],
        NULLIF(@size_msg, N'')                                     AS [size_error_message],
        80                                                         AS [grouping_prefix_length],
        200                                                        AS [top_messages_kept],
