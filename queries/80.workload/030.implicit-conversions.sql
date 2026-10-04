@@ -15,8 +15,11 @@
 --
 -- THE DIRECTION OF THE CONVERSION IS THE WHOLE FINDING. Converting a
 -- parameter is free and normal; converting a column is what defeats the
--- index. The pattern matched here is CONVERT_IMPLICIT(nvarchar — with the
--- column inside — so a plan that merely widens a parameter does not appear.
+-- index. The pattern matched here is CONVERT_IMPLICIT(nvarchar, and the text
+-- alone does not say what is inside it: measured on 17.0.4065.4, a varchar
+-- parameter sought against an nvarchar column matches too, in the seek key.
+-- Which column is converted is projected (converted.*, below), and a row whose
+-- converted.column is NULL converted a parameter, not a column.
 --
 -- WHERE THE PATTERN IS LOOKED FOR IS AS IMPORTANT AS THE PATTERN, and until
 -- 25 September 2026 this file got it wrong. It cast the whole plan to text and
@@ -54,8 +57,11 @@
 -- conversion by computing a range at runtime, which shows in the plan as
 -- StartRange/EndRange against an Expr rather than a plain equality. Having
 -- achieved a seek, the engine has nothing to warn about and stays silent —
--- while every column beyond the one that got the range remains in the
--- residual predicate, evaluated per row.
+-- while the converted columns remain in the residual predicate of the seek,
+-- evaluated per row. Measured on 17.0.4065.4 under Latin1_General_CI_AS: the
+-- residual keeps the conversion of the column that got the range as well as of
+-- the others, and the range itself comes from GetRangeThroughConvert applied
+-- to the parameter, so the conversion of the column is found in the Predicate.
 --
 -- Under a legacy SQL_ collation the two sort orders differ, no range is
 -- possible, the seek is lost outright, and only then does the warning appear.
@@ -91,6 +97,13 @@
 -- parameterised statement from an application is not, and is identified by
 -- query_hash, which the analysis layer can resolve with an elevated login or
 -- by re-running the collection with --include-session-text.
+--
+-- What IS collected from the plan is the identity of the converted column:
+-- database, schema, table and column names as the plan's ColumnReference
+-- spells them, and the type it was converted to. These are object names, the
+-- same class of data 70.schema exports for every table; no literal and no
+-- parameter value is read, and the declared type is left to
+-- 70.schema/060.columns.
 --
 -- SQL Server 2012 is the floor. All the DMVs used predate it.
 
@@ -244,7 +257,14 @@ SELECT DB_NAME(a.[dbid])                                          AS [database],
        a.[total_worker_time] / NULLIF(a.[execution_count], 0)     AS [cpu_us_per_execution],
        a.[creation_time]                                          AS [plan_created],
        a.[last_execution_time]                                    AS [last_execution],
-       CASE WHEN warn.hit IS NULL THEN 0 ELSE 1 END               AS [server_raised_warning]
+       CASE WHEN warn.hit IS NULL THEN 0 ELSE 1 END               AS [server_raised_warning],
+       conv.[db]                                                  AS [converted.database],
+       conv.[sch]                                                 AS [converted.schema],
+       conv.[tbl]                                                 AS [converted.table],
+       conv.[col]                                                 AS [converted.column],
+       conv.[to_type]                                             AS [converted.to_type],
+       conv.[to_length]                                           AS [converted.to_length_bytes],
+       conv.[n_cols]                                              AS [converted.columns_in_expression]
 FROM @candidates AS a
 /* THE CONVERSION HAS TO BE IN A PREDICATE, and the spelling matters twice.
 
@@ -262,18 +282,84 @@ FROM @candidates AS a
    Slow: exist() with a path, 16 s for three calls and 18.5 s for one combined
    call using self::. nodes() binds the node once, and a bound node is already
    located where a path read re-walks the document. TOP (1) because the
-   question is whether any exists, not how many. */
-OUTER APPLY (SELECT TOP (1) 1 AS hit
-             FROM a.[px].nodes('//Predicate//ScalarOperator[contains(@ScalarString,"CONVERT_IMPLICIT(nvarchar")]') AS so(n)) AS pred
-/* The second place a conversion can sit, and the one the Windows collation
-   paragraph above is about: having achieved a range seek across the
-   conversion, the engine puts it under RangeExpressions rather than in a
-   residual Predicate. The lab runs a legacy SQL_ collation, under which that
-   shape cannot occur, so this clause is reasoned from the showplan schema and
-   is NOT measured. It is here rather than absent because the case it covers is
-   the one the whole file exists for. */
-OUTER APPLY (SELECT TOP (1) 1 AS hit
-             FROM a.[px].nodes('//SeekPredicates//ScalarOperator[contains(@ScalarString,"CONVERT_IMPLICIT(nvarchar")]') AS so(n)) AS seek
+   question is whether any exists, not how many.
+
+   WHICH COLUMN IS CONVERTED is read on the node already bound, never by a
+   second walk of the plan: under the matched ScalarOperator, the first Convert
+   that is implicit, targets nvarchar and has a table column as its operand, and
+   the ColumnReference inside it. The [@Table] test is what separates the column
+   from a parameter: showplan writes [@p] as a ColumnReference too, with no
+   Database, Schema or Table. Measured on 17.0.4065.4 with a varchar(20) column
+   compared to an nvarchar(20) parameter, the residual predicate reads
+
+     <ScalarOperator ScalarString="CONVERT_IMPLICIT(nvarchar(20),[db].[s].[t].[Code],0)=[@p]">
+       <Compare><ScalarOperator><Convert DataType="nvarchar" Length="40" Implicit="1">
+         <ScalarOperator><Identifier>
+           <ColumnReference Database="[db]" Schema="[s]" Table="[t]" Column="Code"/>
+
+   Database, Schema and Table come bracketed and Column does not; PARSENAME
+   strips the brackets so the names compare with what 70.schema exports.
+   Length is in bytes, as the plan carries it: 40 for nvarchar(20). The
+   column's declared type is not in the plan; 70.schema/060.columns has it.
+
+   When one predicate converts several columns, the first in document order is
+   projected and columns_in_expression says how many there were. Document
+   order is the order of the predicate, not of the index keys.
+
+   The reads cost something. On the lab, 17.0.4065.4, two hundred candidates
+   and about a dozen rows out, the whole file went from about 4.0 s to
+   between 4.7 and 5.3 s over three runs each, wall clock through sqlcmd. */
+OUTER APPLY (SELECT TOP (1) 1 AS hit,
+                    PARSENAME(cr.n.value('@Database', 'nvarchar(258)'), 1) AS [db],
+                    PARSENAME(cr.n.value('@Schema', 'nvarchar(258)'), 1)   AS [sch],
+                    PARSENAME(cr.n.value('@Table', 'nvarchar(258)'), 1)    AS [tbl],
+                    cr.n.value('@Column', 'nvarchar(128)')                 AS [col],
+                    cv.n.value('@DataType', 'nvarchar(128)')               AS [to_type],
+                    cv.n.value('@Length', 'int')                           AS [to_length],
+                    so.n.value('count(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference/@Table])', 'int') AS [n_cols]
+             FROM a.[px].nodes('//Predicate//ScalarOperator[contains(@ScalarString,"CONVERT_IMPLICIT(nvarchar")]') AS so(n)
+             OUTER APPLY so.n.nodes('(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference/@Table])[1]') AS cv(n)
+             OUTER APPLY cv.n.nodes('ScalarOperator/Identifier/ColumnReference') AS cr(n)) AS pred
+/* The second place a conversion can sit. Until 4 October 2026 this comment
+   said that under a Windows collation the engine, having achieved a range seek
+   across the conversion, puts the conversion under RangeExpressions instead
+   of a residual Predicate, and that this was reasoned, not measured. Measured
+   since, on 17.0.4065.4, with a varchar column under Latin1_General_CI_AS
+   indexed and compared to an nvarchar parameter: the reasoning was wrong about
+   where the conversion goes. The plan is an Index Seek whose StartRange and
+   EndRange RangeExpressions read [Expr1007] and [Expr1008], computed upstream
+   by a Compute Scalar as GetRangeThroughConvert(CONVERT_IMPLICIT(nvarchar(20),
+   [@p],0), ...), which converts the parameter, and the seek keeps the column
+   conversion as its residual Predicate. That form is therefore found by the
+   Predicate clause above, column included, and not by this one.
+
+   What this clause did match on the lab is the harmless direction: an
+   nvarchar column sought with a varchar parameter puts
+   CONVERT_IMPLICIT(nvarchar(20),[@p],0) in the seek key. Such a row has a
+   NULL converted.column, because the operand is a parameter, and that NULL is
+   how the analysis can tell it apart. The clause is kept, not removed, so that
+   what is detected does not change in the same commit as what is projected;
+   whether it ever finds a column conversion is not measured. */
+OUTER APPLY (SELECT TOP (1) 1 AS hit,
+                    PARSENAME(cr.n.value('@Database', 'nvarchar(258)'), 1) AS [db],
+                    PARSENAME(cr.n.value('@Schema', 'nvarchar(258)'), 1)   AS [sch],
+                    PARSENAME(cr.n.value('@Table', 'nvarchar(258)'), 1)    AS [tbl],
+                    cr.n.value('@Column', 'nvarchar(128)')                 AS [col],
+                    cv.n.value('@DataType', 'nvarchar(128)')               AS [to_type],
+                    cv.n.value('@Length', 'int')                           AS [to_length],
+                    so.n.value('count(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference/@Table])', 'int') AS [n_cols]
+             FROM a.[px].nodes('//SeekPredicates//ScalarOperator[contains(@ScalarString,"CONVERT_IMPLICIT(nvarchar")]') AS so(n)
+             OUTER APPLY so.n.nodes('(.//Convert[@Implicit="1" or @Implicit="true"][substring(@DataType,1,8)="nvarchar"][ScalarOperator/Identifier/ColumnReference/@Table])[1]') AS cv(n)
+             OUTER APPLY cv.n.nodes('ScalarOperator/Identifier/ColumnReference') AS cr(n)) AS seek
+/* The predicate's column if it named one, else the seek key's. */
+OUTER APPLY (SELECT TOP (1) x.[db], x.[sch], x.[tbl], x.[col], x.[to_type], x.[to_length], x.[n_cols]
+             FROM (SELECT 1 AS o, pred.[db], pred.[sch], pred.[tbl], pred.[col],
+                          pred.[to_type], pred.[to_length], pred.[n_cols]
+                   UNION ALL
+                   SELECT 2, seek.[db], seek.[sch], seek.[tbl], seek.[col],
+                          seek.[to_type], seek.[to_length], seek.[n_cols]) AS x
+             WHERE x.[col] IS NOT NULL
+             ORDER BY x.o) AS conv
 OUTER APPLY (SELECT TOP (1) 1 AS hit
              FROM a.[px].nodes('//Warnings/PlanAffectingConvert') AS w(n)) AS warn
 WHERE a.[px] IS NOT NULL
