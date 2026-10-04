@@ -968,10 +968,11 @@ func lint(sql string, results []ResultSpec) string {
 	}
 	// Blanked, because contractLint counts hints against the number of declared
 	// result sets and a hint inside dynamic SQL emits nothing. The guard pattern
-	// repeats the hint in every sp_executesql string, so 042 offers seventeen
-	// hints for seven result sets — measured — and the count passes with enough
-	// slack to hide three missing ones on the statements that really do emit.
-	// Blanking leaves eight, which is a check that can still fail.
+	// repeats the hint in every sp_executesql string, so 042 offered seventeen
+	// hints for seven result sets when this was measured (twenty-five for nine
+	// since the agent profiles were added), and the raw count passes with
+	// enough slack to hide several missing ones on the statements that really
+	// do emit. Blanking leaves a count that can still fail.
 	return contractLint(BlankSQLStrings(stripped), results)
 }
 
