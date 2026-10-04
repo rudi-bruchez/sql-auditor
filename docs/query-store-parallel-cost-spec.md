@@ -4,12 +4,16 @@ Status: proposed on 4 October 2026, not implemented. The first draft
 (`87a8d9f`) put the collector behind an opt-in; it was read the same day by a
 panel of five readers, and then the decision changed: the collector runs by
 default, with no option. The second version answered both and was read by a
-second panel of five the same day. This third version answers that panel. What
-each panel found, and what became of each finding, is in "Review of 4 October
-2026" and "Second review of 4 October 2026" at the end. One decision is left to
-the owner before code: whether the session marker of "The statements
-sql-auditor emitted" is kept, or replaced by the alternative given in "Open
-questions". Nothing in the tree has changed yet.
+second panel of five the same day. The third version (`760b4bf`) answered that
+panel and left one decision to the owner: whether to keep a session marker,
+`SET DATEFIRST 3`, that let the file leave sql-auditor's own statements out.
+This fourth version records that decision, taken on 5 October 2026: the marker
+is withdrawn, on a measurement of what a default collection leaves in the
+stores it audits (point 8, "The audit's own statements"). What each panel
+found, and what became of each finding, is in "Review of 4 October 2026" and
+"Second review of 4 October 2026" at the end; the decision and its measurement
+close the second. No decision is left to the owner before code. Nothing in the
+tree has changed yet.
 
 ## The question
 
@@ -68,10 +72,6 @@ From Microsoft Learn:
   for the query plan"), `is_parallel_plan` and `last_execution_time`, from
   SQL Server 2016. It has no cost column.
   https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-query-store-plan-transact-sql
-- `sys.query_context_settings` carries, per context of compilation, the
-  `set_options` mask, `language_id`, `date_format` and `date_first`; every
-  query of the store points to one through `context_settings_id`.
-  https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-query-context-settings-transact-sql
 - Query Store for readable secondaries: "secondary replicas stream query
   execution information (such as runtime and wait statistics) to the primary
   replica, where the data is persisted in Query Store and made visible across
@@ -100,11 +100,11 @@ From Microsoft Learn:
 Measured on the lab, SQL Server 2025 CU7 (17.0.4065.4, 22 schedulers, Linux,
 cost threshold 5, MAXDOP 0), 4 October 2026: in three databases created for it
 (`ZzAvgDop` for the first draft, `ZzAvgDop2` for the second version,
-`ZzAvgDop3` for this one) with the store in capture mode ALL and one-minute
+`ZzAvgDop3` for the third) with the store in capture mode ALL and one-minute
 intervals, dropped afterwards; and in the existing stores of five lab
 databases, `LABSTORE_A` (955 plans, 73 MB) and `LABSTORE_B` (126 plans, 24 MB)
 among them, read from `master` with three-part names so that the reads were
-not captured into those stores.
+not captured into those stores. Point 8 has a setup of its own, given there.
 
 1. A stored plan is the plan of one query, and its first costed statement
    element is that query's own. A procedure of two statements (a key lookup,
@@ -115,7 +115,7 @@ not captured into those stores.
    `INSERT ... EXEC` statements, whose second element carries no cost. Over
    the 955 plans, the string `StatementSubTreeCost="` occurred once in 954
    and never in one (a plan with no statement). No stored plan with two costs
-   has been seen; it is checked again by test 5 rather than assumed.
+   has been seen; it is checked again by test 3 rather than assumed.
 2. The cost found by a text search is the cost of that statement. On the 22
    plans of `ZzAvgDop` the first `StatementSubTreeCost="` of the text and
    `(//StmtSimple/@StatementSubTreeCost)[1]` read as xml agreed 22 times. On
@@ -137,9 +137,9 @@ not captured into those stores.
    `is_parallel_plan = 0` and `max_dop` 41, on an instance of 22 schedulers,
    with 1 604 ms of CPU for one execution; in `LABSTORE_A` the same call
    reported 27, and two `INSERT INTO @density` and one `INSERT INTO @props`
-   statements reported 2. In `ZzAvgDop3`, with the exact artefacts of test 5
+   statements reported 2. In `ZzAvgDop3`, with the exact artefacts of test 3
    (041's `#savings`, the procedure called on a heap of 2 000 000 rows), it
-   reported 36 from an unmarked session and 5 from a marked one, both serial.
+   reported 36 from one session and 5 from another, both serial.
    An ordinary `INSERT INTO #o EXEC dbo.ParAgg`, whose procedure runs a
    parallel aggregate at DOP 22, was stored serial with `max_dop` 1, and so
    were `INSERT INTO @t SELECT ... FROM sys.all_objects` and a procedure
@@ -172,27 +172,16 @@ not captured into those stores.
    two callers 6.5 ms. Their CPU is counted once, in their own query. The
    trigger case reproduces Claude's (2 086.9 ms against 116.7 ms, and 395 ms
    against 49 ms in the second panel).
-8. A context setting marks a session's statements. A session that ran `SET
-   DATEFIRST 3` in a batch of its own and then a parallel aggregate in the
-   next batch stored that aggregate under a context of its own,
-   `date_first` 3, with an unchanged `set_options` mask (`0x000000FB`); no
-   copy of the query appeared under the default context. When the `SET` and
-   the query were in the same batch, the query was also compiled once under
-   the default context, before the `SET` ran, and that plan has no runtime
-   row. The languages of the lab instance have `datefirst` 1 (26 of them) or
-   7 (8); none has 3. In `ZzAvgDop3`, the batch the run already sends before
-   every collector, with the `SET` put first (`SET DATEFIRST 3; IF @@TRANCOUNT
-   > 0 ROLLBACK; USE [master];`), then `USE` of the database, then the
-   collector's batch, stored the collector's query under `date_first` 3, and
-   did so again after the connection was handed back to the pool and taken
-   out (the pool's reset put `@@DATEFIRST` back to 7, the batch to 3). A
-   collector batch that began with `SET LANGUAGE French` read `@@DATEFIRST` 1
-   and stored its query under `date_first` 1, `language_id` 2: a language
-   change replaces the marker until the next reset (Claude found it; measured
-   again here). The second panel also found the marker on the internal
-   statements of `sp_estimate_data_compression_savings`, on `sp_executesql`,
-   on trigger and scalar function bodies and on the `StatMan` queries the
-   audit's metadata access caused (Claude).
+8. A default collection leaves serial plans only. On 4 October 2026, around
+   21:52 UTC, a complete default collection ran on the lab, with the binary
+   of `main` (which has no 043), over the nine databases whose store was
+   active. Then, in each of them, the runtime rows executed since the
+   collection began were joined to `sys.query_store_plan`. In all nine, no
+   plan had `is_parallel_plan = 1`. Each database held 41 to 213 plans in
+   that span, and 0 to 2 of them were serial plans (`is_parallel_plan = 0`)
+   with `max_dop > 1`, point 4's anomaly. The marker measured by the third
+   version, a `SET DATEFIRST 3` in the session, is in that version
+   (`760b4bf`) and no longer here.
 9. The replica groups of a store that has no availability group. In
    `ZzAvgDop3` and in `LABSTORE_A`, every runtime row carried
    `replica_group_id` 1, and `sys.query_store_replicas` held four rows, ids 1
@@ -211,10 +200,9 @@ outside this document's scope and is listed under the open questions.
 ## What is read
 
 The plans of the database's Query Store that are parallel (`is_parallel_plan =
-1`), executed inside the window by this replica's role, and not emitted by
-sql-auditor; for each of them, its estimated cost, read from `query_plan`, and
-over the window, from `sys.query_store_runtime_stats`, its executions, its CPU
-and its degrees.
+1`) and executed inside the window by this replica's role; for each of them,
+its estimated cost, read from `query_plan`, and over the window, from
+`sys.query_store_runtime_stats`, its executions, its CPU and its degrees.
 
 Serial plans are not read. The question the bands answer is what a higher
 threshold would make serial, and only a parallel plan can change; a serial
@@ -230,12 +218,11 @@ execution stopped by a timeout or an error used its CPU and its workers.
 The window's runtime rows are aggregated once, per plan, into a temporary
 table, `#runtime`: executions, CPU, the CPU and executions of the rows where
 `max_dop > 1` and of the rows where `min_dop > 1`, the weighted sum of
-`avg_dop`, the highest `max_dop`, and, joined once, `is_parallel_plan`, the
-query's object type and the query's context. The root's totals, the ranking
-and the bands all come from that table, so they describe the same snapshot and
-no total can disagree with the sum of the bands because a statement ran in
-between. This is a grouping by plan, which 029 does not make (029 groups by
-interval).
+`avg_dop`, the highest `max_dop`, and, joined once, `is_parallel_plan` and the
+query's object type. The root's totals, the ranking and the bands all come
+from that table, so they describe the same snapshot and no total can
+disagree with the sum of the bands because a statement ran in between. This is
+a grouping by plan, which 029 does not make (029 groups by interval).
 
 It is a temporary table and not a table variable for two reasons. The
 statement that fills it is run through `sys.sp_executesql`, because its replica
@@ -297,64 +284,47 @@ include them. A function body that is parallel is not double counted inside
 the bands: a scalar function that is not inlined makes its caller serial
 (point 7's caller was stored serial), so the caller is not in a band.
 
-### The statements sql-auditor emitted
+### The audit's own statements
 
 The collector runs inside the database it measures, after every per-database
 collector that sorts before `80.workload/043`, and the store captures what
 those collectors ran there: `70.schema/041.compression-savings.sql` calls the
 very `sp_estimate_data_compression_savings` of point 4, and 027 alone can
-spend up to 20 s per database. In `LABSTORE_A`, the four serial plans with
-`max_dop > 1` were all sql-auditor's own statements, the newest executed by an
-audit the same evening. Earlier audits within the window are in it too.
+spend up to 20 s per database. Earlier audits within the window are in it too.
+043 keeps all of them: nothing in the store tells the audit's statements from
+the client's, and the marker that did was withdrawn on 5 October 2026 (see the
+end of "Second review of 4 October 2026").
 
-They are recognised by a context setting the runner gives its session, and
-left out of everything: totals, ranking and bands.
+They do not reach the bands. Every result set of the corpus carries `OPTION
+(RECOMPILE, MAXDOP 1)`, which the contract lint requires, and point 8 found no
+parallel plan among the audit's other statements either, nested and system
+ones included, in nine stores after a complete default collection. The serial
+plans the audit leaves with `max_dop > 1`, 0 to 2 per database there, are not
+banded either, since the selection reads `is_parallel_plan = 1` and never
+`max_dop` (point 4). So the bands, `window.parallel_*` and `nested.*`
+describe the workload alone, as far as that measurement and test 4 go.
 
-- The marker rides on the batch the runner already sends before every
-  collector, after every reconnect and when a collector leaves its database:
-  `ResetSession`'s `IF @@TRANCOUNT > 0 ROLLBACK; USE [db];` becomes `SET
-  DATEFIRST 3; IF @@TRANCOUNT > 0 ROLLBACK; USE [db];`. The batch is built by
-  a function of its own so that a test can read it. That batch runs after the
-  pool's reset (which restores the login's settings) and before the
-  collector's own batch, so every collector runs marked (point 8). It adds no
-  statement on the wire: the second version used the driver's
-  `SessionInitSQL`, which go-mssqldb runs as an extra batch on every reset of
-  a pooled connection (Claude, reading v1.10.0), and which would have made
-  `recycleConn`'s comment ("the reset costs nothing on the wire") and the
-  guide's "costs one round trip" false. Both stay true.
-- The value is a Go constant, `collect.AuditDateFirst`, and the file declares
-  `@audit_datefirst` with the same value; a test compares them.
-- The file leaves out every query whose `context_settings_id` has
-  `date_first = @audit_datefirst` in `sys.query_context_settings`, and counts
-  what it left out in `excluded.audit_plans` and `excluded.audit_cpu_s`.
-- What can cancel the marker inside a collector: a statement that writes
-  `DATEFIRST`, which is `SET DATEFIRST` and `SET LANGUAGE` (point 8). The rest
-  of that collector's batch then runs under the other value and is counted as
-  workload, until the next collector's reset batch restores the marker. A
-  `SET` inside a stored procedure is undone when it returns, so a procedure the
-  audit calls cannot do it. The embedded corpus has no writer today, and test
-  2 keeps it so. A script of a `--queries-dir` corpus that has one gets a
-  warning in `MANIFEST.txt` naming it, by the route the existing warnings take.
-- What the marker changes for the corpus: `DATEPART` with `weekday`/`dw` and
-  `week`/`wk`/`ww`, `DATETRUNC(week, ...)` and `@@DATEFIRST` give different
-  answers (agy and codex measured `7, 1, 41` against `3, 5, 40`, and
-  `DATETRUNC(week)` moved from 4 October to 30 September); `DATENAME(weekday)`,
-  `DATEDIFF(week)`, `DATE_BUCKET(week)` and `FORMAT(..., 'dddd')` do not
-  (Claude). The embedded corpus reads none of the first group, and test 2
-  keeps it so; none of the system procedures it calls references `DATEFIRST`
-  or a week datepart (Claude). A `--queries-dir` script that reads one gets
-  the same kind of warning, and `docs/dba-guide.md` says what moves.
+They do reach what the root counts over every query: `window.runtime_rows`,
+`window.executions`, `window.cpu_s`, and `window.serial_plans_dop_above_1`,
+which counts the audit's anomalies with the workload's; and the intervals,
+since the current run is usually the window's last activity
+(`window.newest_interval`) and each audit adds the few intervals it ran in to
+`window.intervals`. What one audit adds to `window.cpu_s` was not measured;
+its statements being serial, it should be of the order of the time its
+collectors spent in the database, against seven days of the client's work,
+and each earlier audit in the window adds its own.
 
-What it cannot recognise: statements of an sql-auditor build older than this
-change; statements of any other tool; the few statements the run sends outside
-a collector (the probe, the preflight, the session id reads), which land in the
-store only when `SQL_DATABASE` names a user database and are serial; and a
-client session that sets `DATEFIRST 3` itself, which is left out and counted as
-the audit's (both codex readers ran it: the same query under 7 and under 3 gave
-two query ids, and the predicate takes the second). The first three stay in
-the window as ordinary workload, and the root does not pretend otherwise. The
-last is the price of the marker, and the decision whether to pay it is in
-"Open questions".
+The root says nothing about it, since any column would be a guess. The file's
+header says it in one sentence, for whoever reads the output beside the SQL:
+"The audit's own statements are in the store and in the serial totals
+(`window.executions`, `window.cpu_s`, `window.serial_plans_dop_above_1`); they
+run at MAXDOP 1 and never reach a band." The analysis needs nothing more: it
+reads the bands and `window.parallel_cpu_s`, which the audit does not touch.
+
+What would change this is a statement of the audit that runs parallel: a
+statement that is not a result set and carries no `MAXDOP 1`, in a future
+collector or in a `--queries-dir` script. Test 4 runs the embedded corpus and
+fails on one; a foreign corpus is not covered.
 
 ### How the cost is found
 
@@ -391,10 +361,10 @@ counted on the staged column, after the copy, and never on the view.
 
 ### The selection
 
-The parallel plans of the window that sql-auditor did not emit are ranked by
-their parallel CPU in the window (the CPU of their runtime rows where `max_dop
-> 1`), highest first, then by plan id, and the first `@cap + 1` are pinned
-into a table variable with their rank `rn`, before any `query_plan` is read,
+The parallel plans of the window are ranked by their parallel CPU in the
+window (the CPU of their runtime rows where `max_dop > 1`), highest first,
+then by plan id, and the first `@cap + 1` are pinned into a table variable
+with their rank `rn`, before any `query_plan` is read,
 as 027 does: `TOP (@cap + 1)`, then the evidence that the cap bit is a count
 above `@cap`, then the extra row is deleted and never read. The rank by
 parallel CPU keeps, when a cap or a budget cuts, the plans that carry the work
@@ -439,7 +409,7 @@ change the other.
 
 ## The constants and the stop rules
 
-All six are constants declared at the head of the file and projected in the
+All five are constants declared at the head of the file and projected in the
 root, following 027 ("THE CAP AND THE BUDGET ARE CONSTANTS AND NOT OPTIONS").
 Tests change them by rewriting the declaration in a copy of the file's text,
 as a `--queries-dir` corpus would.
@@ -451,7 +421,6 @@ as a `--queries-dir` corpus would.
 | `@chunk` | 100 | plans copied per statement of the read loop |
 | `@budget_bytes` | 104 857 600 | bytes of plan text read per database (100 MB) |
 | `@budget_ms` | 10 000 | ms of read loop per database |
-| `@audit_datefirst` | 3 | the context setting of sql-auditor's sessions |
 
 The work has two parts. The selection (the aggregation into `#runtime`, the
 ranking and the pin) reads runtime rows and no plan text, and has no budget of
@@ -484,7 +453,7 @@ not taken: the copy and search of the 955 plans of `LABSTORE_A` took 2.0 and
 2.3 s by chunks of 100, 4.2 and 5.0 s by chunks of 10, and 16.4 and 17.1 s
 plan by plan, because each statement pays a fixed price to reach the store's
 plans whatever it copies. With either budget at 0 the loop reads nothing,
-which is what test 6 uses. The bound that does not move is the file's
+which is what test 5 uses. The bound that does not move is the file's
 `@timeout`; the budgets exist so that a slow instance gets a partial, counted
 answer before it is reached, instead of the nothing an expiry returns.
 
@@ -517,15 +486,6 @@ which is the other reason the chunk is a variable.
   `testdata/corpus.txt` gains its line, with no `@profiles`: the one profile,
   `space`, is about what makes databases larger, and this is not. A run with
   `--profile space` leaves it out.
-- `collect/runner.go`: `ResetSession`'s batch gains `SET DATEFIRST` with
-  `collect.AuditDateFirst` at its head, and is built by a function a test can
-  call (for example `resetBatch(defaultDB string) string`). `Open` and the
-  connector do not change; no `SessionInitSQL`.
-- `collect/queryset.go` or the runner: a warning for a script that writes
-  `DATEFIRST` (`SET DATEFIRST`, `SET LANGUAGE`) or reads it (`DATEPART` with a
-  weekday or week datepart, `DATETRUNC(week, ...)`, `@@DATEFIRST`), by the
-  route `MANIFEST.txt`'s existing warnings take. The embedded corpus never
-  triggers it (test 2).
 - `workload_caps_test.go`: the table learns the form a cap is applied in.
   Today every row counts `TOP (@variable)`; 043's pin is `TOP (@cap + 1)` and
   its chunk is a range of ranks, which that count cannot see (Claude ran it:
@@ -540,12 +500,7 @@ which is the other reason the chunk is a variable.
 - `docs/dba-guide.md`: the @timeout table's `120 s` row goes from 29 to 30
   (`TestTheGuideCountsTheTimeoutTiersOfTheCorpus` fails until it does); the
   row of "What the default run costs a large instance" given in "The cost,
-  measured"; beside the paragraph on the session reset, a paragraph on the
-  session's `DATEFIRST`: its value, why, what it changes (the functions of
-  "The statements sql-auditor emitted"), that a `SET LANGUAGE` or `SET
-  DATEFIRST` in a `--queries-dir` script ends the marking for the rest of that
-  script, and that a client session using `DATEFIRST 3` is counted as the
-  audit's by 043; and the illustrative `check` listing may gain
+  measured"; and the illustrative `check` listing may gain
   `80.workload/043.query-store-parallel-cost.sql per database, SQL Server 13+`.
 - `docs/caps-inventory.md`: a row for 043's `@cap` and its two budgets.
 
@@ -559,8 +514,9 @@ What does not change, and why:
   collectors, and the whole-plan ceiling of its duration lines grows by 120 s
   per database; the costly line, which counts only `CostFlags` collectors, is
   unchanged, and so is `TestPlannedDurationLines`, whose fixture is synthetic.
-- `recycleConn`'s comment and the guide's "costs one round trip" stay true,
-  since the marker adds no batch.
+- `collect/` does not change: the session the runner gives a collector is
+  the one it gives today, with no setting added to the reset batch and no new
+  warning in `MANIFEST.txt`.
 - `QUERY_STORE_DB_INCLUDE` does not narrow 043. Today it narrows the writers
   (021, 022) and 025, the extraction it is documented for ("Narrows which of
   the collected databases the extraction reads"), and none of the default
@@ -574,12 +530,9 @@ What does not change, and why:
 - No `@discloses`, so `MANIFEST.txt`'s text paragraphs and
   `TestManifestListsTheTextTheDefaultRunCaptures` do not move.
 - The six other default Query Store collectors (020, 023, 024, 026, 028, 029)
-  go on counting the audit's statements, and 025, under
-  `--query-store-detail`, shows them as separate query ids with the same
-  `set_options` (Claude). That is left as it is in this change: teaching them
-  the marker is a change to six files with tests of their own, and 043's root
-  gives `excluded.audit_cpu_s`, which is the difference a reader comparing
-  043's total with 029's has to account for. It is an open question.
+  count the audit's statements, as 043 does, and 025, under
+  `--query-store-detail`, extracts them. 043 introduces no difference on that
+  point between its totals and 029's.
 
 ## The guarantee that no text leaves
 
@@ -590,12 +543,11 @@ What leaves the server is the database name (already in every per-database
 document), the store's state and settings, timestamps of intervals, counts,
 sums, degrees, sizes in bytes, the band boundaries and the stop reason. No
 query text, no plan, no query id, plan id, query hash or plan hash, no object
-id or name, no context settings id, no replica name. The plan text is read on
-the instance and dropped with its chunk, as 042 does with the cache. The
-context settings and the replica groups are read to exclude rows, not
-projected.
+id or name, no replica name. The plan text is read on the instance and
+dropped with its chunk, as 042 does with the cache. The replica groups are
+read to exclude rows, not projected.
 
-The test (test 3) is on the output, not on the SQL: the set of keys of the
+The test (test 2) is on the output, not on the SQL: the set of keys of the
 root and of a band row must equal the lists of "The collector", and a query
 planted with a distinctive literal must not appear in the document. Column
 names are not a test of this: the first draft's test forbade `plan` in a
@@ -620,9 +572,9 @@ collectors is full.
 ```
 
 The permissions are 029's, which reads the same views and `sys.objects` for
-the same classes of nested queries; `sys.query_context_settings`,
-`sys.query_store_replicas`, `sys.dm_hadr_availability_replica_states` and
-`sys.dm_os_sys_info` need nothing more (see the permission chain above, and
+the same classes of nested queries; `sys.query_store_replicas`,
+`sys.dm_hadr_availability_replica_states` and `sys.dm_os_sys_info` need
+nothing more (see the permission chain above, and
 050, which reads the replica states under the same line). The floor is SQL
 Server 2016, where every column read outside the `sp_executesql` branch
 exists; it has not been measured on 2016. Each of the two result sets carries
@@ -655,16 +607,15 @@ reader can tell the two apart. The bands are seven rows in every case.
 | `window.store_oldest_interval` | the start of the oldest interval the store holds |
 | `window.intervals` | distinct intervals of the window holding a runtime row |
 | `window.runtime_rows` | runtime rows of the window the aggregation read, before any exclusion |
-| `window.executions`, `window.cpu_s` | every query not emitted by sql-auditor, except scalar function queries |
+| `window.executions`, `window.cpu_s` | every query, the audit's own included ("The audit's own statements"), except scalar function queries |
 | `window.scalar_function_cpu_s` | the CPU of the scalar function queries left out of `window.cpu_s` |
 | `window.parallel_plans` | plans with `is_parallel_plan = 1` executed in the window, nested ones included |
 | `window.parallel_plan_cpu_s` | all their CPU, at any degree |
 | `window.parallel_executions`, `window.parallel_cpu_s` | their runtime rows where `max_dop > 1`: the denominator of the bands' `parallel_*` |
 | `window.parallel_executions_min`, `window.parallel_cpu_s_min` | their runtime rows where `min_dop > 1` |
-| `window.serial_plans_dop_above_1` | plans with `is_parallel_plan = 0` and a runtime row with `max_dop > 1` (point 4), counted and never banded |
+| `window.serial_plans_dop_above_1` | plans with `is_parallel_plan = 0` and a runtime row with `max_dop > 1` (point 4), the audit's included, counted and never banded |
 | `window.dop_above_schedulers` | runtime rows of parallel plans with `max_dop` above `schedulers` (the documented anomaly), counted and kept |
 | `nested.parallel_plans`, `nested.parallel_cpu_s` | parallel plans of `FN`, `TF` and `TR` queries, kept in the bands, and their CPU where `max_dop > 1` |
-| `excluded.audit_plans`, `excluded.audit_cpu_s` | plans executed in the window under `@audit_datefirst`, and their CPU, left out of everything above |
 | `excluded.other_replicas_executions`, `excluded.other_replicas_cpu_s` | runtime rows of other replica roles, left out of everything above; NULL where they cannot be told apart |
 | `cap`, `chunk`, `budget.bytes`, `budget.ms` | the constants |
 | `selection.duration_ms` | the time of the aggregation, the ranking and the pin |
@@ -775,10 +726,12 @@ statements of `master`, the store covers what the cache evicted.
 - `avg_dop` inherits the documented anomaly. The rows above the scheduler
   count are counted in the root so the reader can tell whether it touched the
   bands.
-- The audit's own statements are left out only when an sql-auditor build with
-  the session marker ran them. After an upgrade, a week of older audits can
-  remain in the window, and nothing distinguishes them from the workload. A
-  client session that uses `DATEFIRST 3` is left out as if it were the audit.
+- The audit's own statements, this run's and those of earlier audits in the
+  window, are in the serial totals and in `window.serial_plans_dop_above_1`.
+  That they never reach a band rests on a measurement of nine lab stores
+  (point 8) and on test 4, which runs the embedded corpus; it is not a
+  property of the engine, and a `--queries-dir` script with a statement that
+  runs parallel puts that statement in the bands.
 - The store follows its database across a failover: rows of the primary role
   from before a failover inside the window were run by the other instance,
   under its own threshold and scheduler count. An availability group secondary
@@ -787,8 +740,8 @@ statements of `master`, the store covers what the cache evicted.
 ## The cost, measured
 
 On the lab, 4 October 2026, a prototype of the selection and the read loop
-(not the final file: it pins on `is_parallel_plan = 1 OR max_dop > 1` and
-does not exclude the audit), run twice per database, the first run cold:
+(not the final file: it pins on `is_parallel_plan = 1 OR max_dop > 1`), run
+twice per database, the first run cold:
 
 | Store | Plans in window | Pinned | MB read | Selection | Read loop |
 | --- | --- | --- | --- | --- | --- |
@@ -798,11 +751,12 @@ does not exclude the audit), run twice per database, the first run cold:
 | four other lab stores | 95 to 116 | 0 to 4 | up to 0.07 | 29 to 95 ms | 0 to 64 ms |
 
 So 29 to 148 ms per database on the lab, selection and read loop together.
-Claude measured the final shape of the aggregation (runtime rows joined to the
+Claude measured the third version's aggregation (runtime rows joined to the
 interval, the plan, the query, the context and `sys.objects`, grouped by plan,
-`MAXDOP 1`) at 89 to 90 ms on `LABSTORE_A`'s 9 086 runtime rows, and 81 to
-139 ms on a store of its own. What a lab cannot say is the number of parallel plans
-a client store holds in a week, which decides whether the cap or a budget is
+`MAXDOP 1`; this version drops the join to the context) at 89 to 90 ms on
+`LABSTORE_A`'s 9 086 runtime rows, and 81 to 139 ms on a store of its own.
+What a lab cannot say is the number of parallel plans a client store holds in
+a week, which decides whether the cap or a budget is
 reached, nor the size of the runtime view on a busy store, which decides the
 selection's price; `selection.duration_ms`, `window.runtime_rows`,
 `examined.duration_ms`, `examined.bytes_read`, `examined.largest_plan_bytes`
@@ -819,12 +773,11 @@ The row that "What the default run costs a large instance" in
 
 ## What is not in scope
 
-- Correcting 042 for point 4, and teaching 042 the session marker. Both are
-  findings about 042, recorded here because this measurement found them.
-- Teaching the marker, and the replica filter, to the other Query Store
-  collectors (020 to 029). They count the audit's statements, read the
-  secondary's copy of the primary's store, and, with Query Store for
-  secondaries, mix the roles. That is true today, before 043.
+- Correcting 042 for point 4. It is a finding about 042, recorded here
+  because this measurement found it.
+- Teaching the replica filter to the other Query Store collectors (020 to
+  029). They read the secondary's copy of the primary's store and, with Query
+  Store for secondaries, mix the roles. That is true today, before 043.
 - Correcting 020 and 029, which leave trigger and multi-statement function
   queries out of their totals on the assumption that their CPU is in the
   caller (point 7).
@@ -845,71 +798,59 @@ whose mutation passes tests nothing, and is to be rewritten, not kept.
    @chunk` and `SET @lo = @lo + @chunk` once each, and the projections `cap`
    and `chunk`. Mutations: pinning with `TOP (@cap)` or a literal `TOP
    (1001)`; walking the loop with any other variable than `@chunk`. A static
-   count cannot show that the loop reads by the chunk it declares; test 6 does.
-2. The marker, statically. `@audit_datefirst` in 043 equals
-   `collect.AuditDateFirst`, and the reset batch built by the runner's
-   function begins with `SET DATEFIRST` followed by that value. No file of the
-   embedded corpus, comments stripped, writes `DATEFIRST` (`SET LANGUAGE`,
-   `SET DATEFIRST`) or reads it (`DATEPART` or `DATENAME` with `week`, `wk`,
-   `ww`, `weekday` or `dw`, `DATETRUNC` with `week`, `@@DATEFIRST`); and a
-   script written to a temporary `--queries-dir` with one writer and one
-   reader gets the manifest warning, naming it. Mutations: changing either
-   constant alone; dropping the `SET` from the batch; adding `SET LANGUAGE
-   French;` to any collector (the writer, which breaks 043's exclusion);
-   adding `DATEPART(dw, GETDATE())` to any collector (the reader, which
-   changes that collector's answer); removing the warning.
-3. No text leaves. Live, on the database of test 5: the keys of the root and
+   count cannot show that the loop reads by the chunk it declares; test 5 does.
+2. No text leaves. Live, on the database of test 3: the keys of the root and
    of every band row equal the lists of "The collector" exactly, and the
    literal `ZZ043_PLANTED_TEXT`, written into a parallel query of the planted
    workload, appears nowhere in the document. Mutation: adding `p.plan_id` to
    the projection.
-4. The session marker, live, through the runner's own path. With `runUnit`
-   and `recycleConn`, as `TestLiveAUnitLeavesNoTempTable` uses them, four
-   units in a row on one connection, each a script whose root is `SELECT
-   @@DATEFIRST AS df`, the third preceded in its own batch text by `SET
-   LANGUAGE French;`, and `recycleConn` after each: the roots read 3, 3, 1
-   and 3. Mutations: dropping the `SET` from the reset batch (all four read
-   the login's value, 7 for `us_english`); setting it once after the login
-   instead of in the reset batch (the second and fourth read 7, since the
-   pool's reset restores the login's settings). The third value asserts the
-   limit this document states; if the engine stops resetting `DATEFIRST` on
-   a language change, the test says the limit has gone.
-5. The bands, live, on the lab. A test creates a database with the store in
+3. The bands, live, on the lab. A test creates a database with the store in
    capture mode ALL and one-minute intervals. From a connection opened with
-   `sql.Open`, which never runs `ResetSession` and so is unmarked, it creates
-   six heaps `dbo.Ladder1` to `dbo.Ladder6` (`id bigint`, `pad char(100)`) of
-   20 000, 50 000, 100 000, 200 000, 500 000 and 2 000 000 rows, runs `SELECT
-   COUNT_BIG(*) FROM dbo.LadderN WHERE id % 7 = 3` on each, then the same
-   with `OPTION (MAXDOP 2)`; creates and runs `dbo.TwoStatements`, whose body
-   is `SELECT pad FROM dbo.Ladder1 WHERE id = 1;` then `SELECT COUNT_BIG(*)
-   FROM dbo.Ladder6 WHERE id % 7 = 4;`; and runs, in one batch, 041's
-   `CREATE TABLE #savings (object_name sysname, schema_name sysname, index_id
-   int, partition_number int, size_current_kb bigint, size_requested_kb
-   bigint, sample_current_kb bigint, sample_requested_kb bigint);` then
-   `INSERT INTO #savings EXEC sys.sp_estimate_data_compression_savings
-   @schema_name = N'dbo', @object_name = N'Ladder6', @index_id = NULL,
-   @partition_number = NULL, @data_compression = N'PAGE';`. Then, through
-   `runUnit`, it runs a unit made of the parallel aggregate on `dbo.Ladder6`
-   and the same `#savings` batch, then 043. It asserts, in this order:
-   `window.serial_plans_dop_above_1` is at least 1, and stops there if not,
-   since the rest would test nothing; that count equals the number of serial
-   plans with `max_dop > 1` the test finds itself under the default context,
-   so the audit's call is not in it; `excluded.audit_plans` is at least 2;
+   `sql.Open`, it creates six heaps `dbo.Ladder1` to `dbo.Ladder6` (`id
+   bigint`, `pad char(100)`) of 20 000, 50 000, 100 000, 200 000, 500 000 and
+   2 000 000 rows, runs `SELECT COUNT_BIG(*) FROM dbo.LadderN WHERE id % 7 =
+   3` on each, then the same with `OPTION (MAXDOP 2)`; creates and runs
+   `dbo.TwoStatements`, whose body is `SELECT pad FROM dbo.Ladder1 WHERE id =
+   1;` then `SELECT COUNT_BIG(*) FROM dbo.Ladder6 WHERE id % 7 = 4;`; and
+   runs, in one batch, 041's `CREATE TABLE #savings (object_name sysname,
+   schema_name sysname, index_id int, partition_number int, size_current_kb
+   bigint, size_requested_kb bigint, sample_current_kb bigint,
+   sample_requested_kb bigint);` then `INSERT INTO #savings EXEC
+   sys.sp_estimate_data_compression_savings @schema_name = N'dbo',
+   @object_name = N'Ladder6', @index_id = NULL, @partition_number = NULL,
+   @data_compression = N'PAGE';`. Then, through `runUnit`, it runs 043. It
+   asserts, in this order: `window.serial_plans_dop_above_1` is at least 1,
+   and stops there if not, since the rest would test nothing;
    `excluded.other_replicas_executions` is 0 and not NULL on SQL Server 2025
    (and NULL below 2022, on a lab that has one); the bands equal those
    computed independently from `sys.query_store_plan` through the xml path on
-   the first costed statement element, over the parallel plans of the default
-   context; no plan of the test database has more than one costed statement
-   element; `parallel_executions_min` is at most `parallel_executions` in
-   every band; and `examined.share_of_parallel_cpu_pct` equals the bands'
-   summed `parallel_cpu_s` over `window.parallel_cpu_s` within rounding. The
-   test drops the database. Mutations, each of which must make it fail:
-   selecting on `max_dop > 1` instead of `is_parallel_plan = 1`; removing the
-   exclusion of `@audit_datefirst`; a `COL_LENGTH` or `OBJECT_ID` that never
-   finds the replica column or view (the count turns NULL); a replica
-   predicate that keeps the wrong groups (the bands empty out); computing the
-   share from anything but the bands.
-6. The stop rules, live, on the store of test 5 with `@chunk` rewritten to 2.
+   the first costed statement element, over the parallel plans of the store;
+   no plan of the test database has more than one costed statement element;
+   `parallel_executions_min` is at most `parallel_executions` in every band;
+   and `examined.share_of_parallel_cpu_pct` equals the bands' summed
+   `parallel_cpu_s` over `window.parallel_cpu_s` within rounding. The test
+   drops the database. Mutations, each of which must make it fail: selecting
+   on `max_dop > 1` instead of `is_parallel_plan = 1`; a `COL_LENGTH` or
+   `OBJECT_ID` that never finds the replica column or view (the count turns
+   NULL); a replica predicate that keeps the wrong groups (the bands empty
+   out); computing the share from anything but the bands.
+4. The audit's footprint, live. On the database of test 3, once its workload
+   has run, the test notes the instant, then runs through `runUnit`, in
+   corpus order, every per-database collector of the embedded corpus that a
+   default run would run there, 043 included. It then reads, from `master`
+   with three-part names, the runtime rows of the store whose
+   `last_execution_time` is after that instant, joined to
+   `sys.query_store_plan`. It asserts that there is at least one such row,
+   and fails otherwise, since a store that captured nothing of the audit
+   would pass the rest; and that none of them belongs to a plan with
+   `is_parallel_plan = 1`. It logs, without asserting it, the number of
+   serial plans with `max_dop > 1` among them (point 8 found 0 to 2).
+   Mutation: a copy of the corpus in which one per-database collector begins
+   with `DECLARE @n bigint; SELECT @n = COUNT_BIG(*) FROM dbo.Ladder6 WHERE
+   id % 7 = 5;`, which carries no hint and runs parallel on test 3's ladder.
+   This is the test that keeps point 8 true as collectors are added; it does
+   not cover a `--queries-dir` corpus.
+5. The stop rules, live, on the store of test 3 with `@chunk` rewritten to 2.
    With `@budget_bytes` at 1, `examined.stopped_by` is `bytes` and
    `examined.plans_read` is 2, the first chunk, which are the two plans of
    highest parallel CPU, and `examined.largest_plan_bytes` equals the larger
@@ -923,7 +864,7 @@ whose mutation passes tests nothing, and is to be rewritten, not kept.
    Mutations: a loop that ignores `@chunk` (the byte case reads more than 2);
    `TOP (@cap)` without the `+ 1` (`cap` is never named); checking bytes
    before time.
-7. Stores that are not read, and a store with no parallel work. Through
+6. Stores that are not read, and a store with no parallel work. Through
    `runUnit`: in `master`, which has no row in the options view, one root row
    with `state.actual` NULL, `state.not_read_because` `no store`, NULL counts
    and seven empty bands; in a database whose store held parallel plans and
@@ -936,50 +877,34 @@ whose mutation passes tests nothing, and is to be rewritten, not kept.
    reading the OFF store into the bands (which is why it must hold parallel
    plans before it is switched off); dividing without `NULLIF` (error 8134
    fails the third case).
-8. The guide. `TestTheGuideCountsTheTimeoutTiersOfTheCorpus` passes with the
+7. The guide. `TestTheGuideCountsTheTimeoutTiersOfTheCorpus` passes with the
    `120 s` row at 30; it is the existing test, run after the guide is edited.
 
 What no test here covers, said so that nobody believes otherwise: the
 secondary branch and the rows of another replica role (the lab has no
 availability group); `avg_dop` above the range of a `decimal` (the anomaly
 cannot be produced); a plan leaving the store between the pin and its chunk;
-and the selection's cost on a large runtime view.
+the selection's cost on a large runtime view; the audit's CPU in
+`window.cpu_s`, which no test measures; and the footprint of a `--queries-dir`
+corpus.
 
 The live tests create their databases under a prefix of their own, and the
 existing `TestLive...` suite's `ZzDroppedDuringRun` collides on a shared
 instance (codex neutral, first panel); that is a matter for the suite, not for
-this file.
+this file. The tests are numbered for this version; the reviews below use the
+numbers of the version they read.
 
 ## Open questions
 
-- Is the session marker worth what it changes? It is the only marker found
-  that reaches nested work (system procedures, triggers, functions, the
-  statistics queries the audit causes), and in this version it costs no round
-  trip. Its price: every collector of every run runs under `DATEFIRST 3`; a
-  `--queries-dir` script that reads the week computes it from Wednesday, and
-  one that sets a language stops being recognised for the rest of its batch,
-  both with a warning; a client session that uses `DATEFIRST 3` is counted
-  as the audit's. The alternative is to have no marker and to keep the audit's
-  statements in the window: every result set of the corpus carries `MAXDOP 1`,
-  so most of them are serial and never reach a band; what would remain are
-  the parallel plans the audit causes without writing them, such as the
-  internal statements of `sp_estimate_data_compression_savings`, and the
-  serial anomalies of point 4, which `window.serial_plans_dop_above_1` would
-  then count with the workload's. How much of a band that residue weighs has
-  not been measured; a lab run of the whole corpus followed by 043 without
-  the exclusion would say. The other alternative found, excluding only the
-  intervals of the current run, loses the client's workload of those minutes
-  and keeps every earlier audit.
 - Is seven days the right window, or thirty, the store's default retention,
   at the price of mixing plans compiled under a threshold since changed?
 - Is 10 s the right time budget for a collector that runs on every default
   run, and should the selection, which has no budget, get one, for example
   a count of runtime rows above which the store is reported and not read?
-- Should 042 be corrected for serial statements whose `max_dop` exceeds 1, and
-  taught the session marker, so that both files define parallel and the
-  workload the same way?
-- Should the other Query Store collectors (020 to 029) learn the marker and
-  the replica filter, and skip availability group secondaries?
+- Should 042 be corrected for serial statements whose `max_dop` exceeds 1, so
+  that both files define parallel the same way?
+- Should the other Query Store collectors (020 to 029) learn the replica
+  filter, and skip availability group secondaries?
 - Should 020 and 029 keep trigger and multi-statement function queries in
   their totals, after point 7?
 - Is 043 the right number, or should the Query Store family keep a range of
@@ -989,7 +914,8 @@ this file.
   signature of the opposite misconfiguration?
 
 The first draft's questions on a `.env` key and on `--all` are closed by the
-decision to run by default.
+decision to run by default, and the third version's question on the session
+marker by the decision of 5 October 2026.
 
 ## Review of 4 October 2026
 
@@ -1102,8 +1028,8 @@ neutral prompt. Claude built a driver that runs batches on one pooled
 connection and recycles it as `recycleConn` does, read go-mssqldb v1.10.0, and
 measured in three databases of its own; codex ran the suite and the live
 suite, and probes in two databases; agy ran probes on the lab, and its neutral
-reading found nothing. This version then measured, in `ZzAvgDop3`, the marker
-placed in the reset batch across a recycle and a `SET LANGUAGE`, test 5's
+reading found nothing. The third version then measured, in `ZzAvgDop3`, the
+marker placed in the reset batch across a recycle and a `SET LANGUAGE`, test 5's
 `#savings` artefacts from both kinds of session, the replica groups of a
 store without an availability group, and the copy and search of
 `LABSTORE_A` by chunks of 100, 10 and 1; and read Microsoft Learn on Query
@@ -1204,10 +1130,27 @@ audit causes, `sp_executesql`, system procedure internals, trigger and
 function bodies and `StatMan` included, and the same statements from an
 unmarked session are stored under 7 (Claude); `SessionInitSQL` and the pool's
 reset behaved as the second version said (Claude), which no longer matters;
-the anomaly of test 5 reproduces from both sessions (Claude, and here); no
-language has `datefirst` 3 and no system procedure the corpus calls reads it
-(agy neutral, Claude); the `120 s` tier is 29 today; `--profile space`
+the anomaly of test 5 reproduces from both sessions (Claude, and the third
+version); no language has `datefirst` 3 and no system procedure the corpus
+calls reads it (agy neutral, Claude); the `120 s` tier is 29 today; `--profile space`
 excludes a file with no `@profiles`; the OFF predicate and the denominator
 fix hold (codex, both prompts); the suite and the live suite pass on the
 untouched tree (codex, both prompts, Claude); and the aggregation's join to
 the plan view costs 2 to 14 ms, so it does not decompress plans (Claude).
+
+The decision left to the owner by the third version was taken on 5 October
+2026: the session marker is withdrawn. It rested on a measurement made on 4
+October 2026 around 21:52 UTC, a complete default collection on the lab
+followed, in each of the nine databases with an active store, by a read of the
+runtime rows executed since it began: no parallel plan in any of the nine, 41
+to 213 plans per database, 0 to 2 serial plans with `max_dop > 1` (point 8).
+The audit therefore leaves nothing for the bands to exclude, the selection on
+`is_parallel_plan = 1` already sets its anomalies aside, and its share is in
+the serial totals only ("The audit's own statements"). That supersedes finding
+5 of the first review and findings 2, 6, 7, 12 and 13 of this one, which
+concerned the marker; finding 9 stands, without the `excluded.audit_cpu_s`
+it pointed to, since 043 and 029 now count the audit alike. The marker's
+context-setting measurements, its two tests, the `excluded.audit_*` columns,
+the reset batch and the `--queries-dir` warnings left with it; they are in
+`760b4bf`. Test 4 now runs the embedded corpus against a store and fails if
+the audit leaves a parallel plan.
