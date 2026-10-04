@@ -373,7 +373,7 @@ a subscriber column, and correctly so — a Log Reader reads a publisher's log
 and a Snapshot Agent writes files; neither talks to a subscriber.
 
 **Profiles**, from `msdb.dbo.MSagent_profiles` and
-`msdb.dbo.MSagent_profile_parameters`: the batch and polling parameters
+`msdb.dbo.MSagent_parameters`: the batch and polling parameters
 (`-CommitBatchSize`, `-ReadBatchSize`, `-PollingInterval`,
 `-SubscriptionStreams`) that explain more latency than any single failure does.
 Lightweight catalog tables, guarded like the rest.
@@ -734,7 +734,7 @@ built as written, and each was a decision rather than an omission.
 
 **`MSsubscriptions` and the agent profiles are not collected.** The topology
 section asks for `MSsubscriptions`, and a **Profiles** section asks for
-`msdb.dbo.MSagent_profiles` and `MSagent_profile_parameters` — the batch and
+`msdb.dbo.MSagent_profiles` and `MSagent_parameters` — the batch and
 polling parameters that, as that section says, explain more latency than any
 single failure does. Both are still worth having and neither is in `042`. They
 are the first thing to add to it, not a decision to leave them out for good.
