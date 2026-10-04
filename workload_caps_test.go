@@ -36,6 +36,9 @@ var workloadCaps = []workloadCap{
 	{"020.query-store.sql", "@listing_cap", 200, 2, []string{"listing_cap"}},
 	{"023.query-store-most-executed.sql", "@listing_cap", 200, 2, []string{"listing_cap"}},
 	{"024.query-store-rowcount.sql", "@listing_cap", 200, 1, []string{"listing_cap"}},
+	{"026.query-store-interrupted.sql", "@listing_cap", 200, 2, []string{"listing_cap"}},
+	{"028.query-store-resources.sql", "@listing_cap", 200, 1, []string{"listing_cap"}},
+	{"060.spills.sql", "@listing_cap", 200, 1, []string{"listing_cap"}},
 }
 
 var (

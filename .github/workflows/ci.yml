@@ -651,6 +651,26 @@ jobs:
                  and (.by_query | length) == ([.counts.queries, .listing_cap] | min)' \
             "$run_dir/80.workload/ci_probe/024.query-store-rowcount.json" \
             || { jq 'del(.by_query)' "$run_dir/80.workload/ci_probe/024.query-store-rowcount.json"; exit 1; }
+          # 026, 028 and 060 cap their listings the same way. 026's root
+          # counts the queries behind each listing, 028's the queries above
+          # zero on at least one of its four measures, 060's the spilling
+          # statements; each listing must be its population up to the cap.
+          # 060 compares with <= because the spill counters move between its
+          # two reads of the cache.
+          jq -e '.listing_cap == 200
+                 and (.aborted | length) == ([.queries.with_aborted, .listing_cap] | min)
+                 and (.exceptions | length) == ([.queries.with_exception, .listing_cap] | min)' \
+            "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json" \
+            || { jq '{listing_cap, queries, aborted: (.aborted | length), exceptions: (.exceptions | length)}' \
+                   "$run_dir/80.workload/ci_probe/026.query-store-interrupted.json"; exit 1; }
+          jq -e '.listing_cap == 200
+                 and (.by_query | length) == ([.counts.queries_eligible, .listing_cap] | min)' \
+            "$run_dir/80.workload/ci_probe/028.query-store-resources.json" \
+            || { jq 'del(.by_query, .waits)' "$run_dir/80.workload/ci_probe/028.query-store-resources.json"; exit 1; }
+          jq -e '.listing_cap == 200
+                 and (.top_spills | length) <= ([.statements.spilling, .listing_cap] | min)' \
+            "$run_dir/80.workload/060.spills.json" \
+            || { jq 'del(.top_spills)' "$run_dir/80.workload/060.spills.json"; exit 1; }
           # 027 shreds OptimizerStatsUsage out of the stored plans. ci_probe's
           # few user tables are barely queried, so statistics_used may be empty
           # here and an assertion on its contents would assert nothing. What is
