@@ -1,5 +1,5 @@
 -- @scope:       instance
--- @resultsets:  root:object, events:array
+-- @resultsets:  root:object, events:array, classes:array
 -- @permissions: CONNECT, VIEW SERVER STATE
 -- @requires_flag: default_trace
 -- @discloses:   error_log
@@ -46,12 +46,40 @@
 -- evaluates the permission — and the unit would return one result set more than
 -- it declared.
 --
--- THE ROWS ARE CAPPED AT THE 5000 MOST RECENT. Five rolling 20 MB files can
--- hold far more than an archive should carry, and the aggregate in 044 is what
--- reports the true totals: this file exists to show what the events WERE, not
--- to count them. The cap and the window are both in the root object, so a
--- reader can tell a trace that was truncated here from one that had rolled.
+-- THE ROWS ARE CAPPED AT 5000, SHARED OUT BY EVENT CLASS. Five rolling 20 MB
+-- files can hold far more than an archive should carry, and the aggregate in
+-- 044 is what reports the true totals. Until October 2026 the 5000 were simply
+-- the most recent, on the assumption that the newest rows were a fair sample of
+-- what the events were. They are not: a flood of one class pushes every other
+-- class out. Measured on three client instances in September 2026, the cap was
+-- reached every time (5000 kept of 30 611, 14 262 and 15 050), the kept window
+-- was 10 minutes against the 68 the files held, and on one of them 14 of the 21
+-- configuration changes (class 22) and 26 of the 40 DBCC events (class 116) were
+-- dropped in favour of class 164, Object:Altered. On the lab the same day, 4999
+-- of the 5000 were class 46, and all six configuration changes were lost.
 --
+-- So the rows are ranked inside their class, newest first, and taken round
+-- robin: every class's newest row, then every class's second newest, and so on
+-- until the 5000 are spent. A class with fewer rows than its share is kept
+-- whole, and the classes that flood share what is left. On the lab that kept
+-- every row of every class but 46.
+--
+-- THE CAP STAYS AT 5000 ON PURPOSE, and it is a disclosure decision as much as
+-- a size one. These rows name logins, hosts and applications, and the operator
+-- who passes --include-default-trace accepts an archive of that kind and that
+-- size. Raising the cap to the 30 000 the largest trace held would multiply the
+-- number of named rows by six without anybody deciding it; sharing the same
+-- 5000 out differently changes which rows are named, not how many, nor which
+-- columns. What it does change, and it is the point: the rare classes it keeps
+-- are 20 (failed logins), 104, 105 and 108 (login and role administration) as
+-- much as configuration changes, so an archive that used to hold only the
+-- flooding Object:* rows now holds those too, within the same 5000.
+--
+-- No server cost: the ORDER BY StartTime DESC this replaces already read and
+-- sorted every row of the files, and the ranking is one more sort of the same
+-- rows. The classes result set says, per class, how many rows the files held
+-- and how many were kept, and the window of what was kept, so a class cut by
+-- the cap is named rather than inferred. capped says whether any class was.
 -- ABSENCE STILL PROVES NOTHING, the same caution 044 carries: the files rolled,
 -- and an empty result must not be read as "it never happened".
 
@@ -83,7 +111,8 @@ DECLARE @events TABLE (
     [IntegerData]     int           NULL,
     [Severity]        int           NULL,
     [Success]         int           NULL,
-    [TextData]        nvarchar(4000) NULL);
+    [TextData]        nvarchar(4000) NULL,
+    [ClassTotal]      int           NULL);
 
 BEGIN TRY
     INSERT INTO @traces ([id], [path], [status], [is_default])
@@ -109,19 +138,28 @@ BEGIN
         INSERT INTO @events ([StartTime], [EventClass], [DatabaseName],
                              [ObjectName], [ObjectType], [LoginName],
                              [ApplicationName], [HostName], [Duration],
-                             [IntegerData], [Severity], [Success], [TextData])
+                             [IntegerData], [Severity], [Success], [TextData],
+                             [ClassTotal])
         EXEC sys.sp_executesql
             N'SELECT TOP (5000)
-                     g.StartTime, g.EventClass, g.DatabaseName,
-                     g.ObjectName, g.ObjectType, g.LoginName,
-                     g.ApplicationName, g.HostName, g.Duration,
-                     g.IntegerData, g.Severity, g.Success,
-                     CASE WHEN g.EventClass = 22
-                          THEN CONVERT(nvarchar(4000), g.TextData) END
-              FROM sys.fn_trace_gettable(@p, DEFAULT) AS g
-              WHERE g.EventClass IN (20, 22, 46, 47, 92, 93, 94, 95,
-                                     104, 105, 108, 115, 116, 164)
-              ORDER BY g.StartTime DESC
+                     r.StartTime, r.EventClass, r.DatabaseName,
+                     r.ObjectName, r.ObjectType, r.LoginName,
+                     r.ApplicationName, r.HostName, r.Duration,
+                     r.IntegerData, r.Severity, r.Success,
+                     r.TextData, r.class_total
+              FROM (SELECT g.StartTime, g.EventClass, g.DatabaseName,
+                           g.ObjectName, g.ObjectType, g.LoginName,
+                           g.ApplicationName, g.HostName, g.Duration,
+                           g.IntegerData, g.Severity, g.Success,
+                           CASE WHEN g.EventClass = 22
+                                THEN CONVERT(nvarchar(4000), g.TextData) END AS TextData,
+                           ROW_NUMBER() OVER (PARTITION BY g.EventClass
+                                              ORDER BY g.StartTime DESC) AS class_rank,
+                           COUNT(*) OVER (PARTITION BY g.EventClass) AS class_total
+                    FROM sys.fn_trace_gettable(@p, DEFAULT) AS g
+                    WHERE g.EventClass IN (20, 22, 46, 47, 92, 93, 94, 95,
+                                           104, 105, 108, 115, 116, 164)) AS r
+              ORDER BY r.class_rank, r.StartTime DESC, r.EventClass
               OPTION (RECOMPILE, MAXDOP 1)',
             N'@p nvarchar(260)', @p = @path;
     END TRY
@@ -139,10 +177,19 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                 AS [collected_at
        @path                                                    AS [current_file],
        5000                                                     AS [row_cap],
        (SELECT COUNT(*) FROM @events)                           AS [counts.events],
-       /* At the cap, the window below is the window of what was KEPT and not of
-          what the files hold. 044 reports the true totals. */
-       CASE WHEN (SELECT COUNT(*) FROM @events) >= 5000 THEN 1 ELSE 0 END
-                                                                AS [capped],
+       /* What the files held for the classes read, one total per class summed
+          once. Equal to counts.events when nothing was cut. */
+       (SELECT SUM(c.[held]) FROM (SELECT MAX(e.[ClassTotal]) AS [held]
+                                   FROM @events AS e
+                                   GROUP BY e.[EventClass]) AS c)
+                                                                AS [counts.events_in_files],
+       /* At the cap, the window below is the window of what was KEPT, and it is
+          no longer one window: each class reaches back as far as its share
+          allowed. classes carries the window per class. */
+       CASE WHEN EXISTS (SELECT 1 FROM @events AS e
+                         GROUP BY e.[EventClass]
+                         HAVING COUNT(*) < MAX(e.[ClassTotal]))
+            THEN 1 ELSE 0 END                                   AS [capped],
        (SELECT MIN(e.[StartTime]) FROM @events AS e)            AS [window.oldest],
        (SELECT MAX(e.[StartTime]) FROM @events AS e)            AS [window.newest]
 OPTION (RECOMPILE, MAXDOP 1);
@@ -178,4 +225,18 @@ SELECT e.[StartTime]                                            AS [start_time],
        e.[TextData]                                             AS [text_data]
 FROM @events AS e
 ORDER BY e.[StartTime] DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* One row per class read: what the files held, what was kept, and the window
+   the kept rows cover. A class whose kept is below its held is one the cap
+   cut, and its oldest_kept says how far back it still reaches. A class with no
+   row in the files has no row here, which is the same statement 044 makes. */
+SELECT e.[EventClass]                                           AS [event_class],
+       MAX(e.[ClassTotal])                                      AS [held],
+       COUNT(*)                                                 AS [kept],
+       MIN(e.[StartTime])                                       AS [oldest_kept],
+       MAX(e.[StartTime])                                       AS [newest_kept]
+FROM @events AS e
+GROUP BY e.[EventClass]
+ORDER BY e.[EventClass]
 OPTION (RECOMPILE, MAXDOP 1);
