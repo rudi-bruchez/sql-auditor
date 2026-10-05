@@ -380,6 +380,9 @@ from before the wizard.
   files already written stay in the run folder, but there is no manifest and no
   archive, and the `.lock` file left beside the folder has to be deleted before
   the next collection of that server and day can start.
+- A collection cut by `--max-duration` exits `2`, its last line but one ends
+  with `max duration reached` (then `cancelled` if it was also stopped), and a
+  note on stderr says how many collectors were not started.
 - A run that did not complete, because it was stopped or a collector failed,
   never deletes the earlier run of the same server and day that it replaces:
   that run stays beside it, named `.superseded-HHMMSS`, and the collection says
@@ -449,6 +452,7 @@ Exactly three cases.
 | `--queries-dir DIR` | run a corpus from disk instead of the embedded one. Every file is checked first for what its statements DO, and one that changes the server is refused rather than run. That check is a syntactic guard against the accident and **not a sandbox**: it bounds what a mistake can do, it does not vouch for an author this project has never seen ([what is allowed](docs/dba-guide.md#what-a-corpus-from-a-directory-is-allowed-to-contain)) |
 | `--output-dir DIR` | where to write results |
 | `--keep` | keep an existing same-day run folder, suffixing this run |
+| `--max-duration D` | bound the whole collection, counted from its start: once `D` has passed, no collector starts and the one running is stopped. A Go duration in whole seconds, at least one minute: `90m`, `2h`, `1h30m`. Overrides `MAX_DURATION`. See [Bounding the duration of a collection](#bounding-the-duration-of-a-collection) |
 | `--profile NAME` | collect only the collectors of a profile. The one profile is `space`. Refused beside `--all`. See [Collecting for one question](#collecting-for-one-question) |
 | `--grant-script FILE` | `check` only. Write the T-SQL that grants the permissions found missing, for the login the server reports, with the reason for each. Never executed. Refuses an existing `FILE` unless `--force` is given. |
 
@@ -464,8 +468,8 @@ Exactly three cases.
 | `--include-default-trace` | also collect the retained rows of the default trace, not only the aggregate that is always made. The rows name the login, host and database of each event |
 | `--include-job-step-commands` | also collect the complete text of every Transact-SQL job step, instead of its first 200 characters. A job step is application code, and it is where a password gets typed rather than kept in a credential |
 | `--plan-cache-plans` | also collect execution plans from the plan cache, one `.sqlplan` file each: the only plans an instance without the Query Store contributes. The statement text beside them comes from the cache and can carry literal values |
-| `--estimate-compression` | also estimate page-compression savings on the 20 largest uncompressed objects, per database. Off for cost, not for disclosure: it samples real data into tempdb and is slow on large tables. Each database may take up to its 1800-second timeout, and nothing bounds the run as a whole; `check` prints that ceiling before the run |
-| `--measure-page-density` | also measure how full the pages of the 50 largest index partitions are, per database, which says what a rebuild would give back. Off for cost, not for disclosure: `SAMPLED` reads all of a small partition and a sample of a large one, LOB pages included: about 1 % on one lab measurement, 8 to 12 % on another, so plan with the higher figure. Each database may take up to its 1800-second timeout, and nothing bounds the run as a whole; `check` prints that ceiling before the run: narrow it with `DB_INCLUDE` on an instance with many large databases |
+| `--estimate-compression` | also estimate page-compression savings on the 20 largest uncompressed objects, per database. Off for cost, not for disclosure: it samples real data into tempdb and is slow on large tables. Each database may take up to its 1800-second timeout, and `--max-duration` bounds the run as a whole; `check` prints that ceiling before the run |
+| `--measure-page-density` | also measure how full the pages of the 50 largest index partitions are, per database, which says what a rebuild would give back. Off for cost, not for disclosure: `SAMPLED` reads all of a small partition and a sample of a large one, LOB pages included: about 1 % on one lab measurement, 8 to 12 % on another, so plan with the higher figure. Each database may take up to its 1800-second timeout, and `--max-duration` bounds the run as a whole; `check` prints that ceiling before the run: narrow it with `DB_INCLUDE` on an instance with many large databases |
 | `--query-store-detail` | also collect the full text and the execution plans of the heaviest Query Store queries, per database |
 | `--query-store-plan-stats` | also look for the last profiled plan of each query the option above extracted. Does nothing on its own |
 
@@ -492,6 +496,33 @@ wrong thing everywhere else, and the tool will not ask you which it is.
 It changes nothing else: no confirmation, no extra collectors beyond the eleven,
 and `MANIFEST.txt` still discloses them one by one, because what the archive
 contains is the fact that matters and how briefly it was requested is not.
+
+### Bounding the duration of a collection
+
+`--max-duration 2h`, or `MAX_DURATION=2h` in `.env`, bounds the whole
+collection. The bound counts from the start of the run, connecting included,
+the same origin as `duration_sec` in `_run.json`. Once it has passed, no
+collector starts, and the statement running at that moment is cancelled. Every
+collector not started is listed in `_run.json` with the reason, the run exits
+`2`, and the archive is partial. The collection is bounded; nothing is judged.
+
+What can still run after the bound: the server can take a few seconds to
+confirm the cancellation of the statement in flight, and longer to undo what
+that statement had written; the session's reset after a collector, the start of
+the blocking watch and its last poll are not bounded and can each take up to
+their own limits; the manifest and the archive are written after it. The bound
+counts running time: a machine that sleeps, or a virtual machine paused, ends
+that much later by the clock on the wall.
+
+The collectors behind the two options off for cost run after all the others,
+in every run, so that a bound reached late cuts them before it cuts the Query
+Store. `check` prints the bound before it connects, with where it came from,
+and compares it with the ceiling of the plan.
+
+`MAX_DURATION` is new: 0.37.0 and older refuse a `.env` that sets it, which is
+the safe outcome. They ignore it in the process environment without a word,
+so set it in `.env` or with the flag, and look for the `Bound` line in
+`check`.
 
 ## Collecting for one question
 
@@ -700,6 +731,7 @@ reverse of the usual twelve-factor ordering and is
 | --- | --- | --- |
 | `QUERIES_DIR` | *(empty)* | run a corpus from disk instead of the embedded one, under the same statement check as `--queries-dir` |
 | `OUTPUT_DIR` | `output` | where run folders and archives are written |
+| `MAX_DURATION` | *(empty)* | bound on the whole collection, a Go duration in whole seconds of at least one minute (`90m`, `2h`); empty means none. See [Bounding the duration of a collection](#bounding-the-duration-of-a-collection) |
 | `DB_INCLUDE` | *(empty)* | comma-separated `*`/`?` patterns; empty means all user databases |
 | `DB_EXCLUDE` | *(empty)* | comma-separated `*`/`?` patterns |
 
@@ -737,7 +769,11 @@ is recorded in the archive, but it is not a failure of the run.
 
 The wizard is the exception for a stop: an operator who stops the collection
 from the wizard has read the screen that calls the archive partial, and the
-wizard exits `0`.
+wizard exits `0`. A bound is the same decision taken in advance, and a run it
+cut exits `0` in the wizard too, provided the run wrote an archive, collected
+something, and no collector had failed on its own before the bound. A bound
+that cut the run before anything was collected, or a bounded run in which a
+collector had already failed, exits `2`.
 
 ## Supported versions
 
