@@ -525,3 +525,83 @@ func TestLiveMaxDurationAfterTheRunFolderKeepsThePreviousRun(t *testing.T) {
 		t.Errorf("archives %v, set aside %v; want this run's archive and the first run kept", zips, aside)
 	}
 }
+
+// Criterion 6a. A unit still running at the bound is stopped; its error names
+// the bound once and keeps the driver's words; the next unit is skipped; the
+// unit cut by the bound is not a failure of the run's own.
+func TestLiveMaxDurationStopsTheRunningUnit(t *testing.T) {
+	o := maxDurRun(t, context.Background(), maxDurWait, t.TempDir(), time.Now(), 2*time.Second, nil)
+	msg := ""
+	if len(o.m.Errors) == 1 {
+		msg = o.m.Errors[0].Message
+	}
+	const pre = "stopped when the collection reached its maximum duration of 0m02s (2 s): "
+	if !strings.HasPrefix(msg, pre) || strings.Count(msg, "stopped when") != 1 {
+		t.Errorf("the unit's error %q, want it to begin %q, once", msg, pre)
+	}
+	if o.m.Run.Cancelled {
+		t.Error("cancelled is set")
+	}
+	matches, _ := filepath.Glob(filepath.Join(o.m.Config["output_dir"], "*", "10.system", "901.a*"))
+	if len(matches) != 0 {
+		t.Errorf("the stopped unit left files: %v", matches)
+	}
+	if len(o.m.Skipped) != 1 || o.m.Skipped[0].Reason != maxDurationSkipReason(2*time.Second) {
+		t.Errorf("skipped %+v", o.m.Skipped)
+	}
+	if len(o.rec.skips) != 1 || !o.rec.skips[0].MaxDuration {
+		t.Errorf("skips told: %+v", o.rec.skips)
+	}
+	if nl := noteLines(o.progress); len(nl) != 1 || nl[0] != "note: the collection reached its maximum duration of 0m02s (2 s); 1 collector was not started, and the one running then was stopped" {
+		t.Errorf("note lines %q", nl)
+	}
+	if strings.Contains(o.progress, "connection lost") {
+		t.Error("connection lost printed")
+	}
+	if v := o.verdict(t); v != (Verdict{MaxDurationReached: true, Failed: false, Collected: 0}) {
+		t.Errorf("verdict %+v, want {MaxDurationReached: true}", v)
+	}
+	if o.code != 2 || o.m.Run.DurationSec < 2 {
+		t.Errorf("exit %d, duration_sec %d; want 2 and at least 2", o.code, o.m.Run.DurationSec)
+	}
+	if took := o.rec.firstDone.Sub(o.began); o.rec.firstDone.IsZero() || took > 12*time.Second {
+		t.Errorf("the first unit came back %s after the start, want within 12 s", took)
+	}
+}
+
+// Criterion 7. runUnit with a bound already passed is cut at its first call,
+// the session reset, and writes nothing. The reset is told to USE a database
+// that does not exist: run on the run's context instead of the unit's, it
+// would reach the server and fail with 911 rather than with the bound.
+func TestLiveMaxDurationCutsTheFirstReset(t *testing.T) {
+	cfg := maxDurConfig(t, t.TempDir(), 2*time.Hour)
+	ctx := context.Background()
+	db, err := Open(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	unitCfg := cfg
+	unitCfg.Database = "ZzMaxDurMissing"
+	bound, cancelBound := context.WithDeadlineCause(ctx, time.Now().Add(-time.Second), errMaxDurationReached)
+	defer cancelBound()
+	s := Script{Path: "10.system/901.a.sql", TimeoutSec: 60, SQL: maxDurSelect,
+		Results: []ResultSpec{{Name: "root", Shape: ShapeObject}}}
+	dir := t.TempDir()
+	m, rw := &Manifest{}, newRunWriter(dir, 1<<20)
+	cut, uerr := runUnit(ctx, bound, conn, Options{Config: &unitCfg}, m, rw, s, DatabaseFolder{}, nil, 0)
+	if !cut {
+		t.Error("cut is false")
+	}
+	if uerr == nil || !strings.HasPrefix(uerr.Error(), "stopped when the collection reached its maximum duration of 2h00m (7200 s): ") {
+		t.Errorf("error %v, want the bound's sentence from the first reset", uerr)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 || len(m.Results) != 0 {
+		t.Errorf("files %v, results %+v; want none", entries, m.Results)
+	}
+}

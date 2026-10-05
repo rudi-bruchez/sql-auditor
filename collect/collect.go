@@ -2613,8 +2613,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// Before the unit, not after it: a run that hangs prints no "done"
 		// line, and the last name printed is the one to look at.
 		o.Debugf("running %s on %s", s.Path, target.Name)
-		err := runUnit(ctx, conn, o, m, rw, s, target, watch, spid)
+		cut, err := runUnit(ctx, bound, conn, o, m, rw, s, target, watch, spid)
 		pause("after a unit", bound)
+		// The fact, from the call the bound stopped, never from the error's
+		// words: a SQL Server number returned after the bound, or a stop
+		// landing while the driver returns, leaves cut true.
+		if cut {
+			m.Run.MaxDurationReached = true
+			stoppedByBound = true
+		}
 		var be *blockedError
 		if errors.As(err, &be) && target.Name != "" {
 			cancelledOn[target.Name] = s.Path
@@ -2697,8 +2704,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 			// into 2 once the loop is over.
 			break
 		}
-		exit = code
-		earned = code
+		// A unit the bound cut is not a failure of the run's own: settleRun
+		// makes the run 2 for the bound, and exit stays the record of what
+		// the run earned, which the wizard reads.
+		if !cut {
+			exit = code
+			earned = code
+		}
 
 		// One reconnect attempt on a dead connection. The replacement is
 		// reset before the next unit uses it — the PowerShell version
@@ -2894,19 +2906,32 @@ func outOfTime(parent, call context.Context, limit, bound time.Duration, knob st
 	return fmt.Errorf("still running when %s of %s expired: %w", knob, limit, err)
 }
 
-func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
-	rw *runWriter, s Script, u DatabaseFolder, watch *blockingWatch, spid int) (err error) {
+func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
+	rw *runWriter, s Script, u DatabaseFolder, watch *blockingWatch, spid int) (cut bool, err error) {
 
-	if err := resetWithDeadline(ctx, conn, o.Config); err != nil {
-		return err
-	}
-
+	limit := o.Config.MaxDuration
 	// The unit's own context, which the blocking watch cancels with a
-	// *blockedError as the cause. The run's context stays untouched, so
-	// recordUnitFailure files a watch cancellation as a failed unit and never
-	// as an operator stop.
-	unitCtx, unitCancel := context.WithCancelCause(ctx)
+	// *blockedError as the cause, and which inherits the bound's deadline and
+	// cause. The run's context stays untouched, so recordUnitFailure files a
+	// watch cancellation or a bound stop as a failed unit and never as an
+	// operator stop.
+	unitCtx, unitCancel := context.WithCancelCause(bound)
 	defer unitCancel(nil)
+
+	// The first reset runs on the unit's context, so that the bound can cut
+	// it, and holds its own deadline context so that its cause can be read.
+	// cut is read from that context's first cause, before its cancel, which
+	// would otherwise set the cause to context.Canceled.
+	dctx, dcancel := deadline(unitCtx, o.Config)
+	rerr := ResetSession(dctx, conn, o.Config.Database)
+	if rerr != nil {
+		cut = context.Cause(dctx) == errMaxDurationReached
+		rerr = maxDurationOr(ctx, dctx, limit, rerr)
+	}
+	dcancel()
+	if rerr != nil {
+		return cut, rerr
+	}
 
 	// A session whose context is a user database holds a shared lock on it,
 	// and an ALTER DATABASE waits on that lock with nothing running at all.
@@ -2951,10 +2976,14 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 		// behind a session holding it in single-user or restoring mode. On a
 		// bare context that is a collect that never returns.
 		uctx, ucancel := deadline(unitCtx, o.Config)
-		_, err := conn.ExecContext(uctx, "USE "+quoteName(u.Name)+";")
+		_, uerr := conn.ExecContext(uctx, "USE "+quoteName(u.Name)+";")
+		if uerr != nil {
+			cut = context.Cause(uctx) == errMaxDurationReached
+			uerr = maxDurationOr(ctx, uctx, limit, uerr)
+		}
 		ucancel()
-		if err != nil {
-			return blocked(err)
+		if uerr != nil {
+			return cut, blocked(uerr)
 		}
 	}
 	timeout, knob := unitTimeout(s, o.Config)
@@ -2969,13 +2998,15 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	start := time.Now()
 	rows, err := conn.QueryContext(qctx, s.SQL, args...)
 	if err != nil {
-		return blocked(outOfTime(ctx, qctx, timeout, o.Config.MaxDuration, knob, err))
+		cut = context.Cause(qctx) == errMaxDurationReached
+		return cut, blocked(outOfTime(ctx, qctx, timeout, limit, knob, err))
 	}
 	defer rows.Close()
 
 	sets, err := ReadResultSets(rows, s.Results)
 	if err != nil {
-		return blocked(outOfTime(ctx, qctx, timeout, o.Config.MaxDuration, knob, err))
+		cut = context.Cause(qctx) == errMaxDurationReached
+		return cut, blocked(outOfTime(ctx, qctx, timeout, limit, knob, err))
 	}
 	rows.Close()
 	leave()
@@ -2999,7 +3030,7 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 			// @writer expects a directory of files; producing one JSON instead
 			// would leave an archive that looks collected and holds none of what
 			// was asked for.
-			return fmt.Errorf("@writer: no writer registered for %q", s.Writer)
+			return false, fmt.Errorf("@writer: no writer registered for %q", s.Writer)
 		}
 		// The counts come back valid even with a non-nil error: a writer that
 		// failed halfway has already put files on disk, and computing the
@@ -3013,7 +3044,7 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	} else {
 		payload, warnings, encErr := Encode(sets)
 		if encErr != nil {
-			return encErr
+			return false, encErr
 		}
 		m.warn(warnings...)
 		rel := ResultRelativePath(s.Dir, s.Base, u.Folder)
@@ -3040,14 +3071,14 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 				Status: "incomplete",
 			})
 		}
-		return writeErr
+		return false, writeErr
 	}
 
 	m.Results = append(m.Results, ResultEntry{
 		Script: s.Path, Scope: scopeName(s), Target: u.Name, Output: res.Rel,
 		Bytes: res.Bytes, DurationMS: int(time.Since(start).Milliseconds()), Status: "ok",
 	})
-	return nil
+	return false, nil
 }
 
 func scopeName(s Script) string {
