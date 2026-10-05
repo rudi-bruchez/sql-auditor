@@ -813,11 +813,16 @@ func renderDone(s State, width int) []string {
 		// Nothing to send, and no sentence announcing a file: "This archive
 		// is partial:" above "no archive" contradicted itself on every stop
 		// during the preamble.
-		if s.Cancelled {
+		switch {
+		case s.MaxDurationReached:
+			out = append(out, pad+"Collection stopped at its maximum duration. No archive was written by this run.")
+		case s.Cancelled:
 			out = append(out, pad+"Collection stopped. No archive was written by this run.")
-		} else {
+		default:
 			out = append(out, pad+"No archive was written by this run.")
 		}
+	case s.MaxDurationReached:
+		out = append(out, pad+"Collection stopped at its maximum duration. This archive is partial:")
 	case s.Cancelled:
 		out = append(out, pad+"Collection stopped. This archive is partial:")
 	default:

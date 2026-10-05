@@ -339,11 +339,24 @@ func (e collectDoneEvent) apply(s State) State {
 	return s
 }
 
-// exitStatus is 0 for a run the operator stopped. A cancellation is not a
-// failure — the archive is written, marked partial, and worth sending — and a
-// script wrapping the wizard must not be told the collection broke because
-// somebody decided they had waited long enough.
-func (e collectDoneEvent) exitStatus() int {
+// exitStatus decides the wizard's exit code from Run's code and the run's
+// verdict, which finishedEvent put into s before this event arrived.
+//
+// The bound first, since when both are set it came first. A run the bound cut
+// exits 0 only when it produced an archive (Run returned no error), collected
+// something, and had not failed on its own before the bound: the operator
+// accepted a partial archive in advance by setting the bound, and the last
+// screen calls it partial. Otherwise Run's code, 2 for every run the bound
+// cut, so that a scheduler wrapping the wizard does not record success for a
+// run with nothing to send. Then the operator's stop, 0 as before: the
+// operator who stops has read the screen, the bound has no one watching.
+func (e collectDoneEvent) exitStatus(s State) int {
+	if s.MaxDurationReached {
+		if e.err == nil && !s.RunFailed && s.CollectedUnits > 0 {
+			return 0
+		}
+		return e.code
+	}
 	if e.ctxCancelled {
 		return 0
 	}
