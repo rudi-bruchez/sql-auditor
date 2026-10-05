@@ -99,7 +99,7 @@ func TestWithoutATerminalEachUnitGetsItsOwnPlainLine(t *testing.T) {
 	o.UnitDone("10.system/001.a.sql", "", 2048, 300*time.Millisecond, nil)
 	o.UnitStarted("40.database/210.b.sql", "CLIENTDB")
 	o.UnitDone("40.database/210.b.sql", "CLIENTDB", 100, time.Second, nil)
-	o.Finished(false)
+	o.Finished(collect.Verdict{})
 
 	out := b.String()
 	if strings.Contains(out, "\r") {
@@ -127,7 +127,7 @@ func TestAFailedUnitLeavesAPermanentLine(t *testing.T) {
 		o.Planned(1)
 		o.UnitStarted("40.database/210.b.sql", "CLIENTDB")
 		o.UnitDone("40.database/210.b.sql", "CLIENTDB", 0, time.Second, errors.New("timeout expired"))
-		o.Finished(false)
+		o.Finished(collect.Verdict{})
 
 		out := b.String()
 		// The permanent part is what remains once the transient line and its
@@ -163,7 +163,7 @@ func TestOnATerminalTheGaugeRewritesOneLine(t *testing.T) {
 		o.UnitStarted(s, "")
 		o.UnitDone(s, "", 10, time.Second, nil)
 	}
-	o.Finished(false)
+	o.Finished(collect.Verdict{})
 
 	out := b.String()
 	if strings.Count(out, "\n") != 0 {
@@ -187,7 +187,7 @@ func TestSkipsAreNotPrinted(t *testing.T) {
 	o := newProgress(&b, false, func() int { return 80 }, fixedClock())
 	o.Planned(1)
 	o.ScriptSkipped("40.database/022.query-store-detail.sql", "OTHERDB", "not selected")
-	o.Finished(false)
+	o.Finished(collect.Verdict{})
 	if strings.Contains(b.String(), "OTHERDB") {
 		t.Errorf("a skip was printed:\n%q", b.String())
 	}
@@ -214,7 +214,7 @@ func TestAPhaseAfterTheVerdictEndsItsLine(t *testing.T) {
 	o.Planned(1)
 	o.UnitStarted("a.sql", "")
 	o.UnitDone("a.sql", "", 10, time.Second, nil)
-	o.Finished(false)
+	o.Finished(collect.Verdict{})
 	o.Phase("archiving")
 
 	out := b.String()

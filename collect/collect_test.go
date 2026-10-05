@@ -799,6 +799,9 @@ func TestRunLeavesAManifestWhenTheCorpusCannotBeRead(t *testing.T) {
 	if len(rec.finished) != 1 || rec.finished[0] != "complete" {
 		t.Errorf("Finished = %v, want one 'complete': this run was not cancelled", rec.finished)
 	}
+	if len(rec.verdicts) != 1 || rec.verdicts[0] != (Verdict{}) {
+		t.Errorf("verdict = %+v, want the zero verdict for a run that collected nothing and failed before the loop", rec.verdicts)
+	}
 	if _, err := os.Stat(filepath.Join(out, "_run.json")); err == nil {
 		t.Error("the manifest was written into the output directory itself")
 	}

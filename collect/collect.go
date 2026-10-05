@@ -2155,6 +2155,14 @@ func Run(ctx context.Context, o Options) (int, error) {
 	m.Sources = map[string]SourceInfo{}
 	started := time.Now()
 	exit := 0
+	// earned is exit before settleRun: set wherever exit is set by a failure
+	// of the run's own (a lint error, a unit that failed and was not cut by
+	// the bound), and never by settleRun, whose result is 2 for every cut run.
+	// Verdict.Failed is built from it and never from finish's code argument.
+	// collected counts the units whose runUnit returned no error and whose
+	// database was not found dropped: a unit the operator interrupted reaches
+	// the observer as a UnitDone with no error, so no observer can count it.
+	earned, collected := 0, 0
 
 	// finish is the only exit from this function that matters: a manifest is
 	// written on every path, including the fatal ones, because a run that
@@ -2180,7 +2188,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// manifest and the archive are being written, fails no unit at all —
 		// the archive is whole and the manifest says so, while the screen would
 		// call it partial.
-		obs.Finished(m.Run.Cancelled)
+		// earned and not code gives Failed: code is settleRun's result.
+		obs.Finished(Verdict{
+			Cancelled:          m.Run.Cancelled,
+			MaxDurationReached: m.Run.MaxDurationReached,
+			Failed:             earned != 0,
+			Collected:          collected,
+		})
 		dest := runFolder
 		if dest == "" {
 			stamp := o.Now
@@ -2476,6 +2490,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	m.Errors = append(m.Errors, planErrors...)
 	if len(planErrors) > 0 {
 		exit = 2
+		earned = 2
 	}
 
 	// The total is announced before the first unit runs, and it is the same
@@ -2572,6 +2587,9 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// that is nonetheless a second number for a reader to reconcile.
 		took, wrote := time.Since(started), rw.Spent()-before
 		m.NoteFailureDuration(s.Path, target.Name, took)
+		if err == nil && report == nil {
+			collected++
+		}
 		obs.UnitDone(s.Path, target.Name, int64(wrote), took, report)
 		// The duration is the whole point of the pair: the slow collector in a
 		// long run is invisible in a total and obvious in a column of these.
@@ -2598,6 +2616,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 			break
 		}
 		exit = code
+		earned = code
 
 		// One reconnect attempt on a dead connection. The replacement is
 		// reset before the next unit uses it — the PowerShell version

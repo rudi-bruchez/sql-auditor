@@ -50,7 +50,7 @@ func (o observer) ScriptSkipped(script, database, reason string) {
 
 func (o observer) Phase(name string) { o.send(phaseEvent{name: name}) }
 
-func (o observer) Finished(cancelled bool) { o.send(finishedEvent{cancelled: cancelled}) }
+func (o observer) Finished(v collect.Verdict) { o.send(finishedEvent{v: v}) }
 
 // plannedEvent carries the gauge's denominator. It arrives once, before the
 // first unit, because planUnits resolves the whole plan up front — which is
@@ -138,10 +138,10 @@ func (e phaseEvent) apply(s State) State {
 // the manifest inside the archive says cancelled=false and the run exits 0 —
 // while the screen would tell the DBA the archive is partial. Two documents of
 // one run contradicting each other is worse than either answer alone.
-type finishedEvent struct{ cancelled bool }
+type finishedEvent struct{ v collect.Verdict }
 
 func (e finishedEvent) apply(s State) State {
-	s.Cancelled = e.cancelled
+	s.Cancelled = e.v.Cancelled
 	return s
 }
 

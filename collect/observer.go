@@ -29,14 +29,26 @@ type Observer interface {
 	// the same reason: N identical lines naming no database is not a report.
 	ScriptSkipped(script, database, reason string)
 	Phase(name string)
-	// Finished reports the run's own verdict on whether the operator stopped
-	// it, at the moment the manifest carrying that verdict is written. A caller
-	// cannot derive it: its context being cancelled says a key was pressed, not
-	// that anything was cut short — a Ctrl-C after the last unit fails no unit,
+	// Finished reports the run's own verdict, taken from the manifest it has
+	// just written: whether the operator stopped it, whether the bound cut it,
+	// whether it had failed on its own before either, and how many units it
+	// collected. A caller cannot derive any of it: its context being cancelled
+	// says a key was pressed, not that anything was cut short — a Ctrl-C after the last unit fails no unit,
 	// and the archive is whole. Calling an archive partial when the manifest
 	// inside it says otherwise leaves the two documents of one run
 	// contradicting each other.
-	Finished(cancelled bool)
+	Finished(v Verdict)
+}
+
+// Verdict is what Finished hands the observer.
+type Verdict struct {
+	Cancelled          bool // run.cancelled
+	MaxDurationReached bool // run.max_duration_reached
+	// Failed is the run's own failure, before the stop or the bound is
+	// applied: exit was 2 before settleRun, from a lint error or a unit
+	// that failed and was not cut by the bound.
+	Failed    bool
+	Collected int // units whose runUnit returned no error, drops excluded
 }
 
 // unit is a script paired with the target it will run against. Instance scope
@@ -169,9 +181,9 @@ func (w observer) Phase(name string) {
 	}
 }
 
-func (w observer) Finished(cancelled bool) {
+func (w observer) Finished(v Verdict) {
 	if w.o != nil {
-		w.o.Finished(cancelled)
+		w.o.Finished(v)
 	}
 }
 

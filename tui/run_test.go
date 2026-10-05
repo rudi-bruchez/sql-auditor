@@ -214,14 +214,14 @@ func TestThePartialArchiveIsAnnouncedOnlyByTheRunItself(t *testing.T) {
 	}
 
 	// And when the run does say so, the screen says so.
-	stopped := late.apply(finishedEvent{cancelled: true}.apply(State{Step: StepCollecting}))
+	stopped := late.apply(finishedEvent{v: collect.Verdict{Cancelled: true}}.apply(State{Step: StepCollecting}))
 	if !stopped.Cancelled {
 		t.Error("the run reported a stop and the screen did not carry it")
 	}
 	contains(t, Render(stopped, testWidth, 0), "Collection stopped. This archive is partial:")
 
 	// A complete run keeps the ordinary sentence even though ctrl-c was pressed.
-	whole := late.apply(finishedEvent{cancelled: false}.apply(State{Step: StepCollecting}))
+	whole := late.apply(finishedEvent{}.apply(State{Step: StepCollecting}))
 	contains(t, Render(whole, testWidth, 0), "Send this file to whoever requested the audit:")
 }
 

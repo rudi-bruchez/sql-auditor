@@ -20,6 +20,7 @@ type recordingObserver struct {
 	phases  []string
 	// finished holds one entry per Finished call: "cancelled" or "complete".
 	finished []string
+	verdicts []Verdict
 }
 
 func (r *recordingObserver) Planned(units int) {
@@ -40,12 +41,13 @@ func (r *recordingObserver) ScriptSkipped(script, database, reason string) {
 
 func (r *recordingObserver) Phase(name string) { r.phases = append(r.phases, name) }
 
-func (r *recordingObserver) Finished(cancelled bool) {
+func (r *recordingObserver) Finished(v Verdict) {
 	word := "complete"
-	if cancelled {
+	if v.Cancelled {
 		word = "cancelled"
 	}
 	r.finished = append(r.finished, word)
+	r.verdicts = append(r.verdicts, v)
 }
 
 // The zero value is the path every non-TUI caller takes, so it is the one that
@@ -58,7 +60,7 @@ func TestObserverCallbacksAreSafeOnTheZeroValue(t *testing.T) {
 	o.UnitDone("10.system/010.foo.sql", "", 42, time.Second, errors.New("boom"))
 	o.ScriptSkipped("10.system/010.foo.sql", "RH", "not matched")
 	o.Phase("archiving")
-	o.Finished(true)
+	o.Finished(Verdict{Cancelled: true})
 }
 
 func TestObserverForwardsToTheWrappedImplementation(t *testing.T) {
@@ -70,7 +72,7 @@ func TestObserverForwardsToTheWrappedImplementation(t *testing.T) {
 	o.UnitDone("80.workload/020.query-store.sql", "SALESDB", 10, time.Second, nil)
 	o.ScriptSkipped("80.workload/021.query-store-detail.sql", "RH", "not matched by QUERY_STORE_DB_INCLUDE")
 	o.Phase("writing manifest")
-	o.Finished(true)
+	o.Finished(Verdict{Cancelled: true, MaxDurationReached: true, Failed: true, Collected: 3})
 
 	if len(rec.planned) != 1 || rec.planned[0] != 5 {
 		t.Fatalf("Planned not forwarded: %v", rec.planned)
@@ -90,6 +92,9 @@ func TestObserverForwardsToTheWrappedImplementation(t *testing.T) {
 	}
 	if len(rec.finished) != 1 || rec.finished[0] != "cancelled" {
 		t.Fatalf("Finished not forwarded: %v", rec.finished)
+	}
+	if len(rec.verdicts) != 1 || rec.verdicts[0] != (Verdict{Cancelled: true, MaxDurationReached: true, Failed: true, Collected: 3}) {
+		t.Fatalf("Finished lost part of the verdict: %+v", rec.verdicts)
 	}
 }
 
