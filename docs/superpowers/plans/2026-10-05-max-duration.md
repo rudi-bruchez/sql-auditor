@@ -22,8 +22,9 @@ Evidence: a reviewer's prototype of versions 5 and 6, with mutations switched by
 - `Config.MaxDuration` is the bound's only home. There is no `Options.MaxDuration`.
 - Every sentence naming the bound is built on `maxDurationText(limit)`, which returns `the collection reached its maximum duration of ` followed by `formatCeiling(limit)` (`2h00m (7200 s)`, `0m02s (2 s)`, `1m00s (60 s)`).
 - The run's context `ctx` is never replaced by `bound`. `stopRequested`, `recordUnitFailure`, the parent test of `outOfTime` and `maxDurationOr`, `leave` and the blocking watch stay on `ctx`.
+- The bound's fact is read through `boundReached`, which reads the cause of `settled(bound)`, never through `context.Cause(bound)` or `bound.Err()` directly: a dial cut by the bound's deadline returns before the bound's timer has set the cause (Task 6, spec "The bound as a fact").
 - A context's cause is read before that context's cancel function is called: a cancel sets the cause to `context.Canceled` when none was set, so reading after `ucancel()` or `dcancel()` would erase a deadline's cause.
-- Live tests: the lab's SQL Server 2025 at `localhost,11533`, login `sa`, through `liveConfig` (`collect/watch_live_test.go`), which reads `SQL_AUDITOR_LIVE_SERVER`, `SQL_AUDITOR_LIVE_USER`, `SQL_AUDITOR_LIVE_PASSWORD` and skips when the first is unset. Every live run sets `Config.Database` to `master` (an instance-scope unit run with an empty one fails with 911 on the lab, the v5 reviser's note). No test in this plan creates a database. If one ever must, it is named `ZzMaxDur…` and dropped in a `t.Cleanup`. The existing live tests that create `ZzWatchLive` or `ZzDroppedDuringRun` are not run by any task (see "Spec points found ambiguous", item 12).
+- Live tests: the lab's SQL Server 2025 at `localhost,11533`, login `sa`, through `liveConfig` (`collect/watch_live_test.go`), which reads `SQL_AUDITOR_LIVE_SERVER`, `SQL_AUDITOR_LIVE_USER`, `SQL_AUDITOR_LIVE_PASSWORD` and skips when the first is unset. Every live run sets `Config.Database` to `master` (an instance-scope unit run with an empty one fails with 911 on the lab, the v5 reviser's note). No test in this plan creates a database. If one ever must, it is named `ZzMaxDur…` and dropped in a `t.Cleanup`. The existing live tests that create `ZzWatchLive` or `ZzDroppedDuringRun` are not run by any implementer; the controller runs them once, at the end of the branch ("Closing the branch").
 - Tests that set `pauseHook` live in package `collect`, reset it with `defer func() { pauseHook = nil }()`, never call `t.Parallel()`, and always run under a non-zero bound (a hook that waits on `bound.Done()` with no bound waits for ever).
 - The lab password is never written into the repository, this plan, a log kept in the repository, or a commit. Each live invocation below reads it with `$(LAB_SA_PASSWORD_COMMAND)`, which the controller replaces, in the brief it hands out, with the command that prints the lab's sa password on this machine.
 
@@ -34,7 +35,7 @@ The five inputs or conditions the spec implies and its criteria do not exercise,
 1. An empty `MAX_DURATION=` in `.env` beside an exported `MAX_DURATION=1h`: the operator expects the environment's hour, as for every other key. Pinned in Task 1, `TestResolveMaxDurationPrecedence`, row "an empty .env value lets the environment through".
 2. `--max-duration 30s` on the command line: the operator expects exit 2 and the same sentence as for a `.env` value, not a flag-package error. Pinned in Task 2, `TestAnInvalidMaxDurationFlagIsRefusedInTheSettingsWords`.
 3. A statement slow to cancel, whose driver error reads `Invalid TDS stream: did not get cancellation confirmation from the server (current response: context deadline exceeded)` rather than a bare `context deadline exceeded`: the message must still name the bound and keep the driver's words. Pinned in Task 6, `TestMaxDurationOrNamesTheBoundOnlyWhenTheCallsFirstCauseIsTheBound`, row "a driver error of other words after the bound".
-4. A run with partial units that the bound cut and the operator then stopped: the summary line scripts parse must carry all three tokens in a fixed order. Pinned in Task 9, `TestSummaryTailOrdersTheBoundBeforeTheStop`, row "partial units, the bound and a stop".
+4. A run with partial units that the bound cut and the operator then stopped: the summary line scripts parse must carry all three tokens in a fixed order. The function is pinned in Task 9, `TestSummaryTailOrdersTheBoundBeforeTheStop`, row "partial units, the bound and a stop"; its call site in `Run`, which prints to stdout, has no test (Task 9's break of the propagation is predicted green), and the review reads it.
 5. A very long bound, `720h`, which the spec allows ("There is no upper limit"): accepted by `Resolve`, and `check` says the ceiling is under it. Pinned in Task 1 (`TestResolveReadsMaxDuration`, row `720h`) and Task 22 (`TestDurationBoundAgainstTheBound`, row "a bound far above the ceiling").
 
 ## How every task is run
@@ -72,7 +73,7 @@ When a live test fails, `grep -E '^\s+\S+_test.go:[0-9]+' "$LOG"` shows the asse
 | `collect/config.go` | `MAX_DURATION` key, parsing, floor, provenance | 1 |
 | `cmd/sql-auditor/main.go` | `--max-duration` flag, `flags` map entry, usage line | 2 |
 | `.env.example` | the commented `# MAX_DURATION=2h` | 3 |
-| `collect/maxduration.go` (new) | `errMaxDurationReached`, `boundReached`, `maxDurationText`, `maxDurationSkipReason`, `maxDurationOr`, `skipBefore`, `maxDurationNote`, `pauseHook`, `pause` | 6, 7, 9, 12 |
+| `collect/maxduration.go` (new) | `errMaxDurationReached`, `settled`, `boundReached`, `maxDurationText`, `maxDurationSkipReason`, `maxDurationOr`, `skipBefore`, `maxDurationNote`, `pauseHook`, `pause` | 6, 7, 9, 12 |
 | `collect/observer.go` | costly units last in `planUnits`; `Verdict`; `Observer.Finished(v Verdict)` | 5, 11 |
 | `collect/manifest.go` | `RunInfo.MaxDurationReached`, duration line, grouped skips, run settings paragraph, `recordedBound` | 4, 8 |
 | `collect/collect.go` | `runConfig`, `outOfTime`, `summaryTail`, `settleRun`, `skipLoses` comment, `Run`, `runUnit`, `Check` | 4, 6, 9, 10, 11 to 18, 22 |
@@ -83,7 +84,8 @@ When a live test fails, `grep -E '^\s+\S+_test.go:[0-9]+' "$LOG"` shows the asse
 | `cmd/sql-auditor/progress.go` | the gauge counts the bound's skips silently | 11, 19 |
 | `tui/observer.go`, `tui/state.go`, `tui/render.go`, `tui/run.go`, `tui/loop.go` | verdict in `State`, `CollectedUnits`, silent skips, exit rule, last screen, screen 3 | 11, 20, 21, 22 |
 | `README.md`, `docs/dba-guide.md`, `CHANGELOG.md` | documentation | 23 |
-| `.github/workflows/ci.yml` | live max-duration tests in the integration job, if the owner rules so | 24 |
+| `.github/workflows/ci.yml` | live max-duration tests in the integration job | 24 |
+| `collect/runner.go` | `Connect` reads its caller's context through `settled` | 12 |
 
 ## Task order
 
@@ -112,7 +114,7 @@ Every commit compiles and leaves the suite green. Pure helpers come first and ar
 21. The wizard's exit and last screen.
 22. The bound in `check` and on the wizard's third screen.
 23. Documentation.
-24. CI (owner's ruling required).
+24. The live max-duration tests in CI (ruled for by the owner).
 
 ---
 
@@ -754,7 +756,8 @@ Files:
 Interfaces:
 - Produces:
   - `var errMaxDurationReached error`
-  - `func boundReached(bound context.Context) bool`
+  - `func settled(ctx context.Context) context.Context` (returns `ctx` once its deadline, if passed by the clock, has closed its `Done`)
+  - `func boundReached(bound context.Context) bool` (reads the cause of `settled(bound)`)
   - `func maxDurationText(limit time.Duration) string`
   - `func maxDurationOr(parent, call context.Context, limit time.Duration, err error) error`
   - `func outOfTime(parent, call context.Context, limit, bound time.Duration, knob string, err error) error` (new parameter `bound`, the configured bound, used only for the words)
@@ -777,6 +780,45 @@ import (
 // passedBound is a bound that has already fired, built as Run builds it.
 func passedBound(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithDeadlineCause(parent, time.Now().Add(-time.Second), errMaxDurationReached)
+}
+
+// pastDeadline is a context whose deadline has passed by the clock while its
+// Done is still open. It holds open, for as long as a test needs, the instant
+// between a bound's deadline and the runtime timer that cancels the bound: a
+// dial bounded by that deadline fails with i/o timeout inside that instant,
+// while Err() and Cause() are still nil (measured on 5 October 2026, 200 dials
+// out of 200 once the deadline had passed, and 1 run in 300 of criterion 5a's
+// test on the reviewer's prototype).
+type pastDeadline struct {
+	context.Context
+	at time.Time
+}
+
+func (p pastDeadline) Deadline() (time.Time, bool) { return p.at, true }
+
+// boundReached must not answer while the bound's deadline has passed and its
+// Done is still open: it would answer false about a bound that is firing, and
+// a dial the bound cut would be filed as an unreachable instance. Deterministic:
+// the bound fires only after the answer has been waited for, so an answer given
+// before is always the wrong one.
+func TestBoundReachedWaitsForTheBoundsTimerOnceItsDeadlineHasPassed(t *testing.T) {
+	inner, fire := context.WithCancelCause(context.Background())
+	defer fire(nil)
+	bound := pastDeadline{inner, time.Now().Add(-time.Millisecond)}
+	answer := make(chan bool, 1)
+	go func() { answer <- boundReached(bound) }()
+	select {
+	case got := <-answer:
+		t.Fatalf("boundReached answered %v before the bound's Done closed", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	fire(errMaxDurationReached)
+	if !<-answer {
+		t.Error("boundReached answered false once the bound fired")
+	}
+	if boundReached(context.Background()) {
+		t.Error("a context with no deadline reads as the bound")
+	}
 }
 
 func TestMaxDurationTextUsesTheCeilingsFormat(t *testing.T) {
@@ -947,7 +989,7 @@ In `collect/collect_test.go`, the four existing calls `outOfTime(parent, unit, X
 - [ ] Step 2: run; the package does not compile (`undefined: errMaxDurationReached`, `too many arguments in call to outOfTime`). Expected `go test exit: 1`.
 
 ```bash
-WT=/path/to/worktree && cd "$WT" && LOG=$(mktemp) && rtk proxy go test ./collect/ -run '^(TestMaxDurationTextUsesTheCeilingsFormat|TestMaxDurationOrNamesTheBoundOnlyWhenTheCallsFirstCauseIsTheBound|TestOutOfTime.*)$' -count=1 -v >"$LOG" 2>&1; echo "go test exit: $?"; echo "top-level passes: $(grep -c '^--- PASS' "$LOG")"; grep -E '^--- (FAIL|SKIP)|^(FAIL|ok) |undefined|arguments' "$LOG"
+WT=/path/to/worktree && cd "$WT" && LOG=$(mktemp) && rtk proxy go test ./collect/ -run '^(TestBoundReachedWaitsForTheBoundsTimerOnceItsDeadlineHasPassed|TestMaxDurationTextUsesTheCeilingsFormat|TestMaxDurationOrNamesTheBoundOnlyWhenTheCallsFirstCauseIsTheBound|TestOutOfTime.*)$' -count=1 -v >"$LOG" 2>&1; echo "go test exit: $?"; echo "top-level passes: $(grep -c '^--- PASS' "$LOG")"; grep -E '^--- (FAIL|SKIP)|^(FAIL|ok) |undefined|arguments' "$LOG"
 ```
 
 - [ ] Step 3: implement. Create `collect/maxduration.go`:
@@ -969,11 +1011,30 @@ import (
 // the bound fired, and is not the bound's when the stop came first.
 var errMaxDurationReached = errors.New("the collection reached its maximum duration")
 
+// settled returns ctx once its state can be read. A context whose deadline
+// has passed by the clock is cancelled an instant later, by a runtime timer,
+// and a dial bounded by that deadline does not wait for it: net.Dialer turns
+// the deadline into a socket deadline and returns i/o timeout, which
+// errors.Is(err, context.DeadlineExceeded), while ctx.Err() and
+// context.Cause(ctx) are still nil. Read in that instant, a Connect the bound
+// cut reads as an unreachable instance (exit 1, no flag; measured on
+// 5 October 2026). So the fact is read only once Done is closed when the
+// deadline has passed. The wait is the timer's lag, microseconds; a context
+// with no deadline, or one not yet passed, is returned at once.
+func settled(ctx context.Context) context.Context {
+	if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) {
+		<-ctx.Done()
+	}
+	return ctx
+}
+
 // boundReached says whether the bound fired before anything else cancelled
 // bound. The cause and not bound.Err(): a ctrl-c cancels bound too, with the
-// cause context.Canceled.
+// cause context.Canceled. Through settled, since every caller asks right after
+// a step returned an error, and a failed dial returns before the bound's timer
+// has run.
 func boundReached(bound context.Context) bool {
-	return context.Cause(bound) == errMaxDurationReached
+	return context.Cause(settled(bound)) == errMaxDurationReached
 }
 
 // maxDurationText is the one sentence every message of this feature is built
@@ -1032,13 +1093,14 @@ func outOfTime(parent, call context.Context, limit, bound time.Duration, knob st
 
 In `runUnit`, both `outOfTime(ctx, qctx, timeout, knob, err)` become `outOfTime(ctx, qctx, timeout, o.Config.MaxDuration, knob, err)`. Nothing runs under a bound yet, so behaviour is unchanged.
 
-- [ ] Step 4: rerun. Expected `top-level passes: 7`: the three new tests (`TestMaxDurationTextUsesTheCeilingsFormat`, `TestMaxDurationOrNamesTheBoundOnlyWhenTheCallsFirstCauseIsTheBound`, `TestOutOfTimeTellsTheBoundFromTheUnitsOwnTimeout`) and the four existing ones the `TestOutOfTime.*` pattern also matches (`TestOutOfTimeNamesTheLimitThatExpired`, `TestOutOfTimeLeavesACancelledRunAlone`, `TestOutOfTimeLeavesASQLErrorAloneEvenOnTheDeadline`, `TestOutOfTimeLeavesAnOrdinaryFailureAlone`). If the log shows another `TestOutOfTime` name, the count is wrong: recount against the tree.
+- [ ] Step 4: rerun. Expected `top-level passes: 8`: the four new tests (`TestBoundReachedWaitsForTheBoundsTimerOnceItsDeadlineHasPassed`, `TestMaxDurationTextUsesTheCeilingsFormat`, `TestMaxDurationOrNamesTheBoundOnlyWhenTheCallsFirstCauseIsTheBound`, `TestOutOfTimeTellsTheBoundFromTheUnitsOwnTimeout`) and the four existing ones the `TestOutOfTime.*` pattern also matches (`TestOutOfTimeNamesTheLimitThatExpired`, `TestOutOfTimeLeavesACancelledRunAlone`, `TestOutOfTimeLeavesASQLErrorAloneEvenOnTheDeadline`, `TestOutOfTimeLeavesAnOrdinaryFailureAlone`). If the log shows another `TestOutOfTime` name, the count is wrong: recount against the tree.
 
 - [ ] Step 5: breaks (criterion 4's "Fails when").
 
 | Change | Test that must fail | Row |
 | --- | --- | --- |
-| In `maxDurationOr`, move the cause test before `parent.Err() != nil` (return the sentence when the cause is the bound, whatever the parent) | `TestMaxDurationOrNamesTheBoundOnlyWhenTheCallsFirstCauseIsTheBound` | "a stop after the bound" |
+| In `boundReached`, read `context.Cause(bound)` without `settled` | `TestBoundReachedWaitsForTheBoundsTimerOnceItsDeadlineHasPassed` (`answered false before the bound's Done closed`), every run: the bound fires only after the test has waited for the answer | |
+| In `maxDurationOr`, ask the cause first and return the sentence on it, whatever the parent: split the first test into `if err == nil { return err }` and `if parent.Err() != nil { return err }`, and insert between them `if context.Cause(call) == errMaxDurationReached && sqlErrorNumber(err) == 0 { return fmt.Errorf("stopped when %s: %w", maxDurationText(limit), err) }`. Swapping the two `return err` guards alone changes nothing, since each returns `err` unchanged: that is not this break | `TestMaxDurationOrNamesTheBoundOnlyWhenTheCallsFirstCauseIsTheBound` | "a stop after the bound" |
 | Move the SQL number test after the sentence's return | same | "a SQL Server error number with the bound" |
 | In the test, for the straddling row only, return `unit` instead of `call` as the call context (a caller that asks the unit's context) | same | the straddling row: `Cause(unit)` is the bound's, propagated after the fact |
 | Restore today's body of `outOfTime` (no cause test) | `TestOutOfTimeTellsTheBoundFromTheUnitsOwnTimeout` | the bound's row names `@timeout` |
@@ -1056,7 +1118,9 @@ exists, a query can be stopped by the bound, by its own @timeout, by the
 blocking watch or by the operator, and the driver says context deadline
 exceeded for most of them. The call's own context keeps the first cause,
 so asking it, after the run's context and after the SQL Server error
-number, gives each case its own sentence."
+number, gives each case its own sentence. Whether the bound fired is read
+only once its context has settled: a dial cut by its deadline returns
+before the timer that sets the cause has run."
 ```
 
 ### Task 7: `skipBefore`
@@ -1184,7 +1248,7 @@ Files:
 Interfaces:
 - Produces: `RunInfo.MaxDurationReached bool` with JSON `max_duration_reached,omitempty`; `func recordedBound(cfg map[string]string) (time.Duration, bool)`.
 
-- [ ] Step 1: tests in `collect/manifest_test.go` (add `encoding/json` and `time` to the imports if absent):
+- [ ] Step 1: tests in `collect/manifest_test.go` (add `fmt` and `time` to its imports: at `aa68236` it imports `encoding/json` but neither of these, and `TestManifestTextGroupsTheBoundsSkips` uses `fmt.Sprintf`):
 
 ```go
 // A reader of MANIFEST.txt alone has no other way to learn the run was cut,
@@ -2027,10 +2091,11 @@ run and would make every bounded run look failed."
 Spec: "The bound's context", "The bound as a fact", "Before the first unit" (before the run folder, `pauseHook`). Criteria 5a and 5d.
 
 Files:
-- Modify: `collect/maxduration.go` (`pauseHook`, `pause`), `collect/collect.go` (`Run`: the bound's context, `stoppedOr`, `Connect`, the preflight, the probe, the listing)
-- Test: `collect/maxduration_live_test.go`
+- Modify: `collect/maxduration.go` (`pauseHook`, `pause`), `collect/collect.go` (`Run`: the bound's context, `stoppedOr`, `Connect`, the preflight, the probe, the listing), `collect/runner.go` (`Connect` reads its caller's context through `settled`)
+- Test: `collect/maxduration_live_test.go`, `collect/maxduration_test.go`
 
 Interfaces:
+- Consumes: `settled`, `boundReached` (Task 6).
 - Produces: `var pauseHook func(point string, bound context.Context)`; `func pause(point string, bound context.Context)`; in `Run`, the locals `limit time.Duration` and `bound context.Context`; the hook point `"leaving before the run folder"`, the first statement of `stoppedOr`.
 
 - [ ] Step 1: live tests, appended to `collect/maxduration_live_test.go`:
@@ -2109,7 +2174,7 @@ func TestLiveMaxDurationThenAStopInAFailingStep(t *testing.T) {
 }
 ```
 
-- [ ] Step 2: run; does not compile (`undefined: pauseHook`). Then, after adding only the `pauseHook` variable and `pause` (step 3, first part), run again and see both fail on the code (exit 1, `cannot reach the instance: context deadline exceeded` as the run's error, hook never called).
+- [ ] Step 2: run; does not compile (`undefined: pauseHook`). Then, after adding only the `pauseHook` variable and `pause` (step 3, first part), run again and see both fail. With no bound context yet nothing cuts the run, so the one-millisecond run collects both units: `TestLiveMaxDurationBeforeTheFirstConnection` fails on exit 0 (want 2), the flag, the error (nil) and the missing warning, and `TestLiveMaxDurationThenAStopInAFailingStep` stops at `the hook was never called`, since nothing calls `pause` yet. Measured by the reviewer of 5 October: `code=0 err=<nil>`, two units collected.
 
 ```bash
 WT=/path/to/worktree && cd "$WT" && LOG=$(mktemp) && SQL_AUDITOR_LIVE_SERVER='localhost,11533' SQL_AUDITOR_LIVE_USER=sa SQL_AUDITOR_LIVE_PASSWORD="$(LAB_SA_PASSWORD_COMMAND)" rtk proxy go test ./collect/ -run '^(TestLiveMaxDurationBeforeTheFirstConnection|TestLiveMaxDurationThenAStopInAFailingStep)$' -count=1 -v >"$LOG" 2>&1; echo "go test exit: $?"; echo "top-level passes: $(grep -c '^--- PASS' "$LOG")"; grep -E '^--- (FAIL|SKIP)|^(FAIL|ok) ' "$LOG"
@@ -2198,10 +2263,72 @@ Then pass `bound` instead of `ctx` to exactly these four calls: `Connect(ctx, db
 
 The bound passed before `Connect` in 5a makes `TestLiveMaxDurationBeforeTheFirstConnection` stay green when `stoppedOr` asks the stop first (it has no stop): predicted green, which is why 5d exists.
 
-- [ ] Step 6: commit.
+- [ ] Step 6: `Connect`'s own reading of its caller's context. `Connect` rewords a deadline error as a login timeout when its budget ran out and its caller's context did not (`ctx.Err() == nil`). Now that its caller's context is the bound, that test meets the instant `settled` exists for: the dial fails with `i/o timeout` while `ctx.Err()` is still nil, and the run's warning would quote a login timeout of twice `SQL_CONNECT_TIMEOUT_SEC` about a dial the bound cut. `boundReached` already keeps the flag and the exit code right; this is the words. Test, appended to `collect/maxduration_test.go` (add `net` to its imports):
+
+```go
+// Connect calls a deadline error a login timeout only when its own budget ran
+// out. A dial cut by the caller's deadline, in the instant before the
+// caller's timer has cancelled its context, keeps the dial's own words.
+// Deterministic: the caller's context is cancelled only after Connect has had
+// a hundred milliseconds to answer wrongly, and an unfixed Connect answers in
+// microseconds, since a dial whose deadline has passed is refused before any
+// packet is sent.
+func TestConnectLeavesADialItsCallersDeadlineCutInItsOwnWords(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot listen on loopback: %v", err)
+	}
+	defer ln.Close()
+	cfg := &Config{Server: ln.Addr().String(), User: "AUDIT_RO", Password: "x",
+		AppName: "sql-auditor-test", ConnectTimeout: time.Minute}
+	db, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	inner, fire := context.WithCancelCause(context.Background())
+	defer fire(nil)
+	ctx := pastDeadline{inner, time.Now().Add(-time.Millisecond)}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		fire(errMaxDurationReached)
+	}()
+	c, err := Connect(ctx, db, cfg)
+	if c != nil {
+		c.Close()
+		t.Fatal("got a connection")
+	}
+	if err == nil || strings.Contains(err.Error(), "did not complete the login") {
+		t.Errorf("err = %v, want the dial's own words, not a login timeout", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to wrap the deadline", err)
+	}
+}
+```
+
+Run it; it fails, `err = the server took the connection but did not complete the login within 2m0s (twice SQL_CONNECT_TIMEOUT_SEC)`:
 
 ```bash
-git add collect/maxduration.go collect/collect.go collect/maxduration_live_test.go
+WT=/path/to/worktree && cd "$WT" && LOG=$(mktemp) && rtk proxy go test ./collect/ -run '^TestConnectLeavesADialItsCallersDeadlineCutInItsOwnWords$' -count=1 -v >"$LOG" 2>&1; echo "go test exit: $?"; echo "top-level passes: $(grep -c '^--- PASS' "$LOG")"; grep -E '^--- (FAIL|SKIP)|^(FAIL|ok) |did not complete' "$LOG"
+```
+
+Then in `Connect` (`collect/runner.go`), the test `ctx.Err() == nil` becomes `settled(ctx).Err() == nil`, with this comment above the `if`:
+
+```go
+	// settled: a dial bounded by ctx's own deadline (the bound's, when Run
+	// connects) fails before ctx's timer has cancelled it, and ctx.Err() read
+	// in that instant would call the caller's deadline a login timeout of
+	// ours. When cctx's budget ran out first, ctx's deadline has not passed
+	// and settled returns at once.
+```
+
+Rerun: `top-level passes: 1`. Break: `ctx.Err() == nil` again: red on every run, with the message above. `TestLiveMaxDurationBeforeTheFirstConnection` cannot see this break (the reworded message still begins `cannot reach the instance: `), which is why the test is offline and of its own. Measured on 5 October 2026 on a copy of the tree: 50 runs of 50 green with the change, 50 of 50 red without it, under `GOMAXPROCS=1`.
+
+- [ ] Step 7: commit.
+
+```bash
+git add collect/maxduration.go collect/collect.go collect/runner.go collect/maxduration_test.go collect/maxduration_live_test.go
 git commit -m "Cut the steps before the run folder at the bound
 
 The connection, the preflight, the probe and the listing now run under the
@@ -2209,7 +2336,10 @@ bound's context, and stoppedOr records whether the bound fired first as a
 fact read from that context, beside the operator's stop. Without it a
 Connect cut by the bound came back as exit 1 about an instance that was
 answering. The step's own words go into the bound's warning rather than
-into errors, since the run cannot tell a cut from a coincident failure."
+into errors, since the run cannot tell a cut from a coincident failure.
+Connect no longer calls a dial the bound cut a login timeout: in the
+instant before the bound's timer runs, its context does not yet say it
+has expired, so it is read once its Done has closed."
 ```
 
 ### Task 13: the check before `lockRun`
@@ -2990,7 +3120,7 @@ The query and the read:
 
 Every later `return X` in `runUnit` (the writer not registered, the encoder error, the write error, the final `return nil`) becomes `return false, X`: a file write failing after the bound is a disk error, not a cut. `outOfTime` is not wrapped again by `maxDurationOr` on the query path: one classification per call.
 
-In the loop: `err := runUnit(ctx, conn, o, m, rw, s, target, watch, spid)` becomes
+In the loop, the two lines `err := runUnit(ctx, conn, o, m, rw, s, target, watch, spid)` and `pause("after a unit", bound)` (the second added by Task 14) become the block below, which carries the same `pause` call; replace both lines, or the hook runs twice per unit where the spec defines one point:
 
 ```go
 		cut, err := runUnit(ctx, bound, conn, o, m, rw, s, target, watch, spid)
@@ -3307,6 +3437,11 @@ func TestTheGaugeCountsTheBoundsSkipsWithoutPrintingThem(t *testing.T) {
 		if n := strings.Count(out, "maximum duration"); n != 0 {
 			t.Errorf("tty %v: %d lines about the bound's skips, want none", tty, n)
 		}
+		// The non-tty [n/N] line names the unit and never the reason, so the
+		// count above cannot see a bound skip printed as progress.
+		if n := strings.Count(out, "80.workload/"); n != 0 {
+			t.Errorf("tty %v: %d lines name a unit the bound skipped, want none", tty, n)
+		}
 		if strings.Count(out, "-- ") != 1 || !strings.Contains(out, "the blocking watch cancelled") {
 			t.Errorf("tty %v: the watch's skip lost its line:\n%q", tty, out)
 		}
@@ -3342,7 +3477,12 @@ WT=/path/to/worktree && cd "$WT" && LOG=$(mktemp) && rtk proxy go test ./cmd/sql
 
 - [ ] Step 4: rerun: 1 pass; `rtk proxy go test ./cmd/sql-auditor/ -count=1`.
 
-- [ ] Step 5: break: delete the `if !skip.MaxDuration` test: red (198 lines). Make the bound's skip fall through to the `!p.tty` branch (an `[n/N]` line each): red on the non-tty row only; report which.
+- [ ] Step 5: breaks.
+
+| Change | Prediction |
+| --- | --- |
+| Delete the `if !skip.MaxDuration` test | red on both rows: 198 lines about the bound |
+| Make the bound's skip fall through to the `!p.tty` branch: `if errors.As(err, &skip) && !skip.MaxDuration { ... } else if err != nil && skip == nil { ... } else if !p.tty { ... }` | red on the non-tty row only, and only through the `80.workload/` count: the `[n/N]` line carries the label, the elapsed time and the bytes, never the reason, so the `maximum duration` count stays 0. Measured on 5 October: `tty false: 198 lines name a unit the bound skipped` |
 
 - [ ] Step 6: commit.
 
@@ -3511,7 +3651,9 @@ Interfaces:
 // The wizard's exit after a bound, driven through the loop with every event
 // produced by the wizard's own observer, in the order Run produces them, then
 // the collectDoneEvent. A hand-built finishedEvent passes with an
-// observer.Finished that drops the bound; these do not.
+// observer.Finished that drops the bound; these do not. The first and third
+// rows also render the state the loop ended on, so that the last screen is
+// read from what the events built and not from a State written by hand.
 func TestTheWizardsExitAfterABound(t *testing.T) {
 	const zip = `C:\out\SQL01-2026-10-05.zip`
 	boundErr := errors.New("the collection reached its maximum duration of 1m00s (60 s) before the first collector: nothing was collected")
@@ -3523,19 +3665,22 @@ func TestTheWizardsExitAfterABound(t *testing.T) {
 		v     collect.Verdict
 		done  collectDoneEvent
 		want  int
+		first string // a line the last screen must carry, "" for no check
 	}{
 		{"bound, collected one", []error{nil}, collect.Verdict{MaxDurationReached: true, Collected: 1},
-			collectDoneEvent{code: 2, zipPath: zip, zipBytes: 1024}, 0},
+			collectDoneEvent{code: 2, zipPath: zip, zipBytes: 1024}, 0,
+			"Collection stopped at its maximum duration. This archive is partial:"},
 		{"bound, failed before it", []error{nil}, collect.Verdict{MaxDurationReached: true, Failed: true, Collected: 1},
-			collectDoneEvent{code: 2, zipPath: zip, zipBytes: 1024}, 2},
+			collectDoneEvent{code: 2, zipPath: zip, zipBytes: 1024}, 2, ""},
 		{"bound before the run folder", nil, collect.Verdict{MaxDurationReached: true},
-			collectDoneEvent{code: 2, err: boundErr}, 2},
+			collectDoneEvent{code: 2, err: boundErr}, 2,
+			"Collection stopped at its maximum duration. No archive was written by this run."},
 		{"bound, then a stop, before the run folder", nil, collect.Verdict{MaxDurationReached: true, Cancelled: true},
-			collectDoneEvent{code: 2, err: boundErr, ctxCancelled: true}, 2},
+			collectDoneEvent{code: 2, err: boundErr, ctxCancelled: true}, 2, ""},
 		{"bound, three skips, nothing collected", []error{skip, skip, skip}, collect.Verdict{MaxDurationReached: true},
-			collectDoneEvent{code: 2, zipPath: zip, zipBytes: 1024}, 2},
+			collectDoneEvent{code: 2, zipPath: zip, zipBytes: 1024}, 2, ""},
 		{"a stop alone", nil, collect.Verdict{Cancelled: true},
-			collectDoneEvent{code: 2, err: stopErr, ctxCancelled: true}, 0},
+			collectDoneEvent{code: 2, err: stopErr, ctxCancelled: true}, 0, ""},
 	} {
 		ch := make(chan event, 16)
 		o := observer{ch: ch}
@@ -3548,9 +3693,15 @@ func TestTheWizardsExitAfterABound(t *testing.T) {
 		ch <- key(screen.KeyEnter)
 		close(ch)
 		var f frames
-		_, code := drive(ch, f.draw, fixedSize(80, 24), State{Step: StepCollecting})
+		final, code := drive(ch, f.draw, fixedSize(80, 24), State{Step: StepCollecting})
 		if code != c.want {
 			t.Errorf("%s: exit %d, want %d", c.name, code, c.want)
+		}
+		// The enter key took the wizard from StepDone to StepQuit and left the
+		// rest of the state as the events built it; renderDone draws the last
+		// screen from that state whatever its Step.
+		if c.first != "" && !strings.Contains(joined(renderDone(final, testWidth)), c.first) {
+			t.Errorf("%s: the last screen does not carry %q:\n%s", c.name, c.first, joined(renderDone(final, testWidth)))
 		}
 	}
 }
@@ -3575,11 +3726,11 @@ func TestTheWizardsLastScreenAfterABound(t *testing.T) {
 }
 ```
 
-Add to the imports of `tui/run_test.go` what these use and it lacks (`errors`, `fmt`, `time`, `collect`, `tui/screen`); `frames`, `drive`, `fixedSize` and `key` are in `tui/loop_test.go`, same package.
+Add to the imports of `tui/run_test.go` what these use and it lacks (`errors`, `fmt`, `strings`, `time`, `collect`, `tui/screen`); `frames`, `drive`, `fixedSize` and `key` are in `tui/loop_test.go`, `joined`, `contains`, `absent` and `testWidth` in `tui/render_test.go`, all in the same package.
 
 `TestACancelledCollectionExitsZero`: `e.exitStatus()` becomes `e.exitStatus(State{})` (twice), and `(collectDoneEvent{code: 2}).exitStatus()` becomes `.exitStatus(State{})`. In `tui/loop_test.go`: `func (e runFinished) exitStatus(State) int { return e.code }`.
 
-- [ ] Step 2: run; does not compile until the interface changes; after the signature change alone (step 3, first part), rows 2, 3, 4 and 5 fail and the screen test fails.
+- [ ] Step 2: run; does not compile until the interface changes. After the signature change alone (step 3, first part: `coded`, `loop`, `panicEvent`, and `collectDoneEvent.exitStatus(State)` keeping today's body, which asks only `ctxCancelled`), these fail: row "bound, collected one" (exit 2, want 0, and its screen), row "bound before the run folder" (its screen only, exit 2 either way), row "bound, then a stop, before the run folder" (exit 0, want 2), and `TestTheWizardsLastScreenAfterABound`. Rows "bound, failed before it", "bound, three skips" and "a stop alone" already pass on today's body: their expected codes are Run's code or the stop's 0. The breaks of step 5 are what make those three rows fail.
 
 ```bash
 WT=/path/to/worktree && cd "$WT" && LOG=$(mktemp) && rtk proxy go test ./tui/ -run '^(TestTheWizardsExitAfterABound|TestTheWizardsLastScreenAfterABound|TestACancelledCollectionExitsZero|TestLoopReturnsTheExitCodeTheRunReported)$' -count=1 -v >"$LOG" 2>&1; echo "go test exit: $?"; echo "top-level passes: $(grep -c '^--- PASS' "$LOG")"; grep -E '^--- (FAIL|SKIP)|^(FAIL|ok) ' "$LOG"
@@ -3648,11 +3799,12 @@ func (e collectDoneEvent) exitStatus(s State) int {
 | Change | Row that must fail |
 | --- | --- |
 | `finishedEvent.apply` drops `RunFailed` | "bound, failed before it" exits 0 |
-| `finishedEvent.apply` drops `MaxDurationReached` | "bound before the run folder" and "bound, then a stop" (the latter exits 0) |
+| `finishedEvent.apply` drops `MaxDurationReached` | "bound, collected one" (exits 2, want 0) and "bound, then a stop, before the run folder" (exits 0, want 2), plus the two screen checks. "bound before the run folder" keeps exit 2, since Run's code is 2 either way. Measured on 5 October for the exit codes |
 | Ask `e.ctxCancelled` before `s.MaxDurationReached` | "bound, then a stop, before the run folder" exits 0 |
 | Drop `s.CollectedUnits > 0` | "bound, three skips, nothing collected" exits 0 |
 | Drop `!s.RunFailed` | "bound, failed before it" exits 0 |
-| Delete the bound's case from either branch of `renderDone` | `TestTheWizardsLastScreenAfterABound` |
+| Delete the bound's case from either branch of `renderDone` | `TestTheWizardsLastScreenAfterABound`, and the screen check of row "bound, collected one" (archive branch) or "bound before the run folder" (no-archive branch) |
+| `collectDoneEvent.apply` leaves `ZipPath` empty | row "bound, collected one", its screen (`No archive was written`); existing tests of the last screen fail too |
 | `loop` passes the state after `apply` (`c.exitStatus(e.apply(s))`) | predicted green: `collectDoneEvent.apply` does not touch the verdict fields. Report it. |
 
 - [ ] Step 6: commit.
@@ -3777,7 +3929,7 @@ func TestTheThirdScreenShowsTheBound(t *testing.T) {
 - [ ] Step 2: run; does not compile.
 
 ```bash
-WT=/path/to/worktree && cd "$WT" && LOG=$(mktemp) && rtk proxy go test ./collect/ ./tui/ -run '^(TestDurationBoundAgainstTheBound|TestBoundLineNamesTheValueAndWhereItCameFrom|TestCheckPrintsTheBoundBeforeItConnects|TestTheThirdScreenShowsTheBound|TestCheckPrintsTheCorpusBeforeItTouchesTheInstance|TestPlannedDurationLines)$' -count=1 -v >"$LOG" 2>&1; echo "go test exit: $?"; echo "top-level passes: $(grep -c '^--- PASS' "$LOG")"; grep -E '^--- (FAIL|SKIP)|^(FAIL|ok) |undefined' "$LOG"
+WT=/path/to/worktree && cd "$WT" && LOG=$(mktemp) && rtk proxy go test ./collect/ ./tui/ -run '^(TestDurationBoundAgainstTheBound|TestBoundLineNamesTheValueAndWhereItCameFrom|TestCheckPrintsTheBoundBeforeItConnects|TestTheThirdScreenShowsTheBound|TestCheckPrintsTheCorpusBeforeItTouchesTheInstance|TestCheckStillWritesItsListingToStdout|TestPlannedDurationLines)$' -count=1 -v >"$LOG" 2>&1; echo "go test exit: $?"; echo "top-level passes: $(grep -c '^--- PASS' "$LOG")"; grep -E '^--- (FAIL|SKIP)|^(FAIL|ok) |undefined' "$LOG"
 ```
 
 - [ ] Step 3: implement.
@@ -3872,7 +4024,7 @@ and after the Query Store window block:
 	}
 ```
 
-- [ ] Step 4: rerun: `top-level passes: 6`. Full suite.
+- [ ] Step 4: rerun: `top-level passes: 7` (the four new tests and three existing ones: `TestCheckPrintsTheCorpusBeforeItTouchesTheInstance`, `TestCheckStillWritesItsListingToStdout`, `TestPlannedDurationLines`). Full suite.
 
 - [ ] Step 5: breaks.
 
@@ -3882,7 +4034,7 @@ and after the Query Store window block:
 | `Against`: `b.Ceiling < limit` | red: "the ceiling at the bound" |
 | `Against`: always "above" in the costly case | red: "costly on, the units before them under" |
 | `BoundLine` writes `cfg.MaxDuration.String()` | red: `TestBoundLineNamesTheValueAndWhereItCameFrom` |
-| Print the `Bound` line also without a bound (`"Bound    : " + ""`) | red: `TestCheckPrintsTheCorpusBeforeItTouchesTheInstance`, which asserts the bytes printed before the connection |
+| Print the `Bound` line also without a bound (`fmt.Println("Bound    : " + BoundLine(o.Config))` with no `if`) | red: `TestCheckStillWritesItsListingToStdout` (`stdout mismatch under a non-nil Progress`), which compares the whole of what `check` writes to stdout. `TestCheckPrintsTheCorpusBeforeItTouchesTheInstance` stays green: it reads exactly `len(want)` bytes, which end at `Output   : ...`, and never sees a line after them. Measured on 5 October |
 | `initialState` does not set `Bound` | predicted green: the render test builds the state itself. Report it; the wizard's own path is checked by reading. |
 
 - [ ] Step 6: commit.
@@ -3903,7 +4055,7 @@ since that forecast is hundreds of times too pessimistic."
 Spec: "The option and its format" (README, changelog, dba-guide), "What the bound holds" (the promise), "Exit code and the previous run of the day" (the wizard's paragraph). No test; the review reads the text against the tree.
 
 Files:
-- Modify: `README.md`, `docs/dba-guide.md`, `CHANGELOG.md`
+- Modify: `README.md`, `docs/dba-guide.md`, `CHANGELOG.md`, `collect/collect.go` (one comment in `Check`)
 
 - [ ] Step 1: `README.md`.
 
@@ -3990,12 +4142,25 @@ In `### Changed`:
 
 In the existing `### Added` entry about the duration ceiling, replace `Nothing bounds the collection as a whole yet; this only says before the run how long it can go.` with `--max-duration bounds the collection as a whole.`
 
-- [ ] Step 4: check the prose: `grep -nP '\x{2014}|\x{2013}' README.md docs/dba-guide.md CHANGELOG.md` finds nothing in the lines you added (the files may hold older ones; do not touch those). `git grep -niE "<client names you have been working with>"` per `CLAUDE.md`.
+- [ ] Step 4: `collect/collect.go`, in `Check`, the comment above the ceiling (`// The ceiling sits under the list it multiplies: ...`) still says the ceiling is announced "because nothing bounds a collection as a whole". Replace that clause, keeping the rest of the comment:
 
-- [ ] Step 5: commit.
+```go
+	// The ceiling sits under the list it multiplies: a per-database
+	// collector is paid once per line above. It is announced here because
+	// only MAX_DURATION bounds a collection as a whole, and it is unset by
+	// default: an operator about to start one in the evening has to know
+	// whether the worst case is ten minutes or four hours before choosing the
+	// flags, or the bound, not after.
+```
+
+(the two lines about an empty plan stay). `gofmt -l .` and `go build ./...` after the edit.
+
+- [ ] Step 5: check the prose: `grep -nP '\x{2014}|\x{2013}' README.md docs/dba-guide.md CHANGELOG.md` finds nothing in the lines you added (the files may hold older ones; do not touch those). `git grep -niE "<client names you have been working with>"` per `CLAUDE.md`.
+
+- [ ] Step 6: commit.
 
 ```bash
-git add README.md docs/dba-guide.md CHANGELOG.md
+git add README.md docs/dba-guide.md CHANGELOG.md collect/collect.go
 git commit -m "Document the bound on a collection
 
 The README states the promise in the terms the spec settled: no collector
@@ -4005,30 +4170,54 @@ the environment is the wrong place for it, and how the wizard's exit code
 treats a run the bound cut."
 ```
 
-### Task 24: CI (owner's ruling required)
+### Task 24: the live max-duration tests in CI
 
-Spec: silent on CI. Read `.github/workflows/ci.yml`: the `build` job runs `go test ./... -count=1` and `go test ./collect/ -count=2` with no database; the `integration` job starts SQL Server 2017 and 2022 containers and runs `check` and `collect` through the binary, and sets `SQL_SERVER`, `SQL_USER`, `SQL_PASSWORD`, never `SQL_AUDITOR_LIVE_*`.
+Spec: silent on CI. The owner ruled on 5 October 2026 that the `^TestLiveMaxDuration` tests run in the CI integration job, on both legs (SQL Server 2017 and 2022).
 
-So CI runs every test of this plan that needs no server: Tasks 1 to 10, the non-live parts of 11, 18 to 22, that is criteria 1, 2, 3, 4, 8, the manifest half of 9, 10's `summaryTail` and `TestSettleRun`, 11, 12, 13, 14, 15, 16b. It skips every live test (criteria 5a to 5d, 6a to 6d, 7, 16a, and the two extra live tests of Task 14 and the one of Task 11), as it skips the existing live tests today. The call site `settleRun(exit, m.Run.Cancelled || m.Run.MaxDurationReached)`, the check before `lockRun`, the check before the watch and `cut` have no test CI runs.
+Files:
+- Modify: `.github/workflows/ci.yml` (the `integration` job)
 
-This task is executed only if the owner rules for it. It adds to the `integration` job, after the `collect` step:
+Read `.github/workflows/ci.yml` first: the `build` job runs `go test ./... -count=1` and `go test ./collect/ -count=2` with no database; the `integration` job starts SQL Server 2017 and 2022 containers, sets `SQL_SERVER`, `SQL_USER`, `SQL_PASSWORD` and `SQL_TRUST_SERVER_CERTIFICATE` at job level, never `SQL_AUDITOR_LIVE_*`, and runs `check` and `collect` through the binary, then asserts on the archive.
+
+Without this step CI runs every test of this plan that needs no server (Tasks 1 to 10, the non-live parts of 11, 18 to 22: criteria 1, 2, 3, 4, 8, the manifest half of 9, 10's `summaryTail` and `TestSettleRun`, 11, 12, 13, 14, 15, 16b) and skips every live one (criteria 5a to 5d, 6a to 6d, 7, 16a, and the extra live tests of Tasks 11 and 14), so the call site `settleRun(exit, m.Run.Cancelled || m.Run.MaxDurationReached)`, the check before `lockRun`, the check before the watch and `cut` would have no test CI runs.
+
+- [ ] Step 1: add, as the last step of the `integration` job (after the existing assertions, so that the archive checks of `collect` stay next to it):
 
 ```yaml
       # The bound's live tests, against the same container. They create
-      # nothing: read-only instance collectors, and one missing table that is
-      # never created. Timing-sensitive ones (a bound of three seconds that must
-      # outlast the preamble) are the reason this is a separate step.
+      # nothing: read-only instance collectors on master, and one missing
+      # table that is never created. A separate step because some are
+      # timing-sensitive (a bound of three seconds must outlast the
+      # preamble). A live test skips when SQL_AUDITOR_LIVE_SERVER is unset,
+      # and go test exits 0 on skips, so a SKIP fails the step.
       - name: max-duration live tests
         env:
           SQL_AUDITOR_LIVE_SERVER: localhost,1433
           SQL_AUDITOR_LIVE_USER: sa
           SQL_AUDITOR_LIVE_PASSWORD: ${{ env.SQL_PASSWORD }}
-        run: go test ./collect/ -run '^TestLiveMaxDuration' -count=1 -v
+        run: |
+          go test ./collect/ -run '^TestLiveMaxDuration' -count=1 -v | tee "$RUNNER_TEMP/maxdur.log"
+          grep -q '^--- PASS' "$RUNNER_TEMP/maxdur.log"
+          if grep -q '^--- SKIP' "$RUNNER_TEMP/maxdur.log"; then exit 1; fi
 ```
 
-- [ ] Step 1: ask the controller for the owner's ruling; if none, skip the task and say so in the report.
-- [ ] Step 2: if ruled for, add the step, push the branch only if the owner says so, and read the run's log for `--- PASS` counts on both legs (2017 and 2022): 13 top-level passes each (`TestLiveMaxDuration` matches the 13 tests of Tasks 11 to 17). `liveConfig` sets `TrustCert: true`, which the container's self-signed certificate needs. Risk to weigh: `TestLiveMaxDurationAtTheCheckBeforeTheRunFolder` and its sibling need the preamble under three seconds; on a slow runner they fail saying the hook was never called, which is a flaky red rather than a silent green.
-- [ ] Step 3: commit, if ruled for: `git add .github/workflows/ci.yml`, message explaining that the bound's call sites otherwise have no test that CI runs.
+(GitHub runs a `run:` block under `bash -eo pipefail`, so a failing `go test` fails the step through the pipe; the skip test is an `if`, since `set -e` ignores a command negated with `!`.) `liveConfig` sets `TrustCert: true`, which the container's self-signed certificate needs; it reads only the three `SQL_AUDITOR_LIVE_*` variables.
+
+- [ ] Step 2: check the YAML locally: `python3 -c 'import yaml,sys; yaml.safe_load(open(".github/workflows/ci.yml"))'` exits 0, and the full suite is green. The workflow itself runs when the branch is pushed, which the owner does, not the implementer. When it has run, the controller reads both legs' logs: 13 `--- PASS` lines in the step, no `--- SKIP` (`TestLiveMaxDuration` matches the 13 tests of Tasks 11 to 17). Risk to weigh in that reading: `TestLiveMaxDurationAtTheCheckBeforeTheRunFolder` and its sibling need the preamble under three seconds; on a slow runner they fail saying the hook was never called, a flaky red rather than a silent green, and a red there is read before it is rerun.
+
+- [ ] Step 3: commit.
+
+```bash
+git add .github/workflows/ci.yml
+git commit -m "Run the bound's live tests in the integration job
+
+The checks that make the bound work (the one before the run folder, the
+one before the blocking watch, the cut of a running collector, and the
+exit code given the bound) are exercised only by live tests, which CI
+skipped for lack of an instance. The integration job already has one on
+each leg, so the step points the live harness at it, and fails on a skip,
+since go test reports a skipped live test as a pass."
+```
 
 ## Closing the branch
 
@@ -4037,6 +4226,13 @@ Taken by the controller, not by an implementer.
 - `gofmt -l .` empty, `go vet ./...`, `rtk proxy go test ./... -count=1`, `rtk proxy go test ./collect/ -count=2`, and the two cross-compiles of `ci.yml`.
 - The live set in one invocation: `-run '^TestLiveMaxDuration'`, 13 top-level passes, plus `^(TestLiveAUnitLeavesNoTempTable|TestLiveRunAddressReachesTheRerunGuard)$`, 2.
 - On the lab, `SELECT name FROM sys.databases WHERE name LIKE 'ZzMaxDur%'` returns nothing.
+- Last, once, and never while a review panel or any other live run uses the lab: the existing live tests of the drop path and the watch, which Task 14 touches and no implementer runs, because they create and drop `ZzDroppedDuringRun` and `ZzWatchLive`. The owner allowed this one run on 5 October 2026.
+
+  ```bash
+  WT=/path/to/worktree && cd "$WT" && LOG=$(mktemp) && SQL_AUDITOR_LIVE_SERVER='localhost,11533' SQL_AUDITOR_LIVE_USER=sa SQL_AUDITOR_LIVE_PASSWORD="$(LAB_SA_PASSWORD_COMMAND)" rtk proxy go test ./collect/ -run '^(TestLiveADatabaseDroppedDuringTheRunIsSkippedNotFailed|TestLiveTheRerunGuardAfterADatabaseDroppedDuringTheRun|TestLiveDatabaseExistsAsksTheCatalog|TestLiveWatchRecordsAWait)$' -count=1 -v >"$LOG" 2>&1; echo "go test exit: $?"; echo "top-level passes: $(grep -c '^--- PASS' "$LOG")"; grep -E '^--- (FAIL|SKIP)|^(FAIL|ok) ' "$LOG"
+  ```
+
+  Expected `top-level passes: 4`. Then, whatever the result, check that the tests' cleanups dropped both databases: `SELECT name FROM sys.databases WHERE name IN (N'ZzDroppedDuringRun', N'ZzWatchLive') OR name LIKE N'ZzMaxDur%'` returns no row (through `sqlcmd` or the `sa` connection the controller uses for the lab). A row left means a cleanup failed: drop that database, and only that one, by its exact name, and say so in the ledger.
 - `git grep -niE` for the client names of the session, per `CLAUDE.md`.
 - Read, since no test sees them: the `USE` path reads its cause before `ucancel()`; `databaseExists(bound, ...)`; `recordWatchOutcome(..., cut, ...)` in the defer; `initialState` sets `Bound`; the two `Debugf` lines sit after their calls.
 - Every rule of the spec's "least sure" list of the fifth review is either covered above or named in the next section.
@@ -4056,7 +4252,31 @@ Each point says how this plan resolved it, or that it did not.
 9. Criterion 6a's "the first unit returned within twelve seconds of the start": the prototype measured the whole `Run`. Resolved as the time from `Run`'s call to the first `UnitDone` the recorder sees, which is what the sentence says.
 10. Criterion 10 says the call site of `settleRun` is held by criterion 16a, which this plan reaches in Task 15, one task after the call site changes in Task 14. Resolved by adding `TestLiveMaxDurationBetweenTwoUnits` to Task 14, a run cut only between units, which fails when `settleRun` is not given the bound. Task 14 also adds `TestLiveMaxDurationAfterTheLastUnitCutsNothing` for criterion 9's "absent when the bound passes after the last unit", which no spec criterion produces live.
 11. Criterion 5b says to plant the previous run at the name `RunFolderFor` gives "with the server name the test reads on its own connection". The prototype instead ran an unbounded probe run to learn the name. This plan follows the spec (`Probe` and `RunServerName` on the test's own connection).
-12. The owner's instruction limits live tests to databases named `ZzMaxDur…`. The existing live tests that exercise the code Task 14 changes on the drop path (`TestLiveADatabaseDroppedDuringTheRunIsSkippedNotFailed`, `TestLiveTheRerunGuardAfterADatabaseDroppedDuringTheRun`, `TestLiveDatabaseExistsAsksTheCatalog`) create and drop `ZzDroppedDuringRun`, and `TestLiveWatchRecordsAWait` creates `ZzWatchLive`. Not resolved: no task runs them, so the drop path under the bound has only its unit tests and a reading. The owner decides whether they may run at the end of the branch.
+12. The owner's instruction limits live tests to databases named `ZzMaxDur…`. The existing live tests that exercise the code Task 14 changes on the drop path (`TestLiveADatabaseDroppedDuringTheRunIsSkippedNotFailed`, `TestLiveTheRerunGuardAfterADatabaseDroppedDuringTheRun`, `TestLiveDatabaseExistsAsksTheCatalog`) create and drop `ZzDroppedDuringRun`, and `TestLiveWatchRecordsAWait` creates `ZzWatchLive`. No implementer runs them. The owner ruled on 5 October 2026 that the controller may run them once, at the end of the branch and not beside a panel, followed by a check that both databases are gone: the last step of "Closing the branch".
 13. The open questions of the spec that the owner has not ruled on stay open, and this plan implements the spec's current text for each: the one-minute floor; a stopped unit recorded as an error; the costly collectors moved last in every run, bounded or not; no `MANIFEST.txt` line for an operator's stop; one `skipped_scripts` entry per unit; no `check` warning against the measured preamble; the wizard exiting 0 for a cut run with something to send; the blocking watch's start left outside the bound. One of them asks whether `Verdict.Collected` and `CollectedUnits` should land on their own before the feature: this plan keeps them inside it (Tasks 11 and 20), and they can be taken out as a branch of their own without reordering anything else.
 14. The spec's `stoppedOr` is reached from the check before `lockRun` with no step error, and its last line, `m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})`, would panic on a nil error if that path ever reached it with the bound not fired. It cannot, since the check calls `stoppedOr` only when the bound has fired and a context's cause never changes once set. Resolved by a comment at the call (Task 13); not guarded in code.
-15. CI. The spec says nothing of CI, and the live criteria it measured are exactly the ones that hold the call sites (the check before `lockRun`, the check before the watch, `cut`, `settleRun` given the bound). Not resolved: Task 24 proposes a step and waits for the owner's ruling.
+15. CI. The spec says nothing of CI, and the live criteria it measured are exactly the ones that hold the call sites (the check before `lockRun`, the check before the watch, `cut`, `settleRun` given the bound). The owner ruled for it on 5 October 2026: Task 24 adds the step to the integration job, on both legs.
+
+## Review of the plan
+
+A panel of five read this plan on 5 October 2026: a Claude reader on the neutral prompt, which applied Tasks 1 to 22 verbatim on a copy and ran them against the lab, agy on both prompts, and DeepSeek V4 Pro on both prompts in place of codex, whose two seats failed for capacity. What each finding became:
+
+| Finding | Reader | Outcome |
+| --- | --- | --- |
+| A dial cut by the bound's deadline returns `i/o timeout` before the bound's timer has set the cause, so `stoppedOr` and the loop's guards read "not the bound" and the run exits 1 (criterion 5a red about 1 run in 300) | Claude | Taken, verified: a standalone program saw a nil cause after 200 dials of 200 made past a `WithDeadlineCause` deadline; the prototype's 5a test failed that way 1 time in 300 under `GOMAXPROCS=1`, and 0 in 600 with the fix. `settled` and `boundReached` through it (Task 6), `Connect` through it (Task 12), each with an offline test that fails on every run without the change (50 of 50, measured), using a context whose deadline has passed while its `Done` is held open. The spec says the rule under "The bound as a fact" |
+| Task 19's second break stays green: an `[n/N]` line names the unit, never the reason | Claude | Taken, measured: the test also counts lines naming `80.workload/`; the break is red on the non-tty row |
+| Task 22's fifth break names `TestCheckPrintsTheCorpusBeforeItTouchesTheInstance`, which reads only `len(want)` bytes; the spec's criterion 12 says the same | Claude | Taken: the break names `TestCheckStillWritesItsListingToStdout`, which joins the filter (7 passes); criterion 12 corrected |
+| Task 12's step 2 predicts `cannot reach the instance` with no bound context yet; the run in fact completes | Claude | Taken: the step predicts exit 0, two units collected, and the hook never called |
+| Task 21's break dropping `MaxDurationReached` names a row that stays green | Claude | Taken. On reading, step 2's prediction was wrong too (it named rows 2 to 5; today's body fails rows 1 and 4): corrected |
+| Task 8's test uses `fmt`, which `manifest_test.go` does not import | Claude | Taken |
+| Task 16 replaces the `runUnit` line with a block carrying the `pause` call Task 14 already added | Claude | Taken: the brief says to replace both lines |
+| The comment in `Check` still says nothing bounds a collection | Claude | Taken: Task 23, step 4 |
+| Criterion 14 asks `Render` of the final state driven through `loop`; the plan rendered hand-built states | Claude | Taken: rows 1 and 3 of `TestTheWizardsExitAfterABound` render the state the loop ended on; a break that leaves `ZipPath` empty is listed |
+| "Review focus" item 4 calls the summary line pinned when only `summaryTail` is | Claude | Taken: the item says the call site is read, not tested |
+| Task 6's first break, read as moving the parent test after the cause test, cannot fail: both guards return `err` unchanged | agy (neutral) | Taken in part: the parenthetical meant a cause test that returns the sentence before the parent is asked, which does fail (DeepSeek's reading). The row now gives the code |
+| The live tests of the drop path and the watch, which Task 14 touches, never run | agy (directive), DeepSeek (neutral) | Taken by the owner's ruling: the controller runs them once at the end, then checks both databases are gone ("Closing the branch") |
+| CI runs no live test of the bound | agy (directive) | Taken by the owner's ruling: Task 24, which also fails the step on a skip |
+| `stoppedOr(2, nil)` would panic on `err.Error()` if the bound had not fired | agy (directive), DeepSeek (neutral) | Rejected. The only nil caller asks `boundReached` first, and a context's first cause never changes once set, so `stoppedOr` takes the bound's branch; with `settled` the two reads agree in the instant after the deadline too. A guard would have to invent a third outcome, an exit code with no error, that the spec does not define. The comment at the call (Task 13) stays |
+| The summary line's call site in `Run` has no test | DeepSeek (neutral) | Known and listed (Task 9's predicted-green break); pinning it would change `Run`'s signature for one line. No change beyond the "Review focus" wording |
+| The `USE` path has no live test | DeepSeek (neutral) | Known: the spec concedes it and the closing review reads the order. No change |
+| `recordedBound` needs `strconv` in `manifest.go` | DeepSeek (neutral) | Already in Task 8's text. No change |
