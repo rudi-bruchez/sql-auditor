@@ -2,12 +2,14 @@ package collect
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 // flatten collapses the hard wrapping so an assertion is about the wording
@@ -1087,5 +1089,76 @@ func TestLocalSessionsAreDeclaredAndDisclosed(t *testing.T) {
 	m.Disclosed = []string{"local_sessions"}
 	if h := flatten(m.Human()); !strings.Contains(h, "program names of the sessions opened from the server itself") {
 		t.Errorf("MANIFEST.txt should disclose the local session program names:\n%s", m.Human())
+	}
+}
+
+func TestManifestTextNamesTheMaxDurationAmongTheRunSettings(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "")
+	if !strings.Contains(m.Human(), "maximum duration the run was given when one was set") {
+		t.Error("MANIFEST.txt does not say the run settings include the bound")
+	}
+}
+
+// A reader of MANIFEST.txt alone has no other way to learn the run was cut,
+// so the duration line says it, and says it even for a run cut in its first
+// second, which only a test can produce.
+func TestManifestTextSaysTheRunStoppedAtTheMaxDuration(t *testing.T) {
+	for _, c := range []struct {
+		sec  int
+		want string
+	}{
+		{7204, "Duration     : 7204 s, stopped at the maximum duration of 2h00m (7200 s)\n"},
+		{0, "Duration     : 0 s, stopped at the maximum duration of 2h00m (7200 s)\n"},
+	} {
+		m := NewManifest("sql-auditor", "test", "")
+		m.Config = map[string]string{"max_duration_sec": "7200"}
+		m.Run.DurationSec, m.Run.MaxDurationReached = c.sec, true
+		if h := m.Human(); !strings.Contains(h, c.want) {
+			t.Errorf("duration %d: no line %q in\n%s", c.sec, c.want, h)
+		}
+	}
+}
+
+// A bound that fires early skips hundreds of units for one reason. They are
+// one entry, written where the first of them falls, as a dropped database's
+// are.
+func TestManifestTextGroupsTheBoundsSkips(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "")
+	m.Config = map[string]string{"max_duration_sec": "7200"}
+	reason := maxDurationSkipReason(2 * time.Hour)
+	for i := 0; i < 12; i++ {
+		m.Skipped = append(m.Skipped, SkippedScript{Script: fmt.Sprintf("10.system/%03d.x.sql", i), Reason: "requires SQL Server 2016 or later"})
+	}
+	for i := 0; i < 198; i++ {
+		m.Skipped = append(m.Skipped, SkippedScript{Script: fmt.Sprintf("80.workload/%03d.y.sql", i), Target: "SALESDB", Reason: reason})
+	}
+	h := m.Human()
+	for _, want := range []string{
+		"Queries not run (210):\n",
+		"  - 198 collectors not started, each listed in _run.json\n      " + reason + "\n",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("no %q in\n%s", want, h)
+		}
+	}
+	if n := strings.Count(h, reason); n != 1 {
+		t.Errorf("the bound's reason appears %d times, want once", n)
+	}
+}
+
+// Without a bound nothing changes: today's duration line, and no
+// max_duration_reached in _run.json.
+func TestManifestWithoutABoundKeepsTodaysDurationLine(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "")
+	m.Run.DurationSec = 108
+	if h := m.Human(); !strings.Contains(h, "Duration     : 108 s\n") || strings.Contains(h, "maximum duration of") {
+		t.Errorf("duration line changed without a bound:\n%s", h)
+	}
+	b, err := json.Marshal(m.Run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "max_duration_reached") {
+		t.Errorf("_run.json carries max_duration_reached on an unbounded run: %s", b)
 	}
 }

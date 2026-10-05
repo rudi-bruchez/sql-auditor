@@ -65,7 +65,7 @@ func (e runFinished) apply(s State) State {
 	s.ZipPath = e.zip
 	return s
 }
-func (e runFinished) exitStatus() int { return e.code }
+func (e runFinished) exitStatus(State) int { return e.code }
 
 func TestLoopFoldsASequenceOfEventsIntoTheExpectedState(t *testing.T) {
 	var f frames

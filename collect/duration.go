@@ -144,3 +144,41 @@ func formatCeiling(d time.Duration) string {
 	}
 	return fmt.Sprintf("%s (%d s)", human, s)
 }
+
+// BoundLine is the bound as check and the wizard's third screen state it:
+// the value written by formatCeiling, since Config keeps no spelling and
+// time.Duration prints 2h as 2h0m0s; the key's name as fixed text, so the
+// operator learns what to look for in .env; the provenance, because a .env
+// beats an exported variable here and a bound nobody remembers setting is
+// the one that will be argued about; and the rule. Empty without a bound.
+func BoundLine(cfg *Config) string {
+	if cfg == nil || cfg.MaxDuration <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("MAX_DURATION at %s, from %s; no collector starts after it, and the one running then is stopped",
+		formatCeiling(cfg.MaxDuration), cfg.MaxDurationFrom)
+}
+
+// Against compares the ceiling with the bound and makes no forecast. When
+// costly collectors are on and the whole ceiling is above the bound, it gives
+// the ceiling of the units before them, since those can exceed the bound too
+// and a line that named only the costly ones would mislead. It never promises
+// that only costly collectors will be cut: the bound also counts the steps
+// before the first unit and the resets between units, which no ceiling does.
+func (b DurationBound) Against(limit time.Duration) string {
+	head := "bounded at " + formatCeiling(limit) + ": "
+	switch {
+	case b.Ceiling <= limit:
+		return head + "the ceiling of the units is under the bound"
+	case len(b.Costly) > 0:
+		before := b.Ceiling - b.CostlyCeiling
+		side := "above"
+		if before <= limit {
+			side = "under"
+		}
+		return fmt.Sprintf("%sthe costly collectors run last; the %d units before them: at most %s, %s the bound",
+			head, b.Units-b.CostlyUnits, formatCeiling(before), side)
+	default:
+		return head + "the ceiling is above the bound; if it is reached, the collectors last in the plan are the ones not run"
+	}
+}

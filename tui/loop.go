@@ -56,7 +56,7 @@ func loop(events <-chan event, draw func([]string), size func() (int, int), s St
 		// told whatever script wrapped it that everything had gone fine, which
 		// is the outcome panicEvent.exitStatus exists to prevent.
 		if c, ok := e.(coded); ok && code == 0 {
-			code = c.exitStatus()
+			code = c.exitStatus(s)
 		}
 		prev := s
 		s = e.apply(s)
@@ -85,7 +85,12 @@ func loop(events <-chan event, draw func([]string), size func() (int, int), s St
 // coded is implemented by the events that carry a process exit status. Only
 // the end of the collection has one to report; a keystroke never does, which
 // is why this is an optional interface rather than a field on event.
-type coded interface{ exitStatus() int }
+//
+// s is the state as it stands before the event is applied, which holds the
+// run's verdict: finishedEvent and collectDoneEvent come from the one
+// goroutine that calls collect.Run, on one channel, and the first is applied
+// before the second.
+type coded interface{ exitStatus(s State) int }
 
 // tickEvent is the heartbeat of the three waiting steps. Something has to move
 // on screen while the program waits on a server that may never answer, and a
@@ -159,4 +164,4 @@ func (e panicEvent) apply(s State) State {
 // "the run happened but something in it failed", which is the closest true
 // statement available: a wizard that crashed and exited 0 would tell a script
 // wrapping it that everything went fine.
-func (e panicEvent) exitStatus() int { return 2 }
+func (e panicEvent) exitStatus(State) int { return 2 }

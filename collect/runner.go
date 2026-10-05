@@ -350,7 +350,12 @@ func Connect(ctx context.Context, db *sql.DB, cfg *Config) (*sql.Conn, error) {
 	cctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	c, err := connWithin(cctx, db)
-	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+	// settled: a dial bounded by ctx's own deadline (the bound's, when Run
+	// connects) fails before ctx's timer has cancelled it, and ctx.Err() read
+	// in that instant would call the caller's deadline a login timeout of
+	// ours. When cctx's budget ran out first, ctx's deadline has not passed
+	// and settled returns at once.
+	if err != nil && settled(ctx).Err() == nil && errors.Is(err, context.DeadlineExceeded) {
 		return nil, fmt.Errorf("the server took the connection but did not complete the login within %s (twice SQL_CONNECT_TIMEOUT_SEC)", budget)
 	}
 	return c, err

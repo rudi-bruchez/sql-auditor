@@ -966,3 +966,23 @@ jobs:
             SELECT CONCAT_WS('|', $cols) FROM @x.nodes('/ioSubsystem') AS t(n);")
           echo "read back: $got"
           test "$got" = "3|40|/log/a_log.ldf"
+      # The bound's live tests, against the same container. They create
+      # nothing: read-only instance collectors on master, and one missing
+      # table that is never created. A separate step because some are
+      # timing-sensitive (a bound of three seconds must outlast the
+      # preamble). A live test skips when SQL_AUDITOR_LIVE_SERVER is unset,
+      # and go test exits 0 on skips, so a SKIP fails the step.
+      - name: max-duration live tests
+        env:
+          SQL_AUDITOR_LIVE_SERVER: localhost,1433
+          SQL_AUDITOR_LIVE_USER: sa
+          SQL_AUDITOR_LIVE_PASSWORD: ${{ env.SQL_PASSWORD }}
+        run: |
+          # The runner's bash is `bash -e`, without pipefail: without this
+          # line the status of the pipe below is tee's, and a failing test
+          # would leave the step green.
+          set -o pipefail
+          go test ./collect/ -run '^TestLiveMaxDuration' -count=1 -v | tee "$RUNNER_TEMP/maxdur.log"
+          grep -q '^--- PASS' "$RUNNER_TEMP/maxdur.log"
+          if grep -q '^--- SKIP' "$RUNNER_TEMP/maxdur.log"; then exit 1; fi
+          if grep -q '^--- FAIL' "$RUNNER_TEMP/maxdur.log"; then exit 1; fi

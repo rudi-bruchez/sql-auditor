@@ -55,7 +55,7 @@ func TestLiveAUnitLeavesNoTempTable(t *testing.T) {
 			s := Script{Path: "10.system/999.temp-probe.sql", TimeoutSec: c.timeout, SQL: c.sql,
 				Results: []ResultSpec{{Name: "rows", Shape: ShapeArray}}}
 			m, rw := &Manifest{}, newRunWriter(t.TempDir(), 1<<20)
-			uerr := runUnit(ctx, conn, Options{Config: cfg}, m, rw, s, DatabaseFolder{}, nil, 0)
+			_, uerr := runUnit(ctx, ctx, conn, Options{Config: cfg}, m, rw, s, DatabaseFolder{}, nil, 0)
 			if (uerr == nil) != c.succeeds {
 				t.Fatalf("the unit returned %v", uerr)
 			}

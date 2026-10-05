@@ -790,3 +790,65 @@ func TestCheckRefusesToReplaceAnExistingGrantScript(t *testing.T) {
 		t.Errorf("the existing grant script was changed: %q", b)
 	}
 }
+
+// The bound reaches Run through the command line's own path, not Resolve
+// alone: the flag is parsed, handed to Resolve in the flags map, and lands in
+// Options.Config. Without the map entry the flag is parsed and dropped.
+func TestMaxDurationReachesTheRunFromTheFlagAndFromDotEnv(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+	o, code, err := buildOptions("collect", []string{"--env", env, "--max-duration", "2h"}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if o.Config.MaxDuration != 2*time.Hour || o.Config.MaxDurationFrom != "--max-duration" {
+		t.Errorf("flag: got %s from %q, want 2h0m0s from --max-duration", o.Config.MaxDuration, o.Config.MaxDurationFrom)
+	}
+	env = writeDotEnv(t, "SQL_SERVER=invalid.invalid\nMAX_DURATION=2h\n")
+	o, code, err = buildOptions("collect", []string{"--env", env}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if o.Config.MaxDuration != 2*time.Hour || o.Config.MaxDurationFrom != ".env" {
+		t.Errorf(".env: got %s from %q, want 2h0m0s from .env", o.Config.MaxDuration, o.Config.MaxDurationFrom)
+	}
+}
+
+// A value typed on the command line is refused in the same words as one in
+// .env, because both go through Resolve.
+func TestAnInvalidMaxDurationFlagIsRefusedInTheSettingsWords(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+	_, code, err := buildOptions("collect", []string{"--env", env, "--max-duration", "30s"}, noEnv, noStdin)
+	want := `MAX_DURATION: invalid value "30s", want a whole number of seconds of at least 1m, such as 90m or 2h`
+	if code != 2 || err == nil || err.Error() != want {
+		t.Errorf("code %d, err %v; want 2 and %q", code, err, want)
+	}
+}
+
+// --all turns on the eleven opt-ins and changes nothing else; a bound is not
+// an opt-in. TestAllTurnsOnEveryOptIn is not this guard: a bound added to
+// KnownFlags and to the options' Flags passed it.
+func TestAllSetsNoMaxDuration(t *testing.T) {
+	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
+	o, code, err := buildOptions("collect", []string{"--env", env, "--all"}, noEnv, noStdin)
+	if err != nil || code != 0 {
+		t.Fatalf("buildOptions: code %d, err %v", code, err)
+	}
+	if o.Config.MaxDuration != 0 {
+		t.Errorf("--all set a bound of %s", o.Config.MaxDuration)
+	}
+	for _, set := range []map[string]string{collect.KnownFlags, collect.ValueFlags} {
+		for k, v := range set {
+			if strings.Contains(strings.ToLower(k+v), "duration") {
+				t.Errorf("%s (%s) names the bound among the opt-ins --all turns on", k, v)
+			}
+		}
+	}
+}
+
+func TestTheUsageNamesMaxDuration(t *testing.T) {
+	var buf bytes.Buffer
+	writeUsage(&buf)
+	if !strings.Contains(buf.String(), "--max-duration D") {
+		t.Error("the usage text does not list --max-duration")
+	}
+}

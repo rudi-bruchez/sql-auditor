@@ -70,6 +70,16 @@ type Config struct {
 	// Printed on the line before the connection, where it is still worth
 	// something.
 	ServerFrom string
+	// MaxDuration bounds the whole collection, counted from the moment Run
+	// takes started; zero means no bound. It is the bound's only home: Run
+	// reads it here, and so do check and the wizard, so a path that built its
+	// Options without copying a second field cannot print a bound it does not
+	// apply. The one-minute floor is Resolve's; Run takes any positive value,
+	// which is what lets a test bound a run by two seconds.
+	MaxDuration time.Duration
+	// MaxDurationFrom names where MaxDuration came from, as ServerFrom does
+	// for the server, and is empty when no bound was set.
+	MaxDurationFrom string
 	// AppNameSet distinguishes an AppName the operator supplied from the one
 	// this package defaulted to. The two cannot be told apart from the value:
 	// SQL_APPLICATION_NAME=sql-auditor is a legitimate thing to write — it is
@@ -110,7 +120,8 @@ const maxQueryStoreDays = 3650
 // .env file is a typo, and a typo that silently changes behaviour (SQL_LOGIN
 // falling through to integrated auth) is worse than a hard failure.
 var knownKeys = map[string]bool{
-	"SQL_SERVER": true, "SQL_DATABASE": true, "SQL_USER": true,
+	"MAX_DURATION": true,
+	"SQL_SERVER":   true, "SQL_DATABASE": true, "SQL_USER": true,
 	"SQL_PASSWORD": true, "SQL_INTEGRATED_SECURITY": true,
 	"SQL_ENCRYPT": true, "SQL_TRUST_SERVER_CERTIFICATE": true,
 	"SQL_CONNECT_TIMEOUT_SEC": true, "SQL_QUERY_TIMEOUT_SEC": true,
@@ -342,6 +353,8 @@ func flagNameFor(key string) string {
 		return "queries-dir"
 	case "OUTPUT_DIR":
 		return "output-dir"
+	case "MAX_DURATION":
+		return "max-duration"
 	}
 	return key
 }
@@ -502,23 +515,43 @@ func Resolve(flags, dotenv map[string]string, environ func(string) string) (*Con
 	queryStoreFrom := dateShapeOf("QUERY_STORE_FROM")
 	queryStoreTo := dateShapeOf("QUERY_STORE_TO")
 
+	// A Go duration, so that a window counted in hours is typed in hours.
+	// Whole seconds, because the bound is recorded and printed in whole
+	// seconds and a deadline that differs from its record is a record that
+	// lies; at least a minute, against 30s typed for 30m. time.ParseDuration
+	// already refuses a bare number ("missing unit in duration").
+	var maxDuration time.Duration
+	maxDurationFrom := ""
+	if raw := get("MAX_DURATION", ""); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < time.Minute || d%time.Second != 0 {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("MAX_DURATION: invalid value %q, want a whole number of seconds of at least 1m, such as 90m or 2h", raw)
+			}
+		} else {
+			maxDuration, maxDurationFrom = d, from["MAX_DURATION"]
+		}
+	}
+
 	cfg := &Config{
-		Server:         get("SQL_SERVER", ""),
-		ServerFrom:     from["SQL_SERVER"],
-		Database:       get("SQL_DATABASE", "master"),
-		User:           get("SQL_USER", ""),
-		Password:       get("SQL_PASSWORD", ""),
-		AppName:        get("SQL_APPLICATION_NAME", DefaultAppName),
-		AppNameSet:     set("SQL_APPLICATION_NAME"),
-		Integrated:     boolOf("SQL_INTEGRATED_SECURITY", false),
-		Encrypt:        boolOf("SQL_ENCRYPT", true),
-		TrustCert:      boolOf("SQL_TRUST_SERVER_CERTIFICATE", false),
-		ConnectTimeout: secOf("SQL_CONNECT_TIMEOUT_SEC", 15),
-		QueryTimeout:   secOf("SQL_QUERY_TIMEOUT_SEC", 60),
-		QueriesDir:     get("QUERIES_DIR", ""),
-		OutputDir:      get("OUTPUT_DIR", "output"),
-		DBInclude:      get("DB_INCLUDE", ""),
-		DBExclude:      get("DB_EXCLUDE", ""),
+		Server:          get("SQL_SERVER", ""),
+		ServerFrom:      from["SQL_SERVER"],
+		MaxDuration:     maxDuration,
+		MaxDurationFrom: maxDurationFrom,
+		Database:        get("SQL_DATABASE", "master"),
+		User:            get("SQL_USER", ""),
+		Password:        get("SQL_PASSWORD", ""),
+		AppName:         get("SQL_APPLICATION_NAME", DefaultAppName),
+		AppNameSet:      set("SQL_APPLICATION_NAME"),
+		Integrated:      boolOf("SQL_INTEGRATED_SECURITY", false),
+		Encrypt:         boolOf("SQL_ENCRYPT", true),
+		TrustCert:       boolOf("SQL_TRUST_SERVER_CERTIFICATE", false),
+		ConnectTimeout:  secOf("SQL_CONNECT_TIMEOUT_SEC", 15),
+		QueryTimeout:    secOf("SQL_QUERY_TIMEOUT_SEC", 60),
+		QueriesDir:      get("QUERIES_DIR", ""),
+		OutputDir:       get("OUTPUT_DIR", "output"),
+		DBInclude:       get("DB_INCLUDE", ""),
+		DBExclude:       get("DB_EXCLUDE", ""),
 
 		QueryStoreDays:      queryStoreDays,
 		QueryStoreFrom:      queryStoreFrom,

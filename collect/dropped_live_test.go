@@ -43,7 +43,7 @@ func (o *dropOnObserver) UnitDone(script, db string, _ int64, _ time.Duration, e
 }
 func (o *dropOnObserver) ScriptSkipped(string, string, string) {}
 func (o *dropOnObserver) Phase(string)                         {}
-func (o *dropOnObserver) Finished(bool)                        {}
+func (o *dropOnObserver) Finished(Verdict)                     {}
 
 // droppedLiveLab creates the test database, dropping any left by an earlier
 // run first, and drops it again when the test ends. It returns the

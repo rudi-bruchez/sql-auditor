@@ -212,9 +212,13 @@ func (p *progress) UnitDone(script, database string, bytes int64, d time.Duratio
 	var skip *collect.UnitSkipped
 	if errors.As(err, &skip) {
 		// Kept on screen like a failure, because it is news: the run chose,
-		// while running, not to run something the plan announced.
-		p.clear()
-		fmt.Fprintf(p.out, "-- %s: %v\n", unitLabel(script, database), err)
+		// while running, not to run something the plan announced. Except the
+		// bound's skips, which come by the hundred for one reason: counted,
+		// and said once by the note Run prints after the loop.
+		if !skip.MaxDuration {
+			p.clear()
+			fmt.Fprintf(p.out, "-- %s: %v\n", unitLabel(script, database), err)
+		}
 	} else if err != nil {
 		// The one thing that must outlive the next repaint. Everything else the
 		// gauge says is replaced a second later; a failure is a fact about this
@@ -267,8 +271,9 @@ func (p *progress) Phase(name string) {
 // same run on stderr would only invite the two to disagree. It is Done under
 // another name — the run's verdict and the caller's "that is the last of it"
 // ask for exactly the same thing here — and it delegates rather than repeating
-// the body, so the two cannot drift apart.
-func (p *progress) Finished(cancelled bool) { p.Done() }
+// the body, so the two cannot drift apart. It ignores the verdict, as it
+// ignored the cancellation.
+func (p *progress) Finished(collect.Verdict) { p.Done() }
 
 // Done is called by main once Run has returned. Finished is not enough: the
 // phases after it, and any error Run comes back with, both land after the last

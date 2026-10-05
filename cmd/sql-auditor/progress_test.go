@@ -99,7 +99,7 @@ func TestWithoutATerminalEachUnitGetsItsOwnPlainLine(t *testing.T) {
 	o.UnitDone("10.system/001.a.sql", "", 2048, 300*time.Millisecond, nil)
 	o.UnitStarted("40.database/210.b.sql", "CLIENTDB")
 	o.UnitDone("40.database/210.b.sql", "CLIENTDB", 100, time.Second, nil)
-	o.Finished(false)
+	o.Finished(collect.Verdict{})
 
 	out := b.String()
 	if strings.Contains(out, "\r") {
@@ -127,7 +127,7 @@ func TestAFailedUnitLeavesAPermanentLine(t *testing.T) {
 		o.Planned(1)
 		o.UnitStarted("40.database/210.b.sql", "CLIENTDB")
 		o.UnitDone("40.database/210.b.sql", "CLIENTDB", 0, time.Second, errors.New("timeout expired"))
-		o.Finished(false)
+		o.Finished(collect.Verdict{})
 
 		out := b.String()
 		// The permanent part is what remains once the transient line and its
@@ -163,7 +163,7 @@ func TestOnATerminalTheGaugeRewritesOneLine(t *testing.T) {
 		o.UnitStarted(s, "")
 		o.UnitDone(s, "", 10, time.Second, nil)
 	}
-	o.Finished(false)
+	o.Finished(collect.Verdict{})
 
 	out := b.String()
 	if strings.Count(out, "\n") != 0 {
@@ -187,7 +187,7 @@ func TestSkipsAreNotPrinted(t *testing.T) {
 	o := newProgress(&b, false, func() int { return 80 }, fixedClock())
 	o.Planned(1)
 	o.ScriptSkipped("40.database/022.query-store-detail.sql", "OTHERDB", "not selected")
-	o.Finished(false)
+	o.Finished(collect.Verdict{})
 	if strings.Contains(b.String(), "OTHERDB") {
 		t.Errorf("a skip was printed:\n%q", b.String())
 	}
@@ -214,7 +214,7 @@ func TestAPhaseAfterTheVerdictEndsItsLine(t *testing.T) {
 	o.Planned(1)
 	o.UnitStarted("a.sql", "")
 	o.UnitDone("a.sql", "", 10, time.Second, nil)
-	o.Finished(false)
+	o.Finished(collect.Verdict{})
 	o.Phase("archiving")
 
 	out := b.String()
@@ -328,5 +328,40 @@ func TestAUnitSkippedMidRunSaysSo(t *testing.T) {
 	}
 	if strings.Contains(out, "!!") || strings.Contains(out, "0 bytes") {
 		t.Errorf("the skip reads as a failure or as a unit that ran:\n%s", out)
+	}
+}
+
+// A bound that fires early skips hundreds of units for one reason. The gauge
+// counts them to its total without a line each; the note after the loop is
+// the one line that says it. A skip of the watch still gets its line.
+func TestTheGaugeCountsTheBoundsSkipsWithoutPrintingThem(t *testing.T) {
+	for _, tty := range []bool{true, false} {
+		var b strings.Builder
+		o := newProgress(&b, tty, func() int { return 80 }, fixedClock())
+		o.Planned(200)
+		o.UnitStarted("10.system/001.a.sql", "")
+		o.UnitDone("10.system/001.a.sql", "", 10, time.Second, nil)
+		o.UnitDone("20.databases/010.b.sql", "SALESDB", 0, 0,
+			&collect.UnitSkipped{Reason: "the blocking watch cancelled 70.schema/055.page-density.sql on this database"})
+		for i := 0; i < 198; i++ {
+			o.UnitDone(fmt.Sprintf("80.workload/%03d.c.sql", i), "SALESDB", 0, 0,
+				&collect.UnitSkipped{Reason: "the collection reached its maximum duration of 2h00m (7200 s) before this collector started", MaxDuration: true})
+		}
+		o.Finished(collect.Verdict{MaxDurationReached: true})
+		out := b.String()
+		if n := strings.Count(out, "maximum duration"); n != 0 {
+			t.Errorf("tty %v: %d lines about the bound's skips, want none", tty, n)
+		}
+		// The non-tty [n/N] line names the unit and never the reason, so the
+		// count above cannot see a bound skip printed as progress.
+		if n := strings.Count(out, "80.workload/"); n != 0 {
+			t.Errorf("tty %v: %d lines name a unit the bound skipped, want none", tty, n)
+		}
+		if strings.Count(out, "-- ") != 1 || !strings.Contains(out, "the blocking watch cancelled") {
+			t.Errorf("tty %v: the watch's skip lost its line:\n%q", tty, out)
+		}
+		if o.done != o.planned {
+			t.Errorf("tty %v: counted %d of %d", tty, o.done, o.planned)
+		}
 	}
 }

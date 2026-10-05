@@ -50,7 +50,7 @@ func (o observer) ScriptSkipped(script, database, reason string) {
 
 func (o observer) Phase(name string) { o.send(phaseEvent{name: name}) }
 
-func (o observer) Finished(cancelled bool) { o.send(finishedEvent{cancelled: cancelled}) }
+func (o observer) Finished(v collect.Verdict) { o.send(finishedEvent{v: v}) }
 
 // plannedEvent carries the gauge's denominator. It arrives once, before the
 // first unit, because planUnits resolves the whole plan up front — which is
@@ -93,7 +93,12 @@ func (e unitDoneEvent) apply(s State) State {
 	var skip *collect.UnitSkipped
 	if errors.As(e.err, &skip) {
 		s.SkippedCount++
-		s.Notes = note(s.Notes, status("skipped")+where(e.script, e.database)+": "+skip.Reason)
+		// The bound's skips come by the hundred for one reason, and six notes
+		// are kept: a note each would push the stopped unit's error off the
+		// screen. The last screen says the bound once.
+		if !skip.MaxDuration {
+			s.Notes = note(s.Notes, status("skipped")+where(e.script, e.database)+": "+skip.Reason)
+		}
 		return s
 	}
 	if e.err != nil {
@@ -138,10 +143,13 @@ func (e phaseEvent) apply(s State) State {
 // the manifest inside the archive says cancelled=false and the run exits 0 —
 // while the screen would tell the DBA the archive is partial. Two documents of
 // one run contradicting each other is worse than either answer alone.
-type finishedEvent struct{ cancelled bool }
+type finishedEvent struct{ v collect.Verdict }
 
 func (e finishedEvent) apply(s State) State {
-	s.Cancelled = e.cancelled
+	s.Cancelled = e.v.Cancelled
+	s.MaxDurationReached = e.v.MaxDurationReached
+	s.RunFailed = e.v.Failed
+	s.CollectedUnits = e.v.Collected
 	return s
 }
 

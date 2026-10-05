@@ -360,6 +360,23 @@ func discardSuperseded(paths []string) {
 	}
 }
 
+// summaryTail is the end of the line scripts parse after a run: the partial
+// units, then the bound, then the stop, in the order they happened. A run the
+// bound cut and the operator then stopped carries both, the bound first.
+func summaryTail(m *Manifest) string {
+	tail := ""
+	if m.PartialUnits > 0 {
+		tail = fmt.Sprintf(", %d partial", m.PartialUnits)
+	}
+	if m.Run.MaxDurationReached {
+		tail += ", max duration reached"
+	}
+	if m.Run.Cancelled {
+		tail += ", cancelled"
+	}
+	return tail
+}
+
 // settleRun turns the loop's exit code into the run's, once the loop is over,
 // and says whether the run this one replaced may now be deleted.
 //
@@ -377,8 +394,11 @@ func discardSuperseded(paths []string) {
 // again, so a partial run keeps it. Exit 0 is necessary, not sufficient: the
 // caller also asks previousRunLost whether this run covered the one it
 // replaced.
-func settleRun(exit int, cancelled bool) (code int, discardPrevious bool) {
-	if cancelled && exit == 0 {
+//
+// cutShort is a run the operator stopped or the bound cut; either way the
+// archive is partial and a 0 would tell a scheduler the collection succeeded.
+func settleRun(exit int, cutShort bool) (code int, discardPrevious bool) {
+	if cutShort && exit == 0 {
 		exit = 2
 	}
 	return exit, exit == 0
@@ -674,6 +694,8 @@ func collectorsLost(prev, cur runScope, gone map[string]bool) []string {
 //	                                the case this comparison exists for
 //	held back by the blocking       yes, though such a run already exits 2 and
 //	watch                           keeps prev as partial
+//	reached the maximum duration    yes, though such a run already exits 2 and
+//	                                keeps prev as partial
 //	any other reason                yes: a reason this list does not know is
 //	                                not shown to cover anything
 //
@@ -1437,6 +1459,13 @@ func Check(ctx context.Context, o Options) (int, error) {
 	}
 	fmt.Println()
 
+	// Before the instance is touched, so that it is in every check that gets
+	// past the corpus, including one that cannot connect or cannot price the
+	// plan. Nothing is printed without a bound.
+	if l := BoundLine(o.Config); l != "" {
+		fmt.Println("Bound    : " + l)
+	}
+
 	// Only now is the instance touched.
 	o.Debugf("connecting to %s as %s, up to %s to dial, then one probe per capability at %s each",
 		o.Config.Server, AuthLabel(o.Config), o.Config.ConnectTimeout, o.Config.QueryTimeout)
@@ -1537,9 +1566,10 @@ func Check(ctx context.Context, o Options) (int, error) {
 		}
 		// The ceiling sits under the list it multiplies: a per-database
 		// collector is paid once per line above. It is announced here because
-		// nothing bounds a collection as a whole, and an operator about to
-		// start one in the evening has to know whether the worst case is ten
-		// minutes or four hours before choosing the flags, not after.
+		// only MAX_DURATION bounds a collection as a whole, and it is unset by
+		// default: an operator about to start one in the evening has to know
+		// whether the worst case is ten minutes or four hours before choosing
+		// the flags, or the bound, not after.
 		// Nothing is printed for an empty plan: "all 0 units" would be a
 		// figure about a collection that cannot start.
 		switch b, ok := PlannedDuration(v, o.Profile, o.Flags); {
@@ -1549,6 +1579,9 @@ func Check(ctx context.Context, o Options) (int, error) {
 			fmt.Println("\nDuration, a ceiling and not an estimate:")
 			for _, l := range b.Lines() {
 				fmt.Printf("  %s\n", l)
+			}
+			if o.Config.MaxDuration > 0 {
+				fmt.Printf("  %s\n", b.Against(o.Config.MaxDuration))
 			}
 		}
 	}
@@ -1652,6 +1685,12 @@ func runConfig(o Options) map[string]string {
 	}
 	for name := range ValueFlags {
 		c[name] = fmt.Sprint(o.Flags[name])
+	}
+	// In whole seconds, the unit of duration_sec beside it, and absent when no
+	// bound was set. Without this line every other part of the bound can be in
+	// place and no manifest records it.
+	if o.Config.MaxDuration > 0 {
+		c["max_duration_sec"] = strconv.FormatInt(int64(o.Config.MaxDuration/time.Second), 10)
 	}
 	return c
 }
@@ -2127,6 +2166,26 @@ func Run(ctx context.Context, o Options) (int, error) {
 	m.Sources = map[string]SourceInfo{}
 	started := time.Now()
 	exit := 0
+	// earned is exit before settleRun: set wherever exit is set by a failure
+	// of the run's own (a lint error, a unit that failed and was not cut by
+	// the bound), and never by settleRun, whose result is 2 for every cut run.
+	// Verdict.Failed is built from it and never from finish's code argument.
+	// collected counts the units whose runUnit returned no error and whose
+	// database was not found dropped: a unit the operator interrupted reaches
+	// the observer as a UnitDone with no error, so no observer can count it.
+	earned, collected := 0, 0
+	// The bound's context, and the only clock of this feature: every question
+	// about the bound is whether a context's first cause is
+	// errMaxDurationReached. ctx stays the run's context and is never
+	// replaced by bound: a stop is read from ctx, and at the bound bound.Err()
+	// is set, so every call that files a dead context as an operator's stop
+	// would file the bound as one.
+	limit := o.Config.MaxDuration
+	bound, cancelBound := ctx, context.CancelFunc(func() {})
+	if limit > 0 {
+		bound, cancelBound = context.WithDeadlineCause(ctx, started.Add(limit), errMaxDurationReached)
+	}
+	defer cancelBound()
 
 	// finish is the only exit from this function that matters: a manifest is
 	// written on every path, including the fatal ones, because a run that
@@ -2152,7 +2211,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// manifest and the archive are being written, fails no unit at all —
 		// the archive is whole and the manifest says so, while the screen would
 		// call it partial.
-		obs.Finished(m.Run.Cancelled)
+		// earned and not code gives Failed: code is settleRun's result.
+		obs.Finished(Verdict{
+			Cancelled:          m.Run.Cancelled,
+			MaxDurationReached: m.Run.MaxDurationReached,
+			Failed:             earned != 0,
+			Collected:          collected,
+		})
 		dest := runFolder
 		if dest == "" {
 			stamp := o.Now
@@ -2192,8 +2257,28 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// fault. It is recordUnitFailure's defect one step earlier, and the rule is
 	// the same: a dead context outranks the error, which describes the stopping
 	// and is dropped. Exit 2 is what settleRun gives a stop inside the loop.
+	//
+	// With a bound, stoppedOr asks two facts and nothing of the error: whether
+	// the bound fired first, and whether the operator stopped the run, both
+	// every time, so that a run cut by the bound and then stopped records
+	// both. When the bound fired, the step's error is quoted in the bound's
+	// warning in its own words, since it may describe the cut or a failure of
+	// the server's own in the same seconds, and the run does not try to tell.
 	stoppedOr := func(code int, err error) (int, error) {
-		if stopRequested(ctx, m) {
+		pause("leaving before the run folder", bound)
+		fired := boundReached(bound)
+		stopped := stopRequested(ctx, m)
+		if fired {
+			m.Run.MaxDurationReached = true
+			sentence := maxDurationText(limit) + " before the first collector: nothing was collected"
+			warning := sentence
+			if err != nil {
+				warning += "; the step in progress returned: " + err.Error()
+			}
+			m.warn(warning)
+			return finishWith("", 2, errors.New(sentence))
+		}
+		if stopped {
 			return finishWith("", 2, errors.New("stopped before the first collector: nothing was collected"))
 		}
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -2262,7 +2347,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// so any call handed the *sql.DB while this is held blocks until its
 	// context expires — reproduced as "context deadline exceeded", which is
 	// not a diagnosis anybody would arrive at from the message.
-	conn, err := Connect(ctx, db, o.Config)
+	conn, err := Connect(bound, db, o.Config)
 	if err != nil {
 		if advice := certificateAdvice(o.Config, err); advice != "" {
 			err = fmt.Errorf("cannot reach the instance: %w\n\n%s", err, advice)
@@ -2276,7 +2361,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// Populated before anything can return, so Coverage is never "unknown"
 	// while the manifest goes on to make claims about the database list.
 	o.Debugf("connected; running the preflight probes, each bounded by %s", o.Config.QueryTimeout)
-	m.Preflight = runPreflightWithDeadline(ctx, conn, o.Config)
+	m.Preflight = runPreflightWithDeadline(bound, conn, o.Config)
 	if PreflightExitCode(m.Preflight, 0, true) == 1 {
 		err := errors.New("the instance did not answer the preflight; nothing was collected")
 		return stoppedOr(1, err)
@@ -2290,7 +2375,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	delete(denied, "connect")
 
 	o.Debugf("asking the instance its name, version and UTC offset")
-	si, err := probeWithDeadline(ctx, conn, o.Config)
+	si, err := probeWithDeadline(bound, conn, o.Config)
 	if err != nil {
 		return stoppedOr(1, err)
 	}
@@ -2347,10 +2432,14 @@ func Run(ctx context.Context, o Options) (int, error) {
 	o.Debugf("instance %s, %s, %s", si.Name, si.Edition, si.Version)
 	plan := planScripts(scripts, o.Profile, denied, ParseVersion(si.Version), o.Flags)
 	o.Debugf("listing the databases")
-	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
+	cands, err := candidatesWithDeadline(bound, conn, o.Config)
 	if err != nil {
 		return stoppedOr(1, err)
 	}
+	// After the call returned, not before it: "listing the databases" above is
+	// written before the call, and a test that places the bound relative to
+	// the listing needs a line the listing itself guards.
+	o.Debugf("%d database(s) listed", len(cands))
 	sel, err := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude, WideningPurposes(plan))
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -2408,6 +2497,16 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// other configuration refusals rather than 1, which claims the instance was
 	// unreachable when it has in fact just been read successfully.
 	runFolder := RunFolderFor(o.Config.OutputDir, RunServerName(si.Name, o.Config), o.Profile, o.Now, o.Keep)
+	// The bound is asked once more here, before lockRun and prepareRunFolder,
+	// which is where the previous run of the day is set aside: a bound reached
+	// during the last server step, or the local steps since, must not go on to
+	// move it. Through stoppedOr, so that the order of the two facts is
+	// written once; stoppedOr finds the bound fired, since a context's cause
+	// never changes once set, and has no step error to quote.
+	pause("before the run folder", bound)
+	if boundReached(bound) {
+		return stoppedOr(2, nil)
+	}
 	// Before prepareRunFolder, because prepareRunFolder is where the previous
 	// run gets renamed aside: two runs reaching that together is exactly the
 	// collision the lock exists to stop.
@@ -2448,6 +2547,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	m.Errors = append(m.Errors, planErrors...)
 	if len(planErrors) > 0 {
 		exit = 2
+		earned = 2
 	}
 
 	// The total is announced before the first unit runs, and it is the same
@@ -2461,20 +2561,37 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// The blocking watch starts last, when nothing is left between it and the
 	// first unit. It needs the collection session's id, which a reconnect
 	// changes, so the id is read here and again after every reconnect.
-	spid, spidErr := sessionID(ctx, conn, o.Config)
+	spid, spidErr := sessionID(bound, conn, o.Config)
+	if spidErr == nil {
+		// After a successful read, so that a test can place the bound after it.
+		o.Debugf("the collection session is %d", spid)
+	}
+	// The bound is asked before the watch starts: once it has passed no
+	// collector will run, and a watch would protect nothing. The reason says
+	// only that the bound had passed, which is true of every plan; whether it
+	// cut anything is max_duration_reached's to say. The watch's start itself
+	// stays on the run's context, and is not cut by the bound.
+	pause("before the blocking watch", bound)
 	var stopWatch func()
 	reason := ""
-	if spidErr != nil {
+	switch {
+	case boundReached(bound):
+		reason = "not started: " + maxDurationText(limit)
+	case spidErr != nil:
 		reason = "the collection session's id could not be read: " + spidErr.Error()
-	} else {
+	default:
 		watch, stopWatch, reason = startBlockingWatch(ctx, o.Config, denied, spid)
 		defer stopWatch()
 	}
 	m.BlockingWatch.Enabled, m.BlockingWatch.Reason = watch != nil, reason
 	if watch == nil {
-		m.warn("the blocking watch is off, " + reason +
-			": nothing will cancel a collector that other sessions are waiting on")
-		fmt.Fprintf(o.progress(), "note: the blocking watch is off, %s\n", reason)
+		// Asked at the moment of writing, whatever the reason: a start that
+		// began before the bound and failed after it keeps its own reason
+		// and has no collector to protect either.
+		if warning, note := watchOffNotice(reason, boundReached(bound)); warning != "" {
+			m.warn(warning)
+			fmt.Fprintln(o.progress(), note)
+		}
 	}
 	// Databases where the watch cancelled a collector. The 5-second bound is
 	// per wait, and a deployment is many statements: the next collector on the
@@ -2486,18 +2603,20 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// was left to collect there.
 	droppedOn := map[string]bool{}
 	watchNoted := false
+	notStarted, stoppedByBound := 0, false
 
 	for _, u := range units {
 		s, target := u.Script, u.Target
-		reason, ok := heldBack(cancelledOn, target.Name)
-		if !ok {
-			reason, ok = droppedBefore(droppedOn, target.Name)
-		}
-		if ok {
+		reason, byBound, skip := skipBefore(cancelledOn, droppedOn, bound, limit, target.Name)
+		if skip {
+			if byBound {
+				m.Run.MaxDurationReached = true
+				notStarted++
+			}
 			m.Skipped = append(m.Skipped, SkippedScript{Script: s.Path, Target: target.Name, Reason: reason})
 			// UnitDone and not ScriptSkipped: this unit was planned, and one
 			// UnitDone per planned unit is what brings the gauge to its total.
-			obs.UnitDone(s.Path, target.Name, 0, 0, &UnitSkipped{Reason: reason})
+			obs.UnitDone(s.Path, target.Name, 0, 0, &UnitSkipped{Reason: reason, MaxDuration: byBound})
 			continue
 		}
 		obs.UnitStarted(s.Path, target.Name)
@@ -2505,7 +2624,15 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// Before the unit, not after it: a run that hangs prints no "done"
 		// line, and the last name printed is the one to look at.
 		o.Debugf("running %s on %s", s.Path, target.Name)
-		err := runUnit(ctx, conn, o, m, rw, s, target, watch, spid)
+		cut, err := runUnit(ctx, bound, conn, o, m, rw, s, target, watch, spid)
+		pause("after a unit", bound)
+		// The fact, from the call the bound stopped, never from the error's
+		// words: a SQL Server number returned after the bound, or a stop
+		// landing while the driver returns, leaves cut true.
+		if cut {
+			m.Run.MaxDurationReached = true
+			stoppedByBound = true
+		}
 		var be *blockedError
 		if errors.As(err, &be) && target.Name != "" {
 			cancelledOn[target.Name] = s.Path
@@ -2525,7 +2652,11 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// A stop is asked about first, as recordUnitFailure does: a dead
 		// context fails the catalog check too, and a stop is not a drop.
 		if err != nil && ctx.Err() == nil && databaseDropped(err, target.Name, func(name string) (bool, error) {
-			return databaseExists(ctx, conn, o.Config, name)
+			// Under the bound: once the bound has passed it fails at once, and
+			// a check that could not be made reads as "not shown dropped". A
+			// real drop in the same instant as the bound is filed as an error,
+			// in a run that exits 2 for the bound anyway.
+			return databaseExists(bound, conn, o.Config, name)
 		}) {
 			// From here the unit is treated as one that succeeded with
 			// nothing to write: no error, and the ordinary session recycle.
@@ -2543,15 +2674,31 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// that is nonetheless a second number for a reader to reconcile.
 		took, wrote := time.Since(started), rw.Spent()-before
 		m.NoteFailureDuration(s.Path, target.Name, took)
+		if err == nil && report == nil {
+			collected++
+		}
 		obs.UnitDone(s.Path, target.Name, int64(wrote), took, report)
 		// The duration is the whole point of the pair: the slow collector in a
 		// long run is invisible in a total and obvious in a column of these.
 		o.Debugf("  %s on %s took %s, wrote %d byte(s)%s",
 			s.Path, target.Name, took.Round(time.Millisecond), wrote, failureNote(report))
 		if err == nil {
-			if conn, spid, err = recycleConn(ctx, db, conn, o.Config); err != nil {
+			// After a unit: the stop, then the bound. Once the bound has
+			// passed the loop neither recycles nor pings nor reconnects; the
+			// units left are skipped and nothing after the loop uses the
+			// connection.
+			if stopRequested(ctx, m) {
+				break
+			}
+			if boundReached(bound) {
+				continue
+			}
+			if conn, spid, err = recycleConn(bound, db, conn, o.Config); err != nil {
 				if stopRequested(ctx, m) {
 					break
+				}
+				if boundReached(bound) {
+					continue
 				}
 				err = fmt.Errorf("session reset after %s failed: %w", s.Path, err)
 				m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -2568,7 +2715,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 			// into 2 once the loop is over.
 			break
 		}
-		exit = code
+		// A unit the bound cut is not a failure of the run's own: settleRun
+		// makes the run 2 for the bound, and exit stays the record of what
+		// the run earned, which the wizard reads.
+		if !cut {
+			exit = code
+			earned = code
+		}
 
 		// One reconnect attempt on a dead connection. The replacement is
 		// reset before the next unit uses it — the PowerShell version
@@ -2585,32 +2738,67 @@ func Run(ctx context.Context, o Options) (int, error) {
 		if stopRequested(ctx, m) {
 			break
 		}
-		if !connAlive(ctx, conn, o.Config) {
+		if boundReached(bound) {
+			continue
+		}
+		if !connAlive(bound, conn, o.Config) {
+			// A ping on a context whose bound has fired fails at once, so a
+			// bound landing during the ping would print a lost connection
+			// about one that was fine. The stop, then the bound, before a word.
+			if stopRequested(ctx, m) {
+				break
+			}
+			if boundReached(bound) {
+				continue
+			}
 			fmt.Fprintln(o.progress(), "connection lost; attempting one reconnect")
 			conn.Close()
-			fresh, cerr := Connect(ctx, db, o.Config)
+			fresh, cerr := Connect(bound, db, o.Config)
 			if cerr != nil {
+				if stopRequested(ctx, m) {
+					break
+				}
+				if boundReached(bound) {
+					continue
+				}
 				cerr = fmt.Errorf("reconnect failed: %w", cerr)
 				m.Errors = append(m.Errors, ErrorEntry{Message: cerr.Error()})
 				return finishWith(runFolder, 1, cerr)
 			}
 			conn = fresh
-			if rerr := resetWithDeadline(ctx, conn, o.Config); rerr != nil {
+			if rerr := resetWithDeadline(bound, conn, o.Config); rerr != nil {
+				if stopRequested(ctx, m) {
+					break
+				}
+				if boundReached(bound) {
+					continue
+				}
 				rerr = fmt.Errorf("session reset after reconnect failed: %w", rerr)
 				m.Errors = append(m.Errors, ErrorEntry{Message: rerr.Error()})
 				return finishWith(runFolder, 1, rerr)
 			}
 			// A new connection is a new session: watching the old id would
 			// watch nothing. Zero, if it cannot be read, matches no waiter.
-			spid, _ = sessionID(ctx, conn, o.Config)
-		} else if conn, spid, err = recycleConn(ctx, db, conn, o.Config); err != nil {
+			// Under the bound: its error is ignored, and on the run's context
+			// it would be a query after the bound with nothing to report it.
+			spid, _ = sessionID(bound, conn, o.Config)
+		} else if conn, spid, err = recycleConn(bound, db, conn, o.Config); err != nil {
 			if stopRequested(ctx, m) {
 				break
+			}
+			if boundReached(bound) {
+				continue
 			}
 			err = fmt.Errorf("session reset after %s failed: %w", s.Path, err)
 			m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 			return finishWith(runFolder, 1, err)
 		}
+	}
+
+	// One line for what the bound cut, counted from the bound's own skips so
+	// that it agrees with MANIFEST.txt; a skip per line would be hundreds.
+	if m.Run.MaxDurationReached {
+		fmt.Fprintln(o.progress(), maxDurationNote(limit, notStarted, stoppedByBound))
 	}
 
 	// The two phases after the loop are announced because they are the only
@@ -2619,7 +2807,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// run folder is being zipped.
 	obs.Phase("writing manifest")
 	o.Debugf("all units done; writing the manifest")
-	exit, discardPrevious := settleRun(exit, m.Run.Cancelled)
+	exit, discardPrevious := settleRun(exit, m.Run.Cancelled || m.Run.MaxDurationReached)
 	// A complete run is not yet a run that covers the one it replaced. Exit 0
 	// alone deleted the morning's --all archive under a plain afternoon
 	// collect, with its session text, its plans and its module source.
@@ -2668,20 +2856,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// under the old test its gauge would have taken the archive path away from
 	// every script that reads it.
 	if !o.OwnsScreen {
-		// "N partial" only when there are some. The line is parsed by scripts
-		// and read at a glance by operators; a permanent ", 0 partial" would
-		// cost both and tell neither anything.
-		partial := ""
-		if m.PartialUnits > 0 {
-			partial = fmt.Sprintf(", %d partial", m.PartialUnits)
-		}
-		// Said on the line a script reads, because the exit code alone does
-		// not tell a stopped run from a failed collector.
-		if m.Run.Cancelled {
-			partial += ", cancelled"
-		}
+		// summaryTail adds "N partial" only when there are some (a permanent
+		// ", 0 partial" would cost scripts and operators and tell neither
+		// anything), and says on the line a script reads that the run was cut,
+		// because the exit code alone does not tell a stopped run from a
+		// failed collector.
 		fmt.Printf("%d result(s), %d skipped, %d error(s)%s\n%s\n",
-			len(m.Results), len(m.Skipped), len(m.Errors), partial, zipPath)
+			len(m.Results), len(m.Skipped), len(m.Errors), summaryTail(m), zipPath)
 	}
 	return code, nil
 }
@@ -2705,8 +2886,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 // The driver's own words are kept in the message. They are what a search
 // engine matches, and dropping them to make room for a nicer sentence would
 // trade one kind of unreadable for another.
-func outOfTime(parent, unit context.Context, limit time.Duration, knob string, err error) error {
-	if parent.Err() != nil || unit.Err() != context.DeadlineExceeded {
+//
+// The bound's expiry reaches here too: a query context under a bound that
+// fired has Err() DeadlineExceeded, so the guard lets both through, and the
+// call's first cause, asked after the error number, tells the bound from the
+// unit's own @timeout. bound is the configured bound, for the words.
+func outOfTime(parent, call context.Context, limit, bound time.Duration, knob string, err error) error {
+	if parent.Err() != nil || call.Err() != context.DeadlineExceeded {
 		return err
 	}
 	// A SQL Server error keeps its own words. A genuine failure and the deadline
@@ -2725,22 +2911,44 @@ func outOfTime(parent, unit context.Context, limit time.Duration, knob string, e
 	if sqlErrorNumber(err) != 0 {
 		return err
 	}
+	if context.Cause(call) == errMaxDurationReached {
+		return fmt.Errorf("stopped when %s: %w", maxDurationText(bound), err)
+	}
 	return fmt.Errorf("still running when %s of %s expired: %w", knob, limit, err)
 }
 
-func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
-	rw *runWriter, s Script, u DatabaseFolder, watch *blockingWatch, spid int) (err error) {
+func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
+	rw *runWriter, s Script, u DatabaseFolder, watch *blockingWatch, spid int) (cut bool, err error) {
 
-	if err := resetWithDeadline(ctx, conn, o.Config); err != nil {
-		return err
-	}
-
+	limit := o.Config.MaxDuration
 	// The unit's own context, which the blocking watch cancels with a
-	// *blockedError as the cause. The run's context stays untouched, so
-	// recordUnitFailure files a watch cancellation as a failed unit and never
-	// as an operator stop.
-	unitCtx, unitCancel := context.WithCancelCause(ctx)
+	// *blockedError as the cause, and which inherits the bound's deadline and
+	// cause. The run's context stays untouched, so recordUnitFailure files a
+	// watch cancellation or a bound stop as a failed unit and never as an
+	// operator stop.
+	unitCtx, unitCancel := context.WithCancelCause(bound)
 	defer unitCancel(nil)
+
+	// The first reset runs on the unit's context, so that the bound can cut
+	// it, and holds its own deadline context so that its cause can be read.
+	// cut is read from that context's first cause, before its cancel, which
+	// would otherwise set the cause to context.Canceled. Do not fold this into
+	// resetWithDeadline, whose deferred cancel would erase the cause.
+	dctx, dcancel := deadline(unitCtx, o.Config)
+	rerr := ResetSession(dctx, conn, o.Config.Database)
+	if rerr != nil {
+		// A test seam: a test waits here on bound.Done(), which places the
+		// bound, or a stop after it, between the call's return and the read of
+		// its cause. A server call added to runUnit later needs this point and
+		// the read of its cause as well.
+		pause("after a failing call", bound)
+		cut = context.Cause(dctx) == errMaxDurationReached
+		rerr = maxDurationOr(ctx, dctx, limit, rerr)
+	}
+	dcancel()
+	if rerr != nil {
+		return cut, rerr
+	}
 
 	// A session whose context is a user database holds a shared lock on it,
 	// and an ALTER DATABASE waits on that lock with nothing running at all.
@@ -2765,18 +2973,7 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 		if worst.seen() {
 			m.BlockingWatch.AddBlockedWait(incidentOf(s.Path, u.Name, worst, round, errors.As(err, &be)))
 		}
-		switch {
-		case errors.As(err, &be):
-			m.BlockingWatch.CancelledUnits++
-		case fired:
-			m.warn(fmt.Sprintf(
-				"%s on %s: %s; the collector had already read its rows, and the waiter was released when the session left the database",
-				s.Path, orInstance(u.Name), worst))
-		case worst.seen():
-			m.warn(fmt.Sprintf(
-				"%s on %s: %s, under the blocking watch's %s limit",
-				s.Path, orInstance(u.Name), worst, watchCancelAfter))
-		}
+		recordWatchOutcome(m, s.Path, u.Name, worst, fired, cut, err)
 	}()
 	blocked := func(err error) error { return blockedOr(unitCtx, err) }
 
@@ -2785,10 +2982,15 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 		// behind a session holding it in single-user or restoring mode. On a
 		// bare context that is a collect that never returns.
 		uctx, ucancel := deadline(unitCtx, o.Config)
-		_, err := conn.ExecContext(uctx, "USE "+quoteName(u.Name)+";")
+		_, uerr := conn.ExecContext(uctx, "USE "+quoteName(u.Name)+";")
+		if uerr != nil {
+			pause("after a failing call", bound)
+			cut = context.Cause(uctx) == errMaxDurationReached
+			uerr = maxDurationOr(ctx, uctx, limit, uerr)
+		}
 		ucancel()
-		if err != nil {
-			return blocked(err)
+		if uerr != nil {
+			return cut, blocked(uerr)
 		}
 	}
 	timeout, knob := unitTimeout(s, o.Config)
@@ -2803,13 +3005,17 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	start := time.Now()
 	rows, err := conn.QueryContext(qctx, s.SQL, args...)
 	if err != nil {
-		return blocked(outOfTime(ctx, qctx, timeout, knob, err))
+		pause("after a failing call", bound)
+		cut = context.Cause(qctx) == errMaxDurationReached
+		return cut, blocked(outOfTime(ctx, qctx, timeout, limit, knob, err))
 	}
 	defer rows.Close()
 
 	sets, err := ReadResultSets(rows, s.Results)
 	if err != nil {
-		return blocked(outOfTime(ctx, qctx, timeout, knob, err))
+		pause("after a failing call", bound)
+		cut = context.Cause(qctx) == errMaxDurationReached
+		return cut, blocked(outOfTime(ctx, qctx, timeout, limit, knob, err))
 	}
 	rows.Close()
 	leave()
@@ -2833,7 +3039,7 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 			// @writer expects a directory of files; producing one JSON instead
 			// would leave an archive that looks collected and holds none of what
 			// was asked for.
-			return fmt.Errorf("@writer: no writer registered for %q", s.Writer)
+			return false, fmt.Errorf("@writer: no writer registered for %q", s.Writer)
 		}
 		// The counts come back valid even with a non-nil error: a writer that
 		// failed halfway has already put files on disk, and computing the
@@ -2847,7 +3053,7 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	} else {
 		payload, warnings, encErr := Encode(sets)
 		if encErr != nil {
-			return encErr
+			return false, encErr
 		}
 		m.warn(warnings...)
 		rel := ResultRelativePath(s.Dir, s.Base, u.Folder)
@@ -2874,14 +3080,14 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 				Status: "incomplete",
 			})
 		}
-		return writeErr
+		return false, writeErr
 	}
 
 	m.Results = append(m.Results, ResultEntry{
 		Script: s.Path, Scope: scopeName(s), Target: u.Name, Output: res.Rel,
 		Bytes: res.Bytes, DurationMS: int(time.Since(start).Milliseconds()), Status: "ok",
 	})
-	return nil
+	return false, nil
 }
 
 func scopeName(s Script) string {

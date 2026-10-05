@@ -15,11 +15,11 @@ import (
 // place.
 func TestSettleRun(t *testing.T) {
 	cases := []struct {
-		name      string
-		exit      int
-		cancelled bool
-		code      int
-		discard   bool
+		name     string
+		exit     int
+		cutShort bool
+		code     int
+		discard  bool
 	}{
 		{"a complete run", 0, false, 0, true},
 		{"a stopped run", 0, true, 2, false},
@@ -28,12 +28,45 @@ func TestSettleRun(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			code, discard := settleRun(c.exit, c.cancelled)
+			code, discard := settleRun(c.exit, c.cutShort)
 			if code != c.code || discard != c.discard {
 				t.Errorf("settleRun(%d, %v) = (%d, %v), want (%d, %v)",
-					c.exit, c.cancelled, code, discard, c.code, c.discard)
+					c.exit, c.cutShort, code, discard, c.code, c.discard)
 			}
 		})
+	}
+}
+
+// A unit skipped for the bound produced nothing, so a rerun that skipped it
+// for the bound lost it, by the fallback's rule. Asserted by name, so that a
+// case added above the fallback that happened to match the bound's reason
+// fails here.
+func TestSkipLosesCountsTheBoundsSkipAsALoss(t *testing.T) {
+	for _, c := range []struct {
+		reason string
+		want   bool
+	}{
+		{maxDurationSkipReason(2 * time.Hour), true},
+		{"the blocking watch cancelled 70.schema/055.page-density.sql on this database", true},
+		{skipNotInQueryStoreInclude, false},
+	} {
+		if got := skipLoses(c.reason, runScope{}, runScope{}); got != c.want {
+			t.Errorf("skipLoses(%q) = %v, want %v", c.reason, got, c.want)
+		}
+	}
+}
+
+// A bound that was not reached changed nothing collected, and one that was
+// reached makes the run exit 2: settingsLost has nothing to say about it.
+func TestSettingsLostIgnoresTheMaxDuration(t *testing.T) {
+	for _, c := range [][2]map[string]string{
+		{{"max_duration_sec": "7200"}, {}},
+		{{}, {"max_duration_sec": "7200"}},
+		{{"max_duration_sec": "7200"}, {"max_duration_sec": "3600"}},
+	} {
+		if lost := settingsLost(c[0], c[1]); len(lost) != 0 {
+			t.Errorf("settingsLost(%v, %v) = %v, want nothing", c[0], c[1], lost)
+		}
 	}
 }
 

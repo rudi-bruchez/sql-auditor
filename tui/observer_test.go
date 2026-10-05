@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -191,4 +192,45 @@ func TestObserverCountsAUnitSkippedMidRunAsASkip(t *testing.T) {
 	if len(got.Notes) != 1 || !strings.Contains(got.Notes[0], "blocking watch cancelled") {
 		t.Errorf("Notes = %q", got.Notes)
 	}
+}
+
+// The summary line counts what was collected, which only the run knows: a
+// unit the operator interrupted reaches the wizard as a UnitDone with no
+// error. The bound's skips are counted as skips without a note each, so they
+// do not push the stopped unit's error off the six notes kept.
+func TestTheWizardCountsWhatWasCollectedNotWhatWasDone(t *testing.T) {
+	ch := make(chan event, 400)
+	o := observer{ch: ch}
+	o.Planned(289)
+	for i := 0; i < 90; i++ {
+		o.UnitDone(fmt.Sprintf("10.system/%03d.a.sql", i), "", 10, time.Second, nil)
+	}
+	o.UnitDone("70.schema/055.page-density.sql", "SALESDB", 0, 2*time.Hour,
+		errors.New("stopped when the collection reached its maximum duration of 2h00m (7200 s): context deadline exceeded"))
+	for i := 0; i < 198; i++ {
+		o.UnitDone(fmt.Sprintf("80.workload/%03d.b.sql", i), "SALESDB", 0, 0,
+			&collect.UnitSkipped{Reason: "the collection reached its maximum duration of 2h00m (7200 s) before this collector started", MaxDuration: true})
+	}
+	o.Finished(collect.Verdict{MaxDurationReached: true, Collected: 90})
+	close(ch)
+	var f frames
+	end, _ := drive(ch, f.draw, fixedSize(80, 24), State{Step: StepCollecting})
+	lines := renderDone(end, testWidth)
+	contains(t, lines, "90 collected, 198 skipped, 1 error, 0 permissions denied")
+	for _, n := range end.Notes {
+		if strings.Contains(n, "before this collector started") {
+			t.Errorf("a bound skip became a note: %q", n)
+		}
+	}
+
+	ch = make(chan event, 8)
+	o = observer{ch: ch}
+	o.Planned(3)
+	o.UnitDone("10.system/001.a.sql", "", 10, time.Second, nil)
+	o.UnitDone("10.system/002.b.sql", "", 10, time.Second, nil)
+	o.UnitDone("10.system/003.c.sql", "", 0, time.Second, nil) // interrupted: recordUnitFailure swallowed the stop
+	o.Finished(collect.Verdict{Cancelled: true, Collected: 2})
+	close(ch)
+	end, _ = drive(ch, f.draw, fixedSize(80, 24), State{Step: StepCollecting})
+	contains(t, renderDone(end, testWidth), "2 collected")
 }

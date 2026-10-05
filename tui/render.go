@@ -563,6 +563,9 @@ func renderOptions(s State, width int) []string {
 		for _, l := range b.Lines() {
 			out = append(out, screen.Wrap(l, width, fieldPad)...)
 		}
+		if s.MaxDuration > 0 {
+			out = append(out, screen.Wrap(b.Against(s.MaxDuration), width, fieldPad)...)
+		}
 	}
 	out = append(out, "")
 	profileDesc := "none, the whole corpus"
@@ -598,6 +601,10 @@ func renderOptions(s State, width int) []string {
 	// the window is what bounds everything the Query Store options above export.
 	if s.QueryStoreWindow != "" {
 		out = append(out, pad+"Query Store window: "+s.QueryStoreWindow)
+		out = append(out, "")
+	}
+	if s.Bound != "" {
+		out = append(out, screen.Wrap("Bound: "+s.Bound, width, pad)...)
 		out = append(out, "")
 	}
 
@@ -813,11 +820,16 @@ func renderDone(s State, width int) []string {
 		// Nothing to send, and no sentence announcing a file: "This archive
 		// is partial:" above "no archive" contradicted itself on every stop
 		// during the preamble.
-		if s.Cancelled {
+		switch {
+		case s.MaxDurationReached:
+			out = append(out, pad+"Collection stopped at its maximum duration. No archive was written by this run.")
+		case s.Cancelled:
 			out = append(out, pad+"Collection stopped. No archive was written by this run.")
-		} else {
+		default:
 			out = append(out, pad+"No archive was written by this run.")
 		}
+	case s.MaxDurationReached:
+		out = append(out, pad+"Collection stopped at its maximum duration. This archive is partial:")
 	case s.Cancelled:
 		out = append(out, pad+"Collection stopped. This archive is partial:")
 	default:
@@ -864,7 +876,7 @@ func renderDone(s State, width int) []string {
 
 func summaryLine(s State) string {
 	return fmt.Sprintf("%s, %s, %s, %s",
-		fmt.Sprintf("%d collected", s.DoneUnits),
+		fmt.Sprintf("%d collected", s.CollectedUnits),
 		plural(s.SkippedCount, "skipped", "skipped"),
 		plural(s.ErrorCount, "error", "errors"),
 		plural(deniedPermissions(s), "permission denied", "permissions denied"))

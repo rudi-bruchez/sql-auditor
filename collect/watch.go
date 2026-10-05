@@ -687,7 +687,14 @@ func heldBack(cancelledOn map[string]string, db string) (string, bool) {
 // UnitSkipped is what Observer.UnitDone carries for a planned unit the run
 // decided, once running, not to execute. It is not a failure: the gauge counts
 // the unit, since Planned did, and the screens show it as a skip.
-type UnitSkipped struct{ Reason string }
+//
+// MaxDuration marks the bound's skips. A bound that fires early skips
+// hundreds of units for one reason, so the screens count them without a line
+// each; the note after the loop and the wizard's last screen say it once.
+type UnitSkipped struct {
+	Reason      string
+	MaxDuration bool
+}
 
 func (e *UnitSkipped) Error() string { return "skipped: " + e.Reason }
 
@@ -722,4 +729,48 @@ func incidentOf(script, target string, worst waitSample, round waitRound, cancel
 		in.Waiter.Database = round.Record.Identity.Database
 	}
 	return in
+}
+
+// watchOffNotice is the warning and the stderr note of a watch that is not
+// running. Once the bound has fired no collector will start, and both
+// sentences describe a risk the run no longer runs, so both are empty. The
+// caller asks boundReached at the moment it would write them, whatever the
+// reason: a watch whose start began before the bound and failed after it
+// keeps its own reason and still has no collector to protect.
+func watchOffNotice(reason string, boundFired bool) (warning, note string) {
+	if boundFired {
+		return "", ""
+	}
+	return "the blocking watch is off, " + reason + ": nothing will cancel a collector that other sessions are waiting on",
+		"note: the blocking watch is off, " + reason
+}
+
+// recordWatchOutcome is runUnit's account of what the watch saw while the
+// unit was armed, apart from the blocked wait itself. The case of a unit cut
+// by the bound comes after the watch's own cancellation and before fired: the
+// watch can reach its limit while the driver waits for the cancellation of a
+// unit the bound stopped, and fired's sentence (the rows already read) is
+// false for it, as is the worst wait's (under the limit). It is reached only
+// when the bound came first: a watch that cancelled first leaves its
+// *blockedError as the cause, and the first case files it. It reads cut and
+// not the error, so a cut unit whose error kept a SQL Server number gets the
+// same sentence.
+func recordWatchOutcome(m *Manifest, script, target string, worst waitSample, fired, cut bool, err error) {
+	var be *blockedError
+	switch {
+	case errors.As(err, &be):
+		m.BlockingWatch.CancelledUnits++
+	case cut && fired:
+		m.warn(fmt.Sprintf(
+			"%s on %s: %s; the collector was being stopped at the collection's maximum duration when the blocking watch reached its %s limit",
+			script, orInstance(target), worst, watchCancelAfter))
+	case fired:
+		m.warn(fmt.Sprintf(
+			"%s on %s: %s; the collector had already read its rows, and the waiter was released when the session left the database",
+			script, orInstance(target), worst))
+	case worst.seen():
+		m.warn(fmt.Sprintf(
+			"%s on %s: %s, under the blocking watch's %s limit",
+			script, orInstance(target), worst, watchCancelAfter))
+	}
 }

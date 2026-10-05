@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rudi-bruchez/sql-auditor/collect"
+	"github.com/rudi-bruchez/sql-auditor/tui/screen"
 )
 
 // baseOptions is a resolved configuration as buildOptions would hand one over.
@@ -188,10 +189,10 @@ func TestAStaleConnectionResultDoesNotDragTheOperatorBackIntoTheProbe(t *testing
 
 func TestACancelledCollectionExitsZero(t *testing.T) {
 	e := collectDoneEvent{code: 2, ctxCancelled: true}
-	if e.exitStatus() != 0 {
-		t.Errorf("exit status = %d, want 0 for an operator's stop", e.exitStatus())
+	if e.exitStatus(State{}) != 0 {
+		t.Errorf("exit status = %d, want 0 for an operator's stop", e.exitStatus(State{}))
 	}
-	if (collectDoneEvent{code: 2}).exitStatus() != 2 {
+	if (collectDoneEvent{code: 2}).exitStatus(State{}) != 2 {
 		t.Error("a genuine failure lost its exit code")
 	}
 	s := e.apply(State{Step: StepCollecting, Stopping: true})
@@ -214,14 +215,14 @@ func TestThePartialArchiveIsAnnouncedOnlyByTheRunItself(t *testing.T) {
 	}
 
 	// And when the run does say so, the screen says so.
-	stopped := late.apply(finishedEvent{cancelled: true}.apply(State{Step: StepCollecting}))
+	stopped := late.apply(finishedEvent{v: collect.Verdict{Cancelled: true}}.apply(State{Step: StepCollecting}))
 	if !stopped.Cancelled {
 		t.Error("the run reported a stop and the screen did not carry it")
 	}
 	contains(t, Render(stopped, testWidth, 0), "Collection stopped. This archive is partial:")
 
 	// A complete run keeps the ordinary sentence even though ctrl-c was pressed.
-	whole := late.apply(finishedEvent{cancelled: false}.apply(State{Step: StepCollecting}))
+	whole := late.apply(finishedEvent{}.apply(State{Step: StepCollecting}))
 	contains(t, Render(whole, testWidth, 0), "Send this file to whoever requested the audit:")
 }
 
@@ -372,5 +373,84 @@ func TestAnUnpanickedGuardSendsNothing(t *testing.T) {
 	func() { defer r.guardCollection() }()
 	if len(r.events) != 0 {
 		t.Errorf("%d events sent with no panic", len(r.events))
+	}
+}
+
+// The wizard's exit after a bound, driven through the loop with every event
+// produced by the wizard's own observer, in the order Run produces them, then
+// the collectDoneEvent. A hand-built finishedEvent passes with an
+// observer.Finished that drops the bound; these do not. The first and third
+// rows also render the state the loop ended on, so that the last screen is
+// read from what the events built and not from a State written by hand.
+func TestTheWizardsExitAfterABound(t *testing.T) {
+	const zip = `C:\out\SQL01-2026-10-05.zip`
+	boundErr := errors.New("the collection reached its maximum duration of 1m00s (60 s) before the first collector: nothing was collected")
+	stopErr := errors.New("stopped before the first collector: nothing was collected")
+	skip := &collect.UnitSkipped{Reason: "the collection reached its maximum duration of 1m00s (60 s) before this collector started", MaxDuration: true}
+	for _, c := range []struct {
+		name  string
+		units []error // one UnitDone per entry
+		v     collect.Verdict
+		done  collectDoneEvent
+		want  int
+		first string // a line the last screen must carry, "" for no check
+	}{
+		{"bound, collected one", []error{nil}, collect.Verdict{MaxDurationReached: true, Collected: 1},
+			collectDoneEvent{code: 2, zipPath: zip, zipBytes: 1024}, 0,
+			"Collection stopped at its maximum duration. This archive is partial:"},
+		{"bound, collected one, Run returned an error", []error{nil}, collect.Verdict{MaxDurationReached: true, Collected: 1},
+			collectDoneEvent{code: 2, err: errors.New("zip failed")}, 2, ""},
+		{"bound, failed before it", []error{nil}, collect.Verdict{MaxDurationReached: true, Failed: true, Collected: 1},
+			collectDoneEvent{code: 2, zipPath: zip, zipBytes: 1024}, 2, ""},
+		{"bound before the run folder", nil, collect.Verdict{MaxDurationReached: true},
+			collectDoneEvent{code: 2, err: boundErr}, 2,
+			"Collection stopped at its maximum duration. No archive was written by this run."},
+		{"bound, then a stop, before the run folder", nil, collect.Verdict{MaxDurationReached: true, Cancelled: true},
+			collectDoneEvent{code: 2, err: boundErr, ctxCancelled: true}, 2, ""},
+		{"bound, three skips, nothing collected", []error{skip, skip, skip}, collect.Verdict{MaxDurationReached: true},
+			collectDoneEvent{code: 2, zipPath: zip, zipBytes: 1024}, 2, ""},
+		{"a stop alone", nil, collect.Verdict{Cancelled: true},
+			collectDoneEvent{code: 2, err: stopErr, ctxCancelled: true}, 0, ""},
+	} {
+		ch := make(chan event, 16)
+		o := observer{ch: ch}
+		o.Planned(len(c.units))
+		for i, err := range c.units {
+			o.UnitDone(fmt.Sprintf("10.system/%03d.a.sql", i), "", 0, time.Second, err)
+		}
+		o.Finished(c.v)
+		ch <- c.done
+		ch <- key(screen.KeyEnter)
+		close(ch)
+		var f frames
+		final, code := drive(ch, f.draw, fixedSize(80, 24), State{Step: StepCollecting})
+		if code != c.want {
+			t.Errorf("%s: exit %d, want %d", c.name, code, c.want)
+		}
+		// The enter key took the wizard from StepDone to StepQuit and left the
+		// rest of the state as the events built it; renderDone draws the last
+		// screen from that state whatever its Step.
+		if c.first != "" && !strings.Contains(joined(renderDone(final, testWidth)), c.first) {
+			t.Errorf("%s: the last screen does not carry %q:\n%s", c.name, c.first, joined(renderDone(final, testWidth)))
+		}
+	}
+}
+
+// The first line of the last screen, with and without an archive, when the
+// bound cut the run: the bound before the stop, since it came first.
+func TestTheWizardsLastScreenAfterABound(t *testing.T) {
+	for _, c := range []struct {
+		zip  string
+		want string
+	}{
+		{`C:\out\SQL01-2026-10-05.zip`, "Collection stopped at its maximum duration. This archive is partial:"},
+		{"", "Collection stopped at its maximum duration. No archive was written by this run."},
+	} {
+		for _, cancelled := range []bool{false, true} {
+			s := State{Step: StepDone, ZipPath: c.zip, MaxDurationReached: true, Cancelled: cancelled}
+			lines := Render(s, testWidth, 0)
+			contains(t, lines, c.want)
+			absent(t, lines, "Send this file")
+		}
 	}
 }

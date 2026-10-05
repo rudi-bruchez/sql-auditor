@@ -1,6 +1,9 @@
 package collect
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Observer is how a caller watches a run go by. It is defined here, in the
 // package that produces the events, and implemented by whoever displays them:
@@ -26,14 +29,26 @@ type Observer interface {
 	// the same reason: N identical lines naming no database is not a report.
 	ScriptSkipped(script, database, reason string)
 	Phase(name string)
-	// Finished reports the run's own verdict on whether the operator stopped
-	// it, at the moment the manifest carrying that verdict is written. A caller
-	// cannot derive it: its context being cancelled says a key was pressed, not
-	// that anything was cut short — a Ctrl-C after the last unit fails no unit,
+	// Finished reports the run's own verdict, taken from the manifest it has
+	// just written: whether the operator stopped it, whether the bound cut it,
+	// whether it had failed on its own before either, and how many units it
+	// collected. A caller cannot derive any of it: its context being cancelled
+	// says a key was pressed, not that anything was cut short — a Ctrl-C after the last unit fails no unit,
 	// and the archive is whole. Calling an archive partial when the manifest
 	// inside it says otherwise leaves the two documents of one run
 	// contradicting each other.
-	Finished(cancelled bool)
+	Finished(v Verdict)
+}
+
+// Verdict is what Finished hands the observer.
+type Verdict struct {
+	Cancelled          bool // run.cancelled
+	MaxDurationReached bool // run.max_duration_reached
+	// Failed is the run's own failure, before the stop or the bound is
+	// applied: exit was 2 before settleRun, from a lint error or a unit
+	// that failed and was not cut by the bound.
+	Failed    bool
+	Collected int // units whose runUnit returned no error, drops excluded
 }
 
 // unit is a script paired with the target it will run against. Instance scope
@@ -102,6 +117,24 @@ func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]u
 			units = append(units, unit{Script: s, Target: t})
 		}
 	}
+	// The units of a collector gated by a cost option run after all the
+	// others, each group in plan order. With a bound, what runs last is what
+	// is lost, and the costly collectors sit in 70.schema, ahead of the Query
+	// Store and the plan cache; without one, a ctrl-c at the operator's own
+	// limit keeps everything but the costly part. It is done here because
+	// PlannedDuration and Run both walk this list, so the order check
+	// describes is the order the run follows. A stable sort keeps a nil slice
+	// nil and leaves a plan with no costly unit exactly as it was.
+	slices.SortStableFunc(units, func(a, b unit) int {
+		ca, cb := CostFlags[a.Script.RequiresFlag], CostFlags[b.Script.RequiresFlag]
+		switch {
+		case ca == cb:
+			return 0
+		case cb:
+			return -1
+		}
+		return 1
+	})
 	return units, skipped, errs
 }
 
@@ -148,9 +181,9 @@ func (w observer) Phase(name string) {
 	}
 }
 
-func (w observer) Finished(cancelled bool) {
+func (w observer) Finished(v Verdict) {
 	if w.o != nil {
-		w.o.Finished(cancelled)
+		w.o.Finished(v)
 	}
 }
 
