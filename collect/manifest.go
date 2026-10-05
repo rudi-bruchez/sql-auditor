@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,6 +33,23 @@ type RunInfo struct {
 	// instance simply had little to give". Omitted when false so every
 	// manifest written before this field existed stays byte-identical.
 	Cancelled bool `json:"cancelled,omitempty"`
+	// MaxDurationReached marks a run the bound cut: a step before the run
+	// folder failed after the bound fired, a unit was skipped for it, or a
+	// server call of a unit was stopped by it. A bound that passed after the
+	// last unit cut nothing and leaves this unset. Omitted when false, as
+	// Cancelled is, so every older manifest stays byte-identical. Both can be
+	// set; when they are, the bound came first.
+	MaxDurationReached bool `json:"max_duration_reached,omitempty"`
+}
+
+// recordedBound reads the bound back from the run settings, where runConfig
+// wrote it in whole seconds. False when the run had none.
+func recordedBound(cfg map[string]string) (time.Duration, bool) {
+	n, err := strconv.Atoi(cfg["max_duration_sec"])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return time.Duration(n) * time.Second, true
 }
 
 type ServerBlock struct {
@@ -621,7 +639,14 @@ func (m *Manifest) Human() string {
 		collected += " (UTC)"
 	}
 	fmt.Fprintf(&b, "Collected    : %s\n", collected)
-	if m.Run.DurationSec > 0 {
+	// A cut run says so whatever its duration: a reader of this file alone has
+	// no other way to learn that the run was stopped by its bound.
+	switch d, ok := recordedBound(m.Config); {
+	case m.Run.MaxDurationReached && ok:
+		fmt.Fprintf(&b, "Duration     : %d s, stopped at the maximum duration of %s\n", m.Run.DurationSec, formatCeiling(d))
+	case m.Run.MaxDurationReached:
+		fmt.Fprintf(&b, "Duration     : %d s, stopped at its maximum duration\n", m.Run.DurationSec)
+	case m.Run.DurationSec > 0:
 		fmt.Fprintf(&b, "Duration     : %d s\n", m.Run.DurationSec)
 	}
 	if m.Server.Auth != "" {
@@ -1128,8 +1153,30 @@ func (m *Manifest) writeNotRun(b *strings.Builder) {
 			dropped[s.Target]++
 		}
 	}
+	// The bound's skips share one reason, built from the recorded bound, and
+	// are written as one entry where the first of them falls.
+	boundReason, bounded := "", 0
+	if d, ok := recordedBound(m.Config); ok {
+		boundReason = maxDurationSkipReason(d)
+		for _, s := range m.Skipped {
+			if s.Reason == boundReason {
+				bounded++
+			}
+		}
+	}
 	for _, s := range m.Skipped {
 		if profiled > 0 && s.Reason == ProfileSkipReason(m.Profile.Name) {
+			continue
+		}
+		if boundReason != "" && s.Reason == boundReason {
+			if bounded > 0 {
+				noun := "collectors"
+				if bounded == 1 {
+					noun = "collector"
+				}
+				fmt.Fprintf(b, "  - %d %s not started, each listed in _run.json\n      %s\n", bounded, noun, s.Reason)
+				bounded = 0
+			}
 			continue
 		}
 		if s.Reason == skipDroppedDuringRun {
