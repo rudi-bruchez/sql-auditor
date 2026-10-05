@@ -1653,6 +1653,12 @@ func runConfig(o Options) map[string]string {
 	for name := range ValueFlags {
 		c[name] = fmt.Sprint(o.Flags[name])
 	}
+	// In whole seconds, the unit of duration_sec beside it, and absent when no
+	// bound was set. Without this line every other part of the bound can be in
+	// place and no manifest records it.
+	if o.Config.MaxDuration > 0 {
+		c["max_duration_sec"] = strconv.FormatInt(int64(o.Config.MaxDuration/time.Second), 10)
+	}
 	return c
 }
 

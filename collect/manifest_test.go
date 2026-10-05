@@ -1089,3 +1089,10 @@ func TestLocalSessionsAreDeclaredAndDisclosed(t *testing.T) {
 		t.Errorf("MANIFEST.txt should disclose the local session program names:\n%s", m.Human())
 	}
 }
+
+func TestManifestTextNamesTheMaxDurationAmongTheRunSettings(t *testing.T) {
+	m := NewManifest("sql-auditor", "test", "")
+	if !strings.Contains(m.Human(), "maximum duration the run was given when one was set") {
+		t.Error("MANIFEST.txt does not say the run settings include the bound")
+	}
+}
