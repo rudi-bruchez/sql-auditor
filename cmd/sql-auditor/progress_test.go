@@ -330,3 +330,38 @@ func TestAUnitSkippedMidRunSaysSo(t *testing.T) {
 		t.Errorf("the skip reads as a failure or as a unit that ran:\n%s", out)
 	}
 }
+
+// A bound that fires early skips hundreds of units for one reason. The gauge
+// counts them to its total without a line each; the note after the loop is
+// the one line that says it. A skip of the watch still gets its line.
+func TestTheGaugeCountsTheBoundsSkipsWithoutPrintingThem(t *testing.T) {
+	for _, tty := range []bool{true, false} {
+		var b strings.Builder
+		o := newProgress(&b, tty, func() int { return 80 }, fixedClock())
+		o.Planned(200)
+		o.UnitStarted("10.system/001.a.sql", "")
+		o.UnitDone("10.system/001.a.sql", "", 10, time.Second, nil)
+		o.UnitDone("20.databases/010.b.sql", "SALESDB", 0, 0,
+			&collect.UnitSkipped{Reason: "the blocking watch cancelled 70.schema/055.page-density.sql on this database"})
+		for i := 0; i < 198; i++ {
+			o.UnitDone(fmt.Sprintf("80.workload/%03d.c.sql", i), "SALESDB", 0, 0,
+				&collect.UnitSkipped{Reason: "the collection reached its maximum duration of 2h00m (7200 s) before this collector started", MaxDuration: true})
+		}
+		o.Finished(collect.Verdict{MaxDurationReached: true})
+		out := b.String()
+		if n := strings.Count(out, "maximum duration"); n != 0 {
+			t.Errorf("tty %v: %d lines about the bound's skips, want none", tty, n)
+		}
+		// The non-tty [n/N] line names the unit and never the reason, so the
+		// count above cannot see a bound skip printed as progress.
+		if n := strings.Count(out, "80.workload/"); n != 0 {
+			t.Errorf("tty %v: %d lines name a unit the bound skipped, want none", tty, n)
+		}
+		if strings.Count(out, "-- ") != 1 || !strings.Contains(out, "the blocking watch cancelled") {
+			t.Errorf("tty %v: the watch's skip lost its line:\n%q", tty, out)
+		}
+		if o.done != o.planned {
+			t.Errorf("tty %v: counted %d of %d", tty, o.done, o.planned)
+		}
+	}
+}

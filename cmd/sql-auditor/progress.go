@@ -212,9 +212,13 @@ func (p *progress) UnitDone(script, database string, bytes int64, d time.Duratio
 	var skip *collect.UnitSkipped
 	if errors.As(err, &skip) {
 		// Kept on screen like a failure, because it is news: the run chose,
-		// while running, not to run something the plan announced.
-		p.clear()
-		fmt.Fprintf(p.out, "-- %s: %v\n", unitLabel(script, database), err)
+		// while running, not to run something the plan announced. Except the
+		// bound's skips, which come by the hundred for one reason: counted,
+		// and said once by the note Run prints after the loop.
+		if !skip.MaxDuration {
+			p.clear()
+			fmt.Fprintf(p.out, "-- %s: %v\n", unitLabel(script, database), err)
+		}
 	} else if err != nil {
 		// The one thing that must outlive the next repaint. Everything else the
 		// gauge says is replaced a second later; a failure is a fact about this
