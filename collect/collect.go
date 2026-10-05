@@ -394,8 +394,11 @@ func summaryTail(m *Manifest) string {
 // again, so a partial run keeps it. Exit 0 is necessary, not sufficient: the
 // caller also asks previousRunLost whether this run covered the one it
 // replaced.
-func settleRun(exit int, cancelled bool) (code int, discardPrevious bool) {
-	if cancelled && exit == 0 {
+//
+// cutShort is a run the operator stopped or the bound cut; either way the
+// archive is partial and a 0 would tell a scheduler the collection succeeded.
+func settleRun(exit int, cutShort bool) (code int, discardPrevious bool) {
+	if cutShort && exit == 0 {
 		exit = 2
 	}
 	return exit, exit == 0
@@ -691,6 +694,8 @@ func collectorsLost(prev, cur runScope, gone map[string]bool) []string {
 //	                                the case this comparison exists for
 //	held back by the blocking       yes, though such a run already exits 2 and
 //	watch                           keeps prev as partial
+//	reached the maximum duration    yes, though such a run already exits 2 and
+//	                                keeps prev as partial
 //	any other reason                yes: a reason this list does not know is
 //	                                not shown to cover anything
 //
