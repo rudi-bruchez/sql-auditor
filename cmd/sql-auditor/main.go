@@ -89,6 +89,7 @@ type cliFlags struct {
 	fs *flag.FlagSet
 
 	server, user, envFile, queriesDir, outputDir string
+	maxDuration                                  string
 	to, grantScript, profile                     string
 	keep, force, all                             bool
 
@@ -126,6 +127,10 @@ func defineFlags(cmd string) *cliFlags {
 	fs.StringVar(&c.queriesDir, "queries-dir", "", "run queries from this directory instead of the embedded corpus")
 	fs.StringVar(&c.outputDir, "output-dir", "", "where to write results")
 	fs.BoolVar(&c.keep, "keep", false, "keep an existing same-day run folder, suffixing this run")
+	// A string, not a time.Duration flag, so that Resolve parses and refuses
+	// the value in the same words whichever of the three sources it came from.
+	fs.StringVar(&c.maxDuration, "max-duration", "",
+		"bound the whole collection, e.g. 90m or 2h (overrides MAX_DURATION)")
 	// Declared so it appears in the help and so `collect --debug` parses, and
 	// the value deliberately thrown away: run() resolves the trigger from the
 	// raw arguments before any flag set exists, because the first lines of the
@@ -439,6 +444,7 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 	for k, v := range map[string]string{
 		"SQL_SERVER": c.server, "SQL_USER": c.user,
 		"QUERIES_DIR": c.queriesDir, "OUTPUT_DIR": c.outputDir,
+		"MAX_DURATION": c.maxDuration,
 		// A password from --password-file or --password-stdin enters here
 		// and nowhere else, so it obeys the same precedence as every other
 		// flag — over .env, over the environment — with no rule of its own.
@@ -1086,6 +1092,12 @@ Options (check, collect):
   --queries-dir DIR           run a corpus from disk instead of the embedded one
   --output-dir DIR            where to write results
   --keep                      keep an existing same-day run folder
+  --max-duration D            bound the whole collection, counted from its
+                              start: once D has passed, no collector starts,
+                              the one running is stopped, and the run exits 2
+                              with a partial archive. A Go duration in whole
+                              seconds, at least one minute: 90m, 2h, 1h30m.
+                              Overrides MAX_DURATION.
   --profile NAME              collect only the collectors of a profile. The one
                               profile is space: what makes the databases on this
                               instance larger than they need to be. It removes
