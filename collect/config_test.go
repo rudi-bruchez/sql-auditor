@@ -2,6 +2,7 @@ package collect
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -587,5 +588,91 @@ func TestUpdateDotEnvRemovesItsBackupAfterASuccessfulSave(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".sql-auditor-backup"); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("backup still present after a successful save: %v", err)
+	}
+}
+
+// MAX_DURATION is a Go duration in whole seconds, at least one minute. Every
+// spelling of the same span resolves to the same bound, and the provenance is
+// recorded, since a .env beats an exported variable here.
+func TestResolveReadsMaxDuration(t *testing.T) {
+	noenv := func(string) string { return "" }
+	for _, c := range []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"90m", 5400 * time.Second},
+		{"2h", 7200 * time.Second},
+		{"1h30m", 5400 * time.Second},
+		{"1.5h", 5400 * time.Second},
+		{"5400s", 5400 * time.Second},
+		{"+2h", 7200 * time.Second},
+		{"1m", time.Minute},
+		{"720h", 720 * time.Hour},
+	} {
+		cfg, err := Resolve(nil, map[string]string{"SQL_SERVER": "SQL01", "MAX_DURATION": c.raw}, noenv)
+		if err != nil {
+			t.Errorf("MAX_DURATION=%s: %v", c.raw, err)
+			continue
+		}
+		if cfg.MaxDuration != c.want || cfg.MaxDurationFrom != ".env" {
+			t.Errorf("MAX_DURATION=%s: got %s from %q, want %s from .env", c.raw, cfg.MaxDuration, cfg.MaxDurationFrom, c.want)
+		}
+	}
+	cfg, err := Resolve(nil, map[string]string{"SQL_SERVER": "SQL01"}, noenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxDuration != 0 || cfg.MaxDurationFrom != "" {
+		t.Errorf("unset: got %s from %q, want no bound and no provenance", cfg.MaxDuration, cfg.MaxDurationFrom)
+	}
+}
+
+// A slip of unit (30s for 30m), a bare number (7200 read as seconds or as
+// hours?), a fraction of a second the record would truncate: each is refused
+// in one sentence naming the key.
+func TestResolveRefusesAMaxDurationItCannotHonour(t *testing.T) {
+	noenv := func(string) string { return "" }
+	for _, raw := range []string{"30s", "0", "-5m", "1m0.5s", "59.5s", "7200", "two hours"} {
+		_, err := Resolve(nil, map[string]string{"SQL_SERVER": "SQL01", "MAX_DURATION": raw}, noenv)
+		want := fmt.Sprintf("MAX_DURATION: invalid value %q, want a whole number of seconds of at least 1m, such as 90m or 2h", raw)
+		if err == nil || err.Error() != want {
+			t.Errorf("MAX_DURATION=%s: err = %v, want %q", raw, err, want)
+		}
+	}
+}
+
+// The usual precedence: the flag, then .env, then the environment. An empty
+// value in .env means unset at that level and lets the environment through.
+func TestResolveMaxDurationPrecedence(t *testing.T) {
+	env := func(k string) string {
+		if k == "MAX_DURATION" {
+			return "1h"
+		}
+		return ""
+	}
+	for _, c := range []struct {
+		name   string
+		flags  map[string]string
+		dotenv map[string]string
+		want   time.Duration
+		from   string
+	}{
+		{"the flag beats .env", map[string]string{"MAX_DURATION": "3h"},
+			map[string]string{"SQL_SERVER": "SQL01", "MAX_DURATION": "2h"}, 3 * time.Hour, "--max-duration"},
+		{".env beats the environment", nil,
+			map[string]string{"SQL_SERVER": "SQL01", "MAX_DURATION": "2h"}, 2 * time.Hour, ".env"},
+		{"the environment alone", nil,
+			map[string]string{"SQL_SERVER": "SQL01"}, time.Hour, "the environment"},
+		{"an empty .env value lets the environment through", nil,
+			map[string]string{"SQL_SERVER": "SQL01", "MAX_DURATION": ""}, time.Hour, "the environment"},
+	} {
+		cfg, err := Resolve(c.flags, c.dotenv, env)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if cfg.MaxDuration != c.want || cfg.MaxDurationFrom != c.from {
+			t.Errorf("%s: got %s from %q, want %s from %q", c.name, cfg.MaxDuration, cfg.MaxDurationFrom, c.want, c.from)
+		}
 	}
 }
