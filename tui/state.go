@@ -234,6 +234,12 @@ type State struct {
 	// and the window is what bounds it. It is displayed, never edited: .env
 	// remains the place where settings live.
 	QueryStoreWindow string
+
+	// Bound is BoundLine of the resolved configuration, and MaxDuration the
+	// bound itself for the comparison under the ceiling. Shown on screen 3,
+	// never edited: .env remains the place where settings live.
+	Bound       string
+	MaxDuration time.Duration
 }
 
 // Key applies one keystroke and returns the resulting state. It is the whole

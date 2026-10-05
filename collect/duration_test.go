@@ -134,3 +134,51 @@ func TestPlannedDurationLines(t *testing.T) {
 		t.Errorf("Lines =\n%q\nwant\n%q", got, want)
 	}
 }
+
+func TestDurationBoundAgainstTheBound(t *testing.T) {
+	const pre = "bounded at 2h00m (7200 s): "
+	both := []string{"70.schema/041.compression-savings.sql", "70.schema/055.page-density.sql"}
+	for _, c := range []struct {
+		name string
+		b    DurationBound
+		want string
+	}{
+		{"the ceiling under the bound", DurationBound{Units: 10, Ceiling: 3600 * time.Second},
+			pre + "the ceiling of the units is under the bound"},
+		{"the ceiling at the bound", DurationBound{Units: 10, Ceiling: 7200 * time.Second},
+			pre + "the ceiling of the units is under the bound"},
+		{"a bound far above the ceiling", DurationBound{Units: 289, Ceiling: 34290 * time.Second, Costly: both, CostlyUnits: 12, CostlyCeiling: 21600 * time.Second},
+			"bounded at 720h00m (2592000 s): the ceiling of the units is under the bound"},
+		{"costly on, the units before them above", DurationBound{Units: 301, Ceiling: 55890 * time.Second, Costly: both, CostlyUnits: 12, CostlyCeiling: 21600 * time.Second},
+			pre + "the costly collectors run last; the 289 units before them: at most 9h31m (34290 s), above the bound"},
+		{"costly on, the units before them under", DurationBound{Units: 20, Ceiling: 30000 * time.Second, Costly: both, CostlyUnits: 8, CostlyCeiling: 25000 * time.Second},
+			pre + "the costly collectors run last; the 12 units before them: at most 1h23m (5000 s), under the bound"},
+		{"no costly collector, above", DurationBound{Units: 289, Ceiling: 34290 * time.Second},
+			pre + "the ceiling is above the bound; if it is reached, the collectors last in the plan are the ones not run"},
+	} {
+		limit := 2 * time.Hour
+		if c.name == "a bound far above the ceiling" {
+			limit = 720 * time.Hour
+		}
+		if got := c.b.Against(limit); got != c.want {
+			t.Errorf("%s:\n got  %q\n want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestBoundLineNamesTheValueAndWhereItCameFrom(t *testing.T) {
+	for _, c := range []struct {
+		cfg  Config
+		want string
+	}{
+		{Config{MaxDuration: 2 * time.Hour, MaxDurationFrom: ".env"},
+			"MAX_DURATION at 2h00m (7200 s), from .env; no collector starts after it, and the one running then is stopped"},
+		{Config{MaxDuration: 90 * time.Minute, MaxDurationFrom: "--max-duration"},
+			"MAX_DURATION at 1h30m (5400 s), from --max-duration; no collector starts after it, and the one running then is stopped"},
+		{Config{}, ""},
+	} {
+		if got := BoundLine(&c.cfg); got != c.want {
+			t.Errorf("BoundLine(%s from %q) = %q, want %q", c.cfg.MaxDuration, c.cfg.MaxDurationFrom, got, c.want)
+		}
+	}
+}

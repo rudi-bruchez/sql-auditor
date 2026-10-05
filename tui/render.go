@@ -563,6 +563,9 @@ func renderOptions(s State, width int) []string {
 		for _, l := range b.Lines() {
 			out = append(out, screen.Wrap(l, width, fieldPad)...)
 		}
+		if s.MaxDuration > 0 {
+			out = append(out, screen.Wrap(b.Against(s.MaxDuration), width, fieldPad)...)
+		}
 	}
 	out = append(out, "")
 	profileDesc := "none, the whole corpus"
@@ -598,6 +601,10 @@ func renderOptions(s State, width int) []string {
 	// the window is what bounds everything the Query Store options above export.
 	if s.QueryStoreWindow != "" {
 		out = append(out, pad+"Query Store window: "+s.QueryStoreWindow)
+		out = append(out, "")
+	}
+	if s.Bound != "" {
+		out = append(out, screen.Wrap("Bound: "+s.Bound, width, pad)...)
 		out = append(out, "")
 	}
 

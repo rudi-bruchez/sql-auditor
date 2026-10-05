@@ -641,3 +641,16 @@ func TestTheFinalScreenIgnoresRefusalsTheProfileDoesNotNeed(t *testing.T) {
 		t.Errorf("deniedPermissions without a profile = %d, want 1", got)
 	}
 }
+
+func TestTheThirdScreenShowsTheBound(t *testing.T) {
+	v := probedVerify()
+	v.Scripts = []collect.Script{{Path: "10.system/010.properties.sql", Scope: collect.ScopeInstance, TimeoutSec: 60}}
+	s := State{Step: StepOptions, Verify: v, Flags: map[string]bool{},
+		Bound:       collect.BoundLine(&collect.Config{MaxDuration: 2 * time.Hour, MaxDurationFrom: ".env"}),
+		MaxDuration: 2 * time.Hour}
+	lines := Render(s, testWidth, 0)
+	contains(t, lines, "MAX_DURATION at 2h00m (7200 s)")
+	contains(t, lines, "bounded at 2h00m (7200 s):")
+	s.Bound, s.MaxDuration = "", 0
+	absent(t, Render(s, testWidth, 0), "MAX_DURATION")
+}

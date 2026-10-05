@@ -1459,6 +1459,13 @@ func Check(ctx context.Context, o Options) (int, error) {
 	}
 	fmt.Println()
 
+	// Before the instance is touched, so that it is in every check that gets
+	// past the corpus, including one that cannot connect or cannot price the
+	// plan. Nothing is printed without a bound.
+	if l := BoundLine(o.Config); l != "" {
+		fmt.Println("Bound    : " + l)
+	}
+
 	// Only now is the instance touched.
 	o.Debugf("connecting to %s as %s, up to %s to dial, then one probe per capability at %s each",
 		o.Config.Server, AuthLabel(o.Config), o.Config.ConnectTimeout, o.Config.QueryTimeout)
@@ -1571,6 +1578,9 @@ func Check(ctx context.Context, o Options) (int, error) {
 			fmt.Println("\nDuration, a ceiling and not an estimate:")
 			for _, l := range b.Lines() {
 				fmt.Printf("  %s\n", l)
+			}
+			if o.Config.MaxDuration > 0 {
+				fmt.Printf("  %s\n", b.Against(o.Config.MaxDuration))
 			}
 		}
 	}

@@ -207,3 +207,21 @@ func TestCheckPricesTheQueryStoreWindowConflictAgainstTheFlags(t *testing.T) {
 		})
 	}
 }
+
+// The bound is printed before check connects, so that a check that cannot
+// reach the instance, or cannot price the plan, still shows that a bound was
+// read, which is the only sign that one given through the environment was.
+func TestCheckPrintsTheBoundBeforeItConnects(t *testing.T) {
+	cfg := checkConfig(filepath.Join(t.TempDir(), "output"))
+	cfg.MaxDuration, cfg.MaxDurationFrom = 2*time.Hour, ".env"
+	out := captureStdout(t, func() {
+		Check(context.Background(), Options{Config: cfg, Corpus: checkCorpus, Root: "queries"})
+	})
+	want := "Bound    : MAX_DURATION at 2h00m (7200 s), from .env; no collector starts after it, and the one running then is stopped\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("no %q in\n%s", want, out)
+	}
+	if strings.Contains(out, "Duration, a ceiling") {
+		t.Fatal("the offline check reached a ceiling: this test no longer proves the line is printed without one")
+	}
+}
