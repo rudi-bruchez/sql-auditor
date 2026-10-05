@@ -590,3 +590,19 @@ func TestReplicationAgentProfilesNameTheirParameters(t *testing.T) {
 		t.Errorf("042 selects the job step command itself, not the two tokens:\n%s", steps[1])
 	}
 }
+
+// MAX_DURATION ships commented. An assignment, even an empty one, would make
+// every .env that env init writes unreadable by 0.37.0 and older, which
+// refuse a key they do not know whatever its value.
+func TestEmbeddedEnvTemplateLeavesMaxDurationCommented(t *testing.T) {
+	if !strings.Contains(sqlauditor.EnvExample, "\n# MAX_DURATION=2h\n") {
+		t.Error("the template does not carry the commented line # MAX_DURATION=2h")
+	}
+	parsed, err := collect.ParseDotEnv(strings.NewReader(sqlauditor.EnvExample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := parsed["MAX_DURATION"]; ok {
+		t.Error("the template sets MAX_DURATION; it must only show it commented")
+	}
+}
