@@ -7,13 +7,18 @@ default, with no option. The second version answered both and was read by a
 second panel of five the same day. The third version (`760b4bf`) answered that
 panel and left one decision to the owner: whether to keep a session marker,
 `SET DATEFIRST 3`, that let the file leave sql-auditor's own statements out.
-This fourth version records that decision, taken on 5 October 2026: the marker
-is withdrawn, on a measurement of what a default collection leaves in the
-stores it audits (point 8, "The audit's own statements"). What each panel
-found, and what became of each finding, is in "Review of 4 October 2026" and
-"Second review of 4 October 2026" at the end; the decision and its measurement
-close the second. No decision is left to the owner before code. Nothing in the
-tree has changed yet.
+The fourth version (`16c0591`) recorded that decision, taken on 5 October 2026:
+the marker was withdrawn, on a measurement of what a default collection leaves
+in the stores it audits. A third panel read it and found that measurement false
+on client volumes: a default collector compiled a parallel plan over a 200 000
+row maintenance log. The contract lint was changed the same night (`aeb4619`,
+`a9fe54c`) to require `OPTION (RECOMPILE, MAXDOP 1)` on every statement that
+reads rows, not only on result sets. This fifth version rests the property
+on that lint rather than on a measurement, says what the lint does not reach,
+and answers the rest of the panel. The marker stays withdrawn. What each panel
+found, and what became of each finding, is in the three review sections at the
+end. No decision is left to the owner before code. Nothing in the tree has
+changed yet for 043.
 
 ## The question
 
@@ -139,7 +144,9 @@ not captured into those stores. Point 8 has a setup of its own, given there.
    reported 27, and two `INSERT INTO @density` and one `INSERT INTO @props`
    statements reported 2. In `ZzAvgDop3`, with the exact artefacts of test 3
    (041's `#savings`, the procedure called on a heap of 2 000 000 rows), it
-   reported 36 from one session and 5 from another, both serial.
+   reported 36 from one session and 5 from another, both serial. In the
+   collections of point 8, `INSERT INTO @props` and `INSERT INTO @density`
+   reported 2 although the statement they execute carries `MAXDOP 1`.
    An ordinary `INSERT INTO #o EXEC dbo.ParAgg`, whose procedure runs a
    parallel aggregate at DOP 22, was stored serial with `max_dop` 1, and so
    were `INSERT INTO @t SELECT ... FROM sys.all_objects` and a procedure
@@ -172,16 +179,37 @@ not captured into those stores. Point 8 has a setup of its own, given there.
    two callers 6.5 ms. Their CPU is counted once, in their own query. The
    trigger case reproduces Claude's (2 086.9 ms against 116.7 ms, and 395 ms
    against 49 ms in the second panel).
-8. A default collection leaves serial plans only. On 4 October 2026, around
-   21:52 UTC, a complete default collection ran on the lab, with the binary
-   of `main` (which has no 043), over the nine databases whose store was
-   active. Then, in each of them, the runtime rows executed since the
-   collection began were joined to `sys.query_store_plan`. In all nine, no
-   plan had `is_parallel_plan = 1`. Each database held 41 to 213 plans in
-   that span, and 0 to 2 of them were serial plans (`is_parallel_plan = 0`)
-   with `max_dop > 1`, point 4's anomaly. The marker measured by the third
-   version, a `SET DATEFIRST 3` in the session, is in that version
-   (`760b4bf`) and no longer here.
+8. What a collection leaves in the store, before and after the lint change.
+   On 4 October 2026, around 21:52 UTC, a default collection of `main` over
+   the nine lab databases whose store was active left no plan with
+   `is_parallel_plan = 1`, 41 to 213 plans per database and 0 to 2 serial
+   plans with `max_dop > 1`. The fourth version withdrew the marker on that
+   result. It held only because no lab database had a large maintenance log:
+   the third panel's Claude reader built a `dbo.CommandLog` of 200 000 rows
+   over 23 days and found the unhinted `INSERT INTO #sel` of
+   `50.agent/050.commandlog.sql` stored at DOP 22, cost 5.39, inside the
+   [5, 25) band. After `aeb4619`, a default collection left no parallel plan
+   in any of the nine stores of the lab with that log in place. This version
+   measured the same thing in a database of its own, `ZzAvgDop5A` (store in
+   capture mode ALL, one-minute intervals; test 3's heaps; a `dbo.CommandLog`
+   of Ola Hallengren's shape holding 200 000 rows over 23 days), dropped
+   afterwards. Each run was `sql-auditor collect` with `DB_INCLUDE=ZzAvgDop5A`
+   and nothing else set; before and after it, `SYSUTCDATETIME()` was read on
+   the server; then, from `master` with three-part names, the runtime rows
+   whose `last_execution_time` fell between the two instants were joined to
+   `sys.query_store_plan`:
+
+   | Binary | Options | Plans | `is_parallel_plan = 1` | serial, `max_dop > 1` |
+   | --- | --- | --- | --- | --- |
+   | `7984eef`, before the lint change | none | 220 | 1: `INSERT INTO #sel`, cost 5.63, DOP 22, 549 ms | 2 |
+   | `e49dafb`, after it | none | 218 | 0 | 2 |
+   | `e49dafb` | `--estimate-compression` | 224 | 0 | 3 |
+
+   The first row is the positive control: the same fixture and the same
+   reading found the defect, so the zeros below it are not a store that
+   captured nothing. The marker measured by the third version, a `SET
+   DATEFIRST 3` in the session, is in that version (`760b4bf`) and no longer
+   here.
 9. The replica groups of a store that has no availability group. In
    `ZzAvgDop3` and in `LABSTORE_A`, every runtime row carried
    `replica_group_id` 1, and `sys.query_store_replicas` held four rows, ids 1
@@ -288,43 +316,117 @@ the bands: a scalar function that is not inlined makes its caller serial
 
 The collector runs inside the database it measures, after every per-database
 collector that sorts before `80.workload/043`, and the store captures what
-those collectors ran there: `70.schema/041.compression-savings.sql` calls the
-very `sp_estimate_data_compression_savings` of point 4, and 027 alone can
-spend up to 20 s per database. Earlier audits within the window are in it too.
+those collectors ran there; earlier audits within the window are in it too.
 043 keeps all of them: nothing in the store tells the audit's statements from
 the client's, and the marker that did was withdrawn on 5 October 2026 (see the
 end of "Second review of 4 October 2026").
 
-They do not reach the bands. Every result set of the corpus carries `OPTION
-(RECOMPILE, MAXDOP 1)`, which the contract lint requires, and point 8 found no
-parallel plan among the audit's other statements either, nested and system
-ones included, in nine stores after a complete default collection. The serial
-plans the audit leaves with `max_dop > 1`, 0 to 2 per database there, are not
-banded either, since the selection reads `is_parallel_plan = 1` and never
-`max_dop` (point 4). So the bands, `window.parallel_*` and `nested.*`
-describe the workload alone, as far as that measurement and test 4 go.
+Whether they can reach the bands is decided by the contract lint, not by a
+measurement. Since `aeb4619` it requires `OPTION (RECOMPILE, MAXDOP 1)` on
+every statement that can read rows: a `SELECT` that returns rows or reads a
+table (an assignment included), `SELECT ... INTO`, `INSERT ... SELECT`,
+`UPDATE`, `DELETE` and `MERGE`, whatever their target, in the file and in
+every literal it hands to `EXEC (...)` or `sys.sp_executesql`, which must be a
+single literal. A subquery where no statement could carry the hint (`DECLARE
+@x = (SELECT ...)`, `SET`, `IF EXISTS`, `WHILE`) is refused. The lint runs on
+the embedded corpus in `TestEmbeddedCorpusIsValid` and on a `--queries-dir`
+corpus before it runs. A statement compiled under `MAXDOP 1` gets a serial
+plan, so whatever the client's data volume, a statement the lint sees cannot
+put a parallel plan in the store. Point 8's measurement is the evidence that
+the rule holds on the volume that broke the fourth version, not the
+guarantee.
 
-They do reach what the root counts over every query: `window.runtime_rows`,
-`window.executions`, `window.cpu_s`, and `window.serial_plans_dop_above_1`,
-which counts the audit's anomalies with the workload's; and the intervals,
-since the current run is usually the window's last activity
-(`window.newest_interval`) and each audit adds the few intervals it ran in to
-`window.intervals`. What one audit adds to `window.cpu_s` was not measured;
-its statements being serial, it should be of the order of the time its
-collectors spent in the database, against seven days of the client's work,
-and each earlier audit in the window adds its own.
+What the lint does not reach, and what each part can do:
+
+- `INSERT ... EXEC`. The server refuses an `OPTION` clause on it. Its own
+  plan was stored serial in every case measured (point 4; it is where the
+  anomalous `max_dop` comes from). What it executes is a literal, linted as
+  above when it holds a statement and otherwise a read-only `DBCC` command, of
+  which none appeared in the stores of point 8; or one of the four procedures
+  the statement lint allows besides `sp_executesql`. Three of them cannot
+  touch a store 043 reads: `sp_readerrorlog` and `sp_enumerrorlogs` read
+  files, `msdb.dbo.sp_help_jobhistory` compiles in `msdb`, and all three run
+  from instance-scoped collectors, while 043 reads user databases only
+  (`SelectTargets` leaves `master` and `msdb` out unless a file declares
+  `@widened`, and 043 does not). The fourth,
+  `sys.sp_estimate_data_compression_savings`, runs per database in
+  `70.schema/041.compression-savings.sql`, which only runs under
+  `--estimate-compression` (or `--all`). Its internal copy of a sample into
+  `#sample_table...` is a statement nobody can hint, and the store keeps it:
+  measured serial at cost 37.2 on a 2 000 000-row heap of 108-byte rows and
+  38.1 on a 6 000 000-row heap of `bigint`, with no `NonParallelPlanReason`
+  in either plan. Its seriality is therefore the optimizer's choice, not a
+  rule. Its cost follows the sample, which the procedure caps at 5 000 pages
+  per partition (`@pages_to_sample` in its text on this build), so it should
+  stay of that order; if it ever compiles parallel, one plan per sampled
+  partition enters a band. This is the one path by which a supported run of
+  the shipped corpus can put a parallel plan of its own in the bands.
+- Functions in an expression (`OBJECT_ID`, `COL_LENGTH`, `HAS_PERMS_BY_NAME`
+  and the like), in an `IF` or a `DECLARE`. They read no table through an
+  operator the optimizer can run in parallel.
+- An XML method on a variable in a `DECLARE` or a `SET`, such as `DECLARE @v
+  bigint = @x.value(...)`. It reads a variable, not a table, but it compiles a
+  plan the store keeps, and that plan can be costly: measured at 209 on a
+  variable of 20 000 elements, stored serial with no `NonParallelPlanReason`.
+  No collector of the corpus uses the form today; one that did would be
+  outside the lint, and writing it as `SELECT @v = @x.value(...) OPTION
+  (RECOMPILE, MAXDOP 1)` brings it inside.
+- A statement that opens with a parenthesis. The scanner does not see one
+  open, so a statement left without its `;` before it is credited with its
+  hint. Measured: `SELECT @n = COUNT_BIG(*) FROM dbo.Ladder7 WHERE id % 7 = 2`
+  followed by `(SELECT TOP (0) 1 AS x) EXCEPT (SELECT 1) OPTION (RECOMPILE,
+  MAXDOP 1);` passes the lint, and the assignment is stored at DOP 22. The
+  parenthesised statement returns a result set nobody declared, so the runner
+  refuses the collector at execution ("query returned more result sets than
+  the 1 declared"), but only after the parallel statement has run. Such a file
+  fails on every run and could not ship unnoticed; closing the form in the
+  scanner is a matter for the lint ("Open questions").
+- Automatic statistics. A collector's read can make the engine create a
+  statistic on a client table: after the collections of point 8, `dbo.CommandLog`
+  carried an automatically created statistic on `StartTime`. Its `StatMan`
+  query was not in the store there, but point 5 found such queries stored as
+  parallel plans with no statement cost. If one is captured, it lands in the
+  unknown band (`unknown.no_cost`) and in `window.parallel_*`, never in a
+  costed band.
+- A Query Store hint. Learn says a Query Store hint overrides a hint written
+  in the statement, and it does: with `sys.sp_query_store_set_hints`
+  attaching `OPTION (MAXDOP 4)` to a query written with `OPTION (RECOMPILE,
+  MAXDOP 1)`, the next execution was stored as a parallel plan at DOP 4. A
+  client who sets such a hint on one of the audit's queries makes it
+  parallel, and nothing in a collector can prevent it. A forced plan cannot do
+  the same, since none of the audit's queries has a parallel plan to force.
+
+The serial plans the audit leaves with `max_dop > 1`, two or three per
+database in the runs of point 8, are not banded either, since the selection
+reads `is_parallel_plan = 1` and never `max_dop` (point 4). So the bands,
+`window.parallel_*` and `nested.*` describe the workload, apart from the cases
+above.
+
+The audit does reach what the root counts over every query:
+`window.runtime_rows`, `window.executions`, `window.cpu_s`, and
+`window.serial_plans_dop_above_1`, which counts the audit's anomalies with the
+workload's; and the intervals. The current run is usually the window's last
+activity, so `window.newest_interval` is often the interval the audit ran in,
+043's own included; and each audit in the window adds the intervals it ran in
+to `window.intervals`. On a store that is otherwise quiet, scheduled audits
+can make a thin history look fuller and a stopped workload look recent (codex
+directive). What one audit adds to `window.cpu_s` was not measured; its
+statements being serial, it should be of the order of the time its collectors
+spent in the database, against seven days of the client's work, and each
+earlier audit in the window adds its own.
 
 The root says nothing about it, since any column would be a guess. The file's
-header says it in one sentence, for whoever reads the output beside the SQL:
-"The audit's own statements are in the store and in the serial totals
-(`window.executions`, `window.cpu_s`, `window.serial_plans_dop_above_1`); they
-run at MAXDOP 1 and never reach a band." The analysis needs nothing more: it
-reads the bands and `window.parallel_cpu_s`, which the audit does not touch.
-
-What would change this is a statement of the audit that runs parallel: a
-statement that is not a result set and carries no `MAXDOP 1`, in a future
-collector or in a `--queries-dir` script. Test 4 runs the embedded corpus and
-fails on one; a foreign corpus is not covered.
+header says it, for whoever reads the output beside the SQL: "The audit's own
+statements are in the store, in the serial totals (`window.executions`,
+`window.cpu_s`, `window.serial_plans_dop_above_1`) and in the intervals
+(`window.intervals`, `window.newest_interval`). Every one of them that reads
+rows carries `OPTION (RECOMPILE, MAXDOP 1)`, which the contract lint enforces,
+so they do not reach a band, unless a Query Store hint set on one of them
+overrides it, or the sample copy that `sp_estimate_data_compression_savings`
+runs under `--estimate-compression` compiles parallel." The analysis reads the
+bands and `window.parallel_cpu_s`, which those exceptions alone can touch, and
+reads the intervals knowing that they include the audit ("What the analysis
+does with it").
 
 ### How the cost is found
 
@@ -529,10 +631,13 @@ What does not change, and why:
   it as they narrow every per-database collector.
 - No `@discloses`, so `MANIFEST.txt`'s text paragraphs and
   `TestManifestListsTheTextTheDefaultRunCaptures` do not move.
-- The six other default Query Store collectors (020, 023, 024, 026, 028, 029)
-  count the audit's statements, as 043 does, and 025, under
-  `--query-store-detail`, extracts them. 043 introduces no difference on that
-  point between its totals and 029's.
+- The other default collectors that read the store's queries and runtime
+  rows, `80.workload/` 020, 023, 024, 026, 027, 028 and 029, count the audit's
+  statements as 043 does (027 is in the default run and in the `space`
+  profile); `20.databases/022.query-store.sql` reads the store's options and
+  size, not its queries. 021, under `--query-store-detail`, and 025, under
+  `--query-store-compare-at`, extract them. 043 introduces no difference on
+  that point between its totals and 029's.
 
 ## The guarantee that no text leaves
 
@@ -577,9 +682,28 @@ the same classes of nested queries; `sys.query_store_replicas`,
 nothing more (see the permission chain above, and
 050, which reads the replica states under the same line). The floor is SQL
 Server 2016, where every column read outside the `sp_executesql` branch
-exists; it has not been measured on 2016. Each of the two result sets carries
-`OPTION (RECOMPILE, MAXDOP 1)`, as the contract lint requires, and so does
-every statement of the file.
+exists; it has not been measured on 2016.
+
+Every statement of the file that reads rows carries `OPTION (RECOMPILE,
+MAXDOP 1)`: the two result sets, the aggregation inside the `sp_executesql`
+literal, the pin, the `DELETE` of the extra pinned row, each chunk's copy and
+search, and every assignment that reads a table. The lint of `aeb4619`
+requires it and also shapes the file. The replica state is read by an
+assignment (`SELECT @role = ... OPTION (RECOMPILE, MAXDOP 1)`) that an `IF`
+then tests, never by `IF EXISTS (SELECT ...)`, and no `DECLARE` or `SET` holds
+a subquery. The dynamic aggregation is one literal handed to
+`sys.sp_executesql`, with its own hint, and fills `#runtime` from inside, so no
+`INSERT ... EXEC` is needed. A cost found in a chunk is inserted into a table
+variable of its own rather than written back with an `UPDATE` through an
+alias, since the statement lint wants an `UPDATE`'s target named as `@t` or
+`#t`. A stub written from this document with those forms lints clean under
+`lint()` with `@resultsets: root:object, bands:array`, and each of the
+following makes it refuse the file: the `DELETE` or the pin without its hint,
+the aggregation's literal without its hint, `DECLARE @n int = (SELECT COUNT(*)
+FROM @pinned)`, `IF EXISTS (SELECT ...)` for the replica test, and a third
+hinted `SELECT` that returns rows. A hinted `DELETE` no longer counts as a
+result set, which under the fourth version's lint it did (Claude, third
+panel).
 
 The root comes from a `LEFT JOIN` from `sys.databases` to
 `sys.database_query_store_options`, as in 026 and 029, so a database with no
@@ -688,7 +812,9 @@ Out of this repository's scope, stated so the reviewers can check the shape.
 are shared; its root reader is not: `lire` reads 042's root (`examined.cap`,
 `examined.statements`, `cache.*`), and pointed at 043 it would read 0 and
 None without an error (agy directive). 043 gets a reader of its own, written
-against the keys of "The root".
+against the keys of "The root", and `lire` refuses a document that lacks
+`examined.statements` rather than print zeros, so that the script as it is
+today cannot be pointed at 043 by mistake (DeepSeek neutral).
 
 Over the databases of the archive, it sums each band's counts and CPU, which
 share boundaries and add exactly; it takes the maximum of `max_dop`; and it
@@ -703,7 +829,15 @@ read carry the share the root states (agy neutral, first panel). It says, per
 database, when the store was not read and why, when the history is short
 (`window.store_oldest_interval` later than `window.from`) or thin
 (`window.intervals`), when other replicas' rows were left out, and when a
-budget stopped the read; and it prints both sources side by side. Neither
+budget stopped the read; and it prints both sources side by side. It treats
+`window.intervals` and `window.newest_interval` as including the audit's own
+activity ("The audit's own statements"): a full-looking count of intervals,
+or a newest interval at the time of the collection, is not evidence that the
+client's workload ran recently. Its decision rests on the bands and on
+`window.parallel_cpu_s`, which the audit does not reach outside the cases that
+section names; when `_run.json` shows `estimate_compression` on, it says that
+the sample copies of `sp_estimate_data_compression_savings` may be in the
+bands. Neither
 replaces the other: the cache covers databases whose store is off and
 statements of `master`, the store covers what the cache evicted.
 
@@ -727,11 +861,16 @@ statements of `master`, the store covers what the cache evicted.
   count are counted in the root so the reader can tell whether it touched the
   bands.
 - The audit's own statements, this run's and those of earlier audits in the
-  window, are in the serial totals and in `window.serial_plans_dop_above_1`.
-  That they never reach a band rests on a measurement of nine lab stores
-  (point 8) and on test 4, which runs the embedded corpus; it is not a
-  property of the engine, and a `--queries-dir` script with a statement that
-  runs parallel puts that statement in the bands.
+  window, are in the serial totals, in `window.serial_plans_dop_above_1` and
+  in the intervals. That they stay out of the bands rests on the contract
+  lint, which holds every statement that reads rows to `MAXDOP 1`, in the
+  embedded corpus and in a `--queries-dir` one alike. It does not hold where
+  the lint cannot reach ("The audit's own statements"): a Query Store hint a
+  client set on an audit query, the sample copy of
+  `sp_estimate_data_compression_savings` under `--estimate-compression` (the
+  run's options are in `_run.json`; an earlier audit's in the window are not),
+  and a statement that hides behind a parenthesis, which the runner refuses
+  only after it ran.
 - The store follows its database across a failover: rows of the primary role
   from before a failover inside the window were run by the other instance,
   under its own threshold and scheduler count. An availability group secondary
@@ -797,30 +936,55 @@ whose mutation passes tests nothing, and is to be rewritten, not kept.
    the forms of "Running by default", finds `TOP (@cap + 1)`, `rn < @lo +
    @chunk` and `SET @lo = @lo + @chunk` once each, and the projections `cap`
    and `chunk`. Mutations: pinning with `TOP (@cap)` or a literal `TOP
-   (1001)`; walking the loop with any other variable than `@chunk`. A static
-   count cannot show that the loop reads by the chunk it declares; test 5 does.
-2. No text leaves. Live, on the database of test 3: the keys of the root and
-   of every band row equal the lists of "The collector" exactly, and the
-   literal `ZZ043_PLANTED_TEXT`, written into a parallel query of the planted
-   workload, appears nowhere in the document. Mutation: adding `p.plan_id` to
-   the projection.
+   (1001)`; walking the loop with any other variable than `@chunk`; removing
+   the hint from the `DELETE` of the extra pinned row, which the contract lint
+   refuses (measured on a stub, "The collector"). A static count cannot show
+   that the loop reads by the chunk it declares; test 5 does.
+2. No text leaves. Live, on the database of test 3, whose workload holds the
+   planted query `SELECT COUNT_BIG(*) FROM dbo.Ladder6 WHERE pad <>
+   'ZZ043_PLANTED_TEXT' OPTION (MAXDOP 2);`. The test first asserts that
+   `sys.query_store_query_text` holds the literal in the text of a query
+   whose plan has `is_parallel_plan = 1`, and fails otherwise, since a literal
+   the store never kept cannot leak. The `OPTION` clause is what keeps it
+   there: written bare on Ladder7, the query was stored by simple
+   parameterization as `(@1 varchar(8000))SELECT COUNT_BIG(*) FROM [dbo].[Ladder7] WHERE
+   [pad]<>@1`, literal gone, while the hinted form kept it, at DOP 2 and cost
+   11.56 (codex neutral). Then the keys of the root and of every band row
+   equal the lists of "The collector" exactly, and the literal appears
+   nowhere in the document. Mutation: adding `p.plan_id` to the projection.
 3. The bands, live, on the lab. A test creates a database with the store in
    capture mode ALL and one-minute intervals. From a connection opened with
-   `sql.Open`, it creates six heaps `dbo.Ladder1` to `dbo.Ladder6` (`id
-   bigint`, `pad char(100)`) of 20 000, 50 000, 100 000, 200 000, 500 000 and
-   2 000 000 rows, runs `SELECT COUNT_BIG(*) FROM dbo.LadderN WHERE id % 7 =
-   3` on each, then the same with `OPTION (MAXDOP 2)`; creates and runs
-   `dbo.TwoStatements`, whose body is `SELECT pad FROM dbo.Ladder1 WHERE id =
-   1;` then `SELECT COUNT_BIG(*) FROM dbo.Ladder6 WHERE id % 7 = 4;`; and
-   runs, in one batch, 041's `CREATE TABLE #savings (object_name sysname,
+   `sql.Open`, it creates seven heaps `dbo.Ladder1` to `dbo.Ladder7` (`id
+   bigint`, `pad char(100)`) of 20 000, 50 000, 100 000, 200 000, 500 000,
+   1 000 000 and 2 000 000 rows, filled by `INSERT ... WITH (TABLOCK)
+   SELECT TOP (@n) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), 'x'` from
+   `sys.all_columns` cross joined three times; runs `SELECT COUNT_BIG(*) FROM
+   dbo.LadderN WHERE id % 7 = 3` on each, then the same with `OPTION (MAXDOP
+   2)`; runs test 2's planted query; creates and runs `dbo.TwoStatements`,
+   whose body is `SELECT pad FROM dbo.Ladder1 WHERE id = 1;` then `SELECT
+   COUNT_BIG(*) FROM dbo.Ladder7 WHERE id % 7 = 4;`; and runs, in one batch,
+   041's `CREATE TABLE #savings (object_name sysname,
    schema_name sysname, index_id int, partition_number int, size_current_kb
    bigint, size_requested_kb bigint, sample_current_kb bigint,
    sample_requested_kb bigint);` then `INSERT INTO #savings EXEC
    sys.sp_estimate_data_compression_savings @schema_name = N'dbo',
-   @object_name = N'Ladder6', @index_id = NULL, @partition_number = NULL,
-   @data_compression = N'PAGE';`. Then, through `runUnit`, it runs 043. It
-   asserts, in this order: `window.serial_plans_dop_above_1` is at least 1,
-   and stops there if not, since the rest would test nothing;
+   @object_name = N'Ladder7', @index_id = NULL, @partition_number = NULL,
+   @data_compression = N'PAGE';`. Built and run on the lab in `ZzAvgDop5A`,
+   that workload gave eight parallel plans: Ladder5 without a hint and under
+   `MAXDOP 2` (costs 5.52 and 5.84), Ladder6 likewise (10.99 and 11.56),
+   Ladder7 likewise (21.95 and 23.10), the planted query (11.56) and the
+   second statement of `dbo.TwoStatements` (21.90). Six of the eight come from
+   statements whose serial cost is 12.38 or more (measured under `MAXDOP 1`:
+   6.25 for Ladder5, 12.38 for Ladder6, 24.76 for Ladder7), so they stay
+   parallel under a threshold up to 12 on this costing, where the fourth
+   version's fixture gave exactly five, two of them from a serial cost of 6.25
+   (Claude). Ladder1 to Ladder4 stayed serial; the `#savings` call gave the
+   anomaly (`is_parallel_plan = 0`, `max_dop` 45). The heaps took 3.7 s to
+   build. Then, through `runUnit`, it runs 043. It asserts, in this order:
+   the store holds at least five plans with `is_parallel_plan = 1`, and the
+   test fails with the instance's threshold and scheduler count in its message
+   if not; `window.serial_plans_dop_above_1` is at least 1, and stops there if
+   not, since the rest would test nothing;
    `excluded.other_replicas_executions` is 0 and not NULL on SQL Server 2025
    (and NULL below 2022, on a lab that has one); the bands equal those
    computed independently from `sys.query_store_plan` through the xml path on
@@ -834,22 +998,30 @@ whose mutation passes tests nothing, and is to be rewritten, not kept.
    `OBJECT_ID` that never finds the replica column or view (the count turns
    NULL); a replica predicate that keeps the wrong groups (the bands empty
    out); computing the share from anything but the bands.
-4. The audit's footprint, live. On the database of test 3, once its workload
-   has run, the test notes the instant, then runs through `runUnit`, in
-   corpus order, every per-database collector of the embedded corpus that a
-   default run would run there, 043 included. It then reads, from `master`
-   with three-part names, the runtime rows of the store whose
-   `last_execution_time` is after that instant, joined to
-   `sys.query_store_plan`. It asserts that there is at least one such row,
-   and fails otherwise, since a store that captured nothing of the audit
-   would pass the rest; and that none of them belongs to a plan with
-   `is_parallel_plan = 1`. It logs, without asserting it, the number of
-   serial plans with `max_dop > 1` among them (point 8 found 0 to 2).
-   Mutation: a copy of the corpus in which one per-database collector begins
-   with `DECLARE @n bigint; SELECT @n = COUNT_BIG(*) FROM dbo.Ladder6 WHERE
-   id % 7 = 5;`, which carries no hint and runs parallel on test 3's ladder.
-   This is the test that keeps point 8 true as collectors are added; it does
-   not cover a `--queries-dir` corpus.
+4. The audit's footprint, by the lint. The existing
+   `TestEmbeddedCorpusIsValid` lints every file of the embedded corpus with
+   the hint rule of `aeb4619`, 043 included, and nothing is added to it.
+   Mutations, each of which it must refuse offline: the hint removed from
+   `050.commandlog.sql`'s `INSERT INTO #sel` (the statement point 8 found
+   parallel; measured refused); the fourth version's mutation, a collector
+   that begins with `DECLARE @n bigint; SELECT @n = COUNT_BIG(*) FROM
+   dbo.Ladder6 WHERE id % 7 = 5;` (refused: an unhinted assignment that reads
+   a table); and `050.commandlog.sql` as it was at `7984eef` (refused, on its
+   first unhinted read). The fourth version's live test, which ran every
+   per-database collector on test 3's database and read the store, is not
+   kept. Its mutation is now refused before anything runs, so it could only
+   have been failed by what the lint does not reach; and a live run sees a
+   parallel plan only where its fixture holds data large enough to tempt the
+   optimizer, which is how it missed `050` on a database with no
+   `CommandLog`. A fixture large enough would make it a regression test of one
+   collector, which the lint already is. What it would add over the lint is
+   the list in "The audit's own statements", and no fixture reaches those
+   cases: a Query Store hint is the client's, the compression sample stayed
+   serial on both shapes measured, and the parenthesis form fails the
+   collector at execution. Point 8's table is the live evidence, measured once
+   with a positive control; it is to be measured again, with the same
+   protocol, when the scanner of `hintlint.go` changes or a collector that
+   reads a client table is added.
 5. The stop rules, live, on the store of test 3 with `@chunk` rewritten to 2.
    With `@budget_bytes` at 1, `examined.stopped_by` is `bytes` and
    `examined.plans_read` is 2, the first chunk, which are the two plans of
@@ -869,8 +1041,15 @@ whose mutation passes tests nothing, and is to be rewritten, not kept.
    with `state.actual` NULL, `state.not_read_because` `no store`, NULL counts
    and seven empty bands; in a database whose store held parallel plans and
    was then set OFF, the same with `state.actual` `OFF` and `off`; in a
-   database whose store is on and holds only serial work in the window, 0
-   counts and `examined.share_of_parallel_cpu_pct` NULL. None of the three
+   database whose store is on and holds only serial work in the window, the
+   parallel counts at 0 and not NULL (`window.parallel_plans`,
+   `window.parallel_plan_cpu_s`, `window.parallel_executions`,
+   `window.parallel_cpu_s`, their `_min` pair, `nested.parallel_plans`,
+   `nested.parallel_cpu_s`, `examined.plans`, `examined.plans_read`,
+   `examined.bytes_read`), `examined.share_of_parallel_cpu_pct` NULL, seven
+   bands of zeros, and `window.executions` and `window.cpu_s` above 0, since
+   that serial work and 043's own statements are in them (Claude). None of
+   the three
    raises an error. The "never enabled" case of the second version cannot be
    built on SQL Server 2022 and later, where a new database inherits
    `model`'s store (Claude, point 6), so `master` stands for it. Mutations:
@@ -885,8 +1064,9 @@ secondary branch and the rows of another replica role (the lab has no
 availability group); `avg_dop` above the range of a `decimal` (the anomaly
 cannot be produced); a plan leaving the store between the pin and its chunk;
 the selection's cost on a large runtime view; the audit's CPU in
-`window.cpu_s`, which no test measures; and the footprint of a `--queries-dir`
-corpus.
+`window.cpu_s`, which no test measures; the audit's footprint on a live store,
+measured once (point 8) and held by the lint, not by a live test; and the
+cases the lint does not reach ("The audit's own statements").
 
 The live tests create their databases under a prefix of their own, and the
 existing `TestLive...` suite's `ZzDroppedDuringRun` collides on a shared
@@ -912,6 +1092,14 @@ numbers of the version they read.
 - Should serial plans above the current threshold be counted (they cannot
   exist without a hint or a construct that forbids parallelism), as the
   signature of the opposite misconfiguration?
+- Should the contract lint's scanner refuse a statement that opens with a
+  parenthesis, or a data statement left without its `;` before one? Today
+  such a file passes the lint, runs its unhinted statement, and is refused by
+  the runner only afterwards ("The audit's own statements"). It is a change to
+  `hintlint.go`, not to 043.
+- Should `041.compression-savings.sql` say in its header that the sample copy
+  of `sp_estimate_data_compression_savings` lands, unhinted, in the audited
+  database's Query Store?
 
 The first draft's questions on a `.env` key and on `--all` are closed by the
 decision to run by default, and the third version's question on the session
@@ -1154,3 +1342,200 @@ context-setting measurements, its two tests, the `excluded.audit_*` columns,
 the reset batch and the `--queries-dir` warnings left with it; they are in
 `760b4bf`. Test 4 now runs the embedded corpus against a store and fails if
 the audit leaves a parallel plan.
+
+## Review of 5 October 2026
+
+Five readers ran the fourth version (`16c0591`) against the tree and the lab:
+codex with the directive and the neutral prompts, DeepSeek V4 Pro with both in
+agy's two seats (agy's quota was spent), and a Claude subagent with the neutral
+prompt. Claude built a copy of the tree, the real binary and two databases,
+and ran a default collection over a `dbo.CommandLog` of 200 000 rows; codex ran
+the suite, `check`, part of the live suite and the consumer's functions;
+DeepSeek ran probes in databases of its own. The decisive finding was fixed in
+the tree before this version (`aeb4619`, `a9fe54c`). This version then
+measured in `ZzAvgDop5A`, dropped afterwards: test 3's workload with a seventh
+heap, the collection of point 8 before and after the lint change and with
+`--estimate-compression`, the procedure's sample copy on a second shape, a
+Query Store hint on a statement written with `MAXDOP 1`, the parenthesis form
+and an XML method through the real runner; and it ran `lint()` on a stub of
+043 and on mutated copies of collectors. The union, and what became of each
+finding:
+
+1. A default collector left a parallel plan in the [5, 25) band: the unhinted
+   `INSERT INTO #sel` of `50.agent/050.commandlog.sql`, DOP 22, cost 5.39,
+   over a `CommandLog` of 200 000 rows, which test 4's database did not have
+   (Claude, measured; reproduced with the binary of `7984eef`: cost 5.63, DOP
+   22). DeepSeek directive reached the same class by reading: the lint
+   exempted assignments and buffering statements, and `050`'s dynamic
+   `UPDATE` had no hint. Taken, in the lint first: every statement that reads
+   rows carries the hint since `aeb4619`, and the nineteen files that did not
+   were rewritten. In this document: point 8, "The audit's own statements",
+   the limits and test 4 rest the property on the lint, with point 8's table
+   as its evidence.
+2. A hinted `DELETE` or `UPDATE` failed the lint as a result set too many, and
+   a subquery in `SET` or `DECLARE` cannot carry an `OPTION` clause, so "every
+   statement carries the hint" could not be written (Claude, measured on a
+   stub). Taken by the same change; verified on a stub of 043, which lints
+   clean with its `DELETE` hinted and is refused without it, and "The
+   collector" names the forms the file must use. Found while verifying: the
+   statement lint refuses `UPDATE k ... FROM @pinned AS k` with a message that
+   names `CREATE`, the first scoped keyword of the file, rather than the
+   `UPDATE`. 043 avoids the form; the message is a matter for the lint.
+3. Test 3's workload gave exactly the five parallel plans test 5 needs, two of
+   them from a statement whose serial cost sits just above the threshold
+   (Claude, measured; reproduced: serial cost 6.25, parallel 5.52 and 5.84).
+   Taken: a heap of 1 000 000 rows and the planted query bring the lab to
+   eight, six of them from serial costs of 12.38 or more, and test 3 asserts
+   the count before anything else, with the threshold and scheduler count in
+   its failure.
+4. The opt-in collectors were outside the claim, and 041 was cited as part of
+   the default footprint while it runs only under `--estimate-compression`
+   (Claude, by reading; codex directive, by running `check` with and without
+   `--all`). Verified: with `--estimate-compression` no parallel plan was
+   left, and the procedure's sample copy was stored serial at 37.2, and at
+   38.1 on a second heap. Taken: "The audit's own statements" names it as the
+   one path by which the shipped corpus can reach a band, and the analysis
+   reads `_run.json` for it.
+5. `027`'s `DECLARE @plans_total bigint = (SELECT COUNT_BIG(*) FROM
+   sys.query_store_plan)` and the corpus's other unhinted reads grow with the
+   client's store (Claude, hypothesis). Taken by `aeb4619`, which rewrote 027;
+   checked: the declaration is gone and the file lints clean.
+6. Test 6's third case asked for "0 counts" where `window.executions` and
+   `window.cpu_s` cannot be 0 (Claude, by reading). Taken: the case names the
+   keys at 0 and the two above 0.
+7. Test 4 did not say whether its instant was taken on the server (Claude, by
+   reading). Moot for a test that is no longer live; point 8's protocol reads
+   `SYSUTCDATETIME()` on the server.
+8. "The six other default Query Store collectors" left out 027 and
+   `20.databases/022.query-store.sql` (Claude, by reading). Verified: both run
+   by default, `@profiles: space` adding a profile and removing none. Taken;
+   found while verifying, the same sentence put 025 under
+   `--query-store-detail`, which gates 021, while 025 needs
+   `--query-store-compare-at`.
+9. Point 8's "0 to 2" serial plans with `max_dop > 1`: one database had 3
+   (Claude, measured). Verified: 2 in a default run here and 3 with
+   `--estimate-compression`. Taken: the text says two or three in the runs
+   measured, and the file's header carries no range.
+10. Point 8's measurement could not be repeated: no command, no instant, no
+    database names, no predicate, on an instance where `check` listed eleven
+    databases (codex directive, by running). Taken: point 8's table gives the
+    database, the fixture, the command, the server instants, the predicate and
+    a positive control; the 21:52 measurement stays as dated history.
+11. Test 4 had no positive control and could pass on a store that had not yet
+    shown the audit's rows (codex directive, hypothesis citing Learn on view
+    latency). Moot for test 4, which is now offline; point 8's control is the
+    run before the lint change on the same fixture, which found the plan.
+12. The audit's serial activity fills intervals, so `window.intervals` and
+    `window.newest_interval` can make a thin or stopped history look current
+    (codex directive, hypothesis; DeepSeek directive, by reading, for 043's
+    own interval). Taken in "The audit's own statements" and in the analysis,
+    which must not read either as evidence of the client's workload. No column
+    is added: counting the intervals of parallel work apart would need a
+    second pass over the runtime rows, which `#runtime`, grouped by plan, does
+    not keep.
+13. A Query Store hint overrides a hint written in the statement, so a client
+    can make an audit query parallel (codex, both prompts, from Learn).
+    Verified on the lab: `OPTION (MAXDOP 4)` set with
+    `sys.sp_query_store_set_hints` on a query written with `OPTION (RECOMPILE,
+    MAXDOP 1)` gave a parallel plan at DOP 4. Taken as a limit, in the
+    header's sentence, the section and "The limits a reader must keep in view".
+14. Test 2's planted literal was in no query of test 3's workload (codex
+    neutral, by reading). Taken, and found while verifying that the bare form
+    loses the literal to simple parameterization: the planted query carries
+    `OPTION (MAXDOP 2)`, and test 2 first asserts the store kept the literal
+    in a parallel plan's query.
+15. Test 4's mutation relied on a scalar `COUNT_BIG(*)` that another instance
+    might run serial, and a `GROUP BY` would be more robust (DeepSeek
+    directive, measured parallel on 2 000 000 rows). Moot: the mutation is now
+    refused by the lint before anything runs.
+16. Point 8 was framed as a fact about the engine while it was one run on one
+    build (DeepSeek directive, by reading, findings 6 and 7). Taken with 1 and
+    10: the guarantee is the lint, and the run is evidence.
+17. `seuil_parallelisme.py`, pointed at 043 today, prints zeros rather than
+    failing (DeepSeek neutral, by reading). Known from the second review,
+    finding 18; taken further: `lire` refuses a document without
+    `examined.statements` ("What the analysis does with it").
+
+Found while revising, by running:
+
+18. A data statement left without its `;` before a statement that opens with
+    a parenthesis passes the lint unhinted, and its plan is stored parallel
+    (DOP 22 on 2 000 000 rows); the runner refuses the collector at execution,
+    after the statement ran. Recorded in "The audit's own statements" and as
+    an open question for the lint.
+19. A collection's read created a statistic on a client table: after the runs
+    of point 8, `dbo.CommandLog` carried an automatically created statistic on
+    `StartTime`. Its `StatMan` query was not in the store, but such queries
+    can be stored parallel with no cost (point 5); recorded among the cases
+    the lint does not reach, and as outside the costed bands.
+20. `DECLARE @v bigint = @x.value(...)` on a variable of 20 000 elements
+    compiled a plan the store kept, at cost 209, serial. No collector uses the
+    form; it is listed among the cases the lint does not reach.
+
+Rejected:
+
+- Test 3's ladder cannot go parallel at a threshold of 5, since a 1 500 000
+  row `COUNT_BIG(*)` cost under 0.01 (DeepSeek neutral, measured, findings 3
+  and 7). Rejected by measurement: on the same lab and build the 1 000 000 and
+  2 000 000 row heaps gave parallel plans at 10.99 and 21.95, and Claude's
+  reading of the same fixture found five. A cost under 0.01 is not the cost of
+  scanning 1 500 000 rows, and the report does not give the table's
+  definition or how it was filled.
+  The concern behind it, a test passing on a store with nothing parallel, is
+  answered by test 3's first assertion; the mutation it names, selecting on
+  `max_dop > 1`, would fail anyway, since the asserted anomaly would then
+  enter the bands.
+- `nested.*` should have an any-degree CPU column like
+  `window.parallel_plan_cpu_s` (DeepSeek neutral, finding 9). Rejected: no
+  computation of the analysis uses it; the window's any-degree column exists
+  to show what the denominator leaves out, and `nested.*` only says how much
+  of the bands is nested work.
+- The selection on `is_parallel_plan = 1` sets aside a parallel buffering
+  `INSERT` that the old lint allowed, and should be presented as the guard
+  (DeepSeek directive, finding 6). Rejected as stated: a parallel buffering
+  `INSERT` is a parallel plan and is selected, as `050`'s was
+  (`is_parallel_plan = 1`). The selection guards against the serial anomaly
+  only, which "The audit's own statements" says.
+
+Confirmed and not a problem: `master` and `tempdb` have no row in the options
+view, `model` is `READ_WRITE`, and a new database inherits it (Claude,
+DeepSeek neutral); a store set OFF still returns its data (DeepSeek neutral);
+the replica column and view exist, and a store without an availability group
+maps ids 1 to 4 to `role_type` 1 to 4 (Claude, DeepSeek neutral); the `#savings`
+anomaly reproduces (Claude, DeepSeek directive, and this version at
+`max_dop` 45); the `120 s` tier is 29 and the cited tests exist (Claude); the
+caps test as described catches its mutations (Claude, DeepSeek neutral); the
+consumer's band functions read 043's band shape and `lire` misreads its root
+(codex neutral, DeepSeek); the stop rules' order gives test 5's outcomes
+(Claude, DeepSeek directive); no live text of the body still names the marker,
+and the tests are numbered consistently (codex directive, DeepSeek directive);
+the suite passes on an untouched tree (codex, both prompts, Claude); and the
+live suite's `ZzDroppedDuringRun` collides again on a shared instance (codex,
+both prompts), as the first review recorded.
+
+The rules this version is least sure of, its own new ones first:
+
+- That the lint is the guarantee. `hintlint.go` is a scanner, not a parser:
+  the parenthesis form passes it today, and a construct it has never met
+  could pass it tomorrow. A file that hides a statement this way is refused
+  at execution, which is loud but late.
+- Dropping the live footprint test. Point 8's table is measured once, and "to
+  be measured again when the scanner changes or a collector reads a client
+  table" is a rule nothing enforces.
+- The sample copy of `sp_estimate_data_compression_savings`. Its plan was
+  serial on two shapes with no `NonParallelPlanReason`, so its seriality is a
+  cost decision of the optimizer, and its cost, bounded by a 5 000-page
+  sample, was read from one build's procedure text.
+- The fixture's margin. Eight parallel plans on a lab of 22 schedulers at a
+  threshold of 5, six of them up to a threshold of 12; another instance's
+  costing may give fewer, and test 3 then fails rather than passes.
+- The cases outside the lint that were not observed: an automatic `StatMan`
+  stored parallel after an audit's read, and an XML method in a `DECLARE`
+  that the corpus does not use. Both are argued from other measurements.
+- That the three procedures besides the compression estimate cannot reach a
+  store 043 reads. It holds for the default `SQL_DATABASE`, `master`; with
+  another database there, the instance-scoped collectors run in it, and the
+  argument for `sp_readerrorlog` and `sp_enumerrorlogs` then rests on their
+  reading files.
+- Leaving the interval figures unchanged and relying on the analysis to read
+  them with care (finding 12).
