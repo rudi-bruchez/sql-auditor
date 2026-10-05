@@ -29,7 +29,11 @@ What it does to your instance:
   index and statistics filters. A literal value can travel with any of them.
   `MANIFEST.txt` lists what the archive carries; read it before you hand the
   archive over;
-- it does **not** write to your databases;
+- it does **not** write to your databases. SQL Server itself still records
+  the collector's statements as it records any query: in the plan cache, in
+  the Query Store of a database whose capture mode keeps them, and, where
+  `AUTO_CREATE_STATISTICS` is on, as a column statistic on a table read with a
+  predicate, such as `dbo.CommandLog`;
 - it does **not** change any configuration;
 - read-only is not the same as free or lock-free. One collector samples pages
   of the largest heaps in each database to count forwarded records, which is

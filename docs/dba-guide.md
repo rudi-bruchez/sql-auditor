@@ -989,6 +989,13 @@ It creates no permanent object: nothing that belongs to this server or
 its databases is created, altered or deleted, and no data of yours is
 written anywhere by this tool.
 
+SQL Server still records the collector's statements the way it records
+any query: in its plan cache, in the Query Store of a database whose
+capture mode keeps them, and, where AUTO_CREATE_STATISTICS is on, as a
+column statistic it creates on a table read with a predicate, such as
+Ola Hallengren's dbo.CommandLog. Those are the engine's own records,
+not objects this tool creates.
+
 What is in here that names things:
   - this server's name, version, edition and file paths, and the address
     and database the run was pointed at (SQL_SERVER and SQL_DATABASE)
