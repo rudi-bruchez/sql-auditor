@@ -219,6 +219,15 @@ type State struct {
 	// Cancelled is set once that run has come back, and it is what makes the
 	// final screen say the archive is partial rather than complete.
 	Cancelled bool
+	// The rest of the run's verdict, from finishedEvent. MaxDurationReached is
+	// set when the bound cut the run; RunFailed when the run had failed on its
+	// own before the stop or the bound (a lint error, a collector failing for
+	// its own reason); CollectedUnits is the run's count of units that
+	// returned a result, which no event can give: an interrupted unit arrives
+	// as a UnitDone with no error. The gauge keeps DoneUnits against Units.
+	MaxDurationReached bool
+	RunFailed          bool
+	CollectedUnits     int
 
 	// QueryStoreWindow is the resolved collection window, shown on screen 3
 	// because the flags there change what the Query Store collectors export

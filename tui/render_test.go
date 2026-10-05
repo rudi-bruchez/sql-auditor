@@ -368,7 +368,7 @@ func TestRenderCutsAFrameToTheTerminalHeight(t *testing.T) {
 func collectingState() State {
 	return State{
 		Step: StepCollecting, Verify: probedVerify(), Flags: map[string]bool{},
-		Units: 223, DoneUnits: 147,
+		Units: 223, DoneUnits: 147, CollectedUnits: 147,
 		Script: "80.workload/021.query-store-detail", Database: "SALESDB",
 		Elapsed: 124 * time.Second, Bytes: 39_950_000,
 		Notes: []string{"denied   50.agent/020.job-steps",
@@ -461,6 +461,7 @@ func TestDoneKeepsTheArchivePathAloneOnItsLine(t *testing.T) {
 func TestDoneCountsDeniedPermissionsFromTheVerification(t *testing.T) {
 	s := collectingState()
 	s.Step, s.DoneUnits, s.SkippedCount, s.ErrorCount = StepDone, 219, 4, 0
+	s.CollectedUnits = 219
 	s.ZipPath = `C:\out\a.zip`
 	lines := Render(s, testWidth, 0)
 	contains(t, lines, "219 collected, 4 skipped, 0 errors, 2 permissions denied")
@@ -485,6 +486,7 @@ func TestDoneCountsDeniedPermissionsFromTheVerification(t *testing.T) {
 func TestDoneCarriesTheNotesTheCollectionScreenShowed(t *testing.T) {
 	s := collectingState()
 	s.Step, s.ZipPath, s.DoneUnits = StepDone, `C:\out\a.zip`, 147
+	s.CollectedUnits = 147
 	s.Notes = append(s.Notes, "reconnect failed: dial tcp 10.42.7.19:1433: connection reset by peer")
 	s.ErrorCount = 1
 	lines := Render(s, testWidth, 0)

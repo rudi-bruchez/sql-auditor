@@ -93,7 +93,12 @@ func (e unitDoneEvent) apply(s State) State {
 	var skip *collect.UnitSkipped
 	if errors.As(e.err, &skip) {
 		s.SkippedCount++
-		s.Notes = note(s.Notes, status("skipped")+where(e.script, e.database)+": "+skip.Reason)
+		// The bound's skips come by the hundred for one reason, and six notes
+		// are kept: a note each would push the stopped unit's error off the
+		// screen. The last screen says the bound once.
+		if !skip.MaxDuration {
+			s.Notes = note(s.Notes, status("skipped")+where(e.script, e.database)+": "+skip.Reason)
+		}
 		return s
 	}
 	if e.err != nil {
@@ -142,6 +147,9 @@ type finishedEvent struct{ v collect.Verdict }
 
 func (e finishedEvent) apply(s State) State {
 	s.Cancelled = e.v.Cancelled
+	s.MaxDurationReached = e.v.MaxDurationReached
+	s.RunFailed = e.v.Failed
+	s.CollectedUnits = e.v.Collected
 	return s
 }
 

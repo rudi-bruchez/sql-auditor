@@ -864,7 +864,7 @@ func renderDone(s State, width int) []string {
 
 func summaryLine(s State) string {
 	return fmt.Sprintf("%s, %s, %s, %s",
-		fmt.Sprintf("%d collected", s.DoneUnits),
+		fmt.Sprintf("%d collected", s.CollectedUnits),
 		plural(s.SkippedCount, "skipped", "skipped"),
 		plural(s.ErrorCount, "error", "errors"),
 		plural(deniedPermissions(s), "permission denied", "permissions denied"))
