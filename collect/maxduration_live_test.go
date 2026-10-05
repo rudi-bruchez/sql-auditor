@@ -208,3 +208,75 @@ func TestLiveMaxDurationVerdictOfAnUnboundedRun(t *testing.T) {
 		t.Error("an unbounded run recorded max_duration_sec")
 	}
 }
+
+func boundSentence(limit time.Duration) string {
+	return maxDurationText(limit) + " before the first collector: nothing was collected"
+}
+
+// Criterion 5a. A one-millisecond bound expires before Connect can complete.
+// The run is the bound's, not an unreachable instance's: exit 2, the flag,
+// the bound's sentence, and the step's words in a warning, not in errors.
+func TestLiveMaxDurationBeforeTheFirstConnection(t *testing.T) {
+	o := maxDurRun(t, context.Background(), maxDurFast, t.TempDir(), time.Now(), time.Millisecond, nil)
+	if o.code != 2 {
+		t.Errorf("exit %d, want 2", o.code)
+	}
+	if !o.m.Run.MaxDurationReached || o.m.Run.Cancelled {
+		t.Errorf("reached %v, cancelled %v; want true, false", o.m.Run.MaxDurationReached, o.m.Run.Cancelled)
+	}
+	if o.err == nil || o.err.Error() != boundSentence(time.Millisecond) {
+		t.Errorf("error %v, want %q", o.err, boundSentence(time.Millisecond))
+	}
+	warned := false
+	for _, w := range o.m.Warnings {
+		warned = warned || strings.HasPrefix(w, boundSentence(time.Millisecond)+"; the step in progress returned: cannot reach the instance: ")
+	}
+	if !warned {
+		t.Errorf("no warning with the bound's sentence and the step's words: %q", o.m.Warnings)
+	}
+	if len(o.m.Errors) != 0 {
+		t.Errorf("errors %+v, want none: the step's error belongs to the warning", o.m.Errors)
+	}
+	if v := o.verdict(t); v != (Verdict{MaxDurationReached: true}) {
+		t.Errorf("verdict %+v, want {MaxDurationReached: true}", v)
+	}
+	if !strings.Contains(o.human, "Duration     : ") || !strings.Contains(o.human, "stopped at the maximum duration of") {
+		t.Errorf("MANIFEST.txt does not say the run stopped at its bound:\n%s", o.human)
+	}
+}
+
+// Criterion 5d. The bound, then a ctrl-c while the step it cut returns: both
+// facts recorded, the bound's sentence returned, its warning written.
+func TestLiveMaxDurationThenAStopInAFailingStep(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := false
+	pauseHook = func(point string, b context.Context) {
+		if point == "leaving before the run folder" && !called {
+			called = true
+			<-b.Done()
+			cancel()
+		}
+	}
+	defer func() { pauseHook = nil }()
+	o := maxDurRun(t, ctx, maxDurFast, t.TempDir(), time.Now(), time.Millisecond, nil)
+	if !called {
+		t.Fatal("the hook was never called: the run did not leave through stoppedOr")
+	}
+	if o.code != 2 || !o.m.Run.MaxDurationReached || !o.m.Run.Cancelled {
+		t.Errorf("exit %d, reached %v, cancelled %v; want 2, true, true", o.code, o.m.Run.MaxDurationReached, o.m.Run.Cancelled)
+	}
+	if o.err == nil || o.err.Error() != boundSentence(time.Millisecond) {
+		t.Errorf("error %v, want the bound's sentence", o.err)
+	}
+	warned := false
+	for _, w := range o.m.Warnings {
+		warned = warned || strings.HasPrefix(w, boundSentence(time.Millisecond)+"; the step in progress returned: ")
+	}
+	if !warned || len(o.m.Errors) != 0 {
+		t.Errorf("warnings %q, errors %+v; want the bound's warning and no error", o.m.Warnings, o.m.Errors)
+	}
+	if v := o.verdict(t); v != (Verdict{Cancelled: true, MaxDurationReached: true}) {
+		t.Errorf("verdict %+v, want {Cancelled: true, MaxDurationReached: true}", v)
+	}
+}

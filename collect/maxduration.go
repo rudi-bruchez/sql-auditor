@@ -116,3 +116,16 @@ func maxDurationNote(limit time.Duration, notStarted int, stopped bool) string {
 	}
 	return n
 }
+
+// pauseHook is a test seam, nil outside tests. Run calls it at five named
+// points, so that a test can wait there on bound.Done(), which places the
+// bound exactly at that point, and then cancel the run's context, which
+// places a stop after it. Nothing outside tests sets it; each call costs a
+// nil check.
+var pauseHook func(point string, bound context.Context)
+
+func pause(point string, bound context.Context) {
+	if pauseHook != nil {
+		pauseHook(point, bound)
+	}
+}

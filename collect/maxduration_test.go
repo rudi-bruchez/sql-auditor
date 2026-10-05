@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -322,5 +323,45 @@ func TestWatchOffNoticeKeysOnTheBoundNotTheReason(t *testing.T) {
 		if want := "note: the blocking watch is off, " + r; n != want {
 			t.Errorf("bound not fired, note %q, want %q", n, want)
 		}
+	}
+}
+
+// Connect calls a deadline error a login timeout only when its own budget ran
+// out. A dial cut by the caller's deadline, in the instant before the
+// caller's timer has cancelled its context, keeps the dial's own words.
+// Deterministic: the caller's context is cancelled only after Connect has had
+// a hundred milliseconds to answer wrongly, and an unfixed Connect answers in
+// microseconds, since a dial whose deadline has passed is refused before any
+// packet is sent.
+func TestConnectLeavesADialItsCallersDeadlineCutInItsOwnWords(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot listen on loopback: %v", err)
+	}
+	defer ln.Close()
+	cfg := &Config{Server: ln.Addr().String(), User: "AUDIT_RO", Password: "x",
+		AppName: "sql-auditor-test", ConnectTimeout: time.Minute}
+	db, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	inner, fire := context.WithCancelCause(context.Background())
+	defer fire(nil)
+	ctx := pastDeadline{inner, time.Now().Add(-time.Millisecond)}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		fire(errMaxDurationReached)
+	}()
+	c, err := Connect(ctx, db, cfg)
+	if c != nil {
+		c.Close()
+		t.Fatal("got a connection")
+	}
+	if err == nil || strings.Contains(err.Error(), "did not complete the login") {
+		t.Errorf("err = %v, want the dial's own words, not a login timeout", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to wrap the deadline", err)
 	}
 }

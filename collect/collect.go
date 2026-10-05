@@ -2163,6 +2163,18 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// database was not found dropped: a unit the operator interrupted reaches
 	// the observer as a UnitDone with no error, so no observer can count it.
 	earned, collected := 0, 0
+	// The bound's context, and the only clock of this feature: every question
+	// about the bound is whether a context's first cause is
+	// errMaxDurationReached. ctx stays the run's context and is never
+	// replaced by bound: a stop is read from ctx, and at the bound bound.Err()
+	// is set, so every call that files a dead context as an operator's stop
+	// would file the bound as one.
+	limit := o.Config.MaxDuration
+	bound, cancelBound := ctx, context.CancelFunc(func() {})
+	if limit > 0 {
+		bound, cancelBound = context.WithDeadlineCause(ctx, started.Add(limit), errMaxDurationReached)
+	}
+	defer cancelBound()
 
 	// finish is the only exit from this function that matters: a manifest is
 	// written on every path, including the fatal ones, because a run that
@@ -2234,8 +2246,28 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// fault. It is recordUnitFailure's defect one step earlier, and the rule is
 	// the same: a dead context outranks the error, which describes the stopping
 	// and is dropped. Exit 2 is what settleRun gives a stop inside the loop.
+	//
+	// With a bound, stoppedOr asks two facts and nothing of the error: whether
+	// the bound fired first, and whether the operator stopped the run, both
+	// every time, so that a run cut by the bound and then stopped records
+	// both. When the bound fired, the step's error is quoted in the bound's
+	// warning in its own words, since it may describe the cut or a failure of
+	// the server's own in the same seconds, and the run does not try to tell.
 	stoppedOr := func(code int, err error) (int, error) {
-		if stopRequested(ctx, m) {
+		pause("leaving before the run folder", bound)
+		fired := boundReached(bound)
+		stopped := stopRequested(ctx, m)
+		if fired {
+			m.Run.MaxDurationReached = true
+			sentence := maxDurationText(limit) + " before the first collector: nothing was collected"
+			warning := sentence
+			if err != nil {
+				warning += "; the step in progress returned: " + err.Error()
+			}
+			m.warn(warning)
+			return finishWith("", 2, errors.New(sentence))
+		}
+		if stopped {
 			return finishWith("", 2, errors.New("stopped before the first collector: nothing was collected"))
 		}
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -2304,7 +2336,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// so any call handed the *sql.DB while this is held blocks until its
 	// context expires — reproduced as "context deadline exceeded", which is
 	// not a diagnosis anybody would arrive at from the message.
-	conn, err := Connect(ctx, db, o.Config)
+	conn, err := Connect(bound, db, o.Config)
 	if err != nil {
 		if advice := certificateAdvice(o.Config, err); advice != "" {
 			err = fmt.Errorf("cannot reach the instance: %w\n\n%s", err, advice)
@@ -2318,7 +2350,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// Populated before anything can return, so Coverage is never "unknown"
 	// while the manifest goes on to make claims about the database list.
 	o.Debugf("connected; running the preflight probes, each bounded by %s", o.Config.QueryTimeout)
-	m.Preflight = runPreflightWithDeadline(ctx, conn, o.Config)
+	m.Preflight = runPreflightWithDeadline(bound, conn, o.Config)
 	if PreflightExitCode(m.Preflight, 0, true) == 1 {
 		err := errors.New("the instance did not answer the preflight; nothing was collected")
 		return stoppedOr(1, err)
@@ -2332,7 +2364,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	delete(denied, "connect")
 
 	o.Debugf("asking the instance its name, version and UTC offset")
-	si, err := probeWithDeadline(ctx, conn, o.Config)
+	si, err := probeWithDeadline(bound, conn, o.Config)
 	if err != nil {
 		return stoppedOr(1, err)
 	}
@@ -2389,7 +2421,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	o.Debugf("instance %s, %s, %s", si.Name, si.Edition, si.Version)
 	plan := planScripts(scripts, o.Profile, denied, ParseVersion(si.Version), o.Flags)
 	o.Debugf("listing the databases")
-	cands, err := candidatesWithDeadline(ctx, conn, o.Config)
+	cands, err := candidatesWithDeadline(bound, conn, o.Config)
 	if err != nil {
 		return stoppedOr(1, err)
 	}
