@@ -280,3 +280,100 @@ func TestLiveMaxDurationThenAStopInAFailingStep(t *testing.T) {
 		t.Errorf("verdict %+v, want {Cancelled: true, MaxDurationReached: true}", v)
 	}
 }
+
+// plantPreviousRun puts a folder and an archive at the name this run will
+// use, from RunFolderFor with the server name read on the test's own
+// connection, as a same-day earlier run would have left them.
+func plantPreviousRun(t *testing.T, out string, now time.Time) string {
+	t.Helper()
+	cfg := maxDurConfig(t, out, 0)
+	db, err := Open(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := Connect(context.Background(), db, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	si, err := Probe(context.Background(), conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	folder := RunFolderFor(out, RunServerName(si.Name, &cfg), "", now, false)
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "marker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(folder+".zip", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return folder
+}
+
+func atTheCheckBeforeTheRunFolder(t *testing.T, stopAfter bool) (maxDurOut, bool, bool, string) {
+	out, now := t.TempDir(), time.Now()
+	folder := plantPreviousRun(t, out, now)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dbg := &lockedBuf{}
+	called, listed := false, false
+	pauseHook = func(point string, b context.Context) {
+		if point == "before the run folder" && !called {
+			called = true
+			listed = strings.Contains(dbg.String(), "database(s) listed")
+			<-b.Done()
+			if stopAfter {
+				cancel()
+			}
+		}
+	}
+	defer func() { pauseHook = nil }()
+	o := maxDurRun(t, ctx, maxDurFast, out, now, 3*time.Second, dbg)
+	return o, called, listed, folder
+}
+
+// Criterion 5b. A bound reached after the listing and before lockRun does
+// not go on to set the previous run of the day aside.
+func TestLiveMaxDurationAtTheCheckBeforeTheRunFolder(t *testing.T) {
+	o, called, listed, folder := atTheCheckBeforeTheRunFolder(t, false)
+	if !called {
+		t.Fatal("the hook was never called: either the preamble outlasted three seconds or the check is missing")
+	}
+	if !listed {
+		t.Error("the hook ran before the listing returned: no 'database(s) listed' line in Debug yet")
+	}
+	if o.code != 2 || !o.m.Run.MaxDurationReached {
+		t.Errorf("exit %d, reached %v; want 2, true", o.code, o.m.Run.MaxDurationReached)
+	}
+	if _, err := os.Stat(filepath.Join(folder, "marker")); err != nil {
+		t.Errorf("the planted run folder was touched: %v", err)
+	}
+	if _, err := os.Stat(folder + ".zip"); err != nil {
+		t.Errorf("the planted archive was touched: %v", err)
+	}
+	if aside, _ := filepath.Glob(filepath.Join(filepath.Dir(folder), "*.superseded-*")); len(aside) != 0 {
+		t.Errorf("something was set aside: %v", aside)
+	}
+}
+
+// Criterion 5c. The bound, then a stop, at the same check: both recorded,
+// the bound's sentence returned.
+func TestLiveMaxDurationThenAStopAtTheCheckBeforeTheRunFolder(t *testing.T) {
+	o, called, _, _ := atTheCheckBeforeTheRunFolder(t, true)
+	if !called {
+		t.Fatal("the hook was never called")
+	}
+	if o.code != 2 || !o.m.Run.MaxDurationReached || !o.m.Run.Cancelled {
+		t.Errorf("exit %d, reached %v, cancelled %v; want 2, true, true", o.code, o.m.Run.MaxDurationReached, o.m.Run.Cancelled)
+	}
+	if o.err == nil || o.err.Error() != boundSentence(3*time.Second) {
+		t.Errorf("error %v, want %q", o.err, boundSentence(3*time.Second))
+	}
+	if v := o.verdict(t); v != (Verdict{Cancelled: true, MaxDurationReached: true}) {
+		t.Errorf("verdict %+v", v)
+	}
+}

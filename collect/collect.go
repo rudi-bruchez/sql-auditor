@@ -2425,6 +2425,10 @@ func Run(ctx context.Context, o Options) (int, error) {
 	if err != nil {
 		return stoppedOr(1, err)
 	}
+	// After the call returned, not before it: "listing the databases" above is
+	// written before the call, and a test that places the bound relative to
+	// the listing needs a line the listing itself guards.
+	o.Debugf("%d database(s) listed", len(cands))
 	sel, err := SelectTargets(cands, o.Config.DBInclude, o.Config.DBExclude, WideningPurposes(plan))
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -2485,6 +2489,16 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// Before prepareRunFolder, because prepareRunFolder is where the previous
 	// run gets renamed aside: two runs reaching that together is exactly the
 	// collision the lock exists to stop.
+	// The bound is asked once more here, before lockRun and prepareRunFolder,
+	// which is where the previous run of the day is set aside: a bound reached
+	// during the last server step, or the local steps since, must not go on to
+	// move it. Through stoppedOr, so that the order of the two facts is
+	// written once; stoppedOr finds the bound fired, since a context's cause
+	// never changes once set, and has no step error to quote.
+	pause("before the run folder", bound)
+	if boundReached(bound) {
+		return stoppedOr(2, nil)
+	}
 	releaseLock, err := lockRun(runFolder, o.Now)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
