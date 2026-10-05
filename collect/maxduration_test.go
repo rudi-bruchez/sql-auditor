@@ -213,3 +213,43 @@ func TestOutOfTimeTellsTheBoundFromTheUnitsOwnTimeout(t *testing.T) {
 		t.Errorf("a SQL error with the bound: %v, want it unchanged", got)
 	}
 }
+
+// The watch's and the drop's reasons are more specific than the bound's, and
+// scopeLost matches on them, so they are asked first. byBound says which
+// question answered, never whether the bound has passed.
+func TestSkipBeforeAsksTheBoundLast(t *testing.T) {
+	passed, cancelPassed := passedBound(context.Background())
+	defer cancelPassed()
+	far, cancelFar := context.WithDeadlineCause(context.Background(), time.Now().Add(time.Hour), errMaxDurationReached)
+	defer cancelFar()
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	cancelledOn := map[string]string{"SALESDB": "70.schema/055.page-density.sql"}
+	droppedOn := map[string]bool{"HRDB": true}
+	watchReason := "the blocking watch cancelled 70.schema/055.page-density.sql on this database"
+	for _, c := range []struct {
+		name    string
+		bound   context.Context
+		limit   time.Duration
+		target  string
+		reason  string
+		byBound bool
+		skip    bool
+	}{
+		{"held back, bound passed", passed, 2 * time.Hour, "SALESDB", watchReason, false, true},
+		{"held back, bound not passed", far, 2 * time.Hour, "SALESDB", watchReason, false, true},
+		{"dropped, bound passed", passed, 2 * time.Hour, "HRDB", skipDroppedDuringRun, false, true},
+		{"dropped, bound not passed", far, 2 * time.Hour, "HRDB", skipDroppedDuringRun, false, true},
+		{"another database, bound passed", passed, 2 * time.Hour, "OPSDB",
+			"the collection reached its maximum duration of 2h00m (7200 s) before this collector started", true, true},
+		{"an instance unit, bound passed", passed, 90 * time.Minute, "",
+			"the collection reached its maximum duration of 1h30m (5400 s) before this collector started", true, true},
+		{"another database, bound not passed", far, 2 * time.Hour, "OPSDB", "", false, false},
+		{"another database, a ctrl-c", stopped, 2 * time.Hour, "OPSDB", "", false, false},
+	} {
+		reason, byBound, skip := skipBefore(cancelledOn, droppedOn, c.bound, c.limit, c.target)
+		if reason != c.reason || byBound != c.byBound || skip != c.skip {
+			t.Errorf("%s: got (%q, %v, %v), want (%q, %v, %v)", c.name, reason, byBound, skip, c.reason, c.byBound, c.skip)
+		}
+	}
+}

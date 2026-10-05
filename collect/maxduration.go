@@ -70,3 +70,28 @@ func maxDurationOr(parent, call context.Context, limit time.Duration, err error)
 	}
 	return fmt.Errorf("stopped when %s: %w", maxDurationText(limit), err)
 }
+
+// maxDurationSkipReason is the reason of every unit the bound kept from
+// starting: one string per run, because MANIFEST.txt groups on it.
+func maxDurationSkipReason(limit time.Duration) string {
+	return maxDurationText(limit) + " before this collector started"
+}
+
+// skipBefore is the loop's three questions before a unit, in their order: a
+// database where the watch cancelled a collector, a database found dropped,
+// then the bound. byBound says the bound answered; asking boundReached again
+// after this returns would claim a held-back unit for the bound once the
+// bound has passed, and count it in the note while MANIFEST.txt files it
+// under its own reason.
+func skipBefore(cancelledOn map[string]string, droppedOn map[string]bool, bound context.Context, limit time.Duration, target string) (reason string, byBound, skip bool) {
+	if r, ok := heldBack(cancelledOn, target); ok {
+		return r, false, true
+	}
+	if r, ok := droppedBefore(droppedOn, target); ok {
+		return r, false, true
+	}
+	if boundReached(bound) {
+		return maxDurationSkipReason(limit), true, true
+	}
+	return "", false, false
+}
