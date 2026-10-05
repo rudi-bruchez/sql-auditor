@@ -2925,6 +2925,11 @@ func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
 	dctx, dcancel := deadline(unitCtx, o.Config)
 	rerr := ResetSession(dctx, conn, o.Config.Database)
 	if rerr != nil {
+		// A test seam: a test waits here on bound.Done(), which places the
+		// bound, or a stop after it, between the call's return and the read of
+		// its cause. A server call added to runUnit later needs this point and
+		// the read of its cause as well.
+		pause("after a failing call", bound)
 		cut = context.Cause(dctx) == errMaxDurationReached
 		rerr = maxDurationOr(ctx, dctx, limit, rerr)
 	}
@@ -2978,6 +2983,7 @@ func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
 		uctx, ucancel := deadline(unitCtx, o.Config)
 		_, uerr := conn.ExecContext(uctx, "USE "+quoteName(u.Name)+";")
 		if uerr != nil {
+			pause("after a failing call", bound)
 			cut = context.Cause(uctx) == errMaxDurationReached
 			uerr = maxDurationOr(ctx, uctx, limit, uerr)
 		}
@@ -2998,6 +3004,7 @@ func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
 	start := time.Now()
 	rows, err := conn.QueryContext(qctx, s.SQL, args...)
 	if err != nil {
+		pause("after a failing call", bound)
 		cut = context.Cause(qctx) == errMaxDurationReached
 		return cut, blocked(outOfTime(ctx, qctx, timeout, limit, knob, err))
 	}
@@ -3005,6 +3012,7 @@ func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
 
 	sets, err := ReadResultSets(rows, s.Results)
 	if err != nil {
+		pause("after a failing call", bound)
 		cut = context.Cause(qctx) == errMaxDurationReached
 		return cut, blocked(outOfTime(ctx, qctx, timeout, limit, knob, err))
 	}

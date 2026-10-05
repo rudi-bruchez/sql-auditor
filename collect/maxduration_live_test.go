@@ -605,3 +605,65 @@ func TestLiveMaxDurationCutsTheFirstReset(t *testing.T) {
 		t.Errorf("files %v, results %+v; want none", entries, m.Results)
 	}
 }
+
+// Criterion 6b. The bound cuts the query, then the operator presses ctrl-c
+// while the driver returns, before runUnit reads the cause: both recorded,
+// the unit's error dropped as a stop's, the loop broken.
+func TestLiveMaxDurationThenAStopWhileTheDriverReturns(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := false
+	pauseHook = func(point string, b context.Context) {
+		if point == "after a failing call" && !called {
+			called = true
+			<-b.Done()
+			cancel()
+		}
+	}
+	defer func() { pauseHook = nil }()
+	o := maxDurRun(t, ctx, maxDurWait, t.TempDir(), time.Now(), 2*time.Second, nil)
+	if !called {
+		t.Fatal("the hook was never called")
+	}
+	if o.code != 2 || !o.m.Run.Cancelled || !o.m.Run.MaxDurationReached {
+		t.Errorf("exit %d, cancelled %v, reached %v; want 2, true, true", o.code, o.m.Run.Cancelled, o.m.Run.MaxDurationReached)
+	}
+	if len(o.m.Errors) != 0 || len(o.m.Skipped) != 0 {
+		t.Errorf("errors %+v, skipped %+v; want none: the stop drops the error and breaks the loop", o.m.Errors, o.m.Skipped)
+	}
+	if nl := noteLines(o.progress); len(nl) != 1 || !strings.HasSuffix(nl[0], "; the collector running then was stopped") {
+		t.Errorf("note lines %q", nl)
+	}
+	if v := o.verdict(t); !v.Cancelled || !v.MaxDurationReached {
+		t.Errorf("verdict %+v", v)
+	}
+}
+
+// Criterion 6d. The unit's own @timeout of one second expires first; the
+// bound passes before runUnit reads the cause, as it would during a long wait
+// for the cancellation. The unit failed on its own; the bound cut only what
+// came after.
+func TestLiveMaxDurationDuringTheWaitAfterTheUnitsOwnLimit(t *testing.T) {
+	called := false
+	pauseHook = waitOnceAt("after a failing call", &called)
+	defer func() { pauseHook = nil }()
+	o := maxDurRun(t, context.Background(), maxDurOwnTimeout, t.TempDir(), time.Now(), 3*time.Second, nil)
+	if !called {
+		t.Fatal("the hook was never called")
+	}
+	if o.code != 2 || !o.m.Run.MaxDurationReached {
+		t.Errorf("exit %d, reached %v; want 2, true", o.code, o.m.Run.MaxDurationReached)
+	}
+	if len(o.m.Errors) != 1 || !strings.HasPrefix(o.m.Errors[0].Message, "still running when @timeout of 1s expired") {
+		t.Errorf("errors %+v; want the unit's own limit named", o.m.Errors)
+	}
+	if len(o.m.Skipped) != 1 || o.m.Skipped[0].Reason != maxDurationSkipReason(3*time.Second) {
+		t.Errorf("skipped %+v", o.m.Skipped)
+	}
+	if nl := noteLines(o.progress); len(nl) != 1 || !strings.HasSuffix(nl[0], "1 collector was not started") {
+		t.Errorf("note lines %q, want no clause about a stopped collector", nl)
+	}
+	if v := o.verdict(t); !v.MaxDurationReached || !v.Failed {
+		t.Errorf("verdict %+v, want MaxDurationReached and Failed", v)
+	}
+}
