@@ -723,3 +723,17 @@ func incidentOf(script, target string, worst waitSample, round waitRound, cancel
 	}
 	return in
 }
+
+// watchOffNotice is the warning and the stderr note of a watch that is not
+// running. Once the bound has fired no collector will start, and both
+// sentences describe a risk the run no longer runs, so both are empty. The
+// caller asks boundReached at the moment it would write them, whatever the
+// reason: a watch whose start began before the bound and failed after it
+// keeps its own reason and still has no collector to protect.
+func watchOffNotice(reason string, boundFired bool) (warning, note string) {
+	if boundFired {
+		return "", ""
+	}
+	return "the blocking watch is off, " + reason + ": nothing will cancel a collector that other sessions are waiting on",
+		"note: the blocking watch is off, " + reason
+}

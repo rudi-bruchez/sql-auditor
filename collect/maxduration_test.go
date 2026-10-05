@@ -253,3 +253,74 @@ func TestSkipBeforeAsksTheBoundLast(t *testing.T) {
 		}
 	}
 }
+
+func TestMaxDurationNoteSaysWhatTheBoundCut(t *testing.T) {
+	const pre = "note: the collection reached its maximum duration of 2h00m (7200 s); "
+	for _, c := range []struct {
+		notStarted int
+		stopped    bool
+		want       string
+	}{
+		{198, true, pre + "198 collectors were not started, and the one running then was stopped"},
+		{198, false, pre + "198 collectors were not started"},
+		{1, false, pre + "1 collector was not started"},
+		{0, true, pre + "the collector running then was stopped"},
+		{2, false, pre + "2 collectors were not started"},
+	} {
+		if got := maxDurationNote(2*time.Hour, c.notStarted, c.stopped); got != c.want {
+			t.Errorf("(%d, %v) = %q, want %q", c.notStarted, c.stopped, got, c.want)
+		}
+	}
+}
+
+// The tokens of the line scripts parse, in the order things happened: the
+// bound before the stop, since a stop first would have kept the bound from
+// being recorded.
+func TestSummaryTailOrdersTheBoundBeforeTheStop(t *testing.T) {
+	for _, c := range []struct {
+		name             string
+		partial          int
+		bound, cancelled bool
+		want             string
+	}{
+		{"nothing", 0, false, false, ""},
+		{"partial units", 3, false, false, ", 3 partial"},
+		{"the bound", 0, true, false, ", max duration reached"},
+		{"a stop", 0, false, true, ", cancelled"},
+		{"the bound then a stop", 0, true, true, ", max duration reached, cancelled"},
+		{"partial units, the bound and a stop", 2, true, true, ", 2 partial, max duration reached, cancelled"},
+	} {
+		m := &Manifest{PartialUnits: c.partial}
+		m.Run.MaxDurationReached, m.Run.Cancelled = c.bound, c.cancelled
+		if got := summaryTail(m); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// Once the bound has fired no collector will start, so a warning that
+// nothing will cancel one describes a risk the run no longer runs. The
+// question is the bound, asked when the warning would be written, and never
+// the reason's text: a watch whose start failed after the bound keeps its own
+// reason.
+func TestWatchOffNoticeKeysOnTheBoundNotTheReason(t *testing.T) {
+	reasons := []string{
+		"not started: " + maxDurationText(2*time.Hour),
+		"the collection session's id could not be read: context deadline exceeded",
+		"its connection could not be opened: dial tcp 192.0.2.1:1433: i/o timeout",
+	}
+	for _, r := range reasons {
+		if w, n := watchOffNotice(r, true); w != "" || n != "" {
+			t.Errorf("bound fired, %q: got (%q, %q), want nothing", r, w, n)
+		}
+	}
+	for _, r := range reasons[1:] {
+		w, n := watchOffNotice(r, false)
+		if want := "the blocking watch is off, " + r + ": nothing will cancel a collector that other sessions are waiting on"; w != want {
+			t.Errorf("bound not fired, warning %q, want %q", w, want)
+		}
+		if want := "note: the blocking watch is off, " + r; n != want {
+			t.Errorf("bound not fired, note %q, want %q", n, want)
+		}
+	}
+}

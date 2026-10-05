@@ -360,6 +360,23 @@ func discardSuperseded(paths []string) {
 	}
 }
 
+// summaryTail is the end of the line scripts parse after a run: the partial
+// units, then the bound, then the stop, in the order they happened. A run the
+// bound cut and the operator then stopped carries both, the bound first.
+func summaryTail(m *Manifest) string {
+	tail := ""
+	if m.PartialUnits > 0 {
+		tail = fmt.Sprintf(", %d partial", m.PartialUnits)
+	}
+	if m.Run.MaxDurationReached {
+		tail += ", max duration reached"
+	}
+	if m.Run.Cancelled {
+		tail += ", cancelled"
+	}
+	return tail
+}
+
 // settleRun turns the loop's exit code into the run's, once the loop is over,
 // and says whether the run this one replaced may now be deleted.
 //
@@ -2478,9 +2495,10 @@ func Run(ctx context.Context, o Options) (int, error) {
 	}
 	m.BlockingWatch.Enabled, m.BlockingWatch.Reason = watch != nil, reason
 	if watch == nil {
-		m.warn("the blocking watch is off, " + reason +
-			": nothing will cancel a collector that other sessions are waiting on")
-		fmt.Fprintf(o.progress(), "note: the blocking watch is off, %s\n", reason)
+		if warning, note := watchOffNotice(reason, false); warning != "" {
+			m.warn(warning)
+			fmt.Fprintln(o.progress(), note)
+		}
 	}
 	// Databases where the watch cancelled a collector. The 5-second bound is
 	// per wait, and a deployment is many statements: the next collector on the
@@ -2674,20 +2692,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// under the old test its gauge would have taken the archive path away from
 	// every script that reads it.
 	if !o.OwnsScreen {
-		// "N partial" only when there are some. The line is parsed by scripts
-		// and read at a glance by operators; a permanent ", 0 partial" would
-		// cost both and tell neither anything.
-		partial := ""
-		if m.PartialUnits > 0 {
-			partial = fmt.Sprintf(", %d partial", m.PartialUnits)
-		}
-		// Said on the line a script reads, because the exit code alone does
-		// not tell a stopped run from a failed collector.
-		if m.Run.Cancelled {
-			partial += ", cancelled"
-		}
+		// summaryTail adds "N partial" only when there are some (a permanent
+		// ", 0 partial" would cost scripts and operators and tell neither
+		// anything), and says on the line a script reads that the run was cut,
+		// because the exit code alone does not tell a stopped run from a
+		// failed collector.
 		fmt.Printf("%d result(s), %d skipped, %d error(s)%s\n%s\n",
-			len(m.Results), len(m.Skipped), len(m.Errors), partial, zipPath)
+			len(m.Results), len(m.Skipped), len(m.Errors), summaryTail(m), zipPath)
 	}
 	return code, nil
 }

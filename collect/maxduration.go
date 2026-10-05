@@ -95,3 +95,24 @@ func skipBefore(cancelledOn map[string]string, droppedOn map[string]bool, bound 
 	}
 	return "", false, false
 }
+
+// maxDurationNote is the one line the command line prints after the loop of
+// a run the bound cut. notStarted counts the units skipped for the bound
+// (skipBefore's byBound), so that it agrees with MANIFEST.txt's grouped
+// entry; stopped says a unit was cut. Its second half depends on what the
+// bound cut, since a bound that passed between units stopped nothing.
+func maxDurationNote(limit time.Duration, notStarted int, stopped bool) string {
+	n := "note: " + maxDurationText(limit) + "; "
+	switch notStarted {
+	case 0:
+		return n + "the collector running then was stopped"
+	case 1:
+		n += "1 collector was not started"
+	default:
+		n += fmt.Sprintf("%d collectors were not started", notStarted)
+	}
+	if stopped {
+		n += ", and the one running then was stopped"
+	}
+	return n
+}
