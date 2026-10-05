@@ -2497,9 +2497,6 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// other configuration refusals rather than 1, which claims the instance was
 	// unreachable when it has in fact just been read successfully.
 	runFolder := RunFolderFor(o.Config.OutputDir, RunServerName(si.Name, o.Config), o.Profile, o.Now, o.Keep)
-	// Before prepareRunFolder, because prepareRunFolder is where the previous
-	// run gets renamed aside: two runs reaching that together is exactly the
-	// collision the lock exists to stop.
 	// The bound is asked once more here, before lockRun and prepareRunFolder,
 	// which is where the previous run of the day is set aside: a bound reached
 	// during the last server step, or the local steps since, must not go on to
@@ -2510,6 +2507,9 @@ func Run(ctx context.Context, o Options) (int, error) {
 	if boundReached(bound) {
 		return stoppedOr(2, nil)
 	}
+	// Before prepareRunFolder, because prepareRunFolder is where the previous
+	// run gets renamed aside: two runs reaching that together is exactly the
+	// collision the lock exists to stop.
 	releaseLock, err := lockRun(runFolder, o.Now)
 	if err != nil {
 		m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -2932,7 +2932,8 @@ func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
 	// The first reset runs on the unit's context, so that the bound can cut
 	// it, and holds its own deadline context so that its cause can be read.
 	// cut is read from that context's first cause, before its cancel, which
-	// would otherwise set the cause to context.Canceled.
+	// would otherwise set the cause to context.Canceled. Do not fold this into
+	// resetWithDeadline, whose deferred cancel would erase the cause.
 	dctx, dcancel := deadline(unitCtx, o.Config)
 	rerr := ResetSession(dctx, conn, o.Config.Database)
 	if rerr != nil {

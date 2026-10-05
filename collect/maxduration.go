@@ -22,7 +22,8 @@ var errMaxDurationReached = errors.New("the collection reached its maximum durat
 // context.Cause(ctx) are still nil. Read in that instant, a Connect the bound
 // cut reads as an unreachable instance (exit 1, no flag; measured on
 // 5 October 2026). So the fact is read only once Done is closed when the
-// deadline has passed. The wait is the timer's lag, microseconds; a context
+// deadline has passed. It needs a deadline that keeps its monotonic reading
+// (no Round(0), UTC() or Truncate on it). The wait is the timer's lag, microseconds; a context
 // with no deadline, or one not yet passed, is returned at once.
 func settled(ctx context.Context) context.Context {
 	if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) {

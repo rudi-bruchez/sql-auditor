@@ -382,7 +382,11 @@ from before the wizard.
   the next collection of that server and day can start.
 - A collection in which `--max-duration` cut something exits `2`, its last line but one ends
   with `max duration reached` (then `cancelled` if it was also stopped), and a
-  note on stderr says how many collectors were not started.
+  note on stderr says how many collectors were not started; when only the
+  collector running at that moment was cut, the note gives no count. When the
+  bound passes before the first collector, there is no run folder, no archive,
+  no summary line and no note: the run exits `2` with the error on stderr, and
+  the flag and a warning go into the manifest of the failed run.
 - A run that did not complete, because it was stopped or a collector failed,
   never deletes the earlier run of the same server and day that it replaces:
   that run stays beside it, named `.superseded-HHMMSS`, and the collection says
@@ -504,9 +508,8 @@ collection. The bound counts from the start of the run, connecting included,
 the same origin as `duration_sec` in `_run.json`. Once it has passed, no
 collector starts, and the statement running at that moment is cancelled. Every
 collector not started is listed in `_run.json` with the reason, the run exits
-`2`, and the archive is partial. That holds when the bound cut something: a
-collector not started, one stopped, or the run itself before its first
-collector. A bound that passes after the last collector has cut nothing, and
+`2`, and the archive, when there is one, is partial. That holds when the bound
+cut something: a collector not started, or one stopped. A bound that passes after the last collector has cut nothing, and
 the run exits `0` with a whole archive. The collection is bounded; nothing is
 judged.
 

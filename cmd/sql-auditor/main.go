@@ -1094,9 +1094,10 @@ Options (check, collect):
   --keep                      keep an existing same-day run folder
   --max-duration D            bound the whole collection, counted from its
                               start: once D has passed, no collector starts,
-                              the one running is stopped, and the run exits 2
-                              with a partial archive. A Go duration in whole
-                              seconds, at least one minute: 90m, 2h, 1h30m.
+                              the one running is stopped, and the run exits 2;
+                              the archive, when there is one, is partial.
+                              A Go duration in whole seconds, at least one
+                              minute: 90m, 2h, 1h30m.
                               Overrides MAX_DURATION.
   --profile NAME              collect only the collectors of a profile. The one
                               profile is space: what makes the databases on this
