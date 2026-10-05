@@ -377,3 +377,92 @@ func TestLiveMaxDurationThenAStopAtTheCheckBeforeTheRunFolder(t *testing.T) {
 		t.Errorf("verdict %+v", v)
 	}
 }
+
+// waitOnceAt returns a hook that waits for the bound at its first call at
+// point, and does nothing at any other.
+func waitOnceAt(point string, called *bool) func(string, context.Context) {
+	return func(p string, b context.Context) {
+		if p == point && !*called {
+			*called = true
+			<-b.Done()
+		}
+	}
+}
+
+// Criterion 10, a run cut only between two units: no unit fails, so exit
+// would stay 0 unless settleRun is given the bound.
+func TestLiveMaxDurationBetweenTwoUnits(t *testing.T) {
+	called := false
+	pauseHook = waitOnceAt("after a unit", &called)
+	defer func() { pauseHook = nil }()
+	o := maxDurRun(t, context.Background(), maxDurFast, t.TempDir(), time.Now(), 3*time.Second, nil)
+	if !called {
+		t.Fatal("the hook was never called")
+	}
+	if o.code != 2 || !o.m.Run.MaxDurationReached {
+		t.Errorf("exit %d, reached %v; want 2, true", o.code, o.m.Run.MaxDurationReached)
+	}
+	if len(o.m.Results) != 1 || len(o.m.Skipped) != 1 || o.m.Skipped[0].Reason != maxDurationSkipReason(3*time.Second) {
+		t.Errorf("results %d, skipped %+v; want one result and one skip for the bound", len(o.m.Results), o.m.Skipped)
+	}
+	if len(o.rec.skips) != 1 || !o.rec.skips[0].MaxDuration {
+		t.Errorf("the observer was not told the skip was the bound's: %+v", o.rec.skips)
+	}
+	if nl := noteLines(o.progress); len(nl) != 1 || nl[0] != "note: the collection reached its maximum duration of 0m03s (3 s); 1 collector was not started" {
+		t.Errorf("note lines %q", nl)
+	}
+	if strings.Contains(o.progress, "connection lost") {
+		t.Error("connection lost printed")
+	}
+	if v := o.verdict(t); v != (Verdict{MaxDurationReached: true, Collected: 1}) {
+		t.Errorf("verdict %+v, want {MaxDurationReached: true, Collected: 1}", v)
+	}
+	if o.m.Config["max_duration_sec"] != "3" {
+		t.Errorf("max_duration_sec %q, want 3", o.m.Config["max_duration_sec"])
+	}
+}
+
+// Criterion 9: a bound that passes after the last unit cut nothing.
+func TestLiveMaxDurationAfterTheLastUnitCutsNothing(t *testing.T) {
+	called := false
+	pauseHook = waitOnceAt("after a unit", &called)
+	defer func() { pauseHook = nil }()
+	o := maxDurRun(t, context.Background(), maxDurOne, t.TempDir(), time.Now(), 3*time.Second, nil)
+	if !called {
+		t.Fatal("the hook was never called")
+	}
+	if o.code != 0 || o.m.Run.MaxDurationReached || len(noteLines(o.progress)) != 0 {
+		t.Errorf("exit %d, reached %v, notes %q; want 0, false, none", o.code, o.m.Run.MaxDurationReached, noteLines(o.progress))
+	}
+	if v := o.verdict(t); v != (Verdict{Collected: 1}) {
+		t.Errorf("verdict %+v, want {Collected: 1}", v)
+	}
+}
+
+// Criterion 6c. A failure earned before the bound: the unit's 208 keeps its
+// words, the bound skips the rest without pinging a connection it no longer
+// needs, and the run's own failure is in the verdict.
+func TestLiveMaxDurationAfterAFailureOfTheUnitsOwn(t *testing.T) {
+	called := false
+	pauseHook = waitOnceAt("after a unit", &called)
+	defer func() { pauseHook = nil }()
+	o := maxDurRun(t, context.Background(), maxDurMissing, t.TempDir(), time.Now(), 3*time.Second, nil)
+	if !called {
+		t.Fatal("the hook was never called")
+	}
+	if o.code != 2 || !o.m.Run.MaxDurationReached {
+		t.Errorf("exit %d, reached %v; want 2, true", o.code, o.m.Run.MaxDurationReached)
+	}
+	if len(o.m.Errors) != 1 || o.m.Errors[0].SQLError != 208 || strings.Contains(o.m.Errors[0].Message, "stopped when") {
+		t.Errorf("errors %+v; want the unit's 208 in its own words", o.m.Errors)
+	}
+	if len(o.m.Skipped) != 1 || o.m.Skipped[0].Reason != maxDurationSkipReason(3*time.Second) {
+		t.Errorf("skipped %+v; want the second unit skipped for the bound", o.m.Skipped)
+	}
+	if strings.Contains(o.progress, "connection lost") {
+		t.Error("connection lost printed about a connection that was fine")
+	}
+	if v := o.verdict(t); !v.MaxDurationReached || !v.Failed {
+		t.Errorf("verdict %+v, want MaxDurationReached and Failed", v)
+	}
+}

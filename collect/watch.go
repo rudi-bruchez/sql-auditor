@@ -687,7 +687,14 @@ func heldBack(cancelledOn map[string]string, db string) (string, bool) {
 // UnitSkipped is what Observer.UnitDone carries for a planned unit the run
 // decided, once running, not to execute. It is not a failure: the gauge counts
 // the unit, since Planned did, and the screens show it as a skip.
-type UnitSkipped struct{ Reason string }
+//
+// MaxDuration marks the bound's skips. A bound that fires early skips
+// hundreds of units for one reason, so the screens count them without a line
+// each; the note after the loop and the wizard's last screen say it once.
+type UnitSkipped struct {
+	Reason      string
+	MaxDuration bool
+}
 
 func (e *UnitSkipped) Error() string { return "skipped: " + e.Reason }
 

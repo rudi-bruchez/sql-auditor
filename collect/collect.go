@@ -2576,18 +2576,20 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// was left to collect there.
 	droppedOn := map[string]bool{}
 	watchNoted := false
+	notStarted, stoppedByBound := 0, false
 
 	for _, u := range units {
 		s, target := u.Script, u.Target
-		reason, ok := heldBack(cancelledOn, target.Name)
-		if !ok {
-			reason, ok = droppedBefore(droppedOn, target.Name)
-		}
-		if ok {
+		reason, byBound, skip := skipBefore(cancelledOn, droppedOn, bound, limit, target.Name)
+		if skip {
+			if byBound {
+				m.Run.MaxDurationReached = true
+				notStarted++
+			}
 			m.Skipped = append(m.Skipped, SkippedScript{Script: s.Path, Target: target.Name, Reason: reason})
 			// UnitDone and not ScriptSkipped: this unit was planned, and one
 			// UnitDone per planned unit is what brings the gauge to its total.
-			obs.UnitDone(s.Path, target.Name, 0, 0, &UnitSkipped{Reason: reason})
+			obs.UnitDone(s.Path, target.Name, 0, 0, &UnitSkipped{Reason: reason, MaxDuration: byBound})
 			continue
 		}
 		obs.UnitStarted(s.Path, target.Name)
@@ -2596,6 +2598,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// line, and the last name printed is the one to look at.
 		o.Debugf("running %s on %s", s.Path, target.Name)
 		err := runUnit(ctx, conn, o, m, rw, s, target, watch, spid)
+		pause("after a unit", bound)
 		var be *blockedError
 		if errors.As(err, &be) && target.Name != "" {
 			cancelledOn[target.Name] = s.Path
@@ -2615,7 +2618,11 @@ func Run(ctx context.Context, o Options) (int, error) {
 		// A stop is asked about first, as recordUnitFailure does: a dead
 		// context fails the catalog check too, and a stop is not a drop.
 		if err != nil && ctx.Err() == nil && databaseDropped(err, target.Name, func(name string) (bool, error) {
-			return databaseExists(ctx, conn, o.Config, name)
+			// Under the bound: once the bound has passed it fails at once, and
+			// a check that could not be made reads as "not shown dropped". A
+			// real drop in the same instant as the bound is filed as an error,
+			// in a run that exits 2 for the bound anyway.
+			return databaseExists(bound, conn, o.Config, name)
 		}) {
 			// From here the unit is treated as one that succeeded with
 			// nothing to write: no error, and the ordinary session recycle.
@@ -2642,9 +2649,22 @@ func Run(ctx context.Context, o Options) (int, error) {
 		o.Debugf("  %s on %s took %s, wrote %d byte(s)%s",
 			s.Path, target.Name, took.Round(time.Millisecond), wrote, failureNote(report))
 		if err == nil {
-			if conn, spid, err = recycleConn(ctx, db, conn, o.Config); err != nil {
+			// After a unit: the stop, then the bound. Once the bound has
+			// passed the loop neither recycles nor pings nor reconnects; the
+			// units left are skipped and nothing after the loop uses the
+			// connection.
+			if stopRequested(ctx, m) {
+				break
+			}
+			if boundReached(bound) {
+				continue
+			}
+			if conn, spid, err = recycleConn(bound, db, conn, o.Config); err != nil {
 				if stopRequested(ctx, m) {
 					break
+				}
+				if boundReached(bound) {
+					continue
 				}
 				err = fmt.Errorf("session reset after %s failed: %w", s.Path, err)
 				m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
@@ -2679,32 +2699,67 @@ func Run(ctx context.Context, o Options) (int, error) {
 		if stopRequested(ctx, m) {
 			break
 		}
-		if !connAlive(ctx, conn, o.Config) {
+		if boundReached(bound) {
+			continue
+		}
+		if !connAlive(bound, conn, o.Config) {
+			// A ping on a context whose bound has fired fails at once, so a
+			// bound landing during the ping would print a lost connection
+			// about one that was fine. The stop, then the bound, before a word.
+			if stopRequested(ctx, m) {
+				break
+			}
+			if boundReached(bound) {
+				continue
+			}
 			fmt.Fprintln(o.progress(), "connection lost; attempting one reconnect")
 			conn.Close()
-			fresh, cerr := Connect(ctx, db, o.Config)
+			fresh, cerr := Connect(bound, db, o.Config)
 			if cerr != nil {
+				if stopRequested(ctx, m) {
+					break
+				}
+				if boundReached(bound) {
+					continue
+				}
 				cerr = fmt.Errorf("reconnect failed: %w", cerr)
 				m.Errors = append(m.Errors, ErrorEntry{Message: cerr.Error()})
 				return finishWith(runFolder, 1, cerr)
 			}
 			conn = fresh
-			if rerr := resetWithDeadline(ctx, conn, o.Config); rerr != nil {
+			if rerr := resetWithDeadline(bound, conn, o.Config); rerr != nil {
+				if stopRequested(ctx, m) {
+					break
+				}
+				if boundReached(bound) {
+					continue
+				}
 				rerr = fmt.Errorf("session reset after reconnect failed: %w", rerr)
 				m.Errors = append(m.Errors, ErrorEntry{Message: rerr.Error()})
 				return finishWith(runFolder, 1, rerr)
 			}
 			// A new connection is a new session: watching the old id would
 			// watch nothing. Zero, if it cannot be read, matches no waiter.
-			spid, _ = sessionID(ctx, conn, o.Config)
-		} else if conn, spid, err = recycleConn(ctx, db, conn, o.Config); err != nil {
+			// Under the bound: its error is ignored, and on the run's context
+			// it would be a query after the bound with nothing to report it.
+			spid, _ = sessionID(bound, conn, o.Config)
+		} else if conn, spid, err = recycleConn(bound, db, conn, o.Config); err != nil {
 			if stopRequested(ctx, m) {
 				break
+			}
+			if boundReached(bound) {
+				continue
 			}
 			err = fmt.Errorf("session reset after %s failed: %w", s.Path, err)
 			m.Errors = append(m.Errors, ErrorEntry{Message: err.Error()})
 			return finishWith(runFolder, 1, err)
 		}
+	}
+
+	// One line for what the bound cut, counted from the bound's own skips so
+	// that it agrees with MANIFEST.txt; a skip per line would be hundreds.
+	if m.Run.MaxDurationReached {
+		fmt.Fprintln(o.progress(), maxDurationNote(limit, notStarted, stoppedByBound))
 	}
 
 	// The two phases after the loop are announced because they are the only
@@ -2713,7 +2768,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// run folder is being zipped.
 	obs.Phase("writing manifest")
 	o.Debugf("all units done; writing the manifest")
-	exit, discardPrevious := settleRun(exit, m.Run.Cancelled)
+	exit, discardPrevious := settleRun(exit, m.Run.Cancelled || m.Run.MaxDurationReached)
 	// A complete run is not yet a run that covers the one it replaced. Exit 0
 	// alone deleted the morning's --all archive under a plain afternoon
 	// collect, with its session text, its plans and its module source.
