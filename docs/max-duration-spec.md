@@ -1727,6 +1727,12 @@ bound as a fact: a refused login or a step's own timeout landing within
 milliseconds of the bound is filed as the bound and exits 2 rather than 1,
 with the step's words quoted in the bound's warning.
 
+On the same day the owner validated version six's change to `cut`: inside
+a unit it reads the first cause of the failing call itself, so a collector
+stopped first by its own `@timeout` or by the blocking watch stays a failure
+when the bound passes during the driver's wait. Before the run folder the
+bound still wins, as decided for version five.
+
 ## Review of 4 October 2026
 
 Five readers ran the first draft (`6998f70`) against the tree of the day and
