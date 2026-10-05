@@ -242,7 +242,7 @@ func TestOutOfTimeNamesTheLimitThatExpired(t *testing.T) {
 	defer cancel()
 	<-unit.Done()
 
-	err := outOfTime(parent, unit, 600*time.Second, "@timeout", context.DeadlineExceeded)
+	err := outOfTime(parent, unit, 600*time.Second, 0, "@timeout", context.DeadlineExceeded)
 	for _, want := range []string{"@timeout", "10m0s", "context deadline exceeded"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("message %q does not carry %q", err, want)
@@ -264,7 +264,7 @@ func TestOutOfTimeLeavesACancelledRunAlone(t *testing.T) {
 	stop()
 	<-unit.Done()
 
-	err := outOfTime(parent, unit, time.Minute, "@timeout", context.Canceled)
+	err := outOfTime(parent, unit, time.Minute, 0, "@timeout", context.Canceled)
 	if err != context.Canceled {
 		t.Errorf("err = %v, want the error untouched on a cancelled run", err)
 	}
@@ -281,7 +281,7 @@ func TestOutOfTimeLeavesASQLErrorAloneEvenOnTheDeadline(t *testing.T) {
 	<-unit.Done()
 
 	boom := mssql.Error{Number: 208, Message: "Invalid object name."}
-	if err := outOfTime(parent, unit, time.Minute, "@timeout", boom); err.Error() != boom.Error() {
+	if err := outOfTime(parent, unit, time.Minute, 0, "@timeout", boom); err.Error() != boom.Error() {
 		t.Errorf("err = %v, want the SQL error untouched", err)
 	}
 }
@@ -293,7 +293,7 @@ func TestOutOfTimeLeavesAnOrdinaryFailureAlone(t *testing.T) {
 	defer cancel()
 	boom := errors.New("Invalid object name 'sys.dm_nope'.")
 
-	if err := outOfTime(context.Background(), unit, time.Minute, "@timeout", boom); err != boom {
+	if err := outOfTime(context.Background(), unit, time.Minute, 0, "@timeout", boom); err != boom {
 		t.Errorf("err = %v, want the SQL error untouched", err)
 	}
 }

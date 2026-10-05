@@ -2711,8 +2711,13 @@ func Run(ctx context.Context, o Options) (int, error) {
 // The driver's own words are kept in the message. They are what a search
 // engine matches, and dropping them to make room for a nicer sentence would
 // trade one kind of unreadable for another.
-func outOfTime(parent, unit context.Context, limit time.Duration, knob string, err error) error {
-	if parent.Err() != nil || unit.Err() != context.DeadlineExceeded {
+//
+// The bound's expiry reaches here too: a query context under a bound that
+// fired has Err() DeadlineExceeded, so the guard lets both through, and the
+// call's first cause, asked after the error number, tells the bound from the
+// unit's own @timeout. bound is the configured bound, for the words.
+func outOfTime(parent, call context.Context, limit, bound time.Duration, knob string, err error) error {
+	if parent.Err() != nil || call.Err() != context.DeadlineExceeded {
 		return err
 	}
 	// A SQL Server error keeps its own words. A genuine failure and the deadline
@@ -2730,6 +2735,9 @@ func outOfTime(parent, unit context.Context, limit time.Duration, knob string, e
 	// disagree.
 	if sqlErrorNumber(err) != 0 {
 		return err
+	}
+	if context.Cause(call) == errMaxDurationReached {
+		return fmt.Errorf("stopped when %s: %w", maxDurationText(bound), err)
 	}
 	return fmt.Errorf("still running when %s of %s expired: %w", knob, limit, err)
 }
@@ -2809,13 +2817,13 @@ func runUnit(ctx context.Context, conn *sql.Conn, o Options, m *Manifest,
 	start := time.Now()
 	rows, err := conn.QueryContext(qctx, s.SQL, args...)
 	if err != nil {
-		return blocked(outOfTime(ctx, qctx, timeout, knob, err))
+		return blocked(outOfTime(ctx, qctx, timeout, o.Config.MaxDuration, knob, err))
 	}
 	defer rows.Close()
 
 	sets, err := ReadResultSets(rows, s.Results)
 	if err != nil {
-		return blocked(outOfTime(ctx, qctx, timeout, knob, err))
+		return blocked(outOfTime(ctx, qctx, timeout, o.Config.MaxDuration, knob, err))
 	}
 	rows.Close()
 	leave()

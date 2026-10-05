@@ -1,0 +1,72 @@
+package collect
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+// errMaxDurationReached is the cause the bound's context is cancelled with.
+// Every question this package asks about the bound is whether a context's
+// first cause is this value: a context keeps the first cause it was cancelled
+// with, so the answer does not change when the operator stops the run after
+// the bound fired, and is not the bound's when the stop came first.
+var errMaxDurationReached = errors.New("the collection reached its maximum duration")
+
+// settled returns ctx once its state can be read. A context whose deadline
+// has passed by the clock is cancelled an instant later, by a runtime timer,
+// and a dial bounded by that deadline does not wait for it: net.Dialer turns
+// the deadline into a socket deadline and returns i/o timeout, which
+// errors.Is(err, context.DeadlineExceeded), while ctx.Err() and
+// context.Cause(ctx) are still nil. Read in that instant, a Connect the bound
+// cut reads as an unreachable instance (exit 1, no flag; measured on
+// 5 October 2026). So the fact is read only once Done is closed when the
+// deadline has passed. The wait is the timer's lag, microseconds; a context
+// with no deadline, or one not yet passed, is returned at once.
+func settled(ctx context.Context) context.Context {
+	if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) {
+		<-ctx.Done()
+	}
+	return ctx
+}
+
+// boundReached says whether the bound fired before anything else cancelled
+// bound. The cause and not bound.Err(): a ctrl-c cancels bound too, with the
+// cause context.Canceled. Through settled, since every caller asks right after
+// a step returned an error, and a failed dial returns before the bound's timer
+// has run.
+func boundReached(bound context.Context) bool {
+	return context.Cause(settled(bound)) == errMaxDurationReached
+}
+
+// maxDurationText is the one sentence every message of this feature is built
+// on. The cause is a constant and the deadline an instant, so neither carries
+// the duration the operator set, and the caller passes it.
+func maxDurationText(limit time.Duration) string {
+	return "the collection reached its maximum duration of " + formatCeiling(limit)
+}
+
+// maxDurationOr writes the words of a failed server call, and only the words:
+// whether the bound cut the run is decided elsewhere, from the call's cause,
+// and never from what this returns.
+//
+// The order is the rule. A dead run context is the operator's stop, which
+// recordUnitFailure files and drops. A call whose first cause is not the
+// bound was stopped by something else first (its own deadline, the blocking
+// watch), and its error keeps its words even when the bound passed during the
+// driver's wait for the cancellation. A SQL Server error number is a failure
+// of the server's own, as outOfTime already rules for its deadline. call is
+// the context the failing call ran on, the innermost one, never the unit's.
+func maxDurationOr(parent, call context.Context, limit time.Duration, err error) error {
+	if err == nil || parent.Err() != nil {
+		return err
+	}
+	if context.Cause(call) != errMaxDurationReached {
+		return err
+	}
+	if sqlErrorNumber(err) != 0 {
+		return err
+	}
+	return fmt.Errorf("stopped when %s: %w", maxDurationText(limit), err)
+}
