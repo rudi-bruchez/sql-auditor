@@ -2550,18 +2550,34 @@ func Run(ctx context.Context, o Options) (int, error) {
 	// The blocking watch starts last, when nothing is left between it and the
 	// first unit. It needs the collection session's id, which a reconnect
 	// changes, so the id is read here and again after every reconnect.
-	spid, spidErr := sessionID(ctx, conn, o.Config)
+	spid, spidErr := sessionID(bound, conn, o.Config)
+	if spidErr == nil {
+		// After a successful read, so that a test can place the bound after it.
+		o.Debugf("the collection session is %d", spid)
+	}
+	// The bound is asked before the watch starts: once it has passed no
+	// collector will run, and a watch would protect nothing. The reason says
+	// only that the bound had passed, which is true of every plan; whether it
+	// cut anything is max_duration_reached's to say. The watch's start itself
+	// stays on the run's context, and is not cut by the bound.
+	pause("before the blocking watch", bound)
 	var stopWatch func()
 	reason := ""
-	if spidErr != nil {
+	switch {
+	case boundReached(bound):
+		reason = "not started: " + maxDurationText(limit)
+	case spidErr != nil:
 		reason = "the collection session's id could not be read: " + spidErr.Error()
-	} else {
+	default:
 		watch, stopWatch, reason = startBlockingWatch(ctx, o.Config, denied, spid)
 		defer stopWatch()
 	}
 	m.BlockingWatch.Enabled, m.BlockingWatch.Reason = watch != nil, reason
 	if watch == nil {
-		if warning, note := watchOffNotice(reason, false); warning != "" {
+		// Asked at the moment of writing, whatever the reason: a start that
+		// began before the bound and failed after it keeps its own reason
+		// and has no collector to protect either.
+		if warning, note := watchOffNotice(reason, boundReached(bound)); warning != "" {
 			m.warn(warning)
 			fmt.Fprintln(o.progress(), note)
 		}

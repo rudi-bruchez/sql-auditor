@@ -466,3 +466,62 @@ func TestLiveMaxDurationAfterAFailureOfTheUnitsOwn(t *testing.T) {
 		t.Errorf("verdict %+v, want MaxDurationReached and Failed", v)
 	}
 }
+
+// Criterion 16a. A same-day rerun without --keep, cut after the run folder
+// and before the watch: both units skipped, the watch not started and not
+// warned about, the run partial, the first run kept.
+func TestLiveMaxDurationAfterTheRunFolderKeepsThePreviousRun(t *testing.T) {
+	out, now := t.TempDir(), time.Now()
+	if first := maxDurRun(t, context.Background(), maxDurFast, out, now, 0, nil); first.code != 0 {
+		t.Fatalf("first run exit %d", first.code)
+	}
+	dbg := &lockedBuf{}
+	called, sessionRead := false, false
+	pauseHook = func(point string, b context.Context) {
+		if point == "before the blocking watch" && !called {
+			called = true
+			sessionRead = strings.Contains(dbg.String(), "the collection session is ")
+			<-b.Done()
+		}
+	}
+	defer func() { pauseHook = nil }()
+	o := maxDurRun(t, context.Background(), maxDurFast, out, now, 3*time.Second, dbg)
+	if !called {
+		t.Fatal("the hook was never called")
+	}
+	if !sessionRead {
+		t.Error("the hook ran before the session id was read")
+	}
+	if o.code != 2 || !o.m.Run.MaxDurationReached || len(o.m.Results) != 0 {
+		t.Errorf("exit %d, reached %v, results %d; want 2, true, 0", o.code, o.m.Run.MaxDurationReached, len(o.m.Results))
+	}
+	reason := maxDurationSkipReason(3 * time.Second)
+	if len(o.m.Skipped) != 2 || o.m.Skipped[0].Reason != reason || o.m.Skipped[1].Reason != reason {
+		t.Errorf("skipped %+v; want both units for the bound", o.m.Skipped)
+	}
+	if len(o.rec.skips) != 2 || !o.rec.skips[0].MaxDuration || !o.rec.skips[1].MaxDuration {
+		t.Errorf("skips told to the observer: %+v", o.rec.skips)
+	}
+	if o.m.BlockingWatch.Enabled || o.m.BlockingWatch.Reason != "not started: the collection reached its maximum duration of 0m03s (3 s)" {
+		t.Errorf("watch %v, reason %q", o.m.BlockingWatch.Enabled, o.m.BlockingWatch.Reason)
+	}
+	for _, w := range o.m.Warnings {
+		if strings.Contains(w, "nothing will cancel") {
+			t.Errorf("warning about a watch that has nothing to protect: %q", w)
+		}
+	}
+	if strings.Contains(o.progress, "note: the blocking watch is off") {
+		t.Error("stderr note about the watch")
+	}
+	if nl := noteLines(o.progress); len(nl) != 1 || !strings.HasSuffix(nl[0], "; 2 collectors were not started") {
+		t.Errorf("note lines %q", nl)
+	}
+	if !strings.Contains(o.progress, "this run is partial, so the run it replaced was kept:") {
+		t.Error("Progress does not say the run it replaced was kept")
+	}
+	zips, _ := filepath.Glob(filepath.Join(out, "*.zip"))
+	aside, _ := filepath.Glob(filepath.Join(out, "*.superseded-*"))
+	if len(zips) == 0 || len(aside) == 0 {
+		t.Errorf("archives %v, set aside %v; want this run's archive and the first run kept", zips, aside)
+	}
+}
