@@ -380,7 +380,7 @@ from before the wizard.
   files already written stay in the run folder, but there is no manifest and no
   archive, and the `.lock` file left beside the folder has to be deleted before
   the next collection of that server and day can start.
-- A collection cut by `--max-duration` exits `2`, its last line but one ends
+- A collection in which `--max-duration` cut something exits `2`, its last line but one ends
   with `max duration reached` (then `cancelled` if it was also stopped), and a
   note on stderr says how many collectors were not started.
 - A run that did not complete, because it was stopped or a collector failed,
@@ -504,7 +504,11 @@ collection. The bound counts from the start of the run, connecting included,
 the same origin as `duration_sec` in `_run.json`. Once it has passed, no
 collector starts, and the statement running at that moment is cancelled. Every
 collector not started is listed in `_run.json` with the reason, the run exits
-`2`, and the archive is partial. The collection is bounded; nothing is judged.
+`2`, and the archive is partial. That holds when the bound cut something: a
+collector not started, one stopped, or the run itself before its first
+collector. A bound that passes after the last collector has cut nothing, and
+the run exits `0` with a whole archive. The collection is bounded; nothing is
+judged.
 
 What can still run after the bound: the server can take a few seconds to
 confirm the cancellation of the statement in flight, and longer to undo what

@@ -978,6 +978,11 @@ jobs:
           SQL_AUDITOR_LIVE_USER: sa
           SQL_AUDITOR_LIVE_PASSWORD: ${{ env.SQL_PASSWORD }}
         run: |
+          # The runner's bash is `bash -e`, without pipefail: without this
+          # line the status of the pipe below is tee's, and a failing test
+          # would leave the step green.
+          set -o pipefail
           go test ./collect/ -run '^TestLiveMaxDuration' -count=1 -v | tee "$RUNNER_TEMP/maxdur.log"
           grep -q '^--- PASS' "$RUNNER_TEMP/maxdur.log"
           if grep -q '^--- SKIP' "$RUNNER_TEMP/maxdur.log"; then exit 1; fi
+          if grep -q '^--- FAIL' "$RUNNER_TEMP/maxdur.log"; then exit 1; fi
