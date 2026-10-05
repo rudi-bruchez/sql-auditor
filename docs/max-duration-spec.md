@@ -24,6 +24,12 @@ the second review found on the way and that does not depend on the bound: the
 wizard offers an archive only when `Run` returned no error (`3a8cc59`,
 `archiveOf` in `tui/run.go`).
 
+The review of the implementation plan, on 5 October 2026, found that the
+bound's cause can be read in the instant between its deadline and the timer
+that cancels it, when a dial has already failed; version 6 adds the rule
+under "The bound as a fact" and corrects criterion 12's test name, without a
+new version number.
+
 ## The question
 
 An operator starts a collection of the `space` profile with
@@ -296,6 +302,24 @@ later passes. So `boundReached` answers, at any later moment, whether the
 bound fired before the operator stopped the run, and nothing that happens
 afterwards changes the answer. That is the fact the run records, and the only
 thing the run's verdict is built from.
+
+The fact is read only once the bound's `Done` is closed, when its deadline
+has passed by the clock. A context with a deadline is cancelled by a runtime
+timer an instant after that deadline, and a dial does not wait for it:
+`net.Dialer` turns the context's deadline into a socket deadline and returns
+`i/o timeout`, which `errors.Is(err, context.DeadlineExceeded)`, while
+`bound.Err()` and `context.Cause(bound)` are still nil. Read in that instant,
+a `Connect` or a reconnect the bound cut answers "not the bound", and the run
+exits 1 about an unreachable instance. Measured on 5 October 2026: 200 dials
+out of 200 made just after a `WithDeadlineCause` deadline failed with a nil
+cause, and criterion 5a's test failed that way once in 300 runs on the
+prototype, none in 600 with the rule. So `boundReached` asks
+`context.Cause(settled(bound))`, where `settled` waits on `Done` when the
+deadline has passed and returns at once otherwise, and `Connect`'s own test
+of `ctx.Err()`, which tells its login budget from its caller's deadline, goes
+through `settled` too. Query errors do not need it: the driver reads a
+context's deadline only to reach the SQL Browser, so a query fails from
+`Done`, which closes after the cause is set.
 
 Version 4 built the verdict from errors instead. A unit counted as cut by the
 bound when its error had become a `*maxDurationError`; a step before the run
@@ -1578,9 +1602,11 @@ gauge, which is package `main`, and does not pretend to: it records what
     although it never reaches a ceiling. Fails, measured, when the line is
     printed with the ceiling rather than after `Output   :`. Without a bound,
     what `check` prints before it connects, and its Duration block, are
-    byte-identical to today's, which
-    `TestCheckPrintsTheCorpusBeforeItTouchesTheInstance` already asserts for
-    the first.
+    byte-identical to today's, which `TestCheckStillWritesItsListingToStdout`
+    already asserts for the first: it compares the whole of stdout.
+    `TestCheckPrintsTheCorpusBeforeItTouchesTheInstance` does not, since it
+    reads only as many bytes as it expects and cannot see a line printed after
+    them (the plan's review found it, 5 October 2026).
 13. The screens, without a server. This is where the command line's gauge is
     tested, since a live test in `collect` cannot reach it. Its `progress`,
     fed 198 `UnitDone` calls carrying a `*UnitSkipped` with `MaxDuration` set,
