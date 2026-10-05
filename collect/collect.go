@@ -2961,18 +2961,7 @@ func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
 		if worst.seen() {
 			m.BlockingWatch.AddBlockedWait(incidentOf(s.Path, u.Name, worst, round, errors.As(err, &be)))
 		}
-		switch {
-		case errors.As(err, &be):
-			m.BlockingWatch.CancelledUnits++
-		case fired:
-			m.warn(fmt.Sprintf(
-				"%s on %s: %s; the collector had already read its rows, and the waiter was released when the session left the database",
-				s.Path, orInstance(u.Name), worst))
-		case worst.seen():
-			m.warn(fmt.Sprintf(
-				"%s on %s: %s, under the blocking watch's %s limit",
-				s.Path, orInstance(u.Name), worst, watchCancelAfter))
-		}
+		recordWatchOutcome(m, s.Path, u.Name, worst, fired, cut, err)
 	}()
 	blocked := func(err error) error { return blockedOr(unitCtx, err) }
 

@@ -744,3 +744,33 @@ func watchOffNotice(reason string, boundFired bool) (warning, note string) {
 	return "the blocking watch is off, " + reason + ": nothing will cancel a collector that other sessions are waiting on",
 		"note: the blocking watch is off, " + reason
 }
+
+// recordWatchOutcome is runUnit's account of what the watch saw while the
+// unit was armed, apart from the blocked wait itself. The case of a unit cut
+// by the bound comes after the watch's own cancellation and before fired: the
+// watch can reach its limit while the driver waits for the cancellation of a
+// unit the bound stopped, and fired's sentence (the rows already read) is
+// false for it, as is the worst wait's (under the limit). It is reached only
+// when the bound came first: a watch that cancelled first leaves its
+// *blockedError as the cause, and the first case files it. It reads cut and
+// not the error, so a cut unit whose error kept a SQL Server number gets the
+// same sentence.
+func recordWatchOutcome(m *Manifest, script, target string, worst waitSample, fired, cut bool, err error) {
+	var be *blockedError
+	switch {
+	case errors.As(err, &be):
+		m.BlockingWatch.CancelledUnits++
+	case cut && fired:
+		m.warn(fmt.Sprintf(
+			"%s on %s: %s; the collector was being stopped at the collection's maximum duration when the blocking watch reached its %s limit",
+			script, orInstance(target), worst, watchCancelAfter))
+	case fired:
+		m.warn(fmt.Sprintf(
+			"%s on %s: %s; the collector had already read its rows, and the waiter was released when the session left the database",
+			script, orInstance(target), worst))
+	case worst.seen():
+		m.warn(fmt.Sprintf(
+			"%s on %s: %s, under the blocking watch's %s limit",
+			script, orInstance(target), worst, watchCancelAfter))
+	}
+}

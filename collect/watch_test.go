@@ -750,3 +750,34 @@ func TestWatchReconnectIsCappedWhateverTheConnectTimeout(t *testing.T) {
 		t.Fatalf("a reconnect ran past %v", watchReconnectDeadline)
 	}
 }
+
+// The deferred switch of runUnit, case by case. A unit stopped at the bound
+// may hold locks while the driver waits for the cancellation, and the watch
+// can reach its limit then: that is neither "had already read its rows" nor
+// "under the limit". The case reads cut, not the error, so a cut unit whose
+// error kept a SQL Server number gets the same sentence.
+func TestTheWatchsRecordAfterABoundStop(t *testing.T) {
+	worst := waitSample{Session: 70, WaitType: "LCK_M_S", Waited: 5300 * time.Millisecond, Resource: "KEY: 5:1 (a)"}
+	const unit = "70.schema/055.page-density.sql on SALESDB: session 70 had been waiting on this collector for 5.3 s (LCK_M_S, KEY: 5:1 (a))"
+	stopped := unit + "; the collector was being stopped at the collection's maximum duration when the blocking watch reached its 5s limit"
+	for _, c := range []struct {
+		name       string
+		fired, cut bool
+		err        error
+		warning    string
+		cancelled  int
+	}{
+		{"cut, the watch fired", true, true, context.DeadlineExceeded, stopped, 0},
+		{"cut with a SQL error number, the watch fired", true, true, mssql.Error{Number: 1222, Message: "Lock request time out period exceeded."}, stopped, 0},
+		{"not cut, the watch fired", true, false, nil, unit + "; the collector had already read its rows, and the waiter was released when the session left the database", 0},
+		{"a wait under the limit", false, false, nil, unit + ", under the blocking watch's 5s limit", 0},
+		{"cancelled by the watch", true, false, &blockedError{Sample: worst}, "", 1},
+	} {
+		m := &Manifest{}
+		recordWatchOutcome(m, "70.schema/055.page-density.sql", "SALESDB", worst, c.fired, c.cut, c.err)
+		got := strings.Join(m.Warnings, "|")
+		if got != c.warning || m.BlockingWatch.CancelledUnits != c.cancelled {
+			t.Errorf("%s: warnings %q, cancelled %d; want %q, %d", c.name, got, m.BlockingWatch.CancelledUnits, c.warning, c.cancelled)
+		}
+	}
+}
