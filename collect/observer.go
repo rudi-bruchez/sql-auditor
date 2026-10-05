@@ -1,6 +1,9 @@
 package collect
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Observer is how a caller watches a run go by. It is defined here, in the
 // package that produces the events, and implemented by whoever displays them:
@@ -102,6 +105,24 @@ func planUnits(plan []plannedScript, folders []DatabaseFolder, cfg *Config) ([]u
 			units = append(units, unit{Script: s, Target: t})
 		}
 	}
+	// The units of a collector gated by a cost option run after all the
+	// others, each group in plan order. With a bound, what runs last is what
+	// is lost, and the costly collectors sit in 70.schema, ahead of the Query
+	// Store and the plan cache; without one, a ctrl-c at the operator's own
+	// limit keeps everything but the costly part. It is done here because
+	// PlannedDuration and Run both walk this list, so the order check
+	// describes is the order the run follows. A stable sort keeps a nil slice
+	// nil and leaves a plan with no costly unit exactly as it was.
+	slices.SortStableFunc(units, func(a, b unit) int {
+		ca, cb := CostFlags[a.Script.RequiresFlag], CostFlags[b.Script.RequiresFlag]
+		switch {
+		case ca == cb:
+			return 0
+		case cb:
+			return -1
+		}
+		return 1
+	})
 	return units, skipped, errs
 }
 

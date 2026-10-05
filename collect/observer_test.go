@@ -367,3 +367,73 @@ func TestPlanUnitsDoesNotSkipAWidenedFolderItNeverOffered(t *testing.T) {
 		}
 	}
 }
+
+func unitLabels(units []unit) []string {
+	var out []string
+	for _, u := range units {
+		out = append(out, u.Script.Path+"|"+u.Target.Name)
+	}
+	return out
+}
+
+// With a bound, what runs last is what is lost, and the costly collectors sit
+// in 70.schema, before the Query Store. They move to the end of the plan, in
+// every run, keeping the order within each group. The costly set is derived
+// from CostFlags, never from a list of paths.
+func TestPlanUnitsRunsTheCostlyCollectorsLast(t *testing.T) {
+	var costly []string
+	for f := range CostFlags {
+		costly = append(costly, f)
+	}
+	slices.Sort(costly)
+	if len(costly) < 2 {
+		t.Fatalf("CostFlags holds %d flags; this test needs two", len(costly))
+	}
+	folders := []DatabaseFolder{{Name: "SALESDB", Folder: "SALESDB"}, {Name: "HRDB", Folder: "HRDB"}}
+	plan := []plannedScript{
+		{Script: Script{Path: "20.databases/010.a.sql", Scope: ScopeDatabase}},
+		{Script: Script{Path: "70.schema/041.b.sql", Scope: ScopeDatabase, RequiresFlag: costly[0]}},
+		{Script: Script{Path: "70.schema/050.c.sql", Scope: ScopeDatabase}},
+		{Script: Script{Path: "70.schema/055.d.sql", Scope: ScopeDatabase, RequiresFlag: costly[1]}},
+		{Script: Script{Path: "80.workload/020.e.sql"}},
+		{Script: Script{Path: "90.availability/010.f.sql", RequiresFlag: FlagIncludeSessionText}},
+	}
+	// The expected order, derived: every unit as the plan unfolds it, the
+	// ones gated by a cost flag moved after the rest.
+	var cheap, dear []string
+	for _, p := range plan {
+		targets := []string{""}
+		if p.Script.Scope == ScopeDatabase {
+			targets = []string{"SALESDB", "HRDB"}
+		}
+		for _, db := range targets {
+			l := p.Script.Path + "|" + db
+			if CostFlags[p.Script.RequiresFlag] {
+				dear = append(dear, l)
+			} else {
+				cheap = append(cheap, l)
+			}
+		}
+	}
+	units, _, _ := planUnits(plan, folders, &Config{})
+	if got, want := unitLabels(units), append(cheap, dear...); !slices.Equal(got, want) {
+		t.Errorf("order:\n got  %v\n want %v", got, want)
+	}
+}
+
+// A plan with no cost option keeps today's order exactly: script after
+// script, each over every database.
+func TestPlanUnitsKeepsThePlanOrderWithoutACostlyCollector(t *testing.T) {
+	folders := []DatabaseFolder{{Name: "SALESDB", Folder: "SALESDB"}, {Name: "HRDB", Folder: "HRDB"}}
+	plan := []plannedScript{
+		{Script: Script{Path: "20.databases/010.a.sql", Scope: ScopeDatabase}},
+		{Script: Script{Path: "70.schema/050.c.sql", Scope: ScopeDatabase}},
+		{Script: Script{Path: "80.workload/020.e.sql"}},
+	}
+	units, _, _ := planUnits(plan, folders, &Config{})
+	want := []string{"20.databases/010.a.sql|SALESDB", "20.databases/010.a.sql|HRDB",
+		"70.schema/050.c.sql|SALESDB", "70.schema/050.c.sql|HRDB", "80.workload/020.e.sql|"}
+	if got := unitLabels(units); !slices.Equal(got, want) {
+		t.Errorf("order:\n got  %v\n want %v", got, want)
+	}
+}
