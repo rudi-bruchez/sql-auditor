@@ -220,7 +220,8 @@ not captured into those stores. Point 8 has a setup of its own, given there.
 Point 4 also concerns 042, which calls a statement parallel when
 `sys.dm_exec_query_stats.max_dop > 1`. On the same lab, 25 statements of the
 cache had `max_dop > 1`; 15 of them had no parallel operator in their plan
-fragment (no `Parallel="true"`), carried 351 of the 379 executions and 7.1 of
+fragment (no `Parallel="1"`, the form the cache writes, measured on the
+lab on 6 October 2026), carried 351 of the 379 executions and 7.1 of
 the 14.3 seconds of "parallel" CPU, and were `INSERT ... EXEC` and
 `INSERT INTO @t` statements, most of them sql-auditor's own collectors. It is
 outside this document's scope and is listed under the open questions.
@@ -252,12 +253,20 @@ from that table, so they describe the same snapshot and no total can
 disagree with the sum of the bands because a statement ran in between. This is
 a grouping by plan, which 029 does not make (029 groups by interval).
 
-It is a temporary table and not a table variable for two reasons. The
-statement that fills it is run through `sys.sp_executesql`, because its replica
-predicate names a column that does not exist before SQL Server 2022 ("Other
-replicas"), and a table variable is not visible inside `sp_executesql`; this
-is the corpus's existing way of reading a version-dependent column
-(`20.databases/020.properties.sql`, `COL_LENGTH` then `sp_executesql`). And
+The aggregation is one static statement, the same on every version from SQL
+Server 2016. Only the rows of other replica roles go through
+`sys.sp_executesql`, because the statement that finds them names a column
+that does not exist before SQL Server 2022 ("Other replicas"); it stages them
+into a second temporary table, `#other_rows`, which the aggregation leaves out
+with `NOT EXISTS`. This is the corpus's existing way of reading a
+version-dependent column (`20.databases/020.properties.sql`, `COL_LENGTH`
+then `sp_executesql`), and a table variable would not be visible inside
+`sp_executesql`. Ruled by the owner on 6 October 2026: the fifth version put
+the whole aggregation inside the literal, which could not compile on SQL
+Server 2016 to 2019 and gave those versions no other path; the
+implementation plan found it, and two copies of the aggregation were refused.
+`#runtime` is a temporary table and not a table variable for the second
+reason as well. And
 agy measured an insert of 500 000 aggregated rows at 1.70 s into a table
 variable against 0.44 s into a temporary table; that measurement did not use
 `MAXDOP 1`, which every statement of this file carries, so it is a reason and
@@ -276,8 +285,12 @@ instance's threshold. Two cases are told apart.
   The test is 050's: the database's `replica_id` joined to
   `sys.dm_hadr_availability_replica_states` with `is_local = 1` and `role =
   2`; a database whose `replica_id` is set and whose replica state cannot be
-  read is treated as a secondary and reported as an error, as 050 does.
-  `state.not_read_because` says `secondary` or `replica state unreadable`.
+  read is treated as a secondary, as 050 does. `state.not_read_because`
+  says `secondary` or `replica state unreadable`. Ruled by the owner on 6
+  October 2026: the unreadable state is reported by that reason in the root
+  only, with no `errors.*` key, so it does not mark the run partial (050
+  reports through `errors.*`; 043's root keys are the list of "The root",
+  which test 2 holds exactly).
 - On a primary, or a database outside any availability group, from SQL Server
   2022, the runtime rows whose `replica_group_id` `sys.query_store_replicas`
   maps to a `role_type` other than 1 are left out of everything and counted in
@@ -685,21 +698,22 @@ Server 2016, where every column read outside the `sp_executesql` branch
 exists; it has not been measured on 2016.
 
 Every statement of the file that reads rows carries `OPTION (RECOMPILE,
-MAXDOP 1)`: the two result sets, the aggregation inside the `sp_executesql`
-literal, the pin, the `DELETE` of the extra pinned row, each chunk's copy and
+MAXDOP 1)`: the two result sets, the aggregation, the statement inside the
+`sp_executesql` literal, the pin, the `DELETE` of the extra pinned row, each chunk's copy and
 search, and every assignment that reads a table. The lint of `aeb4619`
 requires it and also shapes the file. The replica state is read by an
 assignment (`SELECT @role = ... OPTION (RECOMPILE, MAXDOP 1)`) that an `IF`
 then tests, never by `IF EXISTS (SELECT ...)`, and no `DECLARE` or `SET` holds
-a subquery. The dynamic aggregation is one literal handed to
-`sys.sp_executesql`, with its own hint, and fills `#runtime` from inside, so no
-`INSERT ... EXEC` is needed. A cost found in a chunk is inserted into a table
+a subquery. The literal handed to `sys.sp_executesql` holds the one
+statement that stages the other replica roles' rows, with its own hint, and
+fills `#other_rows` from inside, so no `INSERT ... EXEC` is needed (amended
+on 6 October 2026, "The aggregation of the runtime rows"). A cost found in a chunk is inserted into a table
 variable of its own rather than written back with an `UPDATE` through an
 alias, since the statement lint wants an `UPDATE`'s target named as `@t` or
 `#t`. A stub written from this document with those forms lints clean under
 `lint()` with `@resultsets: root:object, bands:array`, and each of the
 following makes it refuse the file: the `DELETE` or the pin without its hint,
-the aggregation's literal without its hint, `DECLARE @n int = (SELECT COUNT(*)
+the literal's statement without its hint, `DECLARE @n int = (SELECT COUNT(*)
 FROM @pinned)`, `IF EXISTS (SELECT ...)` for the replica test, and a third
 hinted `SELECT` that returns rows. A hinted `DELETE` no longer counts as a
 result set, which under the fourth version's lint it did (Claude, third
