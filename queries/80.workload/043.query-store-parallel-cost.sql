@@ -33,7 +33,10 @@
 -- OTHER REPLICAS. On an availability group secondary the store is the
 -- primary's, and this file does not read it (state.not_read_because says
 -- secondary, or replica state unreadable when the replica's state cannot be
--- read, the rule of 70.schema/050.heaps.sql). On a primary whose store has
+-- read, the rule of 70.schema/050.heaps.sql). A database restored WITH
+-- STANDBY (log shipping, sys.databases.is_in_standby = 1) is not read either,
+-- for the same reason: its store describes the source server (state.not_read_because
+-- says standby). On a primary whose store has
 -- both the replica_group_id column (SQL Server 2022) and the view
 -- sys.query_store_replicas (present on 2022 CU26 and on 2025, measured), the
 -- runtime rows whose group the view maps to a role other than 1 are staged
@@ -161,11 +164,20 @@ BEGIN CATCH
     OPTION (RECOMPILE, MAXDOP 1);
 END CATCH
 
+/* A database restored WITH STANDBY (log shipping) holds the source server's
+   store, for the same reason as a secondary: an assignment, no subquery. */
+DECLARE @standby bit = 0;
+SELECT @standby = d.is_in_standby
+FROM sys.databases AS d
+WHERE d.database_id = DB_ID()
+OPTION (RECOMPILE, MAXDOP 1);
+
 DECLARE @not_read nvarchar(30) =
     CASE WHEN @has_options = 0        THEN N'no store'
          WHEN @state = N'OFF'         THEN N'off'
          WHEN @replica_unreadable = 1 THEN N'replica state unreadable'
          WHEN @secondary = 1          THEN N'secondary'
+         WHEN @standby = 1            THEN N'standby'
     END;
 DECLARE @read bit = CASE WHEN @not_read IS NULL THEN 1 ELSE 0 END;
 

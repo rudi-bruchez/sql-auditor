@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -915,5 +916,54 @@ func TestLiveQueryStoreParallelCostStoresNotRead(t *testing.T) {
 			}
 		}
 		pcCompareBands(t, doc, nil)
+	})
+
+	// Owner's ruling of 6 October 2026: a database restored WITH STANDBY
+	// (log shipping) holds the source server's store and is not read, as an
+	// availability group secondary is not. The backup and the undo file sit in
+	// the instance's data directory (the default of the container) and are
+	// removed at the end, with both databases.
+	t.Run("standby", func(t *testing.T) {
+		suffix := pcSuffix()
+		src := "ZzAvgDopLiveStandbySrc" + suffix
+		dst := "ZzAvgDopLiveStandby" + suffix
+		var dir string
+		if err := admin.QueryRow("SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(260));").Scan(&dir); err != nil || dir == "" {
+			t.Fatalf("the instance's data path: %q, %v", dir, err)
+		}
+		bak := dir + "zzavgdop-" + suffix + ".bak"
+		undo := dir + "zzavgdop-" + suffix + ".undo"
+		mdf := dir + "zzavgdop-" + suffix + "-sb.mdf"
+		ldf := dir + "zzavgdop-" + suffix + "-sb.ldf"
+		// Registered first, so it runs last, after both drops.
+		t.Cleanup(func() {
+			out, err := exec.Command("podman", "exec", "sql2025", "rm", "-f", bak, undo, mdf, ldf).CombinedOutput()
+			if err != nil {
+				t.Logf("removing %s, %s, %s, %s: %v %s; remove them by hand if the server is a container of yours", bak, undo, mdf, ldf, err, out)
+			}
+		})
+		pcCreateDatabase(t, admin, src, "", false)
+		w := pcOpen(t, cfg, src)
+		pcExec(t, w, "CREATE TABLE dbo.Standby1 (id bigint NOT NULL, pad char(100) NOT NULL);")
+		pcExec(t, w, "INSERT INTO dbo.Standby1 (id, pad) SELECT TOP (1000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), 'x' "+
+			"FROM sys.all_columns OPTION (MAXDOP 1);")
+		pcExec(t, w, "SELECT COUNT_BIG(*) FROM dbo.Standby1 WHERE id % 7 = 3 OPTION (MAXDOP 1);")
+		pcExec(t, w, "EXEC sys.sp_query_store_flush_db;")
+		pcExec(t, admin, "BACKUP DATABASE "+quoteName(src)+" TO DISK = N'"+bak+"' WITH INIT, FORMAT;")
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			if _, err := admin.ExecContext(ctx, "IF DB_ID(@p1) IS NOT NULL DROP DATABASE "+quoteName(dst)+";", dst); err != nil {
+				t.Errorf("dropping %s: %v; drop it by hand", dst, err)
+			}
+		})
+		pcExec(t, admin, "RESTORE DATABASE "+quoteName(dst)+" FROM DISK = N'"+bak+"' WITH "+
+			"MOVE N'"+src+"' TO N'"+mdf+"', MOVE N'"+src+"_log' TO N'"+ldf+"', STANDBY = N'"+undo+"';")
+		var inStandby bool
+		if err := admin.QueryRow("SELECT is_in_standby FROM sys.databases WHERE name = @p1;", dst).Scan(&inStandby); err != nil || !inStandby {
+			t.Fatalf("the restored database is not in standby: %v, %v", inStandby, err)
+		}
+		_, doc := pcRun(t, cfg, parallelCostScript(t, nil), dst)
+		pcNotRead(t, doc, "READ_ONLY", "standby")
 	})
 }
