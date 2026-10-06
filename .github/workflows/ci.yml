@@ -905,6 +905,51 @@ jobs:
             "$run_dir/80.workload/ci_probe/029.query-store-load-profile.json" \
             || { jq 'del(.intervals)' "$run_dir/80.workload/ci_probe/029.query-store-load-profile.json"
                  jq -c '.intervals[-3:]' "$run_dir/80.workload/ci_probe/029.query-store-load-profile.json"; exit 1; }
+          # 043 is a third Query Store collector without @discloses, run by
+          # default, so its key sets are asserted exactly, as 027's and 029's
+          # are: a text or id column added anywhere fails here. ci_probe's
+          # store is on and small, so it is read whole: nothing stops the read,
+          # and every band statement is a plan the loop reached. excluded is
+          # null on 2017, which cannot tell replica groups apart, and 0 on 2022
+          # (CU26, measured) and 2025. The bounds of every band are 042's.
+          jq -e '(keys_unsorted | sort) == (["bands","budget","cap","chunk","collected_at","database","examined",
+                     "excluded","nested","schedulers","selection","state","truncated","unknown","window"] | sort)
+                 and (.state | keys_unsorted | sort) == (["actual","capture_mode","interval_minutes","not_read_because"] | sort)
+                 and (.window | keys_unsorted | sort) == (["cpu_s","days","dop_above_schedulers","executions","from",
+                     "intervals","newest_interval","oldest_interval","parallel_cpu_s","parallel_cpu_s_min",
+                     "parallel_executions","parallel_executions_min","parallel_plan_cpu_s","parallel_plans",
+                     "runtime_rows","scalar_function_cpu_s","serial_plans_dop_above_1","store_oldest_interval"] | sort)
+                 and (.examined | keys_unsorted | sort) == (["bytes_read","duration_ms","largest_plan_bytes","plans",
+                     "plans_read","share_of_parallel_cpu_pct","stopped_by"] | sort)
+                 and (.nested | keys_unsorted | sort) == (["parallel_cpu_s","parallel_plans"] | sort)
+                 and (.excluded | keys_unsorted | sort) == (["other_replicas_cpu_s","other_replicas_executions"] | sort)
+                 and (.budget | keys_unsorted | sort) == (["bytes","ms"] | sort)
+                 and (.selection | keys_unsorted) == ["duration_ms"]
+                 and (.unknown | keys_unsorted | sort) == (["no_cost","no_plan"] | sort)
+                 and ([.bands[].band] == ["lt_5","5_25","25_50","50_100","100_500","ge_500","unknown"])
+                 and ([.bands[] | [.cost_from, .cost_to]]
+                     == [[0,5],[5,25],[25,50],[50,100],[100,500],[500,null],[null,null]])
+                 and all(.bands[]; (keys_unsorted | sort) == (["avg_dop","band","cost_from","cost_to","cpu_s",
+                     "executions","max_dop","parallel_cpu_s","parallel_cpu_s_min","parallel_executions",
+                     "parallel_executions_min","parallel_statements","statements"] | sort)
+                     and .parallel_statements <= .statements
+                     and .parallel_executions_min <= .parallel_executions)
+                 and .state.actual == "READ_WRITE" and .state.not_read_because == null
+                 and .cap == 1000 and .chunk == 100
+                 and .window.days == 7 and .window.executions >= 1 and .window.intervals >= 1
+                 and (.window.serial_plans_dop_above_1 | type) == "number"
+                 and ((.excluded.other_replicas_executions | type) == "null"
+                     or .excluded.other_replicas_executions == 0)
+                 and .examined.plans <= .cap and .examined.plans_read <= .examined.plans
+                 and ([.bands[].statements] | add) == .examined.plans_read + .unknown.no_plan
+                 and .examined.stopped_by == null and .truncated == 0' \
+            "$run_dir/80.workload/ci_probe/043.query-store-parallel-cost.json" \
+            || { jq '.' "$run_dir/80.workload/ci_probe/043.query-store-parallel-cost.json"; exit 1; }
+          if grep -q 'sqlserver/2004/07/showplan' \
+               "$run_dir/80.workload/ci_probe/043.query-store-parallel-cost.json"; then
+            echo "043 emitted showplan XML" >&2
+            exit 1
+          fi
           # An `if`, not `cmd && { ... }`: this step runs under `set -e`, and a
           # grep that finds nothing exits 1, so the && form would turn the step
           # red exactly when the file is clean.
@@ -993,3 +1038,21 @@ jobs:
           grep -q '^--- PASS' "$RUNNER_TEMP/maxdur.log"
           if grep -q '^--- SKIP' "$RUNNER_TEMP/maxdur.log"; then exit 1; fi
           if grep -q '^--- FAIL' "$RUNNER_TEMP/maxdur.log"; then exit 1; fi
+      # 043's live tests, against the same container. They build their own
+      # databases (ZzAvgDopLive...) with a ladder of heaps up to 2 000 000
+      # rows and drop them; ci_probe is not touched. The fixture's premises
+      # were measured on the lab's 2025 and on 2017 and 2022 containers held
+      # to four schedulers, not on these runners: a failure on them here is a
+      # measurement to report, not a test to loosen. Subtests
+      # are indented in -v output, so SKIP and FAIL are matched anywhere.
+      - name: query store parallel cost live tests
+        env:
+          SQL_AUDITOR_LIVE_SERVER: localhost,1433
+          SQL_AUDITOR_LIVE_USER: sa
+          SQL_AUDITOR_LIVE_PASSWORD: ${{ env.SQL_PASSWORD }}
+        run: |
+          set -o pipefail
+          go test ./collect/ -run '^TestLiveQueryStoreParallelCost' -count=1 -v -timeout 20m | tee "$RUNNER_TEMP/avgdop.log"
+          grep -q '^--- PASS' "$RUNNER_TEMP/avgdop.log"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/avgdop.log"; then exit 1; fi
+          if grep -q -- '--- FAIL' "$RUNNER_TEMP/avgdop.log"; then exit 1; fi
