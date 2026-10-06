@@ -1,6 +1,6 @@
 # Parallel cost from the Query Store
 
-Status: proposed on 4 October 2026, not implemented. The first draft
+Status: proposed on 4 October 2026; implemented on 6 October 2026 by the plan docs/superpowers/plans/2026-10-06-query-store-parallel-cost.md. The first draft
 (`87a8d9f`) put the collector behind an opt-in; it was read the same day by a
 panel of five readers, and then the decision changed: the collector runs by
 default, with no option. The second version answered both and was read by a
