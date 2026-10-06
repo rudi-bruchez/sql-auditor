@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -699,5 +700,45 @@ func TestLiveQueryStoreParallelCost(t *testing.T) {
 			}
 		}
 		pcCheckShare(t, doc)
+	})
+	// Test 2 of the spec: nothing that names a query leaves the server.
+	t.Run("no text leaves", func(t *testing.T) {
+		q := quoteName(name)
+		var kept int
+		if err := admin.QueryRow("SELECT COUNT(*) FROM " + q + ".sys.query_store_query_text AS qt " +
+			"JOIN " + q + ".sys.query_store_query AS qq ON qq.query_text_id = qt.query_text_id " +
+			"JOIN " + q + ".sys.query_store_plan AS p ON p.query_id = qq.query_id " +
+			"WHERE p.is_parallel_plan = 1 AND qt.query_sql_text LIKE N'%ZZ043[_]PLANTED[_]TEXT%' " +
+			"OPTION (MAXDOP 1);").Scan(&kept); err != nil {
+			t.Fatal(err)
+		}
+		if kept == 0 {
+			t.Fatal("the store kept the planted literal in no parallel plan's query: a literal the store " +
+				"never held cannot leak, so this would test nothing")
+		}
+		raw, doc := pcRun(t, cfg, parallelCostScript(t, nil), name)
+		var got []string
+		for k := range pcFlat(doc) {
+			got = append(got, k)
+		}
+		slices.Sort(got)
+		want := slices.Sorted(slices.Values(pcRootKeys))
+		if !slices.Equal(got, want) {
+			t.Errorf("root keys\n got  %v\n want %v", got, want)
+		}
+		wantBand := slices.Sorted(slices.Values(pcBandKeys))
+		for _, b := range pcBands(t, doc) {
+			var keys []string
+			for k := range b {
+				keys = append(keys, k)
+			}
+			slices.Sort(keys)
+			if !slices.Equal(keys, wantBand) {
+				t.Errorf("band %v keys\n got  %v\n want %v", b["band"], keys, wantBand)
+			}
+		}
+		if bytes.Contains(raw, []byte("ZZ043_PLANTED_TEXT")) {
+			t.Error("the planted literal is in the document")
+		}
 	})
 }
