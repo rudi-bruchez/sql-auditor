@@ -110,8 +110,9 @@
 -- plan id or hash, no object, no replica name. No @discloses.
 --
 -- Every statement that reads rows carries OPTION (RECOMPILE, MAXDOP 1), the
--- aggregation literal included; the replica state is read by an assignment an
--- IF tests, and no DECLARE or SET holds a subquery, which the lint refuses.
+-- staging literal included; the replica state is read by assignments, a CASE in
+-- the DECLARE of @not_read tests it, and no DECLARE or SET holds a subquery,
+-- which the lint refuses.
 --
 -- SQL Server 2016 is the floor: every column read outside the sp_executesql
 -- branch exists there. Not measured on 2016.
@@ -206,6 +207,8 @@ DECLARE @selection_started datetime2 = SYSDATETIME(), @selection_ms int;
 /* ───────── the selection: runtime rows only, no plan text ───────── */
 IF @read = 1
 BEGIN
+    /* Semi-joins, not a JOIN: the view can hold several rows for one group, and a
+       JOIN would repeat a runtime row and break the primary key. */
     IF @replicas_known = 1
         EXEC sys.sp_executesql
             N'INSERT INTO #other_rows (runtime_stats_id, executions, cpu_us)
@@ -213,10 +216,11 @@ BEGIN
               FROM sys.query_store_runtime_stats AS rs
               JOIN sys.query_store_runtime_stats_interval AS i
                 ON i.runtime_stats_interval_id = rs.runtime_stats_interval_id
-              JOIN sys.query_store_replicas AS r
-                ON r.replica_group_id = rs.replica_group_id
               WHERE i.end_time > @from
-                AND r.role_type <> 1 OPTION (RECOMPILE, MAXDOP 1)',
+                AND EXISTS (SELECT 1 FROM sys.query_store_replicas AS r
+                            WHERE r.replica_group_id = rs.replica_group_id AND r.role_type <> 1)
+                AND NOT EXISTS (SELECT 1 FROM sys.query_store_replicas AS p
+                                WHERE p.replica_group_id = rs.replica_group_id AND p.role_type = 1) OPTION (RECOMPILE, MAXDOP 1)',
             N'@from datetimeoffset',
             @from = @from;
 

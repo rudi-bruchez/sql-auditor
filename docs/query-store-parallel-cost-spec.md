@@ -309,6 +309,10 @@ instance's threshold. Two cases are told apart.
   apart, that do not read one snapshot: a row of another role recorded
   between them is kept (codex, reviewing the plan; not measurable without an
   availability group).
+  Amended on 6 October 2026: the staging statement finds the other-role rows
+  by semi-join on `sys.query_store_replicas`, a row counting only when its
+  group is listed under a non-primary role and never under role 1, because the
+  view can hold several rows per group and a join would repeat a runtime row.
 
 What stays mixed: after a failover inside the window, the primary role's rows
 from before it were run by the other instance. Nothing in the store dates a
