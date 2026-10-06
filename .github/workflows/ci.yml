@@ -549,7 +549,14 @@ jobs:
           # them, whatever the runner's cache holds. And some statement got a
           # cost: without the showplan namespace every path read returns NULL
           # and all of them land in unknown, which the sums alone accept.
+          # Parallel is read from each plan, so a band never holds more
+          # parallel statements than statements, and the count of serial
+          # plans reporting max_dop above 1 is a number within the window.
           jq -e '([.bands[].band] == ["lt_5","5_25","25_50","50_100","100_500","ge_500","unknown"])
+                 and all(.bands[]; .parallel_statements <= .statements
+                                   and .parallel_executions <= .executions)
+                 and (.examined.serial_plans_dop_above_1 | type) == "number"
+                 and .examined.serial_plans_dop_above_1 <= .examined.statements
                  and .examined.cap == 1000 and .examined.statements <= .examined.cap
                  and ([.bands[] | select(.band != "unknown") | .statements] | add) > 0
                  and ([.bands[].statements] | add) == .examined.statements
