@@ -801,4 +801,119 @@ func TestLiveQueryStoreParallelCost(t *testing.T) {
 			check(t, doc, nil, n, 0)
 		})
 	})
+	// A store in READ_ONLY is read like one in READ_WRITE (Review Focus).
+	t.Run("read only store", func(t *testing.T) {
+		pcExec(t, admin, "ALTER DATABASE "+quoteName(name)+" SET QUERY_STORE (OPERATION_MODE = READ_ONLY);")
+		_, doc := pcRun(t, cfg, parallelCostScript(t, nil), name)
+		root := pcFlat(doc)
+		if root["state.actual"] != "READ_ONLY" || root["state.not_read_because"] != nil {
+			t.Fatalf("state.actual %v, not_read_because %v; want READ_ONLY, read", root["state.actual"], root["state.not_read_because"])
+		}
+		pcCompareBands(t, doc, pcParallel(pcOracle(t, admin, name)))
+	})
+
+	// Test 6 of the spec, its second case: a store that held parallel plans,
+	// then set OFF, still returns them, and must not be read. Last, since it
+	// turns the store off.
+	t.Run("off store", func(t *testing.T) {
+		pcExec(t, admin, "ALTER DATABASE "+quoteName(name)+" SET QUERY_STORE = OFF;")
+		_, doc := pcRun(t, cfg, parallelCostScript(t, nil), name)
+		pcNotRead(t, doc, "OFF", "off")
+	})
+}
+
+// pcNotReadKeys are the root keys that are NULL when a store is not read:
+// everything but the identity, the state, the constants and the window's
+// definition.
+func pcNotReadKeys() []string {
+	keep := map[string]bool{
+		"database": true, "collected_at": true, "schedulers": true,
+		"state.actual": true, "state.capture_mode": true, "state.interval_minutes": true,
+		"state.not_read_because": true, "window.days": true, "window.from": true,
+		"cap": true, "chunk": true, "budget.bytes": true, "budget.ms": true,
+	}
+	var out []string
+	for _, k := range pcRootKeys {
+		if !keep[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// pcNotRead checks a document of a store that was not read: the state and
+// the reason, every count NULL, and seven empty bands.
+func pcNotRead(t *testing.T, doc map[string]any, actual any, reason string) {
+	t.Helper()
+	root := pcFlat(doc)
+	if root["state.actual"] != actual || root["state.not_read_because"] != reason {
+		t.Errorf("state.actual %v, not_read_because %v; want %v, %s", root["state.actual"], root["state.not_read_because"], actual, reason)
+	}
+	for _, k := range pcNotReadKeys() {
+		if root[k] != nil {
+			t.Errorf("%s = %v on a store that was not read, want null", k, root[k])
+		}
+	}
+	pcCompareBands(t, doc, nil)
+}
+
+// Test 6 of the spec, its first and third cases.
+func TestLiveQueryStoreParallelCostStoresNotRead(t *testing.T) {
+	cfg, admin := pcAdmin(t)
+
+	// master has no row in the options view: the "never enabled" case,
+	// which a new database cannot be on SQL Server 2022 and later. Measured
+	// with no row on 2017 CU31, 2022 CU26 and 2025 CU7, the CI legs and the
+	// lab.
+	t.Run("master", func(t *testing.T) {
+		_, doc := pcRun(t, cfg, parallelCostScript(t, nil), "master")
+		pcNotRead(t, doc, nil, "no store")
+	})
+
+	// A store that is on and holds serial work only. Case-sensitive, so that
+	// an identifier written in the wrong case fails here, and named with a
+	// space and a closing bracket, so that a name quoted wrongly does
+	// (Review Focus). Automatic statistics are off: a StatMan query can be
+	// stored as a parallel plan, and this store must hold none.
+	t.Run("serial only", func(t *testing.T) {
+		name := "ZzAvgDopLive Serial]" + pcSuffix()
+		pcCreateDatabase(t, admin, name, "Latin1_General_CS_AS", true)
+		w := pcOpen(t, cfg, name)
+		pcExec(t, w, "CREATE TABLE dbo.Serial1 (id bigint NOT NULL, pad char(100) NOT NULL);")
+		pcExec(t, w, "INSERT INTO dbo.Serial1 WITH (TABLOCK) (id, pad) "+
+			"SELECT TOP (500000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), 'x' "+
+			"FROM sys.all_columns AS a CROSS JOIN sys.all_columns AS b CROSS JOIN sys.all_columns AS c "+
+			"OPTION (MAXDOP 1);")
+		for range 5 {
+			pcExec(t, w, "SELECT COUNT_BIG(*) FROM dbo.Serial1 WHERE id % 7 = 3 OPTION (MAXDOP 1);")
+		}
+		pcExec(t, w, "EXEC sys.sp_query_store_flush_db;")
+		if n := len(pcParallel(pcOracle(t, admin, name))); n != 0 {
+			t.Fatalf("the serial store holds %d parallel plans; the case needs none", n)
+		}
+		_, doc := pcRun(t, cfg, parallelCostScript(t, nil), name)
+		root := pcFlat(doc)
+		if root["state.actual"] != "READ_WRITE" || root["state.not_read_because"] != nil {
+			t.Fatalf("state.actual %v, not_read_because %v; want READ_WRITE, read", root["state.actual"], root["state.not_read_because"])
+		}
+		for _, k := range []string{
+			"window.parallel_plans", "window.parallel_plan_cpu_s", "window.parallel_executions",
+			"window.parallel_cpu_s", "window.parallel_executions_min", "window.parallel_cpu_s_min",
+			"nested.parallel_plans", "nested.parallel_cpu_s",
+			"examined.plans", "examined.plans_read", "examined.bytes_read",
+		} {
+			if root[k] != float64(0) {
+				t.Errorf("%s = %v, want 0 and not null: the store was read and holds no parallel plan", k, root[k])
+			}
+		}
+		if root["examined.share_of_parallel_cpu_pct"] != nil {
+			t.Errorf("examined.share_of_parallel_cpu_pct = %v, want null with no parallel CPU", root["examined.share_of_parallel_cpu_pct"])
+		}
+		for _, k := range []string{"window.executions", "window.cpu_s"} {
+			if pcNum(t, root[k], k) <= 0 {
+				t.Errorf("%s = %v, want above 0: the serial work and 043's own statements are in it", k, root[k])
+			}
+		}
+		pcCompareBands(t, doc, nil)
+	})
 }
