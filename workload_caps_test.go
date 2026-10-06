@@ -60,6 +60,12 @@ var workloadCaps = []workloadCap{
 	{"030.implicit-conversions.sql", "@candidate_cap", 1000, top("@candidate_cap", 1), []string{"bounds.candidate_cap"}},
 	{"053.plan-warnings.sql", "@examined", 1000, top("@examined", 1), []string{"bounds.examined_cap"}},
 	{"053.plan-warnings.sql", "@candidate_cap", 500, top("@candidate_cap", 1), []string{"bounds.candidate_cap"}},
+	// 043 pins @cap + 1 plans, as 027 does, so that reaching the extra one is
+	// evidence the cap bit, and reads the pinned plans by ranges of @chunk.
+	{"043.query-store-parallel-cost.sql", "@cap", 1000,
+		[]capForm{{"TOP (@cap + 1)", 1}}, []string{"cap"}},
+	{"043.query-store-parallel-cost.sql", "@chunk", 100,
+		[]capForm{{"rn < @lo + @chunk", 1}, {"SET @lo = @lo + @chunk", 1}}, []string{"chunk"}},
 }
 
 var (
