@@ -34,6 +34,7 @@ Read [what it does](#what-it-does-and-what-it-does-not-do) and
 - [`--include-blocked-process-reports`](#--include-blocked-process-reports)
 - [Authentication](#authentication)
 - [Reproducing a run locally](#reproducing-a-run-locally)
+- [SQL LogScout, on request](#sql-logscout-on-request)
 
 ## What it does, and what it does not do
 
@@ -2545,3 +2546,120 @@ When you are finished:
 ```
 podman rm -f sqlauditor-test
 ```
+
+## SQL LogScout, on request
+
+sql-auditor reads what a SQL connection can see. Some questions need what lies
+outside it: Windows performance counters over an hour, the Windows event logs,
+the cluster log, or the DMVs sampled every few seconds while the problem is
+happening. When one of those is needed, you may be asked to run a second tool,
+[SQL LogScout](https://github.com/microsoft/SQL_LogScout), written and
+maintained by Microsoft's SQL Server support engineers and published under the
+MIT license.
+
+It is a separate request, with a separate archive, decided separately.
+sql-auditor does not ship it, launch it, or read its output, and nothing said
+above about what sql-auditor does to your instance applies to it.
+
+### How it differs from sql-auditor
+
+| | sql-auditor | SQL LogScout |
+| --- | --- | --- |
+| Where it runs | anywhere that can reach the instance | on the server itself; it only collects from local instances |
+| Windows rights | none | local administrator |
+| SQL Server rights | the read rights listed under [What permissions it needs](#what-permissions-it-needs) | `VIEW SERVER STATE` and `ALTER ANY EVENT SESSION` |
+| What it writes on the server | nothing | its output folder, a Perfmon collector and, in most performance scenarios, an Extended Events session |
+| Duration | minutes, then it stops | until the stop time you give it, or until you stop it |
+
+Its Linux variant, a set of Bash scripts, needs `sudo` and a `sysadmin` login.
+
+### The scenario we ask for
+
+Unless the request names another one, the scenario is `LightPerf`. It collects
+everything the `GeneralPerf` scenario collects except the Extended Events
+trace, which keeps both its cost and what it carries down:
+
+- the `Basic` scenario (described below);
+- Perfmon counters for the instance and the operating system, continuously;
+- periodic snapshots of the DMVs on waits, blocking and the requests using the
+  most CPU (the "PerfStats" scripts);
+- Query Store information where it is active, tempdb contention, and linked
+  server metadata.
+
+### Running it
+
+Download the latest release from <https://aka.ms/get-sqllogscout> and unzip it
+on the server. Choose an output folder on a fast local disk: not a network
+share, and preferably not a volume holding database files. The SQL Server
+service account needs write permission on that folder, which it usually does
+not have on your `Downloads`, `Documents` or `Desktop`.
+
+From a command prompt opened as Administrator, in the folder where you unzipped
+it, start `powershell.exe` (not the PowerShell ISE, which LogScout refuses) and
+run, replacing the instance name, the path and the duration:
+
+```
+.\SQL_LogScout.ps1 -Scenario "LightPerf" -ServerName "SQL01\PROD" -CustomOutputPath "E:\logscout" -DeleteExistingOrCreateNew "NewCustomFolder" -DiagStartTime "+00:00:00" -DiagStopTime "+01:00:00" -InteractivePrompts "Quiet"
+```
+
+- `-ServerName` takes the virtual network name for a failover cluster instance
+  or an availability group;
+- `-CustomOutputPath` must exist already and must not end with a backslash;
+- `-DiagStopTime "+01:00:00"` stops it after one hour; a relative time cannot
+  exceed 11:59:59, and an absolute one is written `"yyyy-MM-dd hh:mm:ss"`;
+- `-InteractivePrompts "Quiet"` answers yes to every prompt, including the
+  one that accepts Microsoft's signed scripts. Leave it out if you would rather
+  read and answer them yourself.
+
+If PowerShell refuses to run scripts, `Get-ExecutionPolicy` will say
+`Restricted`; `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope
+CurrentUser` allows it for your account only.
+
+To stop before the stop time, press Ctrl+C, or create an empty file named
+`logscout.stop` in the `internal` subfolder of the output folder; LogScout
+notices it within five seconds. Do not close the window while it runs: that
+can leave a collector running on the server. If it happens,
+`bin\CleanupIncompleteShutdown.ps1 -ServerName "SQL01\PROD"` stops what was
+left behind.
+
+### What the output carries
+
+Read this before you hand the folder over. The `Basic` scenario, which
+`LightPerf` includes, copies files that sql-auditor never reads, and copies
+them whole:
+
+- the System and Application event logs of Windows;
+- `systeminfo`, the process list, installed hotfixes, drivers, environment
+  variables, `ipconfig`, the DNS client configuration and the open TCP and UDP
+  endpoints, which name hosts, addresses and accounts;
+- the SQL Server error logs and Agent logs without truncation, the default
+  trace files and the `system_health` session files;
+- up to twenty SQL Server memory dumps found in the error log directory (less
+  than two months old, less than 200 MB each). A dump is a copy of server
+  memory and can hold data from your tables. If you do not want them to leave
+  the server, delete the `.mdmp` files from the output folder before sending
+  it;
+- on a Windows cluster, the cluster log and the `HKEY_LOCAL_MACHINE\Cluster`
+  registry hive.
+
+The PerfStats snapshots record the text of the statements running at each
+sample, with whatever literal values they contain.
+
+When it has finished, the `internal` subfolder holds LogScout's own log,
+`##SQLLOGSCOUT.LOG`, and one file per collector that failed. Compress the whole
+output folder and send it the way you sent the sql-auditor archive.
+
+### The scenarios we do not ask for by default
+
+Each of these collects more, or costs more, than `LightPerf`. If a question
+needs one, the request names it and says why.
+
+- `GeneralPerf` adds an Extended Events trace of batches, errors, deadlocks and
+  logins, which records the text of every batch, in files of up to 500 MB, fifty
+  of them at most.
+- `DetailedPerf` adds statements and the actual execution plan of every
+  completed query to that trace. It is the heaviest scenario on a busy
+  instance.
+- `NetworkTrace`, `DumpMemory`, `WPR` and `ProcessMonitor` capture network
+  traffic, process memory, kernel activity and file and registry access. Each
+  one answers a narrow question and none of them is a first step.
