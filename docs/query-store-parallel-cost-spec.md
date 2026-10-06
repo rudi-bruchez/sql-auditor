@@ -81,7 +81,8 @@ From Microsoft Learn:
   execution information (such as runtime and wait statistics) to the primary
   replica, where the data is persisted in Query Store and made visible across
   all replicas", "aggregated at the role level", told apart by
-  `replica_group_id`, which `sys.query_store_replicas` (SQL Server 2025) maps
+  `replica_group_id`, which `sys.query_store_replicas` (SQL Server 2025, and
+  present on a 2022 CU26 container, measured on 6 October 2026) maps
   to a `role_type` (1 primary, 2 secondary, 3 geo secondary, 4 geo HA
   secondary, 5 or more a named replica). Learn contradicts itself on the
   default: "What's new in SQL Server 2025" and "Persisted statistics for
@@ -297,10 +298,17 @@ instance's threshold. Two cases are told apart.
   `excluded.other_replicas_executions` and `excluded.other_replicas_cpu_s`.
   The predicate is negative on purpose: a row whose group the view does not
   list is kept, so a mapping this document has not seen cannot empty the
-  bands. Where the column exists and the view does not (SQL Server 2022, where
-  the feature needs trace flag 12606), nothing is left out and the two counts
-  are NULL; before SQL Server 2022 both are NULL as well. 0 therefore means
-  "looked and found none", and NULL "could not look".
+  bands. Where the column exists and the view does not, nothing is left out
+  and the two counts are NULL; before SQL Server 2022 both are NULL as well.
+  0 therefore means "looked and found none", and NULL "could not look".
+  Amended on 6 October 2026, with the plan's review: this said that SQL
+  Server 2022 has the column and not the view; a 2022 CU26 container has both
+  (`OBJECT_ID('sys.query_store_replicas')` not NULL, `excluded.*` 0), and
+  which 2022 build first shipped the view is not known. The staging of the
+  other-role rows and the aggregation are two statements, a few milliseconds
+  apart, that do not read one snapshot: a row of another role recorded
+  between them is kept (codex, reviewing the plan; not measurable without an
+  availability group).
 
 What stays mixed: after a failover inside the window, the primary role's rows
 from before it were run by the other instance. Nothing in the store dates a
@@ -917,12 +925,22 @@ and `examined.stopped_by` put the client's own figures in every archive. The
 replica filter and the `sp_executesql` around the aggregation have not been
 timed; they change the statement's text, not the rows it reads.
 
+The final file, measured on 6 October 2026 after the plan's review, on the
+same build: `selection.duration_ms` was 144 to 221 ms on a store of 13 runtime
+rows (the first run cold) and 242 to 253 ms on a store of 6 851, four or five
+runs each, with the read loop at 57 to 75 ms for 13 plans. The selection
+costs more than the prototype's, and most of it is compilation: every
+statement compiles under `RECOMPILE`, a part paid by every database whatever
+its store holds (Claude, reviewing the plan, measured the compilations by
+`SET STATISTICS TIME`: 78 ms for the aggregation, 39 for the staging
+literal). The row below gives the final file's figures.
+
 The row that "What the default run costs a large instance" in
 `docs/dba-guide.md` gains, as it is to be written there:
 
 | What | Where | What it actually does |
 | --- | --- | --- |
-| Parallel plan costs read out of the Query Store | `80.workload/043.query-store-parallel-cost.sql` | in each database whose store is not off, and which is not an availability group secondary, two parts. First one aggregation of the last seven days of `sys.query_store_runtime_stats`, grouped by plan into a temporary table; it reads no plan text and has no budget of its own, so its cost follows the number of runtime rows in the window: 29 to 105 ms on six lab stores of up to 9 086 rows. Then the text of up to 1 000 parallel plans, those with the most parallel CPU first, copied a hundred at a time into a table variable and searched for one attribute, never converted to `xml`: about 20 ms per MB of plan text on one 2025 lab build. The read stops before the next hundred once 100 MB have been read or 10 s have passed, so one hundred plans can pass either, by as much as their size; the 120-second timeout is the hard bound of the whole file. The store's shared lock is released between chunks. The root projects `selection.duration_ms`, `window.runtime_rows`, `examined.duration_ms`, `examined.bytes_read`, `examined.largest_plan_bytes` and `examined.stopped_by`, so the cost on your instance is in the archive. Nothing that names a query leaves the server. |
+| Parallel plan costs read out of the Query Store | `80.workload/043.query-store-parallel-cost.sql` | in each database whose store is not off, and which is not an availability group secondary, two parts. First one aggregation of the last seven days of `sys.query_store_runtime_stats`, grouped by plan into a temporary table; it reads no plan text and has no budget of its own, so its cost grows with the number of runtime rows in the window, over a fixed part that compiling its statements under `RECOMPILE` costs every database: on one 2025 lab build, 144 to 221 ms on a store of 13 runtime rows and 242 to 253 ms on one of 6 851. Then the text of up to 1 000 parallel plans, those with the most parallel CPU first, copied a hundred at a time into a table variable and searched for one attribute, never converted to `xml`: about 20 ms per MB of plan text on one 2025 lab build. The read stops before the next hundred once 100 MB have been read or 10 s have passed, so one hundred plans can pass either, by as much as their size; the 120-second timeout is the hard bound of the whole file. The store's shared lock is released between chunks. The root projects `selection.duration_ms`, `window.runtime_rows`, `examined.duration_ms`, `examined.bytes_read`, `examined.largest_plan_bytes` and `examined.stopped_by`, so the cost on your instance is in the archive. Nothing that names a query leaves the server. |
 
 ## What is not in scope
 
@@ -1077,7 +1095,11 @@ What no test here covers, said so that nobody believes otherwise: the
 secondary branch and the rows of another replica role (the lab has no
 availability group); `avg_dop` above the range of a `decimal` (the anomaly
 cannot be produced); a plan leaving the store between the pin and its chunk;
-the selection's cost on a large runtime view; the audit's CPU in
+the selection's cost on a large runtime view; a parallel plan whose
+executions ran at a degree of 1 (point 4 saw one in a lab store; no fixture
+reproduces it, so the upper bounds equal the totals in every test, and a
+band or root that took one for the other would pass; added on 6 October
+2026 with the plan's review); the audit's CPU in
 `window.cpu_s`, which no test measures; the audit's footprint on a live store,
 measured once (point 8) and held by the lint, not by a live test; and the
 cases the lint does not reach ("The audit's own statements").

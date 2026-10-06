@@ -12,13 +12,13 @@ Spec: `docs/query-store-parallel-cost-spec.md`, version 5. Executors read both. 
 
 ## Verification of this plan's code
 
-Every piece of code below was run, not only read, on 6 October 2026, in a scratch copy of `main` at `f83d882` under `/var/tmp`, against the lab's SQL Server 2025 (22 schedulers, threshold 5, MAXDOP 0):
+Every piece of code below was run, not only read, on 6 October 2026, in a scratch copy of `main` under `/var/tmp`, against the lab's SQL Server 2025 (22 schedulers, threshold 5, MAXDOP 0): first at `f83d882`, then, after the five-reader panel recorded in "Review of the plan" at the end, at `1fcefb3` with the code as revised.
 
-- the collector lints clean through `collect.Discover`, and each of the seven lint mutations of Task 2 is refused for the reason its test expects;
-- the spec's fixture reproduced: eight parallel plans and one serial plan at `max_dop` 51 (the `#savings` anomaly); 043's bands matched the xml oracle; `is_parallel_plan` agreed with a `Parallel="1"` operator on every costed plan;
-- the full live suite passed (15 `--- PASS` lines), and every break step listed in Tasks 3 to 6 failed as stated, with the messages quoted there;
-- `go test ./...` was green, `tools/verify-corpus-grammar.ps1` parsed 043 under TSql130 with 2 of 2 result sets, and the CI `jq` expression of Task 7 accepted a real 043 document and refused two altered ones;
-- the private consumer's code and tests ran (28 passed) and each of its break steps failed one test.
+- the collector lints clean through `collect.Discover`, each of the seven lint mutations of Task 2 is refused for the reason its test expects, and its table of bands is 042's;
+- the spec's fixture reproduced: eight parallel plans and one serial plan at `max_dop` 51 (the `#savings` anomaly); with this plan's additions (Task 3), twelve parallel plans in four bands (`5_25`, `25_50`, `50_100`, `100_500`), a trigger statement stored parallel and a scalar function body run 300 times; 043's bands and root totals matched the oracle; `is_parallel_plan` agreed with a `Parallel="1"` operator on every costed plan;
+- the full live suite passed (15 `--- PASS` lines) on the lab, and again on throwaway SQL Server 2017 CU31 and 2022 CU26 containers held to four schedulers (`ALTER SERVER CONFIGURATION SET PROCESS AFFINITY CPU = 0 TO 3`, the core count of a GitHub runner), the images of the two CI legs; every break step listed in Tasks 2 to 6 failed as stated, with the messages quoted there, and the two that Task 3 names as out of reach passed, as it says;
+- `go test ./...` was green, `tools/verify-corpus-grammar.ps1` parsed 043 under TSql130 with 2 of 2 result sets, and the CI `jq` expression of Task 7 accepted a real 043 document from `sql-auditor collect` and refused altered ones, one of them a band whose `cost_to` had moved;
+- the private consumer's code and tests ran (28 passed) and each of its first five break steps failed one test. The ninth test and the sixth break step, added after the panel, were not run when this plan was revised: Task 9 says so where they are.
 
 Two defects were found that way and are fixed in the code below: a header line that began with an `@` word (the parser refuses it as an unknown directive), and a loop timer declared `datetime2(3)`, whose rounding made the elapsed time read -1 ms so that a time budget of 0 never stopped the loop. All scratch databases were dropped.
 
@@ -40,11 +40,11 @@ Two defects were found that way and are fixed in the code below: a header line t
 
 ## Review Focus
 
-The inputs the spec implies and its tests do not exercise, most likely to bite first. The first three now have tests in the tasks named; the last two cannot be built on the lab and are listed so a reviewer looks at the code for them.
+The inputs the spec implies and its tests do not exercise, most likely to bite first. The first two now have tests in the tasks named; the last three cannot be built on the lab and are listed so a reviewer looks at the code for them.
 
-1. A database with a case-sensitive collation and a name that needs quoting (a space, a closing bracket). Expected: read like any other. Test: Task 6, "serial only" runs in `Latin1_General_CS_AS` under a name holding `" Serial]"`; measured, an identifier in the wrong case there fails with "Invalid object name".
+1. A database with a case-sensitive collation and a name that needs quoting (a space, a closing bracket). Expected: read like any other. Test: Task 3's store, the one that holds the parallel plans, is created `Latin1_General_CS_AS` under a name holding `" Bands]"`, so the selection, the read loop and the bands all run there; Task 6's "serial only" store is the same with no parallel plan. Measured: an identifier in the wrong case fails with "Invalid object name" in the read loop (Task 3 Step 5) and in the aggregation (Task 6 Step 3).
 2. A store in `READ_ONLY` (full, or set so by the DBA). Expected: read, bands as for `READ_WRITE`. Test: Task 6, "read only store".
-3. A store holding more parallel plans than the cap. Expected: `stopped_by` is `cap`, `truncated` 1, `examined.plans` equals the cap. Test: Task 5, "cap below the plans".
+3. A parallel plan whose runtime rows ran at a degree of 1, as the spec's point 4 saw in a lab store (54 s of CPU over eleven executions, all at DOP 1). Expected: counted in `statements`, `executions` and `cpu_s`, and not in `parallel_executions` or `parallel_cpu_s`, so the upper bounds fall below the totals, in the bands and in the root. No test builds it. Every parallel plan of the fixture ran parallel on every row, so the upper bounds equal the totals there, and a band or a root that took one for the other passes (Task 3 Step 5 names the two root mutations, measured passing). Measured on the lab: `INSERT ... EXEC` of a procedure ran its parallel statement at its degree, and a cursor and a database scoped `MAXDOP` of 1 compiled plans of their own; Resource Governor's `MAX_DOP` would do it, and a test suite does not reconfigure the instance it runs on.
 4. A store whose plans weigh megabytes each. Expected: one chunk may pass the byte budget by up to a hundred plans, and `examined.largest_plan_bytes` says how large they were. Only the reporting is tested (Task 5 compares it with `DATALENGTH`); the overshoot itself is not.
 5. A plan that leaves the store between the pin and its chunk, and a parallel `StatMan` plan with no statement cost. Expected: both in the unknown band, counted in `unknown.no_plan` and `unknown.no_cost`, their runtime figures still counted. No test builds either; the oracle of Task 3 handles a NULL cost the same way 043 does if the fixture happens to hold one.
 
@@ -54,7 +54,7 @@ The inputs the spec implies and its tests do not exercise, most likely to bite f
 | --- | --- | --- |
 | `workload_caps_test.go` | the cap table learns exact applied forms; two rows for 043 | 1, 2 |
 | `queries/80.workload/043.query-store-parallel-cost.sql` | new collector | 2 |
-| `parallel_cost_test.go` (root package) | directives, contract and lint mutations of 043 | 2 |
+| `parallel_cost_test.go` (root package) | directives, contract, lint mutations and band boundaries of 043 | 2 |
 | `testdata/corpus.txt` | regenerated, one line added | 2 |
 | `docs/dba-guide.md` | `120 s` tier 29 to 30 (Task 2); cost row, `check` listing, a section, one sentence (Task 8) | 2, 8 |
 | `collect/parallelcost_test.go` | offline: the constant rewriter the live tests use | 3 |
@@ -67,7 +67,7 @@ The inputs the spec implies and its tests do not exercise, most likely to bite f
 
 1. Applied forms in the workload cap test (refactor, no new test).
 2. The collector in the corpus, with its contract and lint tests, the inventory and the guide's timeout tier.
-3. The live fixture and the bands, against an independent reading of the store (spec test 3).
+3. The live fixture, the bands and the root's totals, against an independent reading of the store (spec test 3, extended).
 4. The document's keys and the planted literal (spec test 2).
 5. The stop rules (spec test 5).
 6. Stores read only, off, missing, and serial only (spec test 6, Review Focus 1 and 2).
@@ -202,7 +202,7 @@ Files:
 
 Interfaces:
 - Consumes: `capForm` from Task 1; `collect.Discover`, `collect.Script` (`Path`, `SQL`, `Scope`, `TimeoutSec`, `MinVersion`, `Permissions`, `RequiresFlag`, `Discloses`, `Profiles`, `Widened`, `Writer`, `LintError`), `collect.ScopeDatabase`, `sqlauditor.Queries`.
-- Produces: the file, whose constants are declared one per line in exactly the form `DECLARE @cap int = 1000;` (Task 3's rewriter depends on it), and whose anchors listed in `TestQueryStoreParallelCostLintRefusesItsMutations` each occur once.
+- Produces: the file, whose constants are declared one per line in exactly the form `DECLARE @cap int = 1000;` (Task 3's rewriter depends on it), whose anchors listed in `TestQueryStoreParallelCostLintRefusesItsMutations` each occur once, and whose table of bands, `FROM (VALUES ...) AS b (ord, band, cost_from, cost_to)`, is 042's once whitespace is removed (`TestQueryStoreParallelCostBandsAreThoseOf042`).
 
 The literal handed to `sp_executesql` only stages the other-role rows into `#other_rows` (where the column and `sys.query_store_replicas` exist), and one static aggregation, the same on every version from 2016, leaves them out with `NOT EXISTS`. This is the spec as amended on 6 October 2026 by the owner's ruling (ambiguity 1, ruled): "The aggregation of the runtime rows", second paragraph, and "The collector". An unreadable replica state is reported by `state.not_read_because` alone, with no `errors.*` key, as the spec's "Other replicas" now says (ambiguity 2, ruled). The measured behaviour is the spec's: the role mutation empties the bands, the column mutation turns `excluded.*` NULL.
 
@@ -212,6 +212,7 @@ The literal handed to `sp_executesql` only stages the other-role rows into `#oth
 package sqlauditor_test
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -340,6 +341,32 @@ func TestQueryStoreParallelCostLintRefusesItsMutations(t *testing.T) {
 		})
 	}
 }
+
+// bandValuesRE finds the table of bands that 042 and 043 both write.
+var bandValuesRE = regexp.MustCompile(`(?s)FROM \(VALUES (.*?)\) AS b \(ord, band, cost_from, cost_to\)`)
+
+// bandValues returns a file's table of bands, its whitespace removed, and
+// fails unless the file holds exactly one.
+func bandValues(t *testing.T, path string) string {
+	t.Helper()
+	m := bandValuesRE.FindAllStringSubmatch(corpusScript(t, path).SQL, -1)
+	if len(m) != 1 {
+		t.Fatalf("%s holds %d band tables of the form FROM (VALUES ...) AS b (ord, band, cost_from, cost_to), want 1", path, len(m))
+	}
+	return strings.Join(strings.Fields(m[0][1]), "")
+}
+
+// 043 reads 042's bands from another source, and the analysis reads the two
+// with the same functions and prints them side by side, so the boundaries
+// are 042's to the digit. The live fixture fills four bands on the lab; this
+// holds every boundary, on every instance.
+func TestQueryStoreParallelCostBandsAreThoseOf042(t *testing.T) {
+	got := bandValues(t, parallelCostPath)
+	want := bandValues(t, "queries/80.workload/042.parallel-cost-distribution.sql")
+	if got != want {
+		t.Errorf("043's bands are\n%s\n042's are\n%s", got, want)
+	}
+}
 ```
 
 and add the two 043 rows at the end of `workloadCaps`:
@@ -366,7 +393,7 @@ and add the two 043 rows at the end of `workloadCaps`:
 cd <worktree> && export GOTMPDIR=/var/tmp/sqa-avgdop && /usr/local/go/bin/go test . -run '^(TestQueryStoreParallelCost|TestWorkloadCapsAreDeclaredAppliedAndReported$)' -count=1 2>&1 | tail -5
 ```
 
-Expected: FAIL, with `queries/80.workload/043.query-store-parallel-cost.sql is not in the corpus` and `open queries/80.workload/043...: file does not exist` from the caps test.
+Expected: FAIL, with `queries/80.workload/043.query-store-parallel-cost.sql is not in the corpus` from each of the three 043 tests and `open queries/80.workload/043...: file does not exist` from the caps test.
 
 - [ ] Step 3: Create `queries/80.workload/043.query-store-parallel-cost.sql` with exactly this content:
 
@@ -406,14 +433,17 @@ Expected: FAIL, with `queries/80.workload/043.query-store-parallel-cost.sql is n
 -- OTHER REPLICAS. On an availability group secondary the store is the
 -- primary's, and this file does not read it (state.not_read_because says
 -- secondary, or replica state unreadable when the replica's state cannot be
--- read, the rule of 70.schema/050.heaps.sql). On a primary from SQL Server
--- 2025, the runtime rows whose replica_group_id sys.query_store_replicas maps
--- to a role other than 1 are staged first into #other_rows, through
--- sp_executesql because the column does not exist before SQL Server 2022, and
--- left out of everything; excluded.* counts them. The predicate is negative: a
--- group the view does not list is kept. Where the column or the view is
--- missing nothing is left out and excluded.* is NULL: 0 means looked and found
--- none, NULL could not look.
+-- read, the rule of 70.schema/050.heaps.sql). On a primary whose store has
+-- both the replica_group_id column (SQL Server 2022) and the view
+-- sys.query_store_replicas (present on 2022 CU26 and on 2025, measured), the
+-- runtime rows whose group the view maps to a role other than 1 are staged
+-- first into #other_rows, through sp_executesql because the column does not
+-- exist before SQL Server 2022, and left out of everything; excluded.* counts
+-- them. The predicate is negative: a group the view does not list is kept.
+-- Where the column or the view is missing nothing is left out and excluded.*
+-- is NULL: 0 means looked and found none, NULL could not look. A row of
+-- another role recorded between the staging and the aggregation, a few
+-- milliseconds apart, is kept: the two statements do not read one snapshot.
 --
 -- NESTED QUERIES (sys.objects.type FN, TF, TR) stay in the bands, since a
 -- parallel plan inside them is one the threshold acts on, and are counted in
@@ -539,7 +569,7 @@ DECLARE @not_read nvarchar(30) =
 DECLARE @read bit = CASE WHEN @not_read IS NULL THEN 1 ELSE 0 END;
 
 /* The replica groups can be told apart only where both the column (SQL
-   Server 2022) and the view (SQL Server 2025) exist. */
+   Server 2022) and the view (measured on 2022 CU26 and 2025) exist. */
 DECLARE @replicas_known bit =
     CASE WHEN COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') IS NOT NULL
           AND OBJECT_ID('sys.query_store_replicas') IS NOT NULL THEN 1 ELSE 0 END;
@@ -847,7 +877,7 @@ Expected: one added line, `80.workload/043.query-store-parallel-cost.sql`, with 
 cd <worktree> && export GOTMPDIR=/var/tmp/sqa-avgdop && /usr/local/go/bin/go test . -run '^TestQueryStoreParallelCost' -count=1 -v 2>&1 | /usr/bin/grep -c -- '--- PASS' && /usr/local/go/bin/go test -list '.*' . | /usr/bin/grep -c '^Test' && /usr/local/go/bin/go test ./... -count=1 2>&1 | tail -6
 ```
 
-Expected: 9 (two tests, seven mutation subtests), then the count measured in Task 1 plus 2 (23 on `f83d882`), then every package `ok`. The root package takes about 45 s.
+Expected: 10 (three tests, seven mutation subtests), then the count measured in Task 1 plus 3 (24 on `f83d882`), then every package `ok`. The root package takes about 55 s.
 
 - [ ] Step 7: Break steps. Each one edits the named file, runs the named test, must fail with the message given, and is then undone (copy the file aside first: `cp <file> /var/tmp/sqa-avgdop/keep` and copy it back; do not use `git checkout`). Reporting that one did not fail is a finding, not a failure of the task.
 
@@ -858,8 +888,9 @@ Expected: 9 (two tests, seven mutation subtests), then the count measured in Tas
 | `SET @lo = @lo + @chunk;` written `SET @lo = @lo + 100;` | the same | `SET @lo = @lo + @chunk applied 0 times, want 1` |
 | a line `-- @profiles:    space` added after `-- @min_version: 13` | `TestQueryStoreParallelCostDeclaresItsContract` | `043's directive lines are` and `profiles [space]` |
 | the hint removed from `DELETE FROM @pinned WHERE rn > @cap` | `TestEmbeddedCorpusIsValid` | `every statement that reads rows needs OPTION (RECOMPILE, MAXDOP 1)` |
+| `(3, '25_50',      25.0,  50.0)` written `(3, '25_50',      25.0, 100.0)` (a band that overlaps the next) | `TestQueryStoreParallelCostBandsAreThoseOf042` | `043's bands are` then `(3,'25_50',25.0,100.0)` against 042's `(3,'25_50',25.0,50.0)` |
 
-The last row is the spec's test 1 mutation on the `DELETE`; the mutation test already covers it on a copy, and this run shows the corpus test refuses the shipped file too.
+The fifth row is the spec's test 1 mutation on the `DELETE`; the mutation test already covers it on a copy, and this run shows the corpus test refuses the shipped file too. The sixth is the band that Task 3's fixture and Task 7's `jq` also catch, here on every instance and offline.
 
 - [ ] Step 8: Verify spec test 4 on this tree, without adding a test (the spec says nothing is added to it). For each mutation, apply it to `queries/50.agent/050.commandlog.sql` (keeping a copy aside), run `/usr/local/go/bin/go test . -run '^TestEmbeddedCorpusIsValid$' -count=1`, expect FAIL naming 050 with `every statement that reads rows needs OPTION (RECOMPILE, MAXDOP 1)`, and restore the file:
   - the `OPTION (RECOMPILE, MAXDOP 1)` after `) AS x` / `GROUP BY x.id` of `INSERT INTO #sel` removed;
@@ -875,10 +906,10 @@ cd <worktree> && pwsh -NoProfile -File tools/verify-corpus-grammar.ps1 2>&1 | /u
 
 Expected: `queries/80.workload/043.query-store-parallel-cost.sql TSql130 (SQL Server 2016) resultsets 2/2 ok`, and `All N files parse`.
 
-- [ ] Step 10: Check for client names and commit.
+- [ ] Step 10: Check for client names and commit. This repository is public, so the names cannot be written in this plan: the controller puts the list of client names, fragments included, in the implementer's brief, from outside the repository. An implementer whose brief carries no list stops and asks for one. The command with its placeholder left in checks nothing: it printed nothing and returned 1 on a copy of 043 holding a planted marker (codex, on this plan).
 
 ```bash
-git grep -niE "<the client names you have been working with>" -- queries/80.workload/043.query-store-parallel-cost.sql parallel_cost_test.go
+git grep -niE "<the names the brief gives, joined by |>" -- queries/80.workload/043.query-store-parallel-cost.sql parallel_cost_test.go
 git add queries/80.workload/043.query-store-parallel-cost.sql parallel_cost_test.go workload_caps_test.go testdata/corpus.txt docs/dba-guide.md
 git commit -m "Read the cost bands of 042 from the Query Store of each database
 
@@ -892,9 +923,9 @@ holds for the last seven days, with a lower bound beside 042's upper one.
 It reads the store only when it is not off and the database is not an
 availability group secondary, leaves out the rows of other replica roles
 where the store can tell them apart, finds each plan's cost by a text search
-as 042 does, and reads at most a thousand plans, a hundred at a time, within
-100 MB and 10 seconds per database. No text and no identifier of a query
-leaves the server. The rows of other roles are staged through sp_executesql
+as 042 does, and reads at most a thousand plans per database, a hundred at a
+time, starting no new hundred once 100 MB or 10 seconds are reached. No text
+and no identifier of a query leaves the server. The rows of other roles are staged through sp_executesql
 rather than aggregated there, because a statement naming replica_group_id
 does not compile before SQL Server 2022 and one aggregation should serve
 every version."
@@ -907,11 +938,11 @@ Files:
 
 Interfaces:
 - Consumes (real names in `collect`, read from the tree): `liveConfig(t) *Config` (skips without `SQL_AUDITOR_LIVE_SERVER`), `Open(cfg *Config) (*sql.DB, error)`, `runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest, rw *runWriter, s Script, u DatabaseFolder, watch *blockingWatch, spid int) (bool, error)`, `newRunWriter(root string, budget int)`, `ResultRelativePath(dir, base, dbFolder string) string`, `parseScript(rel, sql string) Script`, `quoteName(string) string`, `Options{Config: cfg}`, `DatabaseFolder{Name, Folder}`, `Manifest{}`.
-- Produces, for Tasks 4 to 6: `parallelCostScript(t, map[string]int64) Script`; `pcRootKeys`, `pcBandKeys`; `pcAdmin`, `pcCreateDatabase(t, admin, name, collate string, noAutoStats bool)`, `pcOpen`, `pcExec`, `pcLadder`, `pcRun(t, cfg, s, name) ([]byte, map[string]any)`, `pcFlat`, `pcBands`, `pcNum`, `pcPlan`, `pcOracle`, `pcSerialAboveOne`, `pcParallel`, `pcCompareBands(t, doc, []pcPlan)`, `pcCheckShare`, `pcSettings`, `pcReplicasKnown`, and `TestLiveQueryStoreParallelCost`, to which Tasks 4 to 6 add subtests before its closing brace.
+- Produces, for Tasks 4 to 6: `parallelCostScript(t, map[string]int64) Script`; `pcRootKeys`, `pcBandKeys`; `pcAdmin`, `pcCreateDatabase(t, admin, name, collate string, noAutoStats bool)`, `pcOpen`, `pcExec`, `pcLadder`, `pcRun(t, cfg, s, name) ([]byte, map[string]any)`, `pcFlat`, `pcBands`, `pcNum`, `pcPlan`, `pcOracle`, `pcSerialAboveOne`, `pcParallel`, `pcBandOf`, `pcCompareBands(t, doc, []pcPlan)`, `pcCheckShare`, `pcCompareRoot(t, doc, before, after []pcPlan)`, `pcSettings`, `pcReplicasKnown`, and `TestLiveQueryStoreParallelCost`, to which Tasks 4 to 6 add subtests before its closing brace.
 
 The collector exists since Task 2, so these tests may pass at once. What proves them is Step 5: each mutation of the spec's test 3 must make them fail.
 
-Two choices made here, both flagged at the end. The spec asks that `window.serial_plans_dop_above_1` be at least 1 "and stops there if not"; read from the document alone, a 043 that excluded every row failed with a message blaming the fixture (measured with the role mutation). So the premise is read from the store first, and the document is then held to it. And the test adds one assertion the spec does not list: on every costed plan, `is_parallel_plan` agrees with an operator marked `Parallel="1"`, which is how 042 has called a statement parallel since `98e6d14`.
+Four choices made here, all flagged at the end (ambiguities 4, 5 and 16). The spec asks that `window.serial_plans_dop_above_1` be at least 1 "and stops there if not"; read from the document alone, a 043 that excluded every row failed with a message blaming the fixture (measured with the role mutation). So the premise is read from the store first, and the document is then held to it. The test adds one assertion the spec does not list: on every costed plan, `is_parallel_plan` agrees with an operator marked `Parallel="1"`, which is how 042 has called a statement parallel since `98e6d14`. The workload adds to the spec's: the spec's ladder put all eight parallel plans in `5_25` (measured), so three `UNION ALL` scans of the largest heaps put one plan in each of `25_50`, `50_100` and `100_500`, at the same costs in row and batch mode, and a trigger and a scalar function give `nested.*` and the scalar function rule of the spec's point 7 something to count; the test then holds the root's totals to the store, which the spec's test 3 does not ask. And the store is case-sensitive under a name that needs quoting, so that Review Focus 1 reaches the read loop, which Task 6's serial store never enters.
 
 - [ ] Step 1: Create `collect/parallelcost_test.go`:
 
@@ -1113,8 +1144,9 @@ func pcOpen(t *testing.T, cfg *Config, name string) *sql.DB {
 	return db
 }
 
-// pcLadder builds and runs test 3's workload, as the spec writes it, and
-// flushes the store so the views hold it.
+// pcLadder builds and runs test 3's workload, as the spec writes it, then
+// the plans this plan adds to it (above 25, and nested), and flushes the
+// store so the views hold it.
 func pcLadder(t *testing.T, cfg *Config, name string) {
 	t.Helper()
 	w := pcOpen(t, cfg, name)
@@ -1136,6 +1168,42 @@ func pcLadder(t *testing.T, cfg *Config, name string) {
 		"SELECT pad FROM dbo.Ladder1 WHERE id = 1; "+
 		"SELECT COUNT_BIG(*) FROM dbo.Ladder7 WHERE id % 7 = 4; END;")
 	pcExec(t, w, "EXEC dbo.TwoStatements;")
+	// Not in the spec's workload. The ladder's parallel plans all cost under
+	// 25 on the lab, so no band boundary above 25 separated two plans. These
+	// scan the largest heaps joined by UNION ALL, whose cost adds up branch
+	// by branch: 34.6, 69.2 and 207.6 in batch mode (compatibility 170), 34.9,
+	// 69.8 and 209.3 in row mode (130), one plan in each of 25_50, 50_100 and
+	// 100_500 either way, in about 1.7 s together.
+	for _, heaps := range [][]string{
+		{"Ladder7", "Ladder6"}, {"Ladder7", "Ladder7", "Ladder7"}, slices.Repeat([]string{"Ladder7"}, 9),
+	} {
+		var branches []string
+		for _, h := range heaps {
+			branches = append(branches, "SELECT l.id FROM dbo."+h+" AS l")
+		}
+		pcExec(t, w, "SELECT COUNT_BIG(*) FROM ("+strings.Join(branches, " UNION ALL ")+
+			") AS u WHERE u.id % 7 = 3 OPTION (MAXDOP 2);")
+	}
+	// Nested queries, for nested.* and the scalar function rule of point 7:
+	// a trigger whose statement is a parallel aggregate, fired once, and a
+	// scalar function whose body runs once per row of its caller, 300 times.
+	// The function must not be inlined, or its body is no query of its own;
+	// INLINE = OFF exists from SQL Server 2019, before which nothing inlines.
+	pcExec(t, w, "CREATE TABLE dbo.Fired (id int NOT NULL);")
+	pcExec(t, w, "CREATE TRIGGER dbo.FiredCount ON dbo.Fired AFTER INSERT AS BEGIN SET NOCOUNT ON; "+
+		"DECLARE @n bigint; SELECT @n = COUNT_BIG(*) FROM dbo.Ladder6 WHERE id % 7 = 5 OPTION (MAXDOP 2); END;")
+	pcExec(t, w, "INSERT INTO dbo.Fired (id) VALUES (1);")
+	var major int
+	if err := w.QueryRow("SELECT CAST(SERVERPROPERTY('ProductMajorVersion') AS int);").Scan(&major); err != nil {
+		t.Fatal(err)
+	}
+	inline := ""
+	if major >= 15 {
+		inline = " WITH INLINE = OFF"
+	}
+	pcExec(t, w, "CREATE FUNCTION dbo.Scalar1 (@x bigint) RETURNS bigint"+inline+" AS BEGIN "+
+		"RETURN (SELECT COUNT_BIG(*) FROM dbo.Ladder1 WHERE id = @x); END;")
+	pcExec(t, w, "SELECT SUM(dbo.Scalar1(l.id)) FROM dbo.Ladder1 AS l WHERE l.id <= 300;")
 	pcExec(t, w, "CREATE TABLE #savings (object_name sysname, schema_name sysname, index_id int, "+
 		"partition_number int, size_current_kb bigint, size_requested_kb bigint, "+
 		"sample_current_kb bigint, sample_requested_kb bigint); "+
@@ -1228,12 +1296,14 @@ type pcPlan struct {
 	execs, parRows, parExecs, minExecs int64
 	cpu, parCPU, minCPU, dopWeighted   float64
 	maxDOP                             int64
+	kind                               string // sys.objects.type of the query's object, "" for none
 }
 
 // pcOracle reads every plan of the test store executed in the last seven
 // days, with its cost through the xml path on the first costed statement
-// element, the independent reading the spec asks for, and its runtime figures
-// summed by the test's own query.
+// element, the independent reading the spec asks for, its runtime figures
+// summed by the test's own query, and the type of the object its query
+// belongs to.
 func pcOracle(t *testing.T, admin *sql.DB, name string) []pcPlan {
 	t.Helper()
 	q := quoteName(name)
@@ -1241,8 +1311,11 @@ func pcOracle(t *testing.T, admin *sql.DB, name string) []pcPlan {
 SELECT p.plan_id, CAST(p.is_parallel_plan AS int),
        CASE WHEN CHARINDEX(N' Parallel="1"', p.query_plan) > 0 THEN 1 ELSE 0 END,
        x.cost, ISNULL(x.costed, 0), ISNULL(DATALENGTH(p.query_plan), 0),
-       r.execs, r.par_rows, r.par_execs, r.min_execs, r.cpu, r.par_cpu, r.min_cpu, r.dop_weighted, r.max_dop
+       r.execs, r.par_rows, r.par_execs, r.min_execs, r.cpu, r.par_cpu, r.min_cpu, r.dop_weighted, r.max_dop,
+       ISNULL(RTRIM(ob.type), '')
 FROM ` + q + `.sys.query_store_plan AS p
+JOIN ` + q + `.sys.query_store_query AS qq ON qq.query_id = p.query_id
+LEFT JOIN ` + q + `.sys.objects AS ob ON ob.object_id = qq.object_id
 JOIN (SELECT rs.plan_id,
              SUM(rs.count_executions) AS execs,
              COUNT_BIG(CASE WHEN rs.max_dop > 1 THEN 1 END) AS par_rows,
@@ -1271,7 +1344,7 @@ OPTION (MAXDOP 1);`)
 		var p pcPlan
 		var par, marker int
 		if err := rows.Scan(&p.id, &par, &marker, &p.cost, &p.costed, &p.bytes, &p.execs, &p.parRows,
-			&p.parExecs, &p.minExecs, &p.cpu, &p.parCPU, &p.minCPU, &p.dopWeighted, &p.maxDOP); err != nil {
+			&p.parExecs, &p.minExecs, &p.cpu, &p.parCPU, &p.minCPU, &p.dopWeighted, &p.maxDOP, &p.kind); err != nil {
 			t.Fatal(err)
 		}
 		p.parallel, p.marker = par == 1, marker == 1
@@ -1445,6 +1518,80 @@ func pcCheckShare(t *testing.T, doc map[string]any) {
 	}
 }
 
+// pcCompareRoot checks the root's totals against the store read before the
+// run and after it. The parallel totals are exact: 043's own statements are
+// hinted MAXDOP 1 and reach no parallel plan. window.executions and
+// window.cpu_s hold 043's own statements, which run between the two
+// readings, so they must lie between the two; both leave out the queries of
+// scalar functions (FN), whose CPU is in their caller and is counted in
+// window.scalar_function_cpu_s. FN, TF and TR queries are nested.
+func pcCompareRoot(t *testing.T, doc map[string]any, before, after []pcPlan) {
+	t.Helper()
+	root := pcFlat(doc)
+	var plans, nested, parExecs, minExecs int64
+	var planCPU, parCPU, minCPU, nestedCPU, scalarCPU float64
+	for _, p := range after {
+		if p.kind == "FN" {
+			scalarCPU += p.cpu
+		}
+		if !p.parallel {
+			continue
+		}
+		plans++
+		planCPU += p.cpu
+		parExecs += p.parExecs
+		parCPU += p.parCPU
+		minExecs += p.minExecs
+		minCPU += p.minCPU
+		if p.kind == "FN" || p.kind == "TF" || p.kind == "TR" {
+			nested++
+			nestedCPU += p.parCPU
+		}
+	}
+	for _, c := range []struct {
+		key  string
+		want int64
+	}{
+		{"window.parallel_plans", plans}, {"window.parallel_executions", parExecs},
+		{"window.parallel_executions_min", minExecs}, {"nested.parallel_plans", nested},
+	} {
+		if got := int64(pcNum(t, root[c.key], c.key)); got != c.want {
+			t.Errorf("%s = %d, the store holds %d", c.key, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		key string
+		us  float64
+	}{
+		{"window.parallel_plan_cpu_s", planCPU}, {"window.parallel_cpu_s", parCPU},
+		{"window.parallel_cpu_s_min", minCPU}, {"nested.parallel_cpu_s", nestedCPU},
+		{"window.scalar_function_cpu_s", scalarCPU},
+	} {
+		if got := pcNum(t, root[c.key], c.key); math.Abs(got-pcSeconds(c.us)) > 0.1+1e-9 {
+			t.Errorf("%s = %.1f, the store holds %.1f", c.key, got, pcSeconds(c.us))
+		}
+	}
+	serial := func(plans []pcPlan) (execs int64, cpu float64) {
+		for _, p := range plans {
+			if p.kind != "FN" {
+				execs += p.execs
+				cpu += p.cpu
+			}
+		}
+		return execs, cpu
+	}
+	loExecs, loCPU := serial(before)
+	hiExecs, hiCPU := serial(after)
+	if got := int64(pcNum(t, root["window.executions"], "window.executions")); got < loExecs || got > hiExecs {
+		t.Errorf("window.executions = %d, want between %d and %d, the store before and after the run, "+
+			"scalar function queries left out", got, loExecs, hiExecs)
+	}
+	if got := pcNum(t, root["window.cpu_s"], "window.cpu_s"); got < pcSeconds(loCPU)-0.1-1e-9 || got > pcSeconds(hiCPU)+0.1+1e-9 {
+		t.Errorf("window.cpu_s = %.1f, want between %.1f and %.1f, the store before and after the run, "+
+			"scalar function queries left out", got, pcSeconds(loCPU), pcSeconds(hiCPU))
+	}
+}
+
 // pcSettings is the instance's threshold and scheduler count, for the
 // message of a fixture that came out too thin.
 func pcSettings(t *testing.T, admin *sql.DB) string {
@@ -1461,7 +1608,8 @@ func pcSettings(t *testing.T, admin *sql.DB) string {
 }
 
 // pcReplicasKnown says whether this instance can tell replica groups apart:
-// the column (SQL Server 2022) and the view (SQL Server 2025) both exist.
+// the column (SQL Server 2022) and the view (measured present on 2022 CU26 and
+// on 2025) both exist.
 func pcReplicasKnown(t *testing.T, admin *sql.DB) (known bool, major int) {
 	t.Helper()
 	var col, view sql.NullInt64
@@ -1477,8 +1625,12 @@ func pcReplicasKnown(t *testing.T, admin *sql.DB) (known bool, major int) {
 
 func TestLiveQueryStoreParallelCost(t *testing.T) {
 	cfg, admin := pcAdmin(t)
-	name := "ZzAvgDopLive" + pcSuffix()
-	pcCreateDatabase(t, admin, name, "", false)
+	// Case-sensitive, so that an identifier written in the wrong case fails
+	// wherever 043 runs it, the read loop included, and named with a space
+	// and a closing bracket, so that a name quoted wrongly does (Review
+	// Focus 1).
+	name := "ZzAvgDopLive Bands]" + pcSuffix()
+	pcCreateDatabase(t, admin, name, "Latin1_General_CS_AS", false)
 	pcLadder(t, cfg, name)
 
 	// Test 3 of the spec, its assertions in its order.
@@ -1487,6 +1639,32 @@ func TestLiveQueryStoreParallelCost(t *testing.T) {
 		if n := len(pcParallel(before)); n < 5 {
 			t.Fatalf("the store holds %d parallel plans, want at least 5 (%s): the fixture is too thin "+
 				"on this instance to tell the bands apart", n, pcSettings(t, admin))
+		}
+		// Plans in one band would leave every boundary but one untested: a
+		// band that overlapped its neighbour would pass.
+		filled := map[string]bool{}
+		for _, p := range pcParallel(before) {
+			if b := pcBandOf(p); b != "unknown" {
+				filled[b] = true
+			}
+		}
+		if len(filled) < 4 {
+			t.Fatalf("the parallel plans fill %d of the six costed bands (%v), want at least 4 (%s): the fixture "+
+				"cannot tell the boundaries apart on this instance", len(filled), filled, pcSettings(t, admin))
+		}
+		var scalar, nestedParallel int
+		for _, p := range before {
+			if p.kind == "FN" {
+				scalar++
+			}
+			if p.parallel && (p.kind == "FN" || p.kind == "TF" || p.kind == "TR") {
+				nestedParallel++
+			}
+		}
+		if scalar == 0 || nestedParallel == 0 {
+			t.Fatalf("the store holds %d scalar function queries and %d parallel nested plans, want at least one "+
+				"of each (%s): the root's nested.* and its scalar function rule would test nothing",
+				scalar, nestedParallel, pcSettings(t, admin))
 		}
 		// The premise is read from the store, and the document is then held
 		// to it: read from the document alone, a 043 that excluded every row
@@ -1513,11 +1691,8 @@ func TestLiveQueryStoreParallelCost(t *testing.T) {
 			t.Errorf("excluded.other_replicas_executions = %v, want null: this instance cannot tell replica groups apart", got)
 		}
 		plans := pcOracle(t, admin, name)
-		parallel := pcParallel(plans)
-		pcCompareBands(t, doc, parallel)
-		if got := int(pcNum(t, root["window.parallel_plans"], "window.parallel_plans")); got != len(parallel) {
-			t.Errorf("window.parallel_plans = %d, the store holds %d", got, len(parallel))
-		}
+		pcCompareBands(t, doc, pcParallel(plans))
+		pcCompareRoot(t, doc, before, plans)
 		for _, p := range plans {
 			if p.costed > 1 {
 				t.Errorf("plan %d holds %d costed statement elements; the text search reads the first one only", p.id, p.costed)
@@ -1552,17 +1727,24 @@ Expected: 1, then the `collect` count measured in Task 1 plus 2 (520 on `f83d882
 cd <worktree> && export TMPDIR=/var/tmp/sqa-avgdop GOTMPDIR=/var/tmp/sqa-avgdop SQL_AUDITOR_LIVE_SERVER=localhost,11533 SQL_AUDITOR_LIVE_USER=sa SQL_AUDITOR_LIVE_PASSWORD="$(podman exec sql2025 printenv MSSQL_SA_PASSWORD)" && /usr/local/go/bin/go test ./collect/ -run '^TestLiveQueryStoreParallelCost$' -count=1 -v -timeout 20m 2>&1 | tee /var/tmp/sqa-avgdop/live.log | /usr/bin/grep -E -- '--- (PASS|FAIL|SKIP)'
 ```
 
-Expected: exactly 2 `--- PASS` lines (the test and `bands`), no FAIL, no SKIP; about 10 s. A SKIP means the variables did not reach the test. If the first assertion fails on the fixture's size, report the message (it names the threshold and the scheduler count) and stop: do not shrink the fixture.
+Expected: exactly 2 `--- PASS` lines (the test and `bands`), no FAIL, no SKIP; about 20 s. A SKIP means the variables did not reach the test. If a premise fails (the number of parallel plans, the bands they fill, the nested queries, the `#savings` anomaly), report the message (it names the threshold and the scheduler count) and stop: do not shrink or change the fixture.
 
-- [ ] Step 5: Break steps, each against `-run '^TestLiveQueryStoreParallelCost$/^bands$'` with the environment of Step 4, each undone from a copy kept aside.
+- [ ] Step 5: Break steps, each against `-run '^TestLiveQueryStoreParallelCost$/^bands$'` with the environment of Step 4, each undone from a copy kept aside. The figures are one lab run's; the message's shape is what must match.
 
 | Mutation (in 043) | Measured failure |
 | --- | --- |
 | in the pin, `WHERE r.is_parallel_plan = 1` written `WHERE r.max_dop > 1` | `band lt_5: statements = 1, want 0` (the anomaly enters a band) |
 | `'replica_group_id'` written `'replica_group_idx'` | `excluded.other_replicas_executions = <nil>, want 0` |
-| in the literal, `r.role_type <> 1` written `r.role_type = 1` | `window.serial_plans_dop_above_1 = 0 while the store holds 1 such plans`, `excluded.other_replicas_executions = 61, want 0`, `band 5_25: statements = 0, want 8` |
+| in the literal, `r.role_type <> 1` written `r.role_type = 1` | `window.serial_plans_dop_above_1 = 0 while the store holds 1 such plans`, `excluded.other_replicas_executions = 367, want 0`, `band 5_25: statements = 0, want 9` |
+| in the aggregation, `ob.type IN ('FN', 'TF', 'TR')` written `ob.type IN ('XX')` (no query is nested) | `nested.parallel_plans = 0, the store holds 1` |
+| in the aggregation, `ob.type = 'FN'` written `ob.type = 'TR'` (the trigger taken for the scalar function) | `window.scalar_function_cpu_s = 0.1, the store holds 0.5` and `window.executions = 368, want between 65 and 81, the store before and after the run, scalar function queries left out` |
+| in the root, `SUM(CASE WHEN r.scalar_function = 0 THEN r.executions END)` written `SUM(r.executions)` (the function's executions counted beside its caller's) | `window.executions = 369, want between 65 and 81` |
+| `(3, '25_50',      25.0,  50.0)` written `(3, '25_50',      25.0, 100.0)` | `band 25_50: statements = 2, want 1`, and the share: `the bands hold 9.6 s of 8.3 s` |
+| in the read loop, `LEFT JOIN sys.query_store_plan AS p` written `LEFT JOIN sys.Query_Store_Plan AS p` | `043 on ZzAvgDopLive Bands]...: mssql: Invalid object name 'sys.Query_Store_Plan'.` (Review Focus 1: the store is case-sensitive) |
 
 The fourth mutation of the spec's test 3, a share computed from anything but the bands, cannot fail here: the store is read whole, so every such share is 100 (measured). Task 5 catches it, on a store read in part.
+
+Two mutations of the root pass this step, measured, and are not to be reported as findings: `SUM(CASE WHEN r.is_parallel_plan = 1 THEN r.par_cpu_us END) AS par_cpu_us` written with `r.cpu_us`, and `SUM(CASE WHEN r.is_parallel_plan = 1 THEN r.par_executions END) AS par_executions` written with `r.executions`. Every execution of a parallel plan in the fixture ran at a degree above 1, so the upper bounds equal the totals and nothing here can tell them apart (Review Focus 3, which says what was tried).
 
 - [ ] Step 6: Check that the lab holds no test database, then commit.
 
@@ -1576,6 +1758,10 @@ the spec's ladder of heaps in a database of its own, runs the collector
 through runUnit, and recomputes every band from the store with a reading
 that shares nothing with the collector's: the cost through the xml path on
 the first costed statement element, the runtime figures summed by the test.
+The root's totals are held to the same reading, nested queries and the
+scalar function rule included, and the store is case-sensitive under a name
+that needs quoting. The spec's ladder put every parallel plan in one band, so
+three scans of the largest heaps put one plan in each band from 25 to 500.
 Its premises are read from the store before anything else, so a fixture too
 thin on another instance fails with the instance's threshold and scheduler
 count in its message rather than passing on nothing."
@@ -1738,13 +1924,14 @@ Interfaces:
 
 | Mutation (in 043) | Measured failure |
 | --- | --- |
-| `WHERE k.rn >= @lo AND k.rn < @lo + @chunk` written `... < @lo + 1000000` (a loop that ignores `@chunk`) | `examined.plans_read = 8, want 2` |
+| `WHERE k.rn >= @lo AND k.rn < @lo + @chunk` written `... < @lo + 1000000` (a loop that ignores `@chunk`) | `examined.plans_read = 12, want 2` |
 | `TOP (@cap + 1)` written `TOP (@cap)` | `cap below the plans`: `examined.stopped_by = <nil>, want cap` |
 | the bytes check copied before the time check (`IF @bytes_read >= @budget_bytes BEGIN SET @stopped_by = 'bytes'; BREAK; END` inserted above `IF DATEDIFF(...`) | `both budgets zero`: `examined.stopped_by = bytes, want time` |
-| `100.0 * ISNULL(b.banded_par_cpu_us, 0)` written `100.0 * ISNULL(a.par_cpu_us, 0)` (a share not taken from the bands) | `bytes after one chunk`: `share_of_parallel_cpu_pct = 100.0; the bands hold 0.9 s of 1.8 s, which allows 45.9 to 54.3` |
-| `DECLARE @loop_started datetime2 = SYSDATETIME()` written `datetime2(3)` | `time budget zero`: `examined.stopped_by = <nil>, want time`. This one depends on rounding and fails about half the runs; run it three times and report how many failed |
+| `100.0 * ISNULL(b.banded_par_cpu_us, 0)` written `100.0 * ISNULL(a.par_cpu_us, 0)` (a share not taken from the bands) | `bytes after one chunk`: `share_of_parallel_cpu_pct = 100.0; the bands hold 3.5 s of 6.9 s, which allows 48.9 to 52.6` |
 
 The fourth row is the spec's test 3 mutation that test 3 cannot see; it is caught here.
+
+One more break, apart because it is not deterministic: `DECLARE @loop_started datetime2 = SYSDATETIME()` written `datetime2(3)`, against `-run '^TestLiveQueryStoreParallelCost$/^stop$/^time budget zero$'`. The rounding of the start time decides it: measured, 3 runs of 5 failed with `examined.stopped_by = <nil>, want time` and 2 passed. Run it five times. At least one failure is the success of this step, a run that passes is expected and is not a finding, and five passes is a finding. It shows the trap the comment above the timers names; it is not a gate, and the shipped file at full precision makes `time budget zero` deterministic.
 
 - [ ] Step 4: Commit.
 
@@ -1836,7 +2023,9 @@ func TestLiveQueryStoreParallelCostStoresNotRead(t *testing.T) {
 	cfg, admin := pcAdmin(t)
 
 	// master has no row in the options view: the "never enabled" case,
-	// which a new database cannot be on SQL Server 2022 and later.
+	// which a new database cannot be on SQL Server 2022 and later. Measured
+	// with no row on 2017 CU31, 2022 CU26 and 2025 CU7, the CI legs and the
+	// lab.
 	t.Run("master", func(t *testing.T) {
 		_, doc := pcRun(t, cfg, parallelCostScript(t, nil), "master")
 		pcNotRead(t, doc, nil, "no store")
@@ -1897,7 +2086,7 @@ func TestLiveQueryStoreParallelCostStoresNotRead(t *testing.T) {
 cd <worktree> && export TMPDIR=/var/tmp/sqa-avgdop GOTMPDIR=/var/tmp/sqa-avgdop SQL_AUDITOR_LIVE_SERVER=localhost,11533 SQL_AUDITOR_LIVE_USER=sa SQL_AUDITOR_LIVE_PASSWORD="$(podman exec sql2025 printenv MSSQL_SA_PASSWORD)" && /usr/local/go/bin/go test ./collect/ -run '^TestLiveQueryStoreParallelCost' -count=1 -v -timeout 20m 2>&1 | tee /var/tmp/sqa-avgdop/live.log | /usr/bin/grep -E -- '--- (PASS|FAIL|SKIP)' && /usr/local/go/bin/go test -list '.*' ./collect/ | /usr/bin/grep -c '^Test'
 ```
 
-Expected: exactly 15 `--- PASS` lines (12 for the first test, 3 for the second), no FAIL, no SKIP, about 30 s; then the `collect` count of Task 3 plus 1 (521 on `f83d882`).
+Expected: exactly 15 `--- PASS` lines (12 for the first test, 3 for the second), no FAIL, no SKIP, about 45 s; then the `collect` count of Task 3 plus 1 (521 on `f83d882`).
 
 - [ ] Step 3: Break steps, each undone.
 
@@ -1905,7 +2094,7 @@ Expected: exactly 15 `--- PASS` lines (12 for the first test, 3 for the second),
 | --- | --- | --- |
 | `DECLARE @read bit = CASE WHEN @not_read IS NULL THEN 1 ELSE 0 END;` written `... WHEN @not_read IS NULL OR @not_read = N'off' THEN 1 ...` (the OFF store read into the bands) | `'^TestLiveQueryStoreParallelCost$/^off store$'` | `window.oldest_interval = ... on a store that was not read, want null`, every count after it, and the bands |
 | `NULLIF(ISNULL(a.par_cpu_us, 0), 0)` written `ISNULL(a.par_cpu_us, 0)` | `'^TestLiveQueryStoreParallelCostStoresNotRead$'` | `serial only`: `mssql: Divide by zero error encountered.` |
-| `JOIN sys.query_store_plan  AS p` written `JOIN sys.Query_Store_Plan  AS p` | the same | `serial only`: `Invalid object name 'sys.Query_Store_Plan'` (Review Focus 1) |
+| `JOIN sys.query_store_plan  AS p` written `JOIN sys.Query_Store_Plan  AS p` | the same | `serial only`: `Invalid object name 'sys.Query_Store_Plan'` (Review Focus 1; Task 3's `bands` fails on it too, its store being case-sensitive) |
 | `WHEN @has_options = 0        THEN N'no store'` written `WHEN 1 = 0 THEN N'no store'` | the same | `master`: `not_read_because <nil>; want <nil>, no store` |
 
 - [ ] Step 4: Check the lab holds no `ZzAvgDop` database (Task 3 Step 6), then run `/usr/local/go/bin/go test ./... -count=1` and commit.
@@ -1917,7 +2106,8 @@ git commit -m "Test the stores the Query Store parallel cost collector must not 
 A store that is off still returns its data, so the rule is a predicate in
 the file and is tested on a store that held parallel plans before it was
 switched off. master stands for a database with no store, which a new
-database cannot be on SQL Server 2022 and later. A store that is on and
+database cannot be on SQL Server 2022 and later, and has no options row on
+2017, 2022 and 2025 alike. A store that is on and
 holds only serial work must give zeros and not NULLs, and a share that is
 NULL rather than a division by zero, which would lose the whole root. That
 store is case-sensitive and its name needs quoting, so an identifier in the
@@ -1930,7 +2120,7 @@ like any other."
 Files:
 - Modify: `.github/workflows/ci.yml`
 
-The owner decided that max-duration's live tests join the integration job; 043's join it the same way, as a separate step after `max-duration live tests`. They create and drop their own databases (`ZzAvgDopLive...`), not `ci_probe`. The fixture's premises were measured on SQL Server 2025 with 22 schedulers only; the CI matrix is 2017 and 2022 on runners of a few cores. If the step fails there on a premise (fewer than five parallel plans, or no `#savings` anomaly), that is a measurement: report it to the owner with the log, and do not weaken the test (ambiguity 8).
+The owner decided that max-duration's live tests join the integration job; 043's join it the same way, as a separate step after `max-duration live tests`. They create and drop their own databases (`ZzAvgDopLive...`), not `ci_probe`. The CI matrix is 2017 and 2022 on runners of four cores. The whole live suite of Tasks 3 to 6 passed on throwaway containers of both images (2017 CU31, 2022 CU26) held to four schedulers, on 6 October 2026: twelve parallel plans in the same four bands, the `#savings` anomaly at `max_dop` 41 and 39, no options row in `master`. A runner is still not that container. If the step fails there on a premise (fewer than five parallel plans, fewer than four bands, no nested plan, no `#savings` anomaly), that is a measurement: report it to the owner with the log, and do not weaken the test (ambiguity 8).
 
 - [ ] Step 1: In the step `assert the run is complete`, after the `jq` block that checks `029.query-store-load-profile.json` (it ends with `jq -c '.intervals[-3:]' ...; exit 1; }`) and before the comment that begins `# An \`if\`, not \`cmd && { ... }\``, insert:
 
@@ -1940,8 +2130,8 @@ The owner decided that max-duration's live tests join the integration job; 043's
           # are: a text or id column added anywhere fails here. ci_probe's
           # store is on and small, so it is read whole: nothing stops the read,
           # and every band statement is a plan the loop reached. excluded is
-          # null on 2017 and 2022, which cannot tell replica groups apart, and
-          # would be 0 on a 2025 image.
+          # null on 2017, which cannot tell replica groups apart, and 0 on 2022
+          # (CU26, measured) and 2025. The bounds of every band are 042's.
           jq -e '(keys_unsorted | sort) == (["bands","budget","cap","chunk","collected_at","database","examined",
                      "excluded","nested","schedulers","selection","state","truncated","unknown","window"] | sort)
                  and (.state | keys_unsorted | sort) == (["actual","capture_mode","interval_minutes","not_read_because"] | sort)
@@ -1957,6 +2147,8 @@ The owner decided that max-duration's live tests join the integration job; 043's
                  and (.selection | keys_unsorted) == ["duration_ms"]
                  and (.unknown | keys_unsorted | sort) == (["no_cost","no_plan"] | sort)
                  and ([.bands[].band] == ["lt_5","5_25","25_50","50_100","100_500","ge_500","unknown"])
+                 and ([.bands[] | [.cost_from, .cost_to]]
+                     == [[0,5],[5,25],[25,50],[50,100],[100,500],[500,null],[null,null]])
                  and all(.bands[]; (keys_unsorted | sort) == (["avg_dop","band","cost_from","cost_to","cpu_s",
                      "executions","max_dop","parallel_cpu_s","parallel_cpu_s_min","parallel_executions",
                      "parallel_executions_min","parallel_statements","statements"] | sort)
@@ -1980,7 +2172,7 @@ The owner decided that max-duration's live tests join the integration job; 043's
           fi
 ```
 
-The `jq` expression is a single-quoted string spanning lines, as the 027 and 029 blocks are; keep its indentation inside the quotes as above. It was run on a real 043 document from the lab (`true`), and refused one with `cap` 999 and one with an extra `window.plan_id` (`false`).
+The `jq` expression is a single-quoted string spanning lines, as the 027 and 029 blocks are; keep its indentation inside the quotes as above. It was run on a real 043 document from the lab (`true`), and refused one with `cap` 999 and one with an extra `window.plan_id` (`false`). After the panel, the bounds clause was added and run on a document from `sql-auditor collect` (`true`) and on the same document with `25_50` ending at 100 (`false`; without the clause the expression had said `true`).
 
 - [ ] Step 2: After the step `max-duration live tests`, at the end of the job, add:
 
@@ -1988,8 +2180,9 @@ The `jq` expression is a single-quoted string spanning lines, as the 027 and 029
       # 043's live tests, against the same container. They build their own
       # databases (ZzAvgDopLive...) with a ladder of heaps up to 2 000 000
       # rows and drop them; ci_probe is not touched. The fixture's premises
-      # were measured on SQL Server 2025 only: a failure on them here is a
-      # measurement of this image to report, not a test to loosen. Subtests
+      # were measured on the lab's 2025 and on 2017 and 2022 containers held
+      # to four schedulers, not on these runners: a failure on them here is a
+      # measurement to report, not a test to loosen. Subtests
       # are indented in -v output, so SKIP and FAIL are matched anywhere.
       - name: query store parallel cost live tests
         env:
@@ -2023,7 +2216,10 @@ leaves the server, so the CI collection asserts its key sets exactly on
 ci_probe, as it does for the two other Query Store collectors without a
 disclosure. Its live tests join the job as the max-duration ones did, in a
 step of their own that fails on a skip, and run on SQL Server 2017 and 2022,
-where the fixture has not been measured yet."
+where the fixture was measured on containers held to four schedulers but
+not on the runners themselves. The bounds of every band are checked too:
+the live fixture cannot reach every boundary, and a band that overlapped
+its neighbour would mislead the analysis without failing anything else."
 ```
 
 ### Task 8: The documents
@@ -2039,10 +2235,10 @@ No bold, no em or en dash in any line added. Run `/usr/local/go/bin/go test . -c
   80.workload/043.query-store-parallel-cost.sql per database, SQL Server 13+
 ```
 
-- [ ] Step 2: `docs/dba-guide.md`, "### What the default run costs a large instance". After the row whose first cell is `Statement costs read from cached plans`, add the row the spec gives in "The cost, measured", verbatim:
+- [ ] Step 2: `docs/dba-guide.md`, "### What the default run costs a large instance". After the row whose first cell is `Statement costs read from cached plans`, add the row the spec gives in "The cost, measured", verbatim. Its selection figure is the final file's, measured on 6 October 2026 after the panel; the spec's first figure, 29 to 105 ms, was a prototype's, and the spec now gives both.
 
 ```text
-| Parallel plan costs read out of the Query Store | `80.workload/043.query-store-parallel-cost.sql` | in each database whose store is not off, and which is not an availability group secondary, two parts. First one aggregation of the last seven days of `sys.query_store_runtime_stats`, grouped by plan into a temporary table; it reads no plan text and has no budget of its own, so its cost follows the number of runtime rows in the window: 29 to 105 ms on six lab stores of up to 9 086 rows. Then the text of up to 1 000 parallel plans, those with the most parallel CPU first, copied a hundred at a time into a table variable and searched for one attribute, never converted to `xml`: about 20 ms per MB of plan text on one 2025 lab build. The read stops before the next hundred once 100 MB have been read or 10 s have passed, so one hundred plans can pass either, by as much as their size; the 120-second timeout is the hard bound of the whole file. The store's shared lock is released between chunks. The root projects `selection.duration_ms`, `window.runtime_rows`, `examined.duration_ms`, `examined.bytes_read`, `examined.largest_plan_bytes` and `examined.stopped_by`, so the cost on your instance is in the archive. Nothing that names a query leaves the server. |
+| Parallel plan costs read out of the Query Store | `80.workload/043.query-store-parallel-cost.sql` | in each database whose store is not off, and which is not an availability group secondary, two parts. First one aggregation of the last seven days of `sys.query_store_runtime_stats`, grouped by plan into a temporary table; it reads no plan text and has no budget of its own, so its cost grows with the number of runtime rows in the window, over a fixed part that compiling its statements under `RECOMPILE` costs every database: on one 2025 lab build, 144 to 221 ms on a store of 13 runtime rows and 242 to 253 ms on one of 6 851. Then the text of up to 1 000 parallel plans, those with the most parallel CPU first, copied a hundred at a time into a table variable and searched for one attribute, never converted to `xml`: about 20 ms per MB of plan text on one 2025 lab build. The read stops before the next hundred once 100 MB have been read or 10 s have passed, so one hundred plans can pass either, by as much as their size; the 120-second timeout is the hard bound of the whole file. The store's shared lock is released between chunks. The root projects `selection.duration_ms`, `window.runtime_rows`, `examined.duration_ms`, `examined.bytes_read`, `examined.largest_plan_bytes` and `examined.stopped_by`, so the cost on your instance is in the archive. Nothing that names a query leaves the server. |
 ```
 
 - [ ] Step 3: `docs/dba-guide.md`, "#### Narrowing the databases". After the paragraph that begins "`--query-store-databases` narrows which of the collected databases the extraction reads", add:
@@ -2078,9 +2274,10 @@ Read it with these in mind:
   every execution ran parallel, a lower bound. The cache can only give the
   first.
 - A store that is off, a database without a store, and an availability group
-  secondary are not read, and `state.not_read_because` says which. From SQL
-  Server 2025, rows recorded for another replica role are left out and
-  counted under `excluded`.
+  secondary are not read, and `state.not_read_because` says which. Where the
+  store records replica groups (measured on SQL Server 2022 CU26 and 2025),
+  rows recorded for another replica role are left out and counted under
+  `excluded`.
 - At most 1 000 plans are read per database, a hundred at a time, and the
   read stops between hundreds after 100 MB of plan text or 10 seconds.
   `examined.stopped_by` says whether it stopped, and
@@ -2103,15 +2300,16 @@ No query text, plan or identifier leaves the server.
 - [ ] Step 5: `docs/caps-inventory.md`, "## Caps for server cost". After the row of `80.workload/027.query-store-stats-usage`, add:
 
 ```text
-| `80.workload/043.query-store-parallel-cost` | 1 000 parallel plans per database by parallel CPU, read 100 at a time within 100 MB of plan text and 10 s | "THE CAP AND THE BUDGETS ARE CONSTANTS AND NOT OPTIONS, as in 027" | `seuil_parallelisme.py` qualifies a database by `examined.share_of_parallel_cpu_pct` rather than rejecting it | yes: `cap`, `chunk`, `budget.*`, `examined.*`, `truncated` | not in any collection (added 6 October 2026) | Keep. The archive's own `selection.duration_ms`, `examined.duration_ms` and `examined.bytes_read` give the price |
+| `80.workload/043.query-store-parallel-cost` | 1 000 parallel plans per database by parallel CPU, read 100 at a time; no new hundred is begun past 100 MB of plan text or 10 s, so one hundred can pass either | "THE CAP AND THE BUDGETS ARE CONSTANTS AND NOT OPTIONS, as in 027" | `seuil_parallelisme.py` qualifies a database by `examined.share_of_parallel_cpu_pct` rather than rejecting it | yes: `cap`, `chunk`, `budget.*`, `examined.*`, `truncated` | not in any collection (added 6 October 2026) | Keep. The archive's own `selection.duration_ms`, `examined.duration_ms` and `examined.bytes_read` give the price |
 ```
 
 - [ ] Step 6: `README.md`, the bullet "read-only is not the same as free or lock-free". Replace the line `  those plans, and every read holds the locks a read holds while it runs. Run` with:
 
 ```text
   those plans, one more searches the text of up to a thousand Query Store
-  plans per database, within 100 MB and ten seconds of reading there, and
-  every read holds the locks a read holds while it runs. Run
+  plans per database, a hundred at a time, and begins no new hundred past
+  100 MB or ten seconds of reading there, and every read holds the locks a
+  read holds while it runs. Run
 ```
 
 If the line reads otherwise on your base, make the same addition to the sentence that lists what costs CPU, and say so.
@@ -2119,10 +2317,10 @@ If the line reads otherwise on your base, make the same addition to the sentence
 - [ ] Step 7: `CHANGELOG.md`, at the end of `## [Unreleased]` / `### Added`:
 
 ```text
-- `80.workload/043.query-store-parallel-cost.sql` reads the cost bands of `042.parallel-cost-distribution.sql` from the Query Store of each database, by default, so the distribution a `cost threshold for parallelism` is chosen from no longer depends on what the plan cache still holds. It bands the plans with `is_parallel_plan = 1` executed in the last seven days, with 042's seven bands and column names, and adds `parallel_executions_min` and `parallel_cpu_s_min`, a lower bound from the rows whose every execution ran parallel, and `avg_dop`. The cost is found by a text search, as in 042; at most 1 000 plans are read per database, those with the most parallel CPU first, a hundred at a time, within 100 MB and 10 s, and the root projects what the reading cost. A store that is off, a database without a store and an availability group secondary are not read and say why; from SQL Server 2025 the rows of other replica roles are left out and counted. The serial plans that report a degree above 1 are counted and never banded. No query text and no identifier leaves the server. The audit's own statements are in the store and in the serial totals; the contract lint keeps them out of the bands.
+- `80.workload/043.query-store-parallel-cost.sql` reads the cost bands of `042.parallel-cost-distribution.sql` from the Query Store of each database, by default, so the distribution a `cost threshold for parallelism` is chosen from no longer depends on what the plan cache still holds. It bands the plans with `is_parallel_plan = 1` executed in the last seven days, with 042's seven bands and column names, and adds `parallel_executions_min` and `parallel_cpu_s_min`, a lower bound from the rows whose every execution ran parallel, and `avg_dop`. The cost is found by a text search, as in 042; at most 1 000 plans are read per database, those with the most parallel CPU first, a hundred at a time, and no new hundred is begun once 100 MB of plan text or 10 s are reached, so one hundred can pass either; the root projects what the reading cost. A store that is off, a database without a store and an availability group secondary are not read and say why; where the store records replica groups (measured on SQL Server 2022 CU26 and 2025), the rows of other replica roles are left out and counted. The serial plans that report a degree above 1 are counted and never banded. No query text and no identifier leaves the server. The audit's own statements are in the store and in the serial totals; the contract lint keeps them out of the bands.
 ```
 
-- [ ] Step 8: `docs/query-store-parallel-cost-spec.md`. Replace the first line of the status paragraph, `Status: proposed on 4 October 2026, not implemented.`, by `Status: proposed on 4 October 2026; implemented on <date of this commit> by the plan docs/superpowers/plans/2026-10-06-query-store-parallel-cost.md.` The rulings on ambiguities 1 and 2 are already in the spec (amended with this plan on 6 October 2026); check that its text still matches the file as implemented, and amend it, dated, where it does not.
+- [ ] Step 8: `docs/query-store-parallel-cost-spec.md`. Replace the first line of the status paragraph, `Status: proposed on 4 October 2026, not implemented.`, by `Status: proposed on 4 October 2026; implemented on <date of this commit> by the plan docs/superpowers/plans/2026-10-06-query-store-parallel-cost.md.` The rulings on ambiguities 1 and 2, and the corrections of the plan's review (the selection's measured cost, the replica view on SQL Server 2022, the staging's consistency limit, the degree-1 rows no test reaches), are already in the spec, amended with this plan on 6 October 2026; check that its text still matches the file as implemented, and amend it, dated, where it does not.
 
 - [ ] Step 9: Check and commit.
 
@@ -2142,7 +2340,7 @@ Expected: the `grep` prints nothing, and the root package is `ok`.
 
 ### Task 9: PRIVATE REPOSITORY, the reader of 043 in `seuil_parallelisme.py`
 
-This task is executed in `/home/rudi/Sources/Repos/sql-auditor-workspace/sql-auditor-private`, not in the public repository, under that repository's own `CLAUDE.md`: read it first. Its commit messages are in French, with no attribution trailer, and every change to a skill writes its entry in the skill's `HISTORY.md` in the same commit (`memory/AGENTS.md`, "L'historique d'un skill"). Start from that repository's current `HEAD`; `02a4a185` (6 October 2026) already changed the script's docstring for the 042 fix, so re-read the file rather than this plan's excerpts of it.
+This task is executed in `/home/rudi/Sources/Repos/sql-auditor-workspace/sql-auditor-private`, not in the public repository, under that repository's own `CLAUDE.md`: read it first. Its commit messages are in French, with no attribution trailer, and every change to a skill writes its entry in the skill's `HISTORY.md` in the same commit. That rule's text is in the owner's knowledge base, not in the private repository: `memory/AGENTS.md` of the `deckard` repository, section "L'historique d'un skill"; the form to copy is the one `HISTORY.md` itself uses (`Statut`, `Pourquoi`, `Effet`). Start from that repository's current `HEAD`; `02a4a185` (6 October 2026) already changed the script's docstring for the 042 fix, so re-read the file rather than this plan's excerpts of it.
 
 How the consumer reads 043 (spec, "What the analysis does with it"):
 
@@ -2152,7 +2350,7 @@ How the consumer reads 043 (spec, "What the analysis does with it"):
 - The shared functions `tranches`, `serialisable` and `inconnue` read the summed bands; `serialisable_min` gives the lower bound from the `_min` columns, so each candidate threshold is printed as a range.
 - Per database, the reader says when the store was not read and why, when the history is short (`window.store_oldest_interval` after `window.from`) or thin (`window.intervals` under half of what seven days of the store's interval length hold, a figure that counts the audit's own activity), when other replica roles were left out, and when a budget or the cap stopped the read, with the share the bands hold. A database is qualified, never rejected, on `truncated`.
 - When `_run.json` has `config.estimate_compression` at `"true"`, it says the sample copies of `sp_estimate_data_compression_savings` may be in the bands.
-- `main` prints 043's reading beside 042's, per collection, and prints 043's even when 042 is absent.
+- `main` prints 043's reading beside 042's, per collection, and prints 043's even when 042 is absent (`test_main_lit_043_sans_042`).
 
 Files:
 - Modify: `.claude/skills/analyser-collecte/scripts/seuil_parallelisme.py`, `.claude/skills/analyser-collecte/tests/test_seuil_parallelisme.py`, `.claude/skills/analyser-collecte/SKILL.md`, `.claude/skills/analyser-collecte/HISTORY.md`
@@ -2265,6 +2463,19 @@ def test_main_lit_les_deux_sources(tmp_path, capsys):
     assert "(Query Store, 043) : 1 base(s) lue(s) sur 1" in out
     assert "seuil 100 : entre 0 et 0" in out
     assert "INST_B : seuil 50" in out
+
+
+def test_main_lit_043_sans_042(tmp_path, capsys):
+    # Une collecte sans 042 (VIEW SERVER STATE refusé, ou collecteur ignoré)
+    # garde la lecture du Query Store.
+    d = tmp_path / "INST_C"
+    (d / "80.workload" / "SALESDB").mkdir(parents=True)
+    (d / "80.workload" / "SALESDB" / "043.query-store-parallel-cost.json").write_text(
+        json.dumps(_base_qs({"100_500": (3, 300, 360.0, 200, 300.0)})))
+    assert sp.main([str(d)]) == 0
+    out = capsys.readouterr().out
+    assert "INST_C (Query Store, 043) : 1 base(s) lue(s) sur 1" in out
+    assert "042.parallel-cost-distribution n'est pas dans l'archive" in out
 ```
 
 Run Step 1's command. Expected: the new tests fail (`AttributeError: module 'seuil_parallelisme' has no attribute 'bandes_qs'` and the like); the 20 old ones pass.
@@ -2471,7 +2682,7 @@ d. In `main`, replace the loop's opening, from `    lectures = []` to the line b
             continue
 ```
 
-- [ ] Step 4: Run Step 1's command. Expected: the count of Step 1 plus 8 (28 on `02a4a185`), all passed. Then run the whole private suite as that repository's `pytest.ini` declares it (`python -m pytest -q`), which must stay green.
+- [ ] Step 4: Run Step 1's command. Expected: the count of Step 1 plus 9 (29 on `02a4a185`), all passed. `test_main_lit_043_sans_042` and the last row of Step 5 were added after the panel and have not been run: the plan's revision could not run the private suite. If either does not behave as written, report it rather than adapting the code to the test. Then run the whole private suite as that repository's `pytest.ini` declares it (`python -m pytest -q`), which must stay green.
 
 - [ ] Step 5: Break steps, each undone from a copy kept aside, each with the one test that must fail.
 
@@ -2482,6 +2693,7 @@ d. In `main`, replace the loop's opening, from `    lectures = []` to the line b
 | in `lire`, `if "statements" not in (doc.get("examined") or {}):` written `if False:` | `test_lire_refuse_un_document_de_043` |
 | `== "true":` written `== "yes":` | `test_lire_qs_signale_estimate_compression` |
 | in `_marques_base`, `    if debut and depuis and debut > depuis:` written `    if False:` | `test_lire_qs_historique_court_et_mince` |
+| in `main`, the block from `        doc = _lire(collecte, COLLECTEUR)` to its `            continue` moved above `        docs_qs = pr.documents(collecte, COLLECTEUR_QS)` (043 read only when 042 is there) | `test_main_lit_043_sans_042` |
 
 - [ ] Step 6: `SKILL.md`, at the end of the section "## Le seuil de parallélisme se choisit sur la distribution des coûts", add:
 
@@ -2504,13 +2716,13 @@ couvre master et les bases dont le magasin est éteint, le magasin ce que le
 cache a évincé.
 ```
 
-- [ ] Step 7: `HISTORY.md`, at the top of the entries, in that file's form:
+- [ ] Step 7: `HISTORY.md`, at the end of the file, in that file's form. Its entries are in date order, oldest first; on `02a4a185` the last one is of 4 October 2026.
 
 ```text
 ## 2026-10-06 : seuil_parallelisme lit aussi 043, le Query Store par base
 Statut : retenu
 Pourquoi : le dépôt public ajoute `80.workload/043.query-store-parallel-cost`, les tranches de 042 lues dans le Query Store de chaque base, qui garde ce que le cache évince. Sa racine n'est pas celle de 042 : `lire` y aurait lu des zéros sans erreur.
-Effet : `lire_qs` additionne les tranches des bases lues (comptes et CPU, `max_dop` au maximum, `avg_dop` re-pondéré par `parallel_executions`), rapporte le total et la couverture, donne chaque candidat comme un intervalle entre le minorant (`_min`) et le majorant, et marque par base le magasin non lu, l'historique court ou mince, les autres rôles de réplica écartés, le budget ou le plafond atteint, et `--estimate-compression`. `lire` refuse un document sans `examined.statements`. `main` imprime les deux sources côte à côte. Huit tests ; cinq cassures, chacune fait tomber le sien.
+Effet : `lire_qs` additionne les tranches des bases lues (comptes et CPU, `max_dop` au maximum, `avg_dop` re-pondéré par `parallel_executions`), rapporte le total et la couverture, donne chaque candidat comme un intervalle entre le minorant (`_min`) et le majorant, et marque par base le magasin non lu, l'historique court ou mince, les autres rôles de réplica écartés, le budget ou le plafond atteint, et `--estimate-compression`. `lire` refuse un document sans `examined.statements`. `main` imprime les deux sources côte à côte, et 043 seul quand 042 manque. Neuf tests ; six cassures, chacune fait tomber le sien.
 ```
 
 - [ ] Step 8: Commit, in that repository, by explicit paths:
@@ -2532,16 +2744,45 @@ Flagged, not silently resolved. Where the plan had to choose to stay executable,
 
 1. Ruled on 6 October 2026: accepted, and the spec amended. The aggregation and SQL Server 2016 to 2019. The spec runs the aggregation into `#runtime` inside the `sp_executesql` literal that carries the replica predicate ("The aggregation of the runtime rows", "The collector": "The dynamic aggregation is one literal ... and fills `#runtime` from inside"). A statement naming `rs.replica_group_id` does not compile before SQL Server 2022, and the spec gives those versions no other path, while its floor is 2016. The plan stages the other-role rows into `#other_rows` through the literal, only where the column and `sys.query_store_replicas` both exist, and runs one aggregation, the same on every version, with `NOT EXISTS`. Alternative: two copies of the aggregation, one dynamic and one inline, which every later change would have to keep in step. The owner accepted the staging through `#other_rows` and one static aggregation; "The aggregation of the runtime rows" and "The collector" in the spec now say so.
 2. Ruled on 6 October 2026: accepted, and the spec amended. "Reported as an error, as 050 does." For a database whose replica state cannot be read, the spec says it is treated as a secondary "and reported as an error, as 050 does". 050 (`70.schema/050.heaps.sql`) reports through `errors.*` keys, which the runner turns into a partial-run warning in `MANIFEST.txt`. 043's root list has no `errors.*` key, and test 2 requires the key set to equal that list exactly. The plan follows the list: the reason is `state.not_read_because = 'replica state unreadable'` and the run is not marked partial. The owner accepted this; the spec's "Other replicas" now says the reason goes in the root and no `errors.*` key is added.
-3. Spec test 3 cannot catch "computing the share from anything but the bands". On a store read whole, the bands hold every parallel plan, so any such share is 100 (measured: the mutation gives 100.0 either way). The plan asserts the share in Task 3 and catches the mutation in Task 5's partial read (measured 100.0 against an allowed 45.9 to 54.3).
+3. Spec test 3 cannot catch "computing the share from anything but the bands". On a store read whole, the bands hold every parallel plan, so any such share is 100 (measured: the mutation gives 100.0 either way). The plan asserts the share in Task 3 and catches the mutation in Task 5's partial read (measured 100.0 against an allowed 48.9 to 52.6 with the revised fixture, 45.9 to 54.3 before it).
 4. Spec test 3's premise "`window.serial_plans_dop_above_1` is at least 1, and stops there if not", read from the document, fails a wrongly excluding 043 with a message that blames the fixture (measured with the role mutation). The plan reads the premise from the store, fatally, then holds the document to it with an ordinary error.
 5. Vocabulary against 042 since `98e6d14`. 042's bands now call a statement parallel when its cached plan holds an operator with `Parallel="1"`; in 042 `statements` counts every statement of the band and `parallel_statements` the parallel plans, and `parallel_executions` is every execution of a parallel plan. In 043, by the spec, `statements` counts parallel plans, `parallel_statements` those that ran at a degree above 1, and `parallel_executions` the executions of rows at a degree above 1. Same names, different quantities; the consumer's shared `serialisable` sums them alike and prints both as "instructions". The leaf name `serial_plans_dop_above_1` is aligned (042 `examined.`, 043 `window.`). The plan adds an assertion that `is_parallel_plan` agrees with a `Parallel="1"` operator on every costed plan of the fixture (it did); a parallel `StatMan` plan with no statement (spec point 5) is parallel for 043 and would be serial by 042's reading.
 6. The spec's spelling `Parallel="true"` (point 4, paragraph after point 9) is not what the store or the cache writes: the lab shows `Parallel="1"` and `Parallel="0"`, as the 042 fix recorded in "Open questions". Corrected in the spec on 6 October 2026, with this plan.
 7. `truncated`, and every count, on a store that is not read. The spec says the counts are NULL and that `truncated` is 1 when `stopped_by` is not NULL; it does not say what `truncated` is for a store not read. The plan makes it NULL with the counts, so that a reader who checks only `truncated` cannot take an unread store for a complete one.
-8. CI. The spec does not mention CI; the owner's decision for max-duration was applied (a separate live step, failing on a skip), plus an exact key-set `jq` on ci_probe's document, which the spec does not ask for. The fixture's premises (at least five parallel plans, the `#savings` anomaly, `excluded` 0 on 2025) were measured on SQL Server 2025 with 22 schedulers only; on the 2017 and 2022 images with a few cores they are unmeasured, and the step may fail on them. That is to be reported, not loosened.
+8. CI. The spec does not mention CI; the owner's decision for max-duration was applied (a separate live step, failing on a skip), plus an exact key-set `jq` on ci_probe's document, which the spec does not ask for. The fixture's premises (at least five parallel plans in at least four bands, a nested parallel plan and a scalar function query, the `#savings` anomaly, `excluded` 0 where the replica view exists) were first measured on SQL Server 2025 with 22 schedulers only. After the panel, the whole live suite ran on throwaway containers of the two CI images, SQL Server 2017 CU31 and 2022 CU26, each held to four schedulers, and passed on both, with the same twelve parallel plans in the same four bands and the anomaly at `max_dop` 41 and 39. A GitHub runner is not that container, and a failure there is still to be reported, not loosened.
 9. "Left out of everything above" and `window.runtime_rows`. The root table defines `excluded.*` as "left out of everything above", and lists above it `window.runtime_rows`, "before any exclusion". The plan keeps the row's own definition (other-role rows included in `window.runtime_rows`) and counts `window.intervals`, `oldest_interval` and `newest_interval` over the kept rows only.
 10. Several reasons not to read at once (an OFF store on a secondary). The spec lists four values and no order. The plan reports, first that applies: `no store`, `off`, `replica state unreadable`, `secondary`.
 11. `examined.largest_plan_bytes` when nothing is copied: the spec is silent; the plan gives NULL.
 12. Spec test 4 ("nothing is added to it") and this plan add no test for the three 050 mutations; Task 2 Step 8 re-measures them on the tree, and they were all refused on 6 October 2026. The spec's own unease stands: "to be measured again when the scanner changes or a collector reads a client table" is a rule nothing enforces.
 13. Documents beyond the spec's list. "Running by default: what changes in the tree" names the guide's tier and cost row, the `check` listing and the caps inventory. The plan also adds a guide section, a sentence under "Narrowing the databases", a README sentence and a CHANGELOG entry, as requested for this plan. `.env.example` stays unchanged, as the spec says.
-14. A loop timer at `datetime2(3)` is a trap the spec's text does not name and the shape of 027 and 042 invites (both declare their timers that way, harmlessly, for durations only). It made a time budget of 0 never fire. The plan's file uses full precision and says why in a comment, and Task 5 has the break.
+14. A loop timer at `datetime2(3)` is a trap the spec's text does not name and the shape of 027 and 042 invites (both declare their timers that way, harmlessly, for durations only). It made a time budget of 0 never fire in about half the runs. The plan's file uses full precision and says why in a comment, and Task 5 has the break, which is not deterministic and says so (3 failures in 5 runs, measured).
 15. The rules the spec itself is least sure of are unchanged by this plan: that the lint is the guarantee (the parenthesis form still passes `hintlint.go`); the compression sample copy's seriality; the fixture's margin on other instances (ambiguity 8 is where it will show); the unobserved cases outside the lint; the three allowed procedures when `SQL_DATABASE` is not `master`; and leaving the interval figures to the analysis' care, which Task 9 implements as a sentence, not a rule.
+16. Beyond the spec's test 3. The spec's workload put all eight parallel plans in `5_25` on the lab, so its bands test exercised one boundary. Task 3 adds three `UNION ALL` scans of the largest heaps (costs 34.6, 69.2 and 207.6 in batch mode, 34.9, 69.8 and 209.3 in row mode, so the same bands on every version measured), a trigger whose statement is parallel and a scalar function run 300 times, and holds the root's totals to the store (exactly for the parallel totals, between a reading before and after the run for the serial ones, which hold 043's own statements). The bands' store is case-sensitive under a name that needs quoting. Task 2 adds an offline test that 043's table of bands is 042's, and Task 7 a check of the bounds in CI. None of it changes the collector.
+17. The replica view on SQL Server 2022. The spec said that SQL Server 2022 has the column and not the view, so that `excluded.*` would be NULL there. Measured on a 2022 CU26 container on 6 October 2026: `OBJECT_ID('sys.query_store_replicas')` is not NULL, the live test found `excluded.other_replicas_executions` 0, and the CI comment of Task 7 now says so. The collector already tests for both, so only words changed: the spec's "Other replicas", the file's header and comment, the guide section and the changelog. Which 2022 build first shipped the view is not known.
+18. The staging and the aggregation are two statements, a few milliseconds apart, and do not read one snapshot: a row of another role recorded between them is kept (codex neutral, by reading). No availability group exists on the lab to measure it. The file's header and the spec's "Other replicas" say it; reading both in one statement would bring back the copy of the aggregation that ruling 1 removed.
+19. The upper bounds and the totals cannot be told apart on any fixture this plan could build, because no execution of a parallel plan ran at a degree of 1 (Review Focus 3). Two mutations of the root are measured passing and named in Task 3 Step 5, and the spec's "What no test here covers" now lists the case.
+
+## Review of the plan
+
+A panel of five read this plan on 6 October 2026: a fresh Claude subagent and agy on the neutral prompt, codex on both prompts, and DeepSeek V4 Pro on the directive prompt in place of agy, whose quota ran out. The Claude reader applied the nine tasks verbatim in a scratch clone and every count matched; codex ran the SQL in `master`, `model` and a store of its own and the live suite under its own prefix; DeepSeek checked the anchors, the counts and the signatures. What each finding became is below. Every change was measured as the verification section says, in a scratch copy at `1fcefb3`, with databases under the prefix `ZzAvgDop2` on the lab and two throwaway containers, all dropped or removed afterwards.
+
+### Findings taken
+
+1. No test reached a band boundary from 25 up (Claude, measured: widening `25_50` to 100 passed every test). Task 2 now holds 043's table of bands to 042's offline (`TestQueryStoreParallelCostBandsAreThoseOf042`), Task 3's workload puts one plan in each of `25_50`, `50_100` and `100_500`, and Task 7's `jq` checks every band's bounds. The same mutation now fails the offline test, `bands` (`band 25_50: statements = 2, want 1`) and the `jq`.
+2. The root's totals and the nested classification had no test (Claude, measured: four mutations passed together). Task 3 adds a trigger whose statement is parallel and a scalar function run 300 times, reads each plan's object type in the oracle, and holds the root to the store with `pcCompareRoot`. `IN ('XX')` now fails on `nested.parallel_plans`, `'FN'` written `'TR'` on `window.scalar_function_cpu_s` and `window.executions`, and removing the function's exclusion from `window.executions` fails too. The two other mutations, `window.parallel_cpu_s` and `window.parallel_executions` taken from the totals, still pass, and the plan says so in Task 3 Step 5, Review Focus 3, ambiguity 19 and the spec's list of what no test covers: they need an execution of a parallel plan at a degree of 1, which neither `INSERT ... EXEC`, a cursor nor a database scoped `MAXDOP` produced on the lab, and which Resource Governor would produce only by reconfiguring the instance under test.
+3. The case-sensitive store held no parallel plan, so the read loop never ran there (Claude, measured: `sys.Query_Store_Plan` in the loop passed). Task 3's store is now `Latin1_General_CS_AS` under a name holding `" Bands]"`; that mutation fails `bands` with `Invalid object name 'sys.Query_Store_Plan'`.
+4. The guide's cost row quoted the prototype's selection time (Claude, measured 143 to 182 ms). Re-measured on the final file: 144 to 221 ms on a store of 13 runtime rows, 242 to 253 ms on one of 6 851. The row in Task 8 and in the spec, and the spec's "The cost, measured", now give those figures.
+5. Task 9 put its `HISTORY.md` entry at the top of a file kept oldest first, and cited `memory/AGENTS.md` as if it were in the private repository (Claude). The entry now goes at the end, and the rule is cited where it lives, in the `deckard` repository.
+6. `master` might have an options row on SQL Server 2017 (Claude, by reading). Measured: no row on 2017 CU31 nor on 2022 CU26, as on 2025. The test is unchanged and its comment says what was measured.
+7. The client-name check was a placeholder that checks nothing (codex directive, measured on a planted marker). The step now says the controller supplies the names in the brief, from outside this public repository, and that an implementer with no list stops.
+8. The README and the changelog promised reading "within 100 MB and ten seconds", a hard limit the file does not keep (codex, both prompts, measured `bytes_read` 16 332 against a budget of 1). The README, the changelog, the caps inventory and Task 2's commit message, which said the same, now say that no new hundred is begun past either budget.
+9. The CI legs' fixture premises were unmeasured (codex, both prompts, by reading). The whole revised live suite ran on throwaway SQL Server 2017 CU31 and 2022 CU26 containers held to four schedulers and passed on both (ambiguity 8, Task 7). That run also found the replica view present on 2022 CU26, where the spec said it was absent; the spec, the file's comments, the guide, the changelog and the CI comment are corrected (ambiguity 17).
+10. No test kept `main` printing 043 when 042 is absent (codex directive). Task 9 adds `test_main_lit_043_sans_042` and a break that moves the 042 check above the 043 reading. Neither was run in this revision: the private suite could not be run from the scratch copy, and Task 9 Step 4 says the executor's run is the first.
+11. The `datetime2(3)` break fails only some runs (DeepSeek, codex directive). It is out of the table, run five times, and a pass is no longer a finding; measured 3 failures in 5.
+12. A row of another role recorded between the staging and the aggregation is kept (codex neutral, by reading). Not measurable without an availability group, and the fix would put the aggregation back in the literal that ruling 1 took it out of; the file's header, the spec's "Other replicas" and ambiguity 18 now state the limit.
+
+### Findings not taken
+
+1. agy (neutral) reported that Task 2 Step 6 expects 2 `--- PASS` lines where 9 are printed. The plan said 9, the count agy itself measured; the sentence agy quotes ("6 test functions ... exactly 2") is not in the plan. With the third offline test the count is now 10.
+2. codex (directive) asked for tests of the owner's two rulings in their own cases: a row of another role, an unreadable replica state, and a live run on SQL Server 2016. The lab has no availability group and no 2016 instance, and a test that fakes either would test the fake. The spec's "What no test here covers" already names the secondary branch and the other roles' rows, and the file's header says 2016 is not measured. No change.
+3. Claude noted that the `replica state unreadable` branch is hard to reach, since the permission it lacks is the one `sys.dm_os_sys_info` needs first. It is 050's rule, the owner ruled its form, and it costs nothing when unreached. No change.
