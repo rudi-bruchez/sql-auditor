@@ -741,4 +741,64 @@ func TestLiveQueryStoreParallelCost(t *testing.T) {
 			t.Error("the planted literal is in the document")
 		}
 	})
+	// Test 5 of the spec: the stop rules, on the same store.
+	t.Run("stop", func(t *testing.T) {
+		ranked := pcParallel(pcOracle(t, admin, name))
+		if len(ranked) < 5 {
+			t.Fatalf("the store holds %d parallel plans, want at least 5: the rules could not be told apart", len(ranked))
+		}
+		check := func(t *testing.T, doc map[string]any, stoppedBy any, read int, truncated float64) {
+			t.Helper()
+			root := pcFlat(doc)
+			if got := root["examined.stopped_by"]; got != stoppedBy {
+				t.Errorf("examined.stopped_by = %v, want %v", got, stoppedBy)
+			}
+			if got := int(pcNum(t, root["examined.plans_read"], "examined.plans_read")); got != read {
+				t.Errorf("examined.plans_read = %d, want %d", got, read)
+			}
+			if got := pcNum(t, root["truncated"], "truncated"); got != truncated {
+				t.Errorf("truncated = %v, want %v", got, truncated)
+			}
+		}
+		t.Run("bytes after one chunk", func(t *testing.T) {
+			_, doc := pcRun(t, cfg, parallelCostScript(t, map[string]int64{"@chunk": 2, "@budget_bytes": 1}), name)
+			check(t, doc, "bytes", 2, 1)
+			first := pcParallel(pcOracle(t, admin, name))[:2]
+			pcCompareBands(t, doc, first)
+			want := max(first[0].bytes, first[1].bytes)
+			if got := int64(pcNum(t, pcFlat(doc)["examined.largest_plan_bytes"], "examined.largest_plan_bytes")); got != want {
+				t.Errorf("examined.largest_plan_bytes = %d, want %d, the larger of the two plans read", got, want)
+			}
+			// The share is the bands' over the window's. With two plans of
+			// several read, it is below 100, so a share taken from anything
+			// but the bands shows here, where a store read whole cannot.
+			pcCheckShare(t, doc)
+		})
+		t.Run("bytes budget zero", func(t *testing.T) {
+			_, doc := pcRun(t, cfg, parallelCostScript(t, map[string]int64{"@budget_bytes": 0}), name)
+			check(t, doc, "bytes", 0, 1)
+			pcCompareBands(t, doc, nil)
+		})
+		t.Run("time budget zero", func(t *testing.T) {
+			_, doc := pcRun(t, cfg, parallelCostScript(t, map[string]int64{"@budget_ms": 0}), name)
+			check(t, doc, "time", 0, 1)
+			pcCompareBands(t, doc, nil)
+		})
+		t.Run("both budgets zero", func(t *testing.T) {
+			_, doc := pcRun(t, cfg, parallelCostScript(t, map[string]int64{"@budget_bytes": 0, "@budget_ms": 0}), name)
+			check(t, doc, "time", 0, 1)
+		})
+		t.Run("cap below the plans", func(t *testing.T) {
+			_, doc := pcRun(t, cfg, parallelCostScript(t, map[string]int64{"@cap": 2}), name)
+			check(t, doc, "cap", 2, 1)
+			if got := pcNum(t, pcFlat(doc)["examined.plans"], "examined.plans"); got != 2 {
+				t.Errorf("examined.plans = %v, want the cap, 2", got)
+			}
+		})
+		t.Run("cap at the plans", func(t *testing.T) {
+			n := len(pcParallel(pcOracle(t, admin, name)))
+			_, doc := pcRun(t, cfg, parallelCostScript(t, map[string]int64{"@cap": int64(n)}), name)
+			check(t, doc, nil, n, 0)
+		})
+	})
 }
