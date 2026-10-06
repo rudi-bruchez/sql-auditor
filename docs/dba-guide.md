@@ -2646,8 +2646,10 @@ The PerfStats snapshots record the text of the statements running at each
 sample, with whatever literal values they contain.
 
 When it has finished, the `internal` subfolder holds LogScout's own log,
-`##SQLLOGSCOUT.LOG`, and one file per collector that failed. Compress the whole
-output folder and send it the way you sent the sql-auditor archive.
+`##SQLLOGSCOUT.LOG`, and one message file per collector. Most of them are
+empty; a file with content is not by itself a failure (the Perfmon one always
+holds the output of `logman`). Compress the whole output folder and send it
+the way you sent the sql-auditor archive.
 
 ### The scenarios we do not ask for by default
 
