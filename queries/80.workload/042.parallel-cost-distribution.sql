@@ -90,7 +90,35 @@
 --
 -- WHAT A BAND IS. A statement is in the band of the StatementSubTreeCost of
 -- its cached plan, in the optimizer's units: [0, 5), [5, 25), [25, 50),
--- [50, 100), [100, 500), [500, +inf), and unknown. Parallel means max_dop > 1.
+-- [50, 100), [100, 500), [500, +inf), and unknown. A statement is parallel
+-- when its cached plan is: when an operator of the fragment carries
+-- Parallel="1". A statement whose plan the engine no longer returns is not
+-- counted parallel; it sits in unknown, whose max_dop column still shows the
+-- highest degree among them.
+--
+-- PARALLEL IS READ FROM THE PLAN, NOT FROM max_dop, since 6 October 2026.
+-- Until then a statement was parallel when sys.dm_exec_query_stats.max_dop
+-- was above 1, and serial plans report such a degree: plans with no
+-- Parallelism operator and no operator marked Parallel, INSERT ... EXEC and
+-- INSERT INTO a table variable among them, at a cost of 0.0133. On the lab
+-- cache of 4 October 2026, 15 of 25 statements counted parallel had no
+-- parallel operator, 351 of their 379 executions and 7.1 of 14.3 s of their
+-- CPU. Reproduced on 6 October 2026 on 17.0 (SQL Server 2025) after a
+-- default collection by sql-auditor 0.37.0, whose statements did not yet
+-- carry MAXDOP 1: twelve INSERT INTO @table statements of the corpus held a
+-- max_dop of 2 or 3 with a serial plan, all in band [0, 5), and one genuinely
+-- parallel statement at degree 22 sat in [5, 25). Read through max_dop, band
+-- [0, 5) held 12 parallel statements, 12 executions and 1.1 s of parallel
+-- CPU; read through the plan it holds none, and [5, 25) is unchanged. A
+-- cached plan carries no DegreeOfParallelism attribute, parallel or not: the
+-- one occurrence of the word is EstimatedAvailableDegreeOfParallelism, the
+-- same in both, so the operator's Parallel attribute is what is read.
+-- examined.serial_plans_dop_above_1 counts, in the window, the statements
+-- with a max_dop above 1 and a plan that is serial, the size of the anomaly
+-- on each archive. The search for Parallel="1" reads the whole fragment of a
+-- serial plan, so it runs under a binary collation: on that cache of 120 MB
+-- of fragments it cost 0.4 s against 4.5 s under the default collation.
+--
 -- The bands fix the boundaries an analysis can answer at: how much parallel
 -- work lies between 5 and 25 is answerable, between 5 and 30 is not, and
 -- nothing should be interpolated inside a band.
@@ -105,18 +133,25 @@
 -- The cache is also emptied by a restart, by most sp_configure changes, and
 -- by an explicit flush.
 --
--- max_dop is the highest degree one execution reached since the plan was
--- compiled, not the degree of every execution. A statement counted parallel
--- may have run serially most of the time, and its executions and CPU are all
--- counted on the parallel side. The parallel columns are therefore an upper
--- bound of the parallel work.
+-- A parallel plan can still run serially, when no worker is free or when
+-- the degree granted is 1, and the cache does not say how often. A statement
+-- counted parallel has all its executions and CPU on the parallel side. The
+-- parallel columns of the bands are therefore an upper bound of the parallel
+-- work, a tighter one than max_dop gave.
+--
+-- cache.parallel_statements and cache.parallel_cpu_s still read max_dop,
+-- because they cover the whole cache and reading every plan of it is the
+-- cost the window exists to avoid. They are an upper bound that includes the
+-- anomaly above, and they do not have to agree with the sum of the bands.
 --
 -- The cost of a parallel plan is lower than the serial cost the optimizer
 -- compared with the threshold. Measured on the lab: a scan and aggregate
--- whose serial plan costs 24.08 got a parallel plan costing 20.75, and a
--- collection under a threshold of 5 found two statements in band [0, 5) that
--- had run at degree 2. So a parallel statement in band [5, 25) may have had a serial cost above 25, and
--- raising the threshold to 25 would not make it serial. The count of parallel
+-- whose serial plan costs 24.08 got a parallel plan costing 20.75. (A
+-- collection under a threshold of 5 had also found two statements in band
+-- [0, 5) at degree 2; that was read through max_dop, and the anomaly above
+-- makes them more likely serial plans than an instance of this effect.) So
+-- a parallel statement in band [5, 25) may have had a serial cost above 25,
+-- and raising the threshold to 25 would not make it serial. The count of parallel
 -- statements between the current threshold and a candidate is an upper bound
 -- of what raising it would make serial. A parallel statement below the
 -- current threshold is either this effect or a plan compiled under a lower
@@ -156,7 +191,8 @@ DECLARE @costed TABLE (
     [creation_time]     datetime,
     [plan_bytes]        bigint,
     [plan_state]        tinyint,      -- 0 costed, 1 no plan, 2 not xml, 3 no cost
-    [cost]              float);
+    [cost]              float,
+    [parallel]          bit);         -- the plan holds an operator marked Parallel
 
 /* The window, without reading a plan. The sort runs over every statement of
    the cache, which is the unavoidable part and costs no plan conversion. */
@@ -173,15 +209,18 @@ OPTION (RECOMPILE, MAXDOP 1);
    counted, not lost. The cost is the first StatementSubTreeCost attribute of
    the fragment: the first statement element, which is the measured statement
    itself (StmtSimple, or the StmtCond or StmtCursor that holds the others).
-   A double quote cannot appear unescaped inside an attribute value, so the
-   search cannot match inside the statement text. */
+   A double quote cannot appear unescaped inside an attribute value, so
+   neither search can match inside the statement text. The statement is
+   parallel when an operator of its plan carries Parallel="1"; a fragment the
+   engine no longer returns is not counted parallel. */
 INSERT INTO @costed
 SELECT w.execution_count, w.total_worker_time, w.max_dop, w.creation_time,
        DATALENGTH(tp.query_plan),
        CASE WHEN tp.query_plan IS NULL THEN 1
             WHEN c.cost IS NULL THEN 3
             ELSE 0 END,
-       c.cost
+       c.cost,
+       CASE WHEN CHARINDEX(N' Parallel="1"' COLLATE Latin1_General_BIN2, tp.query_plan COLLATE Latin1_General_BIN2) > 0 THEN 1 ELSE 0 END
 FROM @window AS w
 OUTER APPLY sys.dm_exec_text_query_plan(w.plan_handle, w.statement_start_offset,
                                         w.statement_end_offset) AS tp
@@ -199,7 +238,9 @@ SELECT
     CONVERT(varchar(23), (SELECT sqlserver_start_time FROM sys.dm_os_sys_info), 126)
                                                                 AS [instance_start],
     /* The whole cache, read from the DMV alone: what the window is a sample
-       of. The parallel totals need no plan, so they cover every statement. */
+       of. The parallel totals need no plan, so they cover every statement,
+       and read max_dop: an upper bound that counts serial plans reporting a
+       degree above 1, unlike the bands. */
     agg.statements                                              AS [cache.statements],
     agg.executions                                              AS [cache.executions],
     CAST(agg.worker_us / 1000000.0 AS decimal(18,1))            AS [cache.cpu_s],
@@ -215,6 +256,11 @@ SELECT
     (SELECT CAST(ISNULL(SUM(c.plan_bytes), 0) / 1024.0 AS decimal(18,1)) FROM @costed AS c)
                                                                 AS [examined.plan_kb],
     DATEDIFF(millisecond, @started, @finished)                  AS [examined.duration_ms],
+    /* The size of the max_dop anomaly in the window: statements whose
+       max_dop is above 1 although their cached plan has no parallel operator.
+       A statement without a plan is not counted, its plan being unknown. */
+    (SELECT COUNT(*) FROM @costed
+      WHERE max_dop > 1 AND parallel = 0 AND plan_state <> 1)  AS [examined.serial_plans_dop_above_1],
     /* Why the unknown band is unknown. no_plan is a plan the engine no longer
        returns; no_cost a fragment that holds no statement cost. not_xml,
        the nesting limit of the xml type, can no longer happen and stays 0. */
@@ -239,13 +285,13 @@ SELECT
     b.cost_from                                                 AS [cost_from],
     b.cost_to                                                   AS [cost_to],
     COUNT(c.execution_count)                                    AS [statements],
-    SUM(CASE WHEN c.max_dop > 1 THEN 1 ELSE 0 END)              AS [parallel_statements],
+    ISNULL(SUM(CAST(c.parallel AS int)), 0)                     AS [parallel_statements],
     ISNULL(SUM(c.execution_count), 0)                           AS [executions],
-    ISNULL(SUM(CASE WHEN c.max_dop > 1 THEN c.execution_count END), 0)
+    ISNULL(SUM(CASE WHEN c.parallel = 1 THEN c.execution_count END), 0)
                                                                 AS [parallel_executions],
     CAST(ISNULL(SUM(c.total_worker_time), 0) / 1000000.0 AS decimal(18,1))
                                                                 AS [cpu_s],
-    CAST(ISNULL(SUM(CASE WHEN c.max_dop > 1 THEN c.total_worker_time END), 0) / 1000000.0
+    CAST(ISNULL(SUM(CASE WHEN c.parallel = 1 THEN c.total_worker_time END), 0) / 1000000.0
          AS decimal(18,1))                                      AS [parallel_cpu_s],
     MAX(c.max_dop)                                              AS [max_dop]
 FROM (VALUES (1, 'lt_5',        0.0,   5.0),

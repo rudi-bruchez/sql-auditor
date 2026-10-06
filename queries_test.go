@@ -591,6 +591,44 @@ func TestReplicationAgentProfilesNameTheirParameters(t *testing.T) {
 	}
 }
 
+// 80.workload/042 calls a statement parallel when its cached plan holds an
+// operator marked Parallel="1", not when max_dop is above 1: serial plans
+// report a max_dop of 2 or 3, measured on SQL Server 2025 on twelve
+// INSERT INTO @table statements. A cached plan has no DegreeOfParallelism
+// attribute, so a search for it would call every plan serial, and without
+// the leading space the search would also match an attribute whose name ends
+// in Parallel. The bands must not go back to max_dop; the cache totals stay
+// on it by design, and the window counts the statements the two disagree on.
+func TestParallelCostReadsParallelFromThePlan(t *testing.T) {
+	b, err := sqlauditor.Queries.ReadFile("queries/80.workload/042.parallel-cost-distribution.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := collect.StripSQLComments(string(b))
+	search := `CHARINDEX(N' Parallel="1"' COLLATE Latin1_General_BIN2, tp.query_plan COLLATE Latin1_General_BIN2)`
+	if !strings.Contains(code, search) {
+		t.Errorf("042 no longer searches its fragment for %s", search)
+	}
+	if strings.Contains(code, "DegreeOfParallelism") {
+		t.Error("042 reads DegreeOfParallelism, which a cached plan does not carry")
+	}
+	bands := regexp.MustCompile(`(?s)SELECT\s+b\.band(.*?)FROM \(VALUES`).FindStringSubmatch(code)
+	if bands == nil {
+		t.Fatal("042 no longer selects its bands in the shape this test knows")
+	}
+	for _, col := range []string{"parallel_statements", "parallel_executions", "parallel_cpu_s"} {
+		if !strings.Contains(bands[1], "AS ["+col+"]") {
+			t.Errorf("042 bands no longer project [%s]", col)
+		}
+	}
+	if strings.Contains(bands[1], "max_dop > 1") {
+		t.Error("042 bands call a statement parallel from max_dop again")
+	}
+	if !regexp.MustCompile(`max_dop > 1 AND parallel = 0 AND plan_state <> 1\)\s+AS \[examined\.serial_plans_dop_above_1\]`).MatchString(code) {
+		t.Error("042 no longer counts the serial plans with max_dop above 1 in examined.serial_plans_dop_above_1")
+	}
+}
+
 // MAX_DURATION ships commented. An assignment, even an empty one, would make
 // every .env that env init writes unreadable by 0.37.0 and older, which
 // refuse a key they do not know whatever its value.

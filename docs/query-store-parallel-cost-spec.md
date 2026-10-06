@@ -1082,7 +1082,10 @@ numbers of the version they read.
   run, and should the selection, which has no budget, get one, for example
   a count of runtime rows above which the store is reported and not read?
 - Should 042 be corrected for serial statements whose `max_dop` exceeds 1, so
-  that both files define parallel the same way?
+  that both files define parallel the same way? Answered on 6 October 2026:
+  042 now calls a statement parallel when its cached plan fragment holds an
+  operator with `Parallel="1"` (the form the cache writes, not
+  `Parallel="true"`), and projects `examined.serial_plans_dop_above_1`.
 - Should the other Query Store collectors (020 to 029) learn the replica
   filter, and skip availability group secondaries?
 - Should 020 and 029 keep trigger and multi-statement function queries in
