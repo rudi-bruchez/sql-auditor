@@ -28,22 +28,38 @@ type workloadCap struct {
 	file      string
 	variable  string
 	value     int
-	tops      int      // how many TOP (@variable) the file must apply
-	projected []string // root fields that must carry @variable as is
+	applied   []capForm // the exact forms that apply the cap, each counted
+	projected []string  // root fields that must carry @variable as is
+}
+
+// capForm is one exact form in which a file applies a cap, and how many times
+// the file holds it. Until 043 every cap was a TOP (@variable) and the count
+// of that one string was the whole check; 043 pins with TOP (@cap + 1), as
+// 027 does, and reads its chunk as a range of ranks, which a count of
+// TOP (@chunk) cannot see: the only count it passes is 0, which asserts
+// nothing.
+type capForm struct {
+	text  string
+	count int
+}
+
+// top is the form every cap of this table used before 043.
+func top(variable string, n int) []capForm {
+	return []capForm{{"TOP (" + variable + ")", n}}
 }
 
 var workloadCaps = []workloadCap{
-	{"020.query-store.sql", "@listing_cap", 200, 2, []string{"listing_cap"}},
-	{"023.query-store-most-executed.sql", "@listing_cap", 200, 2, []string{"listing_cap"}},
-	{"024.query-store-rowcount.sql", "@listing_cap", 200, 1, []string{"listing_cap"}},
-	{"026.query-store-interrupted.sql", "@listing_cap", 200, 2, []string{"listing_cap"}},
-	{"028.query-store-resources.sql", "@listing_cap", 200, 1, []string{"listing_cap"}},
-	{"060.spills.sql", "@listing_cap", 200, 1, []string{"listing_cap"}},
-	{"042.parallel-cost-distribution.sql", "@examined", 1000, 1, []string{"examined.cap"}},
-	{"030.implicit-conversions.sql", "@examined", 2500, 1, []string{"bounds.examined_cap"}},
-	{"030.implicit-conversions.sql", "@candidate_cap", 1000, 1, []string{"bounds.candidate_cap"}},
-	{"053.plan-warnings.sql", "@examined", 1000, 1, []string{"bounds.examined_cap"}},
-	{"053.plan-warnings.sql", "@candidate_cap", 500, 1, []string{"bounds.candidate_cap"}},
+	{"020.query-store.sql", "@listing_cap", 200, top("@listing_cap", 2), []string{"listing_cap"}},
+	{"023.query-store-most-executed.sql", "@listing_cap", 200, top("@listing_cap", 2), []string{"listing_cap"}},
+	{"024.query-store-rowcount.sql", "@listing_cap", 200, top("@listing_cap", 1), []string{"listing_cap"}},
+	{"026.query-store-interrupted.sql", "@listing_cap", 200, top("@listing_cap", 2), []string{"listing_cap"}},
+	{"028.query-store-resources.sql", "@listing_cap", 200, top("@listing_cap", 1), []string{"listing_cap"}},
+	{"060.spills.sql", "@listing_cap", 200, top("@listing_cap", 1), []string{"listing_cap"}},
+	{"042.parallel-cost-distribution.sql", "@examined", 1000, top("@examined", 1), []string{"examined.cap"}},
+	{"030.implicit-conversions.sql", "@examined", 2500, top("@examined", 1), []string{"bounds.examined_cap"}},
+	{"030.implicit-conversions.sql", "@candidate_cap", 1000, top("@candidate_cap", 1), []string{"bounds.candidate_cap"}},
+	{"053.plan-warnings.sql", "@examined", 1000, top("@examined", 1), []string{"bounds.examined_cap"}},
+	{"053.plan-warnings.sql", "@candidate_cap", 500, top("@candidate_cap", 1), []string{"bounds.candidate_cap"}},
 }
 
 var (
@@ -75,8 +91,10 @@ func TestWorkloadCapsAreDeclaredAppliedAndReported(t *testing.T) {
 		if v, _ := strconv.Atoi(m[0][1]); v != c.value {
 			t.Errorf("%s: %s is %d, want %d", c.file, c.variable, v, c.value)
 		}
-		if n := strings.Count(code, "TOP ("+c.variable+")"); n != c.tops {
-			t.Errorf("%s: TOP (%s) applied %d times, want %d", c.file, c.variable, n, c.tops)
+		for _, f := range c.applied {
+			if n := strings.Count(code, f.text); n != f.count {
+				t.Errorf("%s: %s applied %d times, want %d", c.file, f.text, n, f.count)
+			}
 		}
 		for _, lit := range literalTop.FindAllStringSubmatch(code, -1) {
 			if n, _ := strconv.Atoi(lit[1]); n > 1 {
