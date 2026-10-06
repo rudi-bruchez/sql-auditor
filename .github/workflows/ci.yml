@@ -1044,7 +1044,9 @@ jobs:
       # were measured on the lab's 2025 and on 2017 and 2022 containers held
       # to four schedulers, not on these runners: a failure on them here is a
       # measurement to report, not a test to loosen. Subtests
-      # are indented in -v output, so SKIP and FAIL are matched anywhere.
+      # are indented in -v output, so SKIP and FAIL are matched anywhere. Both
+      # top-level tests are required by name, with the space that ends the
+      # name in a PASS line, so a rename of either fails the step.
       - name: query store parallel cost live tests
         env:
           SQL_AUDITOR_LIVE_SERVER: localhost,1433
@@ -1053,6 +1055,7 @@ jobs:
         run: |
           set -o pipefail
           go test ./collect/ -run '^TestLiveQueryStoreParallelCost' -count=1 -v -timeout 20m | tee "$RUNNER_TEMP/avgdop.log"
-          grep -q '^--- PASS' "$RUNNER_TEMP/avgdop.log"
+          grep -q '^--- PASS: TestLiveQueryStoreParallelCost ' "$RUNNER_TEMP/avgdop.log"
+          grep -q '^--- PASS: TestLiveQueryStoreParallelCostStoresNotRead ' "$RUNNER_TEMP/avgdop.log"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/avgdop.log"; then exit 1; fi
           if grep -q -- '--- FAIL' "$RUNNER_TEMP/avgdop.log"; then exit 1; fi
