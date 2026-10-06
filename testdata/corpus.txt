@@ -96,6 +96,7 @@
 80.workload/040.plan-cache.sql
 80.workload/041.plan-cache-plans.sql
 80.workload/042.parallel-cost-distribution.sql
+80.workload/043.query-store-parallel-cost.sql
 80.workload/050.procedure-stats.sql
 80.workload/051.function-stats.sql
 80.workload/052.optimizer-hints.sql

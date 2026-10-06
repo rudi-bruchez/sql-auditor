@@ -478,6 +478,7 @@ Queries (38):
   80.workload/030.implicit-conversions.sql
   80.workload/040.plan-cache.sql
   80.workload/042.parallel-cost-distribution.sql SQL Server 13+
+  80.workload/043.query-store-parallel-cost.sql per database, SQL Server 13+
 
 Output   : output
 
@@ -768,6 +769,7 @@ run, scale with the size of the instance rather than with the number of objects:
 | The whole current error log | `10.system/040.error-log.sql` | copied into a `#temp` table before it is summarised. An instance that never cycles its log can carry hundreds of megabytes, so the log's size is read first with `sp_enumerrorlogs` and a log above 50 MB is not read at all: the collector's status says `skipped_for_size` and gives the size. Cycling the log with `sp_cycle_errorlog` is what brings it back. If the size cannot be read (a login denied `sp_enumerrorlogs`), the log is not read either: the status says `skipped_size_unknown` and why. |
 | A string search over cached plans | `80.workload/030.implicit-conversions.sql`, `80.workload/053.plan-warnings.sql` | the 2 500 statements with the most reads (030) or the 1 000 with the most CPU (053) are taken from `sys.dm_exec_query_stats` first, then each of their batch plans is read as text from `sys.dm_exec_text_query_plan` and searched once with a binary, case-sensitive `LIKE`. CPU, proportional to the size of those plans and not of the whole cache: about 18 ms per megabyte of plan text for 030 and 21 for 053, measured on one 2025 build under a `SQL_` collation on a lab schema, against 79 and 117 when the plan was built as `xml`, cast back to text and searched case-insensitively (until 27 September 2026). The xml is then built only for the candidates, the statements whose plan passed the search, up to 1 000 for 030 and 500 for 053; each root reports how many matched (`bounds.matched`) and how many were read (`bounds.candidates`). On a 2025 lab cache of about 5 000 statements, 030 took 9 to 10 s and 053 18.5 s. Until 27 September 2026 as well, every plan in the cache was searched before the cap applied. |
 | Statement costs read from cached plans | `80.workload/042.parallel-cost-distribution.sql` | the 1 000 statements with the most CPU are taken from `sys.dm_exec_query_stats` first, then each statement's own plan fragment is fetched with `sys.dm_exec_text_query_plan` and its estimated cost is found by a text search, never by converting the plan to `xml`. The cost is fetching those 1 000 fragments, proportional to their size and not to the whole cache: 4.2 s for 145 MB of plan text on one 2025 lab build (1.7 s for the 75 MB of the 500 the file read until 4 October 2026, where the earlier conversion took 8.2 s). The file projects its own `examined.plan_kb` and `examined.duration_ms`, so the cost on your instance is in the archive. |
+| Parallel plan costs read out of the Query Store | `80.workload/043.query-store-parallel-cost.sql` | in each database whose store is not off, and which is not an availability group secondary or a standby database, two parts. First one aggregation of the last seven days of `sys.query_store_runtime_stats`, grouped by plan into a temporary table; it reads no plan text and has no budget of its own, so its cost grows with the number of runtime rows in the window, over a fixed part that compiling its statements under `RECOMPILE` costs every database: on one 2025 lab build, 144 to 221 ms on a store of 13 runtime rows and 242 to 253 ms on one of 6 851. Then the text of up to 1 000 parallel plans, those with the most parallel CPU first, copied a hundred at a time into a table variable and searched for one attribute, never converted to `xml`: about 20 ms per MB of plan text on one 2025 lab build. The read stops before the next hundred once 100 MB have been read or 10 s have passed, so one hundred plans can pass either, by as much as their size; the 120-second timeout is the hard bound of the whole file. Each chunk also scans the plans of the whole store to find its hundred, which the per-MB price does not cover, and which grows with the number of plans in the store, not with what the chunk copies (plan shape observed on one 2025 lab build). The shared lock on the store is held for the whole of the selection, which has no budget, and released between chunks only by the read loop. The root projects `selection.duration_ms`, `window.runtime_rows`, `examined.duration_ms`, `examined.bytes_read`, `examined.largest_plan_bytes` and `examined.stopped_by`, so the cost on your instance is in the archive. Nothing that names a query leaves the server. |
 | Plans read out of the Query Store | `80.workload/027.query-store-stats-usage.sql` | the 2,000 most recently executed plans of each database whose store is on, newest first, until 200 MB of plan text have been read, whichever comes first. Each chunk of a hundred plans is converted to `xml` into a table variable and only the statistics they loaded and the indexes they read are kept; the store's shared lock is released between chunks. CPU, proportional to the bytes read: 94 to 112 ms per MB on one 2025 lab build, 20 s for the full 200 MB, where the form used until 4 October 2026 cost about 440 ms per MB there and reached the 300 s timeout on 663 MB of plans. The root projects `budget.bytes_read`, `budget.plans_skipped` and `budget.duration_ms`, so the cost on your instance and how far back the read reached are in the archive. |
 | The whole backup history | `60.backup/010.history.sql`, `40.security/040.encryption-certificates.sql` | each reads `msdb.dbo.backupset` end to end once, with no date bound: `010` counts every row, `040` keeps the encrypted ones and groups them by certificate, which leaves one row per certificate. The cost is a scan of `backupset`, however long `msdb` has been allowed to grow; an `msdb` that is never purged makes it larger, and purging it with `sp_delete_backuphistory` is the remedy rather than skipping the files |
 
@@ -1440,7 +1442,7 @@ one, in these tiers:
 | --- | --- |
 | 30 s | 9 |
 | 60 s | 55 |
-| 120 s | 29 |
+| 120 s | 30 |
 | 180 s | 3 |
 | 300 s | 15 |
 | 600 s | 1 |
@@ -1978,6 +1980,11 @@ nothing to say about it either way.
 `--query-store-databases` narrows which of the collected databases the extraction
 reads, with the same `*`/`?` wildcards as `DB_INCLUDE`.
 
+It narrows the extraction only. The Query Store collectors that run by
+default, `80.workload/043.query-store-parallel-cost.sql` among them, read
+every collected database whose store is on; `DB_INCLUDE` and `DB_EXCLUDE`
+narrow them as they narrow every per-database collector.
+
 It only narrows: a database excluded from the run cannot be brought back by
 naming it here. Each database it removes is recorded by name in the manifest, so
 a selection can be reconstructed after the fact.
@@ -2135,6 +2142,49 @@ statement that called it. What was left out is given beside each interval.
 Under capture mode `AUTO` a light ad hoc workload is undercounted, and work
 that is not a query (a backup, `DBCC CHECKDB`) is not in the store at all, so a
 quiet hour here is quiet for the applications, not for the instance.
+
+## Parallel plan costs from the Query Store
+
+`80.workload/042.parallel-cost-distribution.sql` puts the cached statements
+with the most CPU into bands of estimated cost and says, per band, how much
+of their work ran in parallel: it is what a value for `cost threshold for
+parallelism` is chosen from. A cache under memory pressure holds little, and
+a restart or most `sp_configure` changes empty it, so
+`80.workload/043.query-store-parallel-cost.sql` reads the same bands from the
+Query Store of each database, over the last seven days.
+
+Read it with these in mind:
+
+- Only plans the store marks parallel (`is_parallel_plan`) are banded. A
+  serial plan can report a degree above 1; such plans are counted in
+  `window.serial_plans_dop_above_1` and never banded.
+- Each band gives two bounds. `parallel_executions` and `parallel_cpu_s` are
+  over the store's rows that reached a degree above 1, an upper bound;
+  `parallel_executions_min` and `parallel_cpu_s_min` over the rows whose
+  every execution ran parallel, a lower bound. The cache can only give the
+  first.
+- A store that is off, a database without a store, an availability group
+  secondary and a database restored `WITH STANDBY` (log shipping) are not read, and `state.not_read_because` says which. Where the
+  store records replica groups (measured on SQL Server 2022 CU26 and 2025),
+  rows recorded for another replica role are left out and counted under
+  `excluded`.
+- At most 1 000 plans are read per database, a hundred at a time, and the
+  read stops between hundreds after 100 MB of plan text or 10 seconds.
+  `examined.stopped_by` says whether it stopped, and
+  `examined.share_of_parallel_cpu_pct` what share of the parallel work the
+  bands hold.
+- The store records the audit's own statements. They are in the serial
+  totals and in `window.intervals` and `window.newest_interval`, so a recent
+  newest interval is not evidence that the applications ran recently. Every
+  statement of the corpus that reads rows is held to `MAXDOP 1` by the
+  collector lint, which keeps them out of the bands, unless a Query Store
+  hint set on one of them overrides it, or `--estimate-compression` runs
+  `sp_estimate_data_compression_savings`, whose sample copy cannot be
+  hinted.
+- The two files describe different sets, the instance's cache and the stores
+  of the collected databases. Read them side by side; never add them.
+
+No query text, plan or identifier leaves the server.
 
 ## `--query-store-compare-at`
 

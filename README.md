@@ -39,7 +39,10 @@ What it does to your instance:
   of the largest heaps in each database to count forwarded records, which is
   real I/O on a large instance, three others parse the XML of up to a
   thousand cached plans each, which costs CPU in proportion to the size of
-  those plans, and every read holds the locks a read holds while it runs. Run
+  those plans, one more searches the text of up to a thousand Query Store
+  plans per database, a hundred at a time, and begins no new hundred past
+  100 MB or ten seconds of reading there, and every read holds the locks a
+  read holds while it runs. Run
   it first off-peak. On an availability group readable
   secondary the physical reads are skipped, because their lock can hold up
   REDO; run it on the primary for those. [What it costs the

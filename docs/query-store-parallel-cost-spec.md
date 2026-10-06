@@ -1,6 +1,6 @@
 # Parallel cost from the Query Store
 
-Status: proposed on 4 October 2026, not implemented. The first draft
+Status: proposed on 4 October 2026; implemented on 6 October 2026 by the plan docs/superpowers/plans/2026-10-06-query-store-parallel-cost.md. The first draft
 (`87a8d9f`) put the collector behind an opt-in; it was read the same day by a
 panel of five readers, and then the decision changed: the collector runs by
 default, with no option. The second version answered both and was read by a
@@ -292,6 +292,14 @@ instance's threshold. Two cases are told apart.
   only, with no `errors.*` key, so it does not mark the run partial (050
   reports through `errors.*`; 043's root keys are the list of "The root",
   which test 2 holds exactly).
+- A database restored `WITH STANDBY` (log shipping, `sys.databases.is_in_standby
+  = 1`) is not read either: its store describes the source server's work, run
+  under that server's threshold and scheduler count, which is the reason a
+  secondary is skipped. `state.not_read_because` says `standby`, after
+  `secondary` in the order of the reasons, and every count is NULL as for any
+  store not read. Ruled by the owner on 6 October 2026, on the final review's
+  finding. A restored copy on a test instance cannot be told from a live
+  database and is a limit the reader must keep in view.
 - On a primary, or a database outside any availability group, from SQL Server
   2022, the runtime rows whose `replica_group_id` `sys.query_store_replicas`
   maps to a `role_type` other than 1 are left out of everything and counted in
@@ -309,6 +317,10 @@ instance's threshold. Two cases are told apart.
   apart, that do not read one snapshot: a row of another role recorded
   between them is kept (codex, reviewing the plan; not measurable without an
   availability group).
+  Amended on 6 October 2026: the staging statement finds the other-role rows
+  by semi-join on `sys.query_store_replicas`, a row counting only when its
+  group is listed under a non-primary role and never under role 1, because the
+  view can hold several rows per group and a join would repeat a runtime row.
 
 What stays mixed: after a failover inside the window, the primary role's rows
 from before it were run by the other instance. Nothing in the store dates a
@@ -731,7 +743,7 @@ The root comes from a `LEFT JOIN` from `sys.databases` to
 `sys.database_query_store_options`, as in 026 and 029, so a database with no
 row in the options view still returns its row. The store is read unless its
 `actual_state_desc` is `OFF`, the database has no row there, or the database
-is an availability group secondary ("Other replicas"); that is a predicate in
+is an availability group secondary or a standby database ("Other replicas"); that is a predicate in
 the file (point 6): 021 reports the state and leaves the decision to its
 writer, and 043 has no writer. A store in `ERROR` is read like a `READ_ONLY`
 one; neither state has been measured here. When the store is not read, the
@@ -746,7 +758,7 @@ reader can tell the two apart. The bands are seven rows in every case.
 | `database` | `DB_NAME()` |
 | `collected_at` | `SYSDATETIMEOFFSET()` |
 | `state.actual`, `state.capture_mode`, `state.interval_minutes` | from `sys.database_query_store_options`, NULL when it has no row |
-| `state.not_read_because` | NULL when read; otherwise `off`, `no store`, `secondary` or `replica state unreadable` |
+| `state.not_read_because` | NULL when read; otherwise `off`, `no store`, `secondary`, `replica state unreadable` or `standby` (a database restored `WITH STANDBY`, ruled on 6 October 2026), tested in that order |
 | `schedulers` | `scheduler_count` of `sys.dm_os_sys_info` |
 | `window.days`, `window.from` | `@window_days`, and the instant the window starts |
 | `window.oldest_interval`, `window.newest_interval` | the start of the oldest and the end of the newest interval read |
@@ -896,7 +908,7 @@ statements of `master`, the store covers what the cache evicted.
 - The store follows its database across a failover: rows of the primary role
   from before a failover inside the window were run by the other instance,
   under its own threshold and scheduler count. An availability group secondary
-  is not read at all.
+  and a standby database are not read at all.
 
 ## The cost, measured
 
@@ -940,7 +952,7 @@ The row that "What the default run costs a large instance" in
 
 | What | Where | What it actually does |
 | --- | --- | --- |
-| Parallel plan costs read out of the Query Store | `80.workload/043.query-store-parallel-cost.sql` | in each database whose store is not off, and which is not an availability group secondary, two parts. First one aggregation of the last seven days of `sys.query_store_runtime_stats`, grouped by plan into a temporary table; it reads no plan text and has no budget of its own, so its cost grows with the number of runtime rows in the window, over a fixed part that compiling its statements under `RECOMPILE` costs every database: on one 2025 lab build, 144 to 221 ms on a store of 13 runtime rows and 242 to 253 ms on one of 6 851. Then the text of up to 1 000 parallel plans, those with the most parallel CPU first, copied a hundred at a time into a table variable and searched for one attribute, never converted to `xml`: about 20 ms per MB of plan text on one 2025 lab build. The read stops before the next hundred once 100 MB have been read or 10 s have passed, so one hundred plans can pass either, by as much as their size; the 120-second timeout is the hard bound of the whole file. The store's shared lock is released between chunks. The root projects `selection.duration_ms`, `window.runtime_rows`, `examined.duration_ms`, `examined.bytes_read`, `examined.largest_plan_bytes` and `examined.stopped_by`, so the cost on your instance is in the archive. Nothing that names a query leaves the server. |
+| Parallel plan costs read out of the Query Store | `80.workload/043.query-store-parallel-cost.sql` | in each database whose store is not off, and which is not an availability group secondary or a standby database, two parts. First one aggregation of the last seven days of `sys.query_store_runtime_stats`, grouped by plan into a temporary table; it reads no plan text and has no budget of its own, so its cost grows with the number of runtime rows in the window, over a fixed part that compiling its statements under `RECOMPILE` costs every database: on one 2025 lab build, 144 to 221 ms on a store of 13 runtime rows and 242 to 253 ms on one of 6 851. Then the text of up to 1 000 parallel plans, those with the most parallel CPU first, copied a hundred at a time into a table variable and searched for one attribute, never converted to `xml`: about 20 ms per MB of plan text on one 2025 lab build. The read stops before the next hundred once 100 MB have been read or 10 s have passed, so one hundred plans can pass either, by as much as their size; the 120-second timeout is the hard bound of the whole file. Each chunk also scans the plans of the whole store to find its hundred, which the per-MB price does not cover, and which grows with the number of plans in the store, not with what the chunk copies (plan shape observed on one 2025 lab build). The shared lock on the store is held for the whole of the selection, which has no budget, and released between chunks only by the read loop. The root projects `selection.duration_ms`, `window.runtime_rows`, `examined.duration_ms`, `examined.bytes_read`, `examined.largest_plan_bytes` and `examined.stopped_by`, so the cost on your instance is in the archive. Nothing that names a query leaves the server. |
 
 ## What is not in scope
 
