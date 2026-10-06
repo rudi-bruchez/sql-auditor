@@ -25,6 +25,9 @@ import (
 //	SQL_AUDITOR_LIVE_SERVER=localhost,11533 SQL_AUDITOR_LIVE_USER=sa \
 //	SQL_AUDITOR_LIVE_PASSWORD=... go test ./collect/ -run '^TestLiveQueryStoreParallelCost' -v
 //
+// SQL_AUDITOR_LIVE_CONTAINER, when set, names the server's container, from
+// which the standby subtest removes the files it wrote.
+//
 // Every database here is created under the ZzAvgDopLive prefix, with a
 // suffix of its own so two runs cannot collide, and dropped by t.Cleanup. The
 // oracles read the test database from master with three-part names, so that
@@ -935,9 +938,17 @@ func TestLiveQueryStoreParallelCostStoresNotRead(t *testing.T) {
 		undo := dir + "zzavgdop-" + suffix + ".undo"
 		mdf := dir + "zzavgdop-" + suffix + "-sb.mdf"
 		ldf := dir + "zzavgdop-" + suffix + "-sb.ldf"
-		// Registered first, so it runs last, after both drops.
+		// Registered first, so it runs last, after both drops. SQL Server has
+		// no supported way to delete a file it wrote, so the files are removed
+		// through the container named by SQL_AUDITOR_LIVE_CONTAINER, and only
+		// logged when it is not set (a CI container is thrown away anyway).
 		t.Cleanup(func() {
-			out, err := exec.Command("podman", "exec", "sql2025", "rm", "-f", bak, undo, mdf, ldf).CombinedOutput()
+			container := os.Getenv("SQL_AUDITOR_LIVE_CONTAINER")
+			if container == "" {
+				t.Logf("left in the instance's data directory: %s, %s, %s, %s", bak, undo, mdf, ldf)
+				return
+			}
+			out, err := exec.Command("podman", "exec", container, "rm", "-f", bak, undo, mdf, ldf).CombinedOutput()
 			if err != nil {
 				t.Logf("removing %s, %s, %s, %s: %v %s; remove them by hand if the server is a container of yours", bak, undo, mdf, ldf, err, out)
 			}
