@@ -32,6 +32,7 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Changed
 
+- The GitHub release page carries this file's section for the version, followed by how to verify a download against the checksums file, instead of a generated list of commits. A section that is present but empty now fails the release too, before anything is built.
 - The collectors behind `--estimate-compression` and `--measure-page-density` run after all the others, in every run, so that a bound or a stop reached late cuts them rather than the Query Store. The order of `results` in `_run.json` changes for a run with either option; a run with neither keeps its order.
 - `collect.Observer.Finished` takes a `collect.Verdict` (cancelled, bound reached, failed on its own, units collected) in place of a boolean.
 - The wizard's last screen counts as collected only the units that returned a result, from the run's own count; it counted every unit done, skips and errors included.
