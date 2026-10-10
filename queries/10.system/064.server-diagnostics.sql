@@ -336,9 +336,25 @@ BEGIN TRY
                   order of the list; SQLWATCH reads the first element and
                   would be right only if the engine sorts it. The element is
                   empty on a round without a pending I/O, so both columns are
-                  NULL there, which is the common case. */
+                  NULL there, which is the common case.
+
+                  THE xs:decimal IS NOT DECORATION. max() over an untyped
+                  attribute returns xs:double, and value() hands a double to
+                  T-SQL as its XQuery text: 999999 stays 999999, but 1234567
+                  becomes 1.234567E6, which no bigint conversion accepts. The
+                  whole read then failed with error 8114, "Error converting
+                  data type nvarchar to bigint", and every interval and every
+                  wait of the window went with it. Found on a client instance in
+                  October 2026 (SQL Server 2016 SP3), where the archive came
+                  back with both arrays empty and that exact error in
+                  errors.diagnostics; reproduced on 17.0 with a payload whose
+                  longest pending request is 1234567, and fixed by this cast.
+                  The bug is not specific to 2016: any instance with a pending
+                  request at or above a million in this attribute's unit hit
+                  it. That it is the cause on that instance is inferred from
+                  the error, not observed: its rounds were never seen. */
                CASE WHEN n.value('local-name(.)', 'varchar(30)') = 'ioSubsystem'
-                    THEN n.value('max(longestPendingRequests/pendingRequest/@duration)', 'bigint')
+                    THEN n.value('xs:decimal(max(longestPendingRequests/pendingRequest/@duration))', 'bigint')
                END                                                           AS [pending_io_ms],
                CASE WHEN n.value('local-name(.)', 'varchar(30)') = 'ioSubsystem'
                     THEN n.value('(longestPendingRequests/pendingRequest[@duration = max(../pendingRequest/@duration)]/@filePath)[1]', 'nvarchar(260)')
