@@ -41,7 +41,8 @@
 --
 -- It reads the WHOLE RETAINED HISTORY and takes no parameter, like 023: a
 -- query that timed out every night for a month is the finding. The text is
--- cut at 500 characters, which is why it carries no flag.
+-- cut to its first and last 500 characters (text, text_tail, text_length), as
+-- in 020, which is why it carries no flag.
 --
 -- EACH LISTING IS CAPPED AT listing_cap, 200 since 4 October 2026, and the
 -- root says when the cap cut it: queries.with_aborted and
@@ -142,7 +143,13 @@ SELECT TOP (@listing_cap)
        CAST(r.max_duration / 1000.0 AS decimal(18,1))             AS [regular.max_duration_ms],
        CAST(r.cpu / r.n / 1000.0 AS decimal(18,1))                AS [regular.avg_cpu_ms],
        e.n                                                        AS [exception.executions],
-       LEFT(qt.query_sql_text, 500)                               AS [text]
+       LEFT(qt.query_sql_text, 500)                               AS [text],
+       CASE WHEN LEN(qt.query_sql_text) > 500
+            THEN RIGHT(LEFT(qt.query_sql_text, LEN(qt.query_sql_text)),
+                       CASE WHEN LEN(qt.query_sql_text) > 1000 THEN 500
+                            ELSE LEN(qt.query_sql_text) - 500 END)
+       END                                                        AS [text_tail],
+       LEN(qt.query_sql_text)                                     AS [text_length]
 FROM perType AS x
 JOIN      sys.query_store_query      AS q  ON q.query_id = x.query_id
 JOIN      sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id
@@ -194,7 +201,13 @@ SELECT TOP (@listing_cap)
        CAST(r.max_duration / 1000.0 AS decimal(18,1))             AS [regular.max_duration_ms],
        CAST(r.cpu / r.n / 1000.0 AS decimal(18,1))                AS [regular.avg_cpu_ms],
        a.n                                                        AS [aborted.executions],
-       LEFT(qt.query_sql_text, 500)                               AS [text]
+       LEFT(qt.query_sql_text, 500)                               AS [text],
+       CASE WHEN LEN(qt.query_sql_text) > 500
+            THEN RIGHT(LEFT(qt.query_sql_text, LEN(qt.query_sql_text)),
+                       CASE WHEN LEN(qt.query_sql_text) > 1000 THEN 500
+                            ELSE LEN(qt.query_sql_text) - 500 END)
+       END                                                        AS [text_tail],
+       LEN(qt.query_sql_text)                                     AS [text_length]
 FROM perType AS x
 JOIN      sys.query_store_query      AS q  ON q.query_id = x.query_id
 JOIN      sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id

@@ -156,7 +156,13 @@ SELECT TOP (@listing_cap)
        MAX(pi.executions)                                         AS [spread.peak_interval_executions],
        CAST(MAX(pi.executions) * 1.0 / NULLIF(SUM(pi.executions), 0)
             AS DECIMAL(9,4))                                      AS [spread.busiest_interval_share],
-       LEFT(qt.query_sql_text, 500)                               AS [text]
+       LEFT(qt.query_sql_text, 500)                               AS [text],
+       MAX(CASE WHEN LEN(qt.query_sql_text) > 500
+                THEN RIGHT(LEFT(qt.query_sql_text, LEN(qt.query_sql_text)),
+                           CASE WHEN LEN(qt.query_sql_text) > 1000 THEN 500
+                                ELSE LEN(qt.query_sql_text) - 500 END)
+           END)                                                   AS [text_tail],
+       MAX(LEN(qt.query_sql_text))                                AS [text_length]
 FROM       per_interval                       AS pi
 JOIN       sys.query_store_query               AS q  ON q.query_id = pi.query_id
 JOIN       sys.query_store_query_text          AS qt ON qt.query_text_id = q.query_text_id

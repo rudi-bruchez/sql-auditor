@@ -179,6 +179,9 @@ Each row:
 - in `aborted`, `exception.executions`, and in `exceptions`,
   `aborted.executions`, so the other count is visible without a join;
 - `text`: the first 500 characters.
+- `text_tail`, `text_length`: added in October 2026, as in 020: what follows
+  the first 500 characters, at most its last 500, NULL for a text that fits;
+  and the statement's whole length.
 
 Durations and CPU are converted from microseconds to milliseconds.
 `first_execution` and `last_execution` are the minimum and maximum of the

@@ -118,7 +118,11 @@
 -- It aggregates the whole retained window and takes no window parameter, like
 -- 023 and 024; QUERY_STORE_DAYS and QUERY_STORE_DB_INCLUDE narrow the deep
 -- extraction of 021 and 022, not the ungated summaries. Query text is the
--- first 500 characters, as in 020 and 024.
+-- first 500 characters and, for a longer statement, the last 500 (text,
+-- text_tail, text_length), as in 020 and 024. The tail exists because of this
+-- file: in October 2026 its listing held extraction queries whose column list
+-- ran past 500 characters, and the tables they read could only be guessed
+-- from the aliases.
 --
 -- On a database whose Query Store is off, by_query and waits are empty and
 -- root still reports the state.
@@ -294,7 +298,13 @@ SELECT r.query_id                                                   AS [query_id
        r.rn_log                                                     AS [rank.log],
        r.rn_tempdb                                                  AS [rank.tempdb],
        r.rn_reads                                                   AS [rank.physical_reads],
-       LEFT(qt.query_sql_text, 500)                                 AS [text]
+       LEFT(qt.query_sql_text, 500)                                 AS [text],
+       CASE WHEN LEN(qt.query_sql_text) > 500
+            THEN RIGHT(LEFT(qt.query_sql_text, LEN(qt.query_sql_text)),
+                       CASE WHEN LEN(qt.query_sql_text) > 1000 THEN 500
+                            ELSE LEN(qt.query_sql_text) - 500 END)
+       END                                                          AS [text_tail],
+       LEN(qt.query_sql_text)                                       AS [text_length]
 FROM       #retained                     AS r
 JOIN       sys.query_store_query          AS q  ON q.query_id = r.query_id
 JOIN       sys.query_store_query_text     AS qt ON qt.query_text_id = q.query_text_id
