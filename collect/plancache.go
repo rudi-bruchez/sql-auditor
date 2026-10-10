@@ -2,8 +2,11 @@ package collect
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"path"
+	"strings"
 )
 
 // The plan-cache-plans writer turns 80.workload/041.plan-cache-plans.sql into
@@ -82,10 +85,13 @@ type planCacheCounts struct {
 	// NullPlans counts the rows where sys.dm_exec_query_plan returned nothing
 	// for a plan that IS in the cache. It is reported rather than folded into
 	// the omissions total because its cause is the engine's, not this tool's.
-	NullPlans  int `json:"null_plans"`
-	CapPlans   int `json:"cap_plans"`
-	CapBytes   int `json:"cap_plan_bytes"`
-	CapPerRank int `json:"cap_per_metric"`
+	NullPlans int `json:"null_plans"`
+	// WrittenWithoutQueryPlan counts the files written whose XML holds no
+	// QueryPlan element: they are counted in Written, and are not plans.
+	WrittenWithoutQueryPlan int `json:"written_without_query_plan"`
+	CapPlans                int `json:"cap_plans"`
+	CapBytes                int `json:"cap_plan_bytes"`
+	CapPerRank              int `json:"cap_per_metric"`
 }
 
 // planCacheSnapshot is the window the cache itself covered. Without it a reader
@@ -113,6 +119,101 @@ type indexedPlan struct {
 	// File is empty when no plan was written; the reason is in the omissions
 	// under the same rank, never inferred from the empty string.
 	File string `json:"file,omitempty"`
+	// Shape says what the written file actually holds. Present whenever File
+	// is, absent otherwise.
+	Shape *planShape `json:"shape,omitempty"`
+}
+
+// planShape is what a written .sqlplan holds, read back from its XML, because
+// a file being there does not mean a plan is.
+//
+// Found on a client instance in October 2026: the plans ranked first and third
+// by CPU, close to 690,000 executions each, were API cursors. Their QueryPlan elements
+// sit under StmtCursor/CursorPlan/Operation (PopulateQuery, FetchQuery), with
+// no StmtSimple at all, and a plan reader that walks StmtSimple reported
+// nothing in them. Further down the same ranking, a dozen files of 870 bytes
+// held no QueryPlan whatsoever: "FETCH API_CURSOR0000…" statements, the entry
+// each sp_cursorfetch RPC leaves in the cache, whose CursorPlan is empty. Both
+// shapes were reproduced on SQL Server 2025 by driving sp_cursorprepexec and
+// sp_cursorfetch over RPC. In both cases the file looked like a measurement and
+// the analyst found out otherwise by opening it.
+//
+// READ IN GO, NOT IN 041. An XQuery count in the SQL would run on the audited
+// instance, over every selected plan of up to maxPlanCacheBytes, and would add
+// the xml-method SET option requirements (error 1934) to a script that has none
+// today. The XML is already in this process's memory to be written: a
+// streaming decode of at most maxPlanCachePlans documents costs the server
+// nothing. The file is UTF-8 — the driver hands the nvarchar over as a Go
+// string and writeFile writes its bytes, with no XML declaration — so the
+// decoder needs no charset handling.
+type planShape struct {
+	// QueryPlans counts QueryPlan elements anywhere in the document, nested
+	// under a cursor's operations or not. Zero means the file shows no plan
+	// shape, whatever its statistics say.
+	QueryPlans int `json:"query_plans"`
+	// Statements counts statements by element and StatementType, e.g.
+	// "StmtCursor:FETCH CURSOR", which is what tells the two cursor cases
+	// above apart from an ordinary plan.
+	Statements map[string]int `json:"statements"`
+	Note       string         `json:"note,omitempty"`
+}
+
+const (
+	planNoteCursorFetch = "No statement here carries a query plan. This is the cache entry an API " +
+		"cursor fetch (sp_cursorfetch) leaves: its CursorPlan is an empty skeleton, and the plan " +
+		"that does the work is cached under the cursor's DECLARE CURSOR entry (sp_cursorprepexec " +
+		"or sp_cursoropen), another plan handle. The statistics beside it are the fetches' own; " +
+		"the file shows no plan shape."
+	planNoteNoQueryPlan = "No statement here carries a query plan, so the file shows no plan shape. " +
+		"The statistics beside it are real; the file is not a plan of them."
+	planNoteCursorNested = "The query plans are nested under StmtCursor/CursorPlan/Operation " +
+		"(PopulateQuery, FetchQuery), not under StmtSimple: this is a cursor's plan, and a reader " +
+		"that only walks StmtSimple finds nothing in it."
+)
+
+// readPlanShape counts the statements and query plans of one showplan document.
+func readPlanShape(doc string) *planShape {
+	s := &planShape{Statements: map[string]int{}}
+	d := xml.NewDecoder(strings.NewReader(doc))
+	var err error
+	for {
+		var tok xml.Token
+		if tok, err = d.Token(); err != nil {
+			break
+		}
+		el, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch {
+		case el.Name.Local == "QueryPlan":
+			s.QueryPlans++
+		case strings.HasPrefix(el.Name.Local, "Stmt"):
+			kind := el.Name.Local
+			for _, a := range el.Attr {
+				if a.Name.Local == "StatementType" {
+					kind += ":" + a.Value
+				}
+			}
+			s.Statements[kind]++
+		}
+	}
+	cursor := false
+	for k := range s.Statements {
+		cursor = cursor || strings.HasPrefix(k, "StmtCursor")
+	}
+	switch {
+	case err != io.EOF:
+		s.Note = fmt.Sprintf("the plan XML could not be parsed (%v); the counts cover what was "+
+			"read before the error", err)
+	case s.QueryPlans == 0 && s.Statements["StmtCursor:FETCH CURSOR"] > 0:
+		s.Note = planNoteCursorFetch
+	case s.QueryPlans == 0:
+		s.Note = planNoteNoQueryPlan
+	case cursor:
+		s.Note = planNoteCursorNested
+	}
+	return s
 }
 
 type planOmission struct {
@@ -253,6 +354,10 @@ func writePlanCachePlans(req WriteRequest) (WriteResult, error) {
 			res.CachedPlanFiles++
 			entry.File = file
 			idx.Counts.Written++
+			entry.Shape = readPlanShape(xml)
+			if entry.Shape.QueryPlans == 0 {
+				idx.Counts.WrittenWithoutQueryPlan++
+			}
 		}
 		idx.Plans = append(idx.Plans, entry)
 	}
