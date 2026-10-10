@@ -1,5 +1,5 @@
 -- @scope:       instance
--- @resultsets:  root:object, ring_buffers:array, connectivity:array, exceptions:array
+-- @resultsets:  root:object, ring_buffers:array, connectivity:array, exceptions:array, exceptions_by_hour:array
 -- @permissions: CONNECT, VIEW SERVER STATE
 -- @timeout:     120
 --
@@ -38,6 +38,25 @@
 -- SPID, whatever a reading that confuses them with RING_BUFFER_SECURITY_ERROR
 -- may suggest.
 --
+-- THE EXCEPTION BUFFER WRAPS TOO, AND AN AGGREGATE HIDES IT. On a client
+-- instance in October 2026 (SQL Server 2022) this set said 1 023 errors 1105
+-- of severity 17 over 16.4 hours. The buffer held 1 024 records, the same
+-- ceiling the connectivity buffer has, so it was full and the 16 hours were
+-- all that was left; and one row per error number could not say whether
+-- those thousand errors came in one burst or a few an hour. So the root
+-- carries exception_records, read straight from the buffer like
+-- connectivity_records, and exceptions_by_hour spreads each error over the
+-- hours of the window. No capacity is projected: 1 024 is what full buffers
+-- have been seen holding, not a documented constant, and the reader compares
+-- exception_records against it.
+--
+-- A RECORD IS NOT AN ERROR, and occurrences counts records. On 17.0.4045.5,
+-- five divisions by zero wrote fifteen 8134 records and three calls to a
+-- missing procedure wrote six 2812 records, all within the same second. So
+-- occurrences is an upper bound on the errors a client saw, by a factor that
+-- depends on the error, and a full buffer covers fewer errors than its record
+-- count suggests.
+--
 -- SQL Server 2012 is the floor. sys.dm_os_ring_buffers predates it. The record
 -- layout is undocumented and has been stable for many versions, but it is not
 -- contractual — hence value() with explicit types rather than positional
@@ -56,7 +75,9 @@ SELECT si.sqlserver_start_time                                    AS [instance_s
        SYSDATETIME()                                              AS [collected_at],
        (SELECT COUNT(*) FROM sys.dm_os_ring_buffers
         WHERE ring_buffer_type = 'RING_BUFFER_CONNECTIVITY')      AS [connectivity_records],
-       1024                                                       AS [connectivity_capacity]
+       1024                                                       AS [connectivity_capacity],
+       (SELECT COUNT(*) FROM sys.dm_os_ring_buffers
+        WHERE ring_buffer_type = 'RING_BUFFER_EXCEPTION')         AS [exception_records]
 FROM sys.dm_os_sys_info AS si
 OPTION (RECOMPILE, MAXDOP 1);
 
@@ -180,28 +201,53 @@ GROUP BY c.rec_type, c.rec_source, c.remote_host, c.sni_error, c.socket_error, c
 ORDER BY COUNT(*) DESC
 OPTION (RECOMPILE, MAXDOP 1);
 
-/* The exception buffer, aggregated. Same undocumented-shape caveat as every
-   other decode of this view: explicit XPaths with explicit types, so a renamed
-   element gives one NULL column rather than a silently shifted row. */
+/* The exception buffer, decoded once into a table variable so that the two
+   sets below describe the same records: the buffer moves while this batch
+   runs, and two reads of it would disagree. Same undocumented-shape caveat as
+   every other decode of this view: explicit XPaths with explicit types, so a
+   renamed element gives one NULL column rather than a silently shifted row. */
+DECLARE @exceptions TABLE (
+    when_local   datetime NOT NULL,
+    error_number int      NULL,
+    severity     int      NULL,
+    state        int      NULL
+);
+
+INSERT INTO @exceptions (when_local, error_number, severity, state)
+SELECT DATEADD(second, -((@ticks - rb.timestamp) / 1000), GETDATE())          AS when_local,
+       /* Text out, TRY_CONVERT after: an explicit numeric type in value()
+          turns an unexpected symbolic value into a batch-level error rather
+          than into the NULL this decode promises. Measured the hard way in
+          048.security-errors.sql. */
+       TRY_CONVERT(int, x.value('(//Exception/Error)[1]',    'varchar(64)')) AS error_number,
+       TRY_CONVERT(int, x.value('(//Exception/Severity)[1]', 'varchar(64)')) AS severity,
+       TRY_CONVERT(int, x.value('(//Exception/State)[1]',    'varchar(64)')) AS state
+FROM sys.dm_os_ring_buffers AS rb
+CROSS APPLY (SELECT CAST(rb.record AS xml)) AS r(x)
+WHERE rb.ring_buffer_type = 'RING_BUFFER_EXCEPTION'
+OPTION (RECOMPILE, MAXDOP 1);
+
 SELECT e.error_number                                             AS [error_number],
        e.severity                                                 AS [severity],
        e.state                                                    AS [state],
        COUNT(*)                                                   AS [occurrences],
        MIN(e.when_local)                                          AS [first_seen],
        MAX(e.when_local)                                          AS [last_seen]
-FROM (
-    SELECT DATEADD(second, -((@ticks - rb.timestamp) / 1000), GETDATE())      AS when_local,
-           /* Text out, TRY_CONVERT after: an explicit numeric type in value()
-              turns an unexpected symbolic value into a batch-level error rather
-              than into the NULL this decode promises. Measured the hard way in
-              048.security-errors.sql. */
-           TRY_CONVERT(int, x.value('(//Exception/Error)[1]',    'varchar(64)')) AS error_number,
-           TRY_CONVERT(int, x.value('(//Exception/Severity)[1]', 'varchar(64)')) AS severity,
-           TRY_CONVERT(int, x.value('(//Exception/State)[1]',    'varchar(64)')) AS state
-    FROM sys.dm_os_ring_buffers AS rb
-    CROSS APPLY (SELECT CAST(rb.record AS xml)) AS r(x)
-    WHERE rb.ring_buffer_type = 'RING_BUFFER_EXCEPTION'
-) AS e
+FROM @exceptions AS e
 GROUP BY e.error_number, e.severity, e.state
 ORDER BY COUNT(*) DESC
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* Each error spread over the hours it occurred in, local time, an hour
+   starting at the bucket. A burst is one or two rows carrying most of the
+   count; a trickle is a row per hour. The state is left out on purpose: it
+   splits one error into rows that tell the same story, and the set above
+   keeps it. Never more rows than the buffer has records. */
+SELECT e.error_number                                             AS [error_number],
+       e.severity                                                 AS [severity],
+       DATEADD(hour, DATEDIFF(hour, 0, e.when_local), 0)          AS [hour],
+       COUNT(*)                                                   AS [occurrences]
+FROM @exceptions AS e
+GROUP BY e.error_number, e.severity, DATEADD(hour, DATEDIFF(hour, 0, e.when_local), 0)
+ORDER BY e.error_number, e.severity, [hour]
 OPTION (RECOMPILE, MAXDOP 1);
