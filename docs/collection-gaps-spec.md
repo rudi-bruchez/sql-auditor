@@ -2019,3 +2019,66 @@ database and the other runs of the same target, which together tell a command
 cut off from a slow one. Reading needs `SELECT` on the table, which the grant
 script cannot give for a database it does not know; a refusal is recorded as
 error 229 and the file completes.
+
+## Gaps recorded on 10 October 2026
+
+Both came out of two topics of the private corpus written after a comparison
+with the agent skills Microsoft published for SQL Server. Each topic reads a
+field the default collection carries, and needs a second one it does not to
+tell a finding from a non-finding.
+
+### 30. Whether a forced plan still runs is collected only behind a flag
+
+slug: forced-plan-last-execution
+
+`80.workload/020.query-store.sql` lists every plan that is forced or has a
+forcing failure, with `force_failure_count`, `last_force_failure_reason_desc`,
+`last_compile_start_time` and `count_compiles`. It does not carry the plan's
+`last_execution_time`, nor that of the other plans of the same query.
+
+The failure count alone does not say that forcing is failing today. It is a
+history: measured on SQL Server 2025, after the index named by a forced plan
+was dropped and then recreated, forcing resumed while the plan still showed
+three failures and `NO_INDEX`. The count goes back to zero only when the plan
+is unforced or forced again. What tells a current failure from a healed one is
+which plan of the query runs: when forcing fails, the fallback plan's
+`last_execution_time` moves and the forced plan's stops.
+
+`80.workload/021.query-store-detail.sql` carries `last_execution` and
+`count_compiles` for every plan of a query that has a forced plan, but only when
+the run is launched with `--query-store-detail`. A default collection leaves the
+reader comparing the forced plan's last compilation with the query's last
+execution in `top_queries`, which is suggestive and no more.
+
+What closes it. Project, in the `forced_plans` result set of `020`, the forced
+plan's `MAX(last_execution_time)` from `sys.query_store_runtime_stats` and the
+same value for the most recent other plan of the query, with that plan's id. The
+rows are already bounded by the forced plans of the database, which are few, so
+the cost is two aggregates per forced query.
+
+### 31. Indexed views are listed nowhere
+
+slug: indexed-views-absent
+
+`70.schema/070.index-columns.sql` lists the indexes of user tables only
+(`o.type = 'U'`), and `70.schema/080.modules.sql` carries every view's source and
+`is_schema_bound`, which says that a view could be indexed and not that it is.
+`70.schema/055.page-density.sql` includes indexed views, but it runs only behind
+`--measure-page-density` and keeps the 50 largest partitions of the database, so
+a small indexed view, or any indexed view on a run without the flag, does not
+appear.
+
+An indexed view matters to an audit for what it imposes on the tables under it,
+not for its size. Every module that writes to one of its base tables must have
+been created with `QUOTED_IDENTIFIER` and `ANSI_NULLS` on, or it fails with
+Msg 1934 on every call; a module that reads the view with `NOEXPAND` fails the
+same way. Every write to a base table also maintains the view's index, which a
+topic on write cost has to count. Today a topic can only name the schema-bound
+views as candidates and send the reader to the client to confirm.
+
+What closes it. List the indexes of views beside those of tables: widen the
+filter of `070` to `o.type IN ('U', 'V')` and project the object type, or add a
+small result set naming each indexed view, its index and its base tables (from
+`sys.sql_expression_dependencies` with `referenced_minor_id = 0`). The first is
+the smaller change, but every consumer of `070` that assumes a table would then
+have to be checked.
