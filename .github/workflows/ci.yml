@@ -1001,6 +1001,9 @@ jobs:
       # (pendingRequest, @duration, @filePath); this pins the file to them and
       # checks that the longest request's file is the one returned, but it
       # cannot confirm the engine's own spelling, which no round has shown.
+      # The longest duration is above a million on purpose: max() returns a
+      # double, which reached T-SQL as 1.234567E6 and failed the whole read
+      # with error 8114 until the file cast it to xs:decimal.
       - name: read 064's pending I/O paths against a filled payload
         run: |
           tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
@@ -1012,12 +1015,12 @@ jobs:
           got=$(tools -I -h -1 -W -Q "SET NOCOUNT ON;
             DECLARE @x xml = N'<ioSubsystem ioLatchTimeouts=''0''><longestPendingRequests>
               <pendingRequest duration=''12'' filePath=''/data/a.mdf''/>
-              <pendingRequest duration=''40'' filePath=''/log/a_log.ldf''/>
+              <pendingRequest duration=''1234567'' filePath=''/log/a_log.ldf''/>
               <pendingRequest duration=''7'' filePath=''/data/tempdb.mdf''/>
               </longestPendingRequests></ioSubsystem>';
             SELECT CONCAT_WS('|', $cols) FROM @x.nodes('/ioSubsystem') AS t(n);")
           echo "read back: $got"
-          test "$got" = "3|40|/log/a_log.ldf"
+          test "$got" = "3|1234567|/log/a_log.ldf"
       # The bound's live tests, against the same container. They create
       # nothing: read-only instance collectors on master, and one missing
       # table that is never created. A separate step because some are
