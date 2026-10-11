@@ -44,8 +44,12 @@ var msdbSameRoute = map[string][]string{
 // the list cannot outlive the fix.
 var msdbKnownUnguarded = map[string]string{}
 
+// msdbRef parses the sys schema as well as dbo. 10.system/096.msdb-tables
+// reads msdb's catalog views by three-part name, and a login with no user in
+// msdb, guest disabled there, is refused those like any dbo table. No probe
+// reads them, so the rule sends them to BEGIN TRY.
 var (
-	msdbRef  = regexp.MustCompile(`(?i)(?:\bmsdb|\[msdb\])\s*\.\s*(?:\[?dbo\]?)?\s*\.\s*\[?(\w+)\]?`)
+	msdbRef  = regexp.MustCompile(`(?i)(?:\bmsdb|\[msdb\])\s*\.\s*(?:\[?(?:dbo|sys)\]?)?\s*\.\s*\[?(\w+)\]?`)
 	msdbBare = regexp.MustCompile(`(?i)(\bmsdb|\[msdb\])\s*\.`)
 	tryBegin = regexp.MustCompile(`(?i)\bBEGIN\s+TRY\b`)
 	tryEnd   = regexp.MustCompile(`(?i)\bEND\s+TRY\b`)
@@ -139,7 +143,7 @@ func TestUndeclaredMsdbReadsAreGuarded(t *testing.T) {
 				seenKnown[key] = true
 				continue
 			}
-			t.Errorf("%s reads msdb.dbo.%s outside BEGIN TRY, and no capability it requires vouches for "+
+			t.Errorf("%s reads msdb object %s outside BEGIN TRY, and no capability it requires vouches for "+
 				"that object; a login the preflight lets through can still be refused it and lose "+
 				"the whole file. Guard the read, or require the capability whose probe covers it: %q",
 				s.Path, object, excerpt)

@@ -37,6 +37,7 @@
 10.system/079.telemetry.sql
 10.system/080.loaded-modules.sql
 10.system/095.master-user-objects.sql
+10.system/096.msdb-tables.sql @profiles: space
 20.databases/010.all-databases.sql @profiles: space
 20.databases/011.all-databases-2014.sql
 20.databases/012.all-databases-query-store.sql
