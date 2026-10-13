@@ -12,7 +12,8 @@
 --
 -- 80.workload/020.query-store.sql is the SUMMARY, and the two are deliberately
 -- separate files. The summary answers "what is heavy here" in one JSON that
--- costs nothing to read and discloses nothing beyond 500 characters of SQL.
+-- costs nothing to read and discloses nothing beyond the first and last 500
+-- characters of SQL.
 -- This file answers "what is that query actually doing", which needs the whole
 -- statement and its plan — and that is a different disclosure decision, not a
 -- larger version of the same one.

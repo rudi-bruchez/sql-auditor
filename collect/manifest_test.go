@@ -950,6 +950,7 @@ func TestApplicationTextIsDeclaredAndDisclosed(t *testing.T) {
 		{"70.schema/070.index-columns.sql", "schema_expressions", "filtered indexes"},
 		{"70.schema/090.statistics.sql", "schema_expressions", "statistics"},
 		{"80.workload/020.query-store.sql", "query_text", "first 500 characters"},
+		{"80.workload/028.query-store-resources.sql", "query_text", "the last 500 of a longer statement"},
 		{"80.workload/020.query-store.sql", "query_text", "at most 200 queries in each ranking per database"},
 		{"80.workload/023.query-store-most-executed.sql", "query_text", "at most 200 queries"},
 		{"80.workload/024.query-store-rowcount.sql", "query_text", "at most 200 queries"},

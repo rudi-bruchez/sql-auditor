@@ -132,3 +132,25 @@ func TestMostExecutedAndRowcountRankTheSameNumber(t *testing.T) {
 		t.Errorf("023 ranks %s and 024 ranks %s; they must rank the same population", a, b)
 	}
 }
+
+// 027 pins the plans it will read with a TOP over sys.query_store_plan, and
+// that statement must not mention query_plan. The view computes the column as
+// CAST(showplanxmldecompress(...) AS nvarchar(max)), so any predicate on it
+// decompresses every plan in the store before the TOP keeps two thousand. On
+// a lab store of 39 329 plans the pin took 5 131 ms of CPU with
+// WHERE query_plan IS NOT NULL and 55 ms without.
+func TestStatsUsagePinNeverDecompressesThePlans(t *testing.T) {
+	_, code := workloadSQL(t, "027.query-store-stats-usage.sql")
+	start := strings.Index(code, "INSERT INTO @scan")
+	if start < 0 {
+		t.Fatal("027: no INSERT INTO @scan, the pin this test guards")
+	}
+	pin := code[start:]
+	pin = pin[:strings.Index(pin, "OPTION (")]
+	if !strings.Contains(pin, "sys.query_store_plan") {
+		t.Fatalf("027: the pin no longer reads sys.query_store_plan:\n%s", pin)
+	}
+	if regexp.MustCompile(`\bquery_plan\b`).MatchString(pin) {
+		t.Errorf("027: the pin references query_plan, which decompresses every plan in the store:\n%s", pin)
+	}
+}

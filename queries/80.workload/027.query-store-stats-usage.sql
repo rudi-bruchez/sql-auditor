@@ -405,7 +405,21 @@ DECLARE @reads TABLE (
 /* ───────── the scan set, pinned ─────────
    The plans this run is answerable for, chosen once so that every count below
    is about the same set of plans and not about whatever the store held a
-   second later. */
+   second later.
+
+   NO PREDICATE ON query_plan. sys.query_store_plan computes that column as
+   CAST(showplanxmldecompress(...) AS nvarchar(max)), so the WHERE
+   query_plan IS NOT NULL this pin carried until October 2026 decompressed
+   EVERY plan the store holds before the TOP kept 2 001 of them: the statement
+   meant to be cheap was the one whose cost neither the cap nor the budget
+   bounded, growing with the whole store rather than with what is read. On a
+   lab store of 39 329 plans (SQL Server 2025, 11 October 2026) it cost
+   5 131 ms of CPU with the predicate and 55 ms without, the plan showing the
+   decompression on a clustered index scan of all 39 329 rows. It was found
+   because 027 reached its 300 s timeout on a client instance whose store held
+   38 916 plans in 840 MB; how much of that run the pin took was not measured
+   there. A plan with no text is not lost by dropping the test: it is pinned,
+   sized at NULL, and counted in plans_unparsed when its chunk is cast. */
 INSERT INTO @scan (rn, plan_id, query_id, last_compile, last_execution, is_forced)
 SELECT ROW_NUMBER() OVER (ORDER BY t.last_execution_time DESC),
        t.plan_id,
@@ -420,7 +434,6 @@ FROM (SELECT TOP (@cap + 1)
              p.last_execution_time,
              p.is_forced_plan
       FROM sys.query_store_plan AS p
-      WHERE p.query_plan IS NOT NULL
       ORDER BY p.last_execution_time DESC) AS t
 OPTION (RECOMPILE, MAXDOP 1);
 
@@ -542,7 +555,9 @@ DECLARE @plans_skipped bigint = @plans_selected - @plans_read;
 
 /* Plans whose XML actually parsed. It is @plans_read on every instance
    seen so far; the two differ only where TRY_CAST refused a truncated plan,
-   or where a plan left the store between the pin and its chunk, and reporting
+   where the store holds no text for a plan (the pin no longer filters those
+   out, see the scan set above), or where a plan left the store between the
+   pin and its chunk, and reporting
    the count that was really read is what keeps the share below honest when
    that happens. */
 DECLARE @plans_examined bigint;

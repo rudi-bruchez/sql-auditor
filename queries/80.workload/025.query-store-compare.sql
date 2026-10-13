@@ -54,7 +54,8 @@
 -- means; a query slower after the change may be slower for reasons that have
 -- nothing to do with it, and telling which needs the deployment calendar.
 --
--- The text is cut at 500 characters, as in 020, and no plan XML is returned:
+-- The text is cut to its first and last 500 characters (text, text_tail,
+-- text_length), as in 020, and no plan XML is returned:
 -- the plans are --query-store-detail's disclosure, not this file's.
 --
 -- SQL Server 2016 is the floor, the Query Store's. Not collected for that
@@ -360,7 +361,13 @@ SELECT q.query_id                                                 AS [query_id],
        CAST(a.logical_writes / a.n AS decimal(18,1))              AS [after.logical_writes],
        CAST(a.memory_pages / a.n AS decimal(18,1))                AS [after.max_used_memory_pages],
        CAST(a.row_count / a.n AS decimal(18,1))                   AS [after.rowcount],
-       LEFT(qt.query_sql_text, 500)                               AS [text]
+       LEFT(qt.query_sql_text, 500)                               AS [text],
+       CASE WHEN LEN(qt.query_sql_text) > 500
+            THEN RIGHT(LEFT(qt.query_sql_text, LEN(qt.query_sql_text)),
+                       CASE WHEN LEN(qt.query_sql_text) > 1000 THEN 500
+                            ELSE LEN(qt.query_sql_text) - 500 END)
+       END                                                        AS [text_tail],
+       LEN(qt.query_sql_text)                                     AS [text_length]
 FROM @sel AS s
 JOIN      sys.query_store_query            AS q  ON q.query_id = s.query_id
 JOIN      sys.query_store_query_text       AS qt ON qt.query_text_id = q.query_text_id

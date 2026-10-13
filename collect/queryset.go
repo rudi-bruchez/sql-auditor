@@ -579,7 +579,8 @@ var KnownDisclosures = map[string][]string{
 	// their own rankings, and forced_plans in 020 has no cap at all.
 	"query_text": {
 		"the first 500 characters of the SQL of the queries the Query Store",
-		"recorded, for at most 200 queries in each ranking per database",
+		"recorded, and the last 500 of a longer statement, for at most 200",
+		"queries in each ranking per database",
 		"(heaviest, most executed, most rows, interrupted, by resource) and for",
 		"every query with a forced plan; this is application code and can",
 		"carry the literal values a statement was written with",

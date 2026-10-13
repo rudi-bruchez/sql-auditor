@@ -837,7 +837,7 @@ SQL text, cut to a fixed length rather than left out:
 
 | Collector | What it keeps |
 | --- | --- |
-| `80.workload/020.query-store.sql` | the first 500 characters of each listed Query Store query |
+| `80.workload/020.query-store.sql` | the first 500 characters of each listed Query Store query, and the last 500 of a longer one |
 | `80.workload/023.query-store-most-executed.sql` | the same |
 | `80.workload/024.query-store-rowcount.sql` | the same |
 | `80.workload/028.query-store-resources.sql` | the same |
@@ -1027,7 +1027,8 @@ What is in here that names things:
     each, which name backup files, shares and servers and can quote the
     error a restore or a copy raised
   - the first 500 characters of the SQL of the queries the Query Store
-    recorded, for at most 200 queries in each ranking per database
+    recorded, and the last 500 of a longer statement, for at most 200
+    queries in each ranking per database
     (heaviest, most executed, most rows, interrupted, by resource) and for
     every query with a forced plan; this is application code and can
     carry the literal values a statement was written with
@@ -1442,7 +1443,7 @@ one, in these tiers:
 | `@timeout` | Files |
 | --- | --- |
 | 30 s | 9 |
-| 60 s | 55 |
+| 60 s | 56 |
 | 120 s | 30 |
 | 180 s | 3 |
 | 300 s | 15 |
@@ -1827,9 +1828,11 @@ collector cannot tell which literal in somebody else's SQL is sensitive.
 This is why `80.workload/020.query-store.sql`,
 `80.workload/023.query-store-most-executed.sql` and
 `80.workload/026.query-store-interrupted.sql` need no flag and run on every
-collection: they truncate the statement to 500 characters and collect no plan at
-all. Enough to identify a query, not enough to reconstruct a payload. The moment
-that trade stops being made, a flag appears.
+collection: they keep the first and the last 500 characters of the statement
+and collect no plan at all. A statement of up to 1 000 characters arrives whole,
+literals included; a longer one loses its middle. Enough to identify a query and
+the tables it reads, not enough to reconstruct a long payload. The moment that
+trade stops being made, a flag appears.
 
 **Turn it on** when the question is which queries are heavy and why, and you have
 somewhere appropriate to put the answer. **Leave it off** for an inventory or a
@@ -2254,8 +2257,8 @@ deployment calendar.
 
 ### What it discloses
 
-The first 500 characters of each query's text, as `020.query-store.sql`
-already does, and no plan XML: the plans are `--query-store-detail`'s
+The first 500 characters of each query's text and the last 500 of a longer
+one, as `020.query-store.sql` already does, and no plan XML: the plans are `--query-store-detail`'s
 disclosure. `--query-store-databases` narrows it as it narrows the detail
 extraction.
 

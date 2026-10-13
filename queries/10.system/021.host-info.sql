@@ -41,20 +41,45 @@
 -- HOST_RELEASE IS A NUMBER AND IT IS NOT THE MARKETING NAME. 10.0 covers
 -- Windows Server 2016, 2019, 2022 and 2025 alike, and Windows 10 and 11 with
 -- them. The raw value is projected and MUST NOT be mapped to a product name:
--- the mapping needs the build number, which neither view exposes, and a wrong
--- product name in an audit is worse than a version number the reader looks up.
--- host_sku is projected as its integer for the same reason.
+-- the mapping needs the build number, and a wrong product name in an audit is
+-- worse than a version number the reader looks up. host_sku is projected as
+-- its integer for the same reason.
 --
--- That limit is worth stating rather than hiding. This collector answers the
--- memory question and half of the supportability one: it says which Windows
--- family, not which release, so supportability still needs a build number from
--- somewhere else.
+-- THE BUILD NUMBER COMES FROM @@VERSION, because neither view exposes it. In
+-- October 2026 an audit of a 2016 instance on Windows had release 10.0 and
+-- sku 7 and could not say whether the OS was still supported: the question
+-- went back to the client. On Windows, @@VERSION ends with the OS and its build,
+-- "on Windows Server 2016 Datacenter 10.0 <X64> (Build 14393: ) (Hypervisor)",
+-- and the build is what tells 2016 (14393), 2019 (17763) and 2022 (20348)
+-- apart. host.build is that number, raw, and the mapping is left to the
+-- reader. It is read only after " on Windows" and only when digits follow
+-- "(Build "; anything else leaves it NULL, which is what Linux gives, since
+-- its @@VERSION carries no build ("on Linux (Ubuntu 24.04.4 LTS) <X64>"). It
+-- is read whichever branch below ran, and when both failed, since @@VERSION
+-- needs no permission.
+--
+-- The product name in the same sentence is NOT projected. It is whatever the
+-- registry's ProductName says, and that is wrong in at least one known case:
+-- Windows 11 kept "Windows 10" there. A label that can name the wrong release
+-- is the value this corpus prefers not to have; the build is not relabelled.
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 10000;
 
 DECLARE @source varchar(24) = 'none', @err int = 0, @msg nvarchar(2048) = N'';
+
+/* The build, read from @@VERSION before either view is tried. The input is
+   one DECLARE on a line of its own so that a test can hand it the @@VERSION
+   of a Windows host the lab does not have. CONVERT is safe: at most nine
+   characters, all digits, are converted. */
+DECLARE @version nvarchar(4000) = @@VERSION;
+DECLARE @build_at int = CHARINDEX(N' on Windows', @version), @build int = NULL;
+IF @build_at > 0
+    SET @build_at = CHARINDEX(N'(Build ', @version, @build_at);
+IF @build_at > 0 AND SUBSTRING(@version, @build_at + 7, 1) LIKE N'[0-9]'
+    SET @build = CONVERT(int, LEFT(SUBSTRING(@version, @build_at + 7, 9),
+                 PATINDEX(N'%[^0-9]%', SUBSTRING(@version, @build_at + 7, 9) + N'x') - 1));
 
 DECLARE @host TABLE (
     [platform]           varchar(32)  NULL,
@@ -133,6 +158,7 @@ SELECT CONVERT(varchar(23), SYSDATETIME(), 126)                 AS [collected_at
        (SELECT TOP 1 h.[platform] FROM @host AS h)              AS [platform],
        (SELECT TOP 1 h.[distribution] FROM @host AS h)          AS [host.distribution],
        (SELECT TOP 1 h.[release] FROM @host AS h)               AS [host.release],
+       @build                                                   AS [host.build],
        (SELECT TOP 1 h.[service_pack_level] FROM @host AS h)    AS [host.service_pack_level],
        (SELECT TOP 1 h.[sku] FROM @host AS h)                   AS [host.sku],
        (SELECT TOP 1 h.[language_version] FROM @host AS h)      AS [host.language_version],

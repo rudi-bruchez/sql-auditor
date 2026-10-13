@@ -332,6 +332,9 @@ Each row gives its statement's `selected_by` and ranks.
   `max_used_memory_pages` (the source column counts 8 KB pages, and 021
   already names its column that way), `rowcount`;
 - `text`: the first 500 characters, as 020 does.
+- `text_tail`, `text_length`: added in October 2026, as in 020: what follows
+  the first 500 characters, at most its last 500, NULL for a text that fits;
+  and the statement's whole length.
 
 Averages are weighted by executions (`SUM(avg * count) / SUM(count)`), as in
 020 and 021, and durations converted from microseconds to milliseconds.

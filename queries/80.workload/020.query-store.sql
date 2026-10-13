@@ -29,21 +29,33 @@
 -- other timing in the corpus is in milliseconds, and a column that silently
 -- changes unit between files is a defect waiting to be quoted in a report.
 --
--- Query text is truncated to 500 characters. It is application SQL and can
--- contain literal values from the workload, which is a disclosure decision:
--- 052.session-text.sql puts the same class of data behind an explicit flag.
--- The truncation bounds how much is taken, not what: a short statement fits
--- whole in 500 characters, literals included, so an ALTER LOGIN or an INSERT
--- carrying a password or a card number in clear lands in the archive as it
--- was sent. What it does keep out is the tail of a long statement and every
--- plan. That is the trade that leaves this collector outside any flag, taken
--- knowingly and stated in MANIFEST.txt and docs/dba-guide.md. If it is wrong
--- for a client, the file is the place to change it.
+-- Query text is truncated: the first 500 characters, and the last 500 of a
+-- longer statement. It is application SQL and can contain literal values from
+-- the workload, which is a disclosure decision: 052.session-text.sql puts the
+-- same class of data behind an explicit flag. The truncation bounds how much
+-- is taken, not what: a short statement fits whole, literals included, so an
+-- ALTER LOGIN or an INSERT carrying a password or a card number in clear lands
+-- in the archive as it was sent. What it does keep out is the middle of a long
+-- statement and every plan. That is the trade that leaves this collector
+-- outside any flag, taken knowingly and stated in MANIFEST.txt and
+-- docs/dba-guide.md. If it is wrong for a client, the file is the place to
+-- change it.
+--
+-- THE TAIL WAS ADDED IN OCTOBER 2026. Found on a client instance: extraction
+-- queries whose column list ran past 500 characters, so that the FROM clause
+-- was never in the archive and the tables they read had to be guessed from
+-- the aliases. text keeps the first 500 characters as before. text_tail is
+-- what comes after them, at most its last 500 characters, and is NULL when
+-- the statement fits in text: the two never overlap, a statement of up to
+-- 1 000 characters is whole across them, and a longer one loses its middle.
+-- text_length is the whole statement's LEN, trailing spaces not counted, so a
+-- reader can tell a whole text from a cut one and how much was cut. The same
+-- three fields, computed the same way, are in 023, 024, 025, 026 and 028.
 --
 -- 021.query-store-detail.sql and 022.query-store-profiled.sql do the DEEP
 -- read: the whole statement text, the execution plans, and the per-interval
 -- statistics behind each plan. Both are flag-gated where this file is not, and
--- the 500-character truncation above is exactly what buys this one its place
+-- the truncation above is exactly what buys this one its place
 -- in every collection. A summary that runs always and a deep read that runs on
 -- request are not a duplication: the first is what tells an operator whether
 -- the second is worth asking for.
@@ -235,7 +247,13 @@ SELECT r.query_id                                                 AS [query_id],
             WHEN ob.type IN ('FN', 'TF', 'TR') THEN 1
             WHEN ob.object_id IS NOT NULL THEN 0
        END                                                        AS [nested],
-       LEFT(qt.query_sql_text, 500)                               AS [text]
+       LEFT(qt.query_sql_text, 500)                               AS [text],
+       CASE WHEN LEN(qt.query_sql_text) > 500
+            THEN RIGHT(LEFT(qt.query_sql_text, LEN(qt.query_sql_text)),
+                       CASE WHEN LEN(qt.query_sql_text) > 1000 THEN 500
+                            ELSE LEN(qt.query_sql_text) - 500 END)
+       END                                                        AS [text_tail],
+       LEN(qt.query_sql_text)                                     AS [text_length]
 FROM       capped                         AS c
 JOIN       ranked                         AS r  ON r.query_id = c.query_id
 JOIN       sys.query_store_query          AS q  ON q.query_id = r.query_id
@@ -254,7 +272,13 @@ SELECT p.plan_id                                                  AS [plan_id],
        p.last_force_failure_reason_desc                           AS [last_force_failure_reason],
        p.last_compile_start_time                                  AS [last_compile_start],
        p.count_compiles                                           AS [count_compiles],
-       LEFT(qt.query_sql_text, 500)                               AS [text]
+       LEFT(qt.query_sql_text, 500)                               AS [text],
+       CASE WHEN LEN(qt.query_sql_text) > 500
+            THEN RIGHT(LEFT(qt.query_sql_text, LEN(qt.query_sql_text)),
+                       CASE WHEN LEN(qt.query_sql_text) > 1000 THEN 500
+                            ELSE LEN(qt.query_sql_text) - 500 END)
+       END                                                        AS [text_tail],
+       LEN(qt.query_sql_text)                                     AS [text_length]
 FROM       sys.query_store_plan       AS p
 JOIN       sys.query_store_query      AS q  ON q.query_id = p.query_id
 JOIN       sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id
@@ -356,7 +380,13 @@ SELECT CONVERT(varchar(18), r.query_hash, 1)                      AS [query_hash
        r.rn_reads                                                 AS [rank.logical_reads],
        r.nested                                                   AS [nested],
        r.sample_query_id                                          AS [sample_query_id],
-       LEFT(qt.query_sql_text, 500)                               AS [text]
+       LEFT(qt.query_sql_text, 500)                               AS [text],
+       CASE WHEN LEN(qt.query_sql_text) > 500
+            THEN RIGHT(LEFT(qt.query_sql_text, LEN(qt.query_sql_text)),
+                       CASE WHEN LEN(qt.query_sql_text) > 1000 THEN 500
+                            ELSE LEN(qt.query_sql_text) - 500 END)
+       END                                                        AS [text_tail],
+       LEN(qt.query_sql_text)                                     AS [text_length]
 FROM       capped                         AS c
 JOIN       ranked                         AS r  ON r.query_hash = c.query_hash
 JOIN       sys.query_store_query          AS q  ON q.query_id = r.sample_query_id

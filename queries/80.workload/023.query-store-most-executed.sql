@@ -13,9 +13,10 @@
 -- calls are a defect requires knowing what the application does, and that is
 -- not in the Query Store.
 --
--- This file carries no flag because the text is truncated to 500 characters,
--- the same trade 80.workload/020.query-store.sql makes and on the same terms:
--- the cut keeps out the tail of a long statement, not its literals, and a
+-- This file carries no flag because the text is truncated to its first and
+-- last 500 characters (text, text_tail, text_length, defined in 020), the same
+-- trade 80.workload/020.query-store.sql makes and on the same terms: the cut
+-- keeps out the middle of a long statement, not its literals, and a
 -- short statement written with a password in it arrives whole. A row-by-row
 -- query is a few dozen characters anyway, so here the cut changes nothing.
 --
@@ -126,7 +127,13 @@ SELECT TOP (@listing_cap)
        CAST(SUM(rs.count_executions)
             / NULLIF(DATEDIFF(SECOND, MIN(i.start_time), MAX(rs.last_execution_time)) / 3600.0, 0)
             AS DECIMAL(18,1))                                     AS [executions_per_hour],
-       LEFT(qt.query_sql_text, 500)                                AS [text]
+       LEFT(qt.query_sql_text, 500)                                AS [text],
+       MAX(CASE WHEN LEN(qt.query_sql_text) > 500
+                THEN RIGHT(LEFT(qt.query_sql_text, LEN(qt.query_sql_text)),
+                           CASE WHEN LEN(qt.query_sql_text) > 1000 THEN 500
+                                ELSE LEN(qt.query_sql_text) - 500 END)
+           END)                                                    AS [text_tail],
+       MAX(LEN(qt.query_sql_text))                                 AS [text_length]
 FROM       sys.query_store_query                AS q
 JOIN       sys.query_store_query_text            AS qt ON qt.query_text_id = q.query_text_id
 JOIN       sys.query_store_plan                   AS p  ON p.query_id = q.query_id
@@ -212,7 +219,13 @@ SELECT TOP (@listing_cap)
             / NULLIF(DATEDIFF(SECOND, MIN(i.start_time), MAX(rs.last_execution_time)) / 3600.0, 0)
             AS DECIMAL(18,1))                                     AS [executions_per_hour],
        s.query_id                                                 AS [sample_query_id],
-       LEFT(qt.query_sql_text, 500)                               AS [text]
+       LEFT(qt.query_sql_text, 500)                               AS [text],
+       MAX(CASE WHEN LEN(qt.query_sql_text) > 500
+                THEN RIGHT(LEFT(qt.query_sql_text, LEN(qt.query_sql_text)),
+                           CASE WHEN LEN(qt.query_sql_text) > 1000 THEN 500
+                                ELSE LEN(qt.query_sql_text) - 500 END)
+           END)                                                   AS [text_tail],
+       MAX(LEN(qt.query_sql_text))                                AS [text_length]
 FROM       sys.query_store_query                AS q
 JOIN       sys.query_store_plan                   AS p  ON p.query_id = q.query_id
 JOIN       sys.query_store_runtime_stats           AS rs ON rs.plan_id = p.plan_id

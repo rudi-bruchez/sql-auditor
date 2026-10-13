@@ -181,7 +181,7 @@ Kept by decision. Named here so that the list is complete.
 | --- | --- | --- | --- |
 | `50.agent/020.job-steps` | `LEFT(command, 200)` for T-SQL steps, other subsystems not projected | "a T-SQL step whose first 200 characters contain a literal password would carry it" | 16 of 255 T-SQL steps cut, all at 0.23.0 (longest 46 438 characters). The full text exists behind `--include-job-step-commands` (021) |
 | `50.agent/010.jobs` `last_run.message` | `LEFT(…, 512)` | "written by whatever the job runs" | none of 8 messages reached 512 |
-| `80.workload/020`, `023`, `024`, `025`, `026`, `028` | `LEFT(query_sql_text, 500)` | "application SQL and can contain literal values from the workload, which is a disclosure decision" | 54 % of 020's listed texts and 33 % of 023's reached 500. The full text is in 021 behind its flag. No per-row flag says a text was cut |
+| `80.workload/020`, `023`, `024`, `025`, `026`, `028` | `LEFT(query_sql_text, 500)`, and since October 2026 the last 500 characters of a longer text in `text_tail` | "application SQL and can contain literal values from the workload, which is a disclosure decision" | 54 % of 020's listed texts and 33 % of 023's reached 500. The full text is in 021 behind its flag. `text_length` says whether and how much a text was cut |
 | `10.system/042.connection-security` pools | 200 groups of host, program, login | "THE LIST IS CAPPED AT 200 GROUPS, largest first, and the root carries the total" | not in any collection |
 | `10.system/052.session-text` (opt-in) | 5 transactions with text | "Same TOP (5) and same ORDER BY as 050.tempdb.sql, so the rows correspond" | no hit |
 
