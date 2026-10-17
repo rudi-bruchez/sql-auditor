@@ -19,9 +19,21 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-17
+
+This release is mostly about listings that were cut without saying so. Caps
+are raised where real collections showed them binding, and in `70.schema` and
+`80.workload` each cap that remains is projected beside the count that says
+whether it bound.
+A whole collection can now be bounded in time with `--max-duration`. New
+collectors read the largest tables of msdb, the cost bands of parallel plans
+from the Query Store, and the profiles of replication agents; and a series of
+fixes makes `MANIFEST.txt` declare exactly the text a run carries, no more and
+no less.
+
 ### Added
 
-- `10.system/096.msdb-tables.sql` lists the largest tables of msdb, internal tables counted under their parent, with reserved and used kilobytes, rows and `is_ms_shipped`, capped at 200 and totalled over every object at the root. Found on a client instance in October 2026: msdb held 9.8 GB and the archive could not say which history filled it. It reads `sys.partitions` and `sys.allocation_units` rather than `sys.dm_db_partition_stats`, so it needs no VIEW SERVER STATE and does not stall behind one Sch-M lock. Not yet run against a live instance.
+- `10.system/096.msdb-tables.sql` lists the largest tables of msdb, internal tables counted under their parent, with reserved and used kilobytes, rows and `is_ms_shipped`, capped at 200 and totalled over every object at the root. Found on a client instance in October 2026: msdb held 9.8 GB and the archive could not say which history filled it. It reads `sys.partitions` and `sys.allocation_units` rather than `sys.dm_db_partition_stats`, so it needs no VIEW SERVER STATE and does not stall behind one Sch-M lock. Run on SQL Server 2025 CU7: its total and its three largest tables matched `sys.dm_db_partition_stats` read on msdb.
 - `10.system/041.connectivity.sql` projects `exceptions_by_hour` (error, severity, hour, records) and `exception_records` at the root, from one decoding of `RING_BUFFER_EXCEPTION` shared with `exceptions`. A ring full of one error now says whether it came as a burst or a trickle. One error can write several records (measured: 5 divisions by zero wrote 15), so the counts are an upper bound on errors.
 - `10.system/021.host-info.sql` projects `host.build`, the Windows build number read from `@@VERSION`, on both branches of its guard: `release` is `10.0` for Windows Server 2016, 2019 and 2022 alike. Null on Linux and whenever the version string carries no build.
 - The six Query Store collectors that list statement text (020, 023, 024, 025, 026, 028) project `text_tail`, what follows the first 500 characters up to the last 500, and `text_length`. A statement of 1 000 characters or fewer is now whole; a longer extraction no longer loses its FROM clause. The disclosure sentence of `MANIFEST.txt` and `docs/` say 1 000 characters.
@@ -90,6 +102,19 @@ release workflow refuses a tag that disagrees with either this file or
 - A same-day rerun no longer deletes the run of another target that shares its server name, or the lack of one. `_run.json` now records where the run was pointed, `SQL_SERVER` as given under `server.address` and `SQL_DATABASE` under `server.database`, and the run set aside is kept when either differs from this run's, with both named in the reason. Two nameless targets filed under one folder, such as address `A` with `SQL_DATABASE=B` and address `A_B`, and two clones giving one name from two addresses, are now told apart. The address is compared as `SQL_SERVER` is read (case, spaces, the `tcp:` prefix and the comma or colon before the port do not count) and `master` is the same as no database; a short name and its FQDN still count as two, which keeps the earlier run. A `_run.json` without the address, written before this change, is compared by name only. The archive therefore carries the address as well, and `MANIFEST.txt` lists it among what names things; an address holding an `@` or the password is not written.
 - A database dropped while the collection is reading it no longer makes the run partial. Each collector left on it failed with error 911, the run exited 2, and a same-day rerun kept the archive it would have replaced, for a staging database another job had created and dropped meanwhile. When a collector meets error 911 and `DB_ID` confirms the database is gone, that collector and the ones after it on the database are skipped with the reason "the database was dropped during the collection", one warning names the collector that found it gone, and MANIFEST.txt lists the skips in one entry; a 911 on a database that still exists stays an error. A rerun after a run that had read the database keeps that run, and names the database once with the reason rather than once per collector.
 - `80.workload/042.parallel-cost-distribution.sql` calls a statement parallel when its cached plan is parallel, read from the plan fragment it already fetches (an operator carrying `Parallel="1"`), instead of when `sys.dm_exec_query_stats.max_dop` is above 1. Serial plans report a `max_dop` above 1: on a lab cache of 4 October 2026, 15 of the 25 statements counted parallel had no parallel operator, with 351 of 379 executions and 7.1 of 14.3 s of the parallel CPU, and the bands are what the choice of a cost threshold for parallelism is read from. Reproduced on SQL Server 2025 after a default collection by 0.37.0: twelve `INSERT INTO @table` statements of the corpus showed a `max_dop` of 2 or 3 with a serial plan, and band `lt_5` went from 12 parallel statements, 12 executions and 1.1 s of parallel CPU to none, while the one genuinely parallel statement stayed in `5_25`. A statement without a plan is no longer counted parallel. The root gains `examined.serial_plans_dop_above_1`, the window's statements with a `max_dop` above 1 and a serial plan. `cache.parallel_statements` and `cache.parallel_cpu_s` still read `max_dop`, since they cover the whole cache without reading a plan, and are documented as an upper bound that includes those statements. The search runs under a binary collation: under the default one it doubled the file's time on 120 MB of fragments (8.1 s against 3.6 s), under the binary one it costs 0.4 s. A cached plan carries no `DegreeOfParallelism` attribute, parallel or not, which is why the operator is read instead.
+
+### Upgrading
+
+- A script that reads `bounds.statements_examined` in
+  `80.workload/030.implicit-conversions` or `053.plan-warnings` now gets the
+  number of statements in the window as filled; the cap it used to report is
+  `bounds.examined_cap`.
+- In `10.system/045.default-trace-detail`, `capped` now means that some event
+  class was cut, and the rows are shared out by class instead of being the most
+  recent.
+- `10.system/040.error-log` lists `notable` newest first.
+- A `.env` that sets `MAX_DURATION` is refused by 0.37.0 and older, so keep it
+  commented if the same file serves an older binary.
 
 ## [0.37.0] - 2026-10-04
 
