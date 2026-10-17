@@ -1,11 +1,12 @@
 # Sending memory dumps on request
 
-Status: proposed on 17 October 2026, not implemented; version 2, of 17 October
+Status: proposed on 17 October 2026, not implemented; version 3, of 17 October
 2026. Version 1 (`20e5bc0`) was read the same day by a panel of five readers
 (agy and codex, each with a directive and a neutral prompt, and a Claude
-reader on the neutral one), without a SQL Server lab. Version 2 answers them;
-what they found and what became of each finding is in "Review of 17 October
-2026" at the end.
+reader on the neutral one), without a SQL Server lab. Version 2 (`3d878e2`)
+answered them, and an adversarial reader aimed at version 2's own corrections
+found eight defects in them, which version 3 fixes. Both reviews are at the
+end.
 
 ## The gesture
 
@@ -43,17 +44,21 @@ the server's disk, so it packs only when run on the machine that hosts the
 instance, on Windows. On any other build (Linux, macOS) it refuses to pack and
 says why; `--list` still works there.
 
-It refuses an instance whose `sys.dm_os_host_info.host_platform` is not
-`Windows`: dumps of SQL Server on Linux follow other rules
-(`/var/opt/mssql/log`, `paldumper`) and are not covered.
+It refuses an instance on Linux: dumps of SQL Server on Linux follow other
+rules (`/var/opt/mssql/log`, `paldumper`) and are not covered. The platform is
+read from `sys.dm_os_host_info.host_platform` on SQL Server 2017 and later;
+that view does not exist before 2017 (Learn), and an instance of 2012 to 2016
+is on Windows by construction, so the view is not queried there.
 
 ### The machine check
 
 Before reading any file, `dumps` compares
 `SERVERPROPERTY('ComputerNamePhysicalNetBIOS')` with the local NetBIOS name,
-read with `windows.GetComputerNameEx(windows.ComputerNamePhysicalNetBIOS)` from
-`golang.org/x/sys/windows` (already a dependency in `go.mod`), for exact
-equality, case-insensitively. Not `os.Hostname`, which on Windows returns the
+for exact equality, case-insensitively. The local name comes from
+`windows.GetComputerNameEx` in `golang.org/x/sys/windows` (already a dependency
+in `go.mod`), called with `windows.ComputerNamePhysicalNetBIOS`: it is the raw
+Win32 call, `(nametype uint32, buf *uint16, n *uint32)`, so the caller passes a
+buffer and retries once at the size the first call returns. Not `os.Hostname`, which on Windows returns the
 physical DNS host name (`$GOROOT/src/os/sys_windows.go`), and not a prefix
 comparison, which accepts two machines whose names share their first fifteen
 characters.
@@ -61,8 +66,10 @@ characters.
 NetBIOS names are unique within a domain but not across domains, so equal names
 do not prove it is the same machine. The second check is the file itself: for
 each row, the `.mdmp` at the row's path must exist and its size must equal the
-row's `size_in_bytes`. A row that fails it is not packed and is reported. When
-no row passes, nothing is packed.
+row's `size_in_bytes`. A row that fails it, including a row whose
+`size_in_bytes` is NULL (the column is nullable, per Learn), is not packed and
+is reported. When no row of the window passes, nothing is packed: that is the
+signature of the wrong machine, and it exits 2.
 
 On a mismatch of names, nothing is read, and the message names the machine the
 command must run on. On a failover cluster instance that is the node that
@@ -86,8 +93,12 @@ permission below; otherwise a SQL login in `.env`.
    `creation_time`, `size_in_bytes`. The permission is the one `check` already
    probes for that view: `VIEW SERVER STATE`, or `VIEW SERVER PERFORMANCE STATE`
    on SQL Server 2022 and later (Learn, `sys.dm_server_memory_dumps`, and the
-   DBA guide's permission table). The command runs that same probe first. The
-   header of `071` names only `VIEW SERVER STATE`; that is a separate fix.
+   DBA guide's permission table). The command does not reuse `check`'s probe,
+   which reads `sys.dm_os_wait_stats`, nor `VerifyLocal`, which creates
+   `OUTPUT_DIR` (under `C:\Windows\System32` on an elevated prompt): the query
+   on the view itself is the probe, and a permission error on it exits 2 with
+   the grant to ask for. The header of `071` names only `VIEW SERVER STATE`;
+   that is a separate fix.
 2. From the local disk, the files of each row. The view lists the `.mdmp` file
    only (Learn). Its siblings are the same path with the extension replaced by
    `.txt` and by `.log`, whatever the name: `SQLDumpNNNN.mdmp`, a manual
@@ -113,7 +124,8 @@ It reads nothing else: no other file of the `LOG` folder, not
 Packing the `.txt` by default, although it carries statement text, is
 deliberate: the command is itself the opt-in, run by someone who has been asked
 for these files, and the text file is what makes a dump readable at all. The
-manifest and the last lines of stdout say which files carry statement text.
+manifest, and stdout before the archive path, say which files carry statement
+text.
 
 ### The memory dump
 
@@ -121,29 +133,40 @@ manifest and the last lines of stdout say which files carry statement text.
 dumps under the same extension, and a full dump is the size of the process
 memory, up to hundreds of GB, per Learn, "Use Sqldumper.exe").
 
-- It packs only `.mdmp` files of at most `--max-dump-mb` megabytes, default
-  200, the ceiling the DBA guide already gives for SQL LogScout. A larger one is
+- It packs only `.mdmp` files of less than `--max-dump-mb` MiB, default 200,
+  the ceiling the DBA guide already gives for SQL LogScout. A larger one is
   listed with its size and skipped.
 - Before writing, it checks that the destination volume has free space for the
   selected files plus 10 %, and refuses otherwise.
 
 ## Options
 
-All three are accepted by `dumps` only. Every other command refuses them, and
-`dumps` refuses the options of `collect` (`--all`, `--profile`, `--keep`,
-`--include-*`, `--max-duration`), by the same mechanism `main.go` already uses
-for `--profile` and `--grant-script` on the shared flag set. `isCommand`, the
-usage text and the "did you mean" message gain `dumps`.
+All flags live on the one shared flag set, and a flag a command ignores is a
+flag the operator believes in. So `dumps` works from an allowlist: the
+connection options (`--env` and the connection flags `collect` reads), `--to`,
+`--since`, `--with-memory-dump`, `--max-dump-mb`, `--list`, `--debug`. Any
+other flag typed with `dumps` is refused before dispatch, detected with
+`fs.Visit` as `--profile` already is. In the other direction, `--since`,
+`--with-memory-dump`, `--max-dump-mb` and `--list` are new and refused by every
+other command the same way. `--to` already exists (`queries export`,
+`env init`) and keeps its meaning there. `isCommand`, the usage text and the
+"did you mean" message gain `dumps`.
 
-- `--to <dir>`: where to write the archive. Required, no default: the working
+- `--to <dir>`: where to write the archive, a directory as for
+  `queries export`. Required, no default: the working
   directory of an elevated prompt is `C:\Windows\System32`, and `OUTPUT_DIR`
   may be a shared folder chosen for metadata. A file in `<dir>` inherits its
   ACL; the guide's "Where you leave it matters" applies with more force.
 - `--since <yyyy-mm-dd>`: only dumps whose `creation_time`, a `datetimeoffset`
   in the server's offset, falls on or after that date in that same offset. The
-  filter is applied in T-SQL (`CONVERT(date, creation_time) >= @since`), so the
-  client's local time zone plays no part. Default: 90 days before the server's
-  current date. Every file sent is a disclosure, and a dump older than that
+  filter is applied in T-SQL, and the date travels as the string the operator
+  typed, never as a Go `time.Time`: go-mssqldb sends a `time.Time` as a
+  `datetimeoffset` carrying the client's offset, and the comparison would lose
+  the first day of the window west of UTC. So:
+  `CONVERT(date, creation_time) >= CONVERT(date, @since, 23)`, with `@since` a
+  string validated as `yyyy-mm-dd` before it is sent. Default: 90 days before
+  the server's current date,
+  `DATEADD(day, -90, CONVERT(date, SYSDATETIMEOFFSET()))`. Every file sent is a disclosure, and a dump older than that
   rarely explains a current problem; `--list` shows the older ones.
 - `--with-memory-dump` and `--max-dump-mb <n>`: above.
 - `--list`: print every row of the view, marked in or out of the window, with
@@ -156,11 +179,17 @@ usage text and the "did you mean" message gain `dumps`.
 One zip in `--to`, named
 `<instance>-<yyyy-mm-dd>-<hhmmss>.dumps.zip`, where `<instance>` is the
 `SafeFolderName` of the server name `collect` uses. The double extension is a
-shape `RunFolderName` never produces, whatever the profile. The time in the name
-means a second run the same day (typically after adding `--with-memory-dump`)
-never meets the first; the file is created exclusively (`O_EXCL`), as
-`collect.Zip` does, and removed if the run fails or is interrupted. The
-interrupt message names the dumps archive, not a collection.
+shape `collect` never produces, because `CheckProfile` refuses a profile name
+with a dot; that refusal must stay. The time in the name means a second run the
+same day (typically after adding `--with-memory-dump`) never meets the first;
+the file is created exclusively (`O_EXCL`), as `collect.Zip` does.
+
+The archive is removed, and the run exits 2, when it fails: an error reading a
+file that exists (access denied, I/O error), an error writing or closing the
+zip, or an interrupt. The interrupt message names the dumps archive, not a
+collection. Anything else that leaves a file out (an absent sibling, a row
+failing the size check, a memory dump above the ceiling) is a reported
+omission, not a failure.
 
 Inside, one top-level directory of the same name without `.zip`, as
 `collect.Zip` keeps, so the archive cannot explode into the recipient's working
@@ -177,17 +206,21 @@ directory:
 
 ## Output and exit codes
 
-On stdout, one line per dump (created at, name, files packed), then the archive
-path as the last line, as `collect` does. With `--list`, the listing only.
+On stdout, one line per dump (created at, name, files packed), then one line
+per kind of disclosure the archive carries (statement text, logins and
+addresses, process memory), then the archive path as the last line, as
+`collect` does. Omissions go to stderr and to the manifest. With `--list`, the
+listing only.
 
-The codes follow the guide's "The three exit codes":
+The codes follow the guide's "The three exit codes", where 0 is a usable
+result, possibly degraded:
 
-- 0: a usable result. An archive holding every file selected, or `--list`
-  printed, or no dump in the window (said on stderr, no archive written).
+- 0: an archive was written with at least one dump, its omissions reported; or
+  `--list` printed; or no dump in the window (said on stderr, no archive).
 - 1: the instance did not answer.
-- 2: unusable or partial. Wrong machine, wrong platform, the permission missing,
-  no space, a usage error; or an archive written with files missing or skipped
-  (the archive is kept, its manifest and stderr name what is missing).
+- 2: nothing usable. Wrong machine, wrong platform, the permission missing, no
+  space, a usage error, no row of the window passing the size check, or a
+  failure as defined above (the archive is removed).
 
 ## Not covered
 
@@ -258,3 +291,23 @@ Not adopted:
 - The FCI case where the crash dump sits on the previous owner's local disk
   (agy directive): the dump folder of an FCI is on its shared disk by default; a
   file not found is reported, which is the right outcome.
+
+## Review of version 2, 17 October 2026
+
+One adversarial Claude reader, aimed at the corrections of version 2 only. All
+eight findings are adopted in version 3.
+
+| Finding | Version 3 |
+|---|---|
+| `--to` already exists on the shared flag set for `queries export` and `env init`, so "refused by every other command" would break them; `--include-*` does not cover a dozen collect flags `dumps` would then ignore (verified against `main.go`) | allowlist for `dumps` by `fs.Visit`; only the four new flags refused elsewhere; `--to` keeps its meaning |
+| `@since` sent as a `time.Time` becomes a `datetimeoffset` with the client's offset; west of UTC the first day is lost (simulated with go-mssqldb's rules) | sent as a string, `CONVERT(date, @since, 23)` |
+| `windows.GetComputerNameEx(windows.ComputerNamePhysicalNetBIOS)` does not compile at x/sys v0.47.0 (verified) | the raw call with a buffer, stated |
+| `sys.dm_os_host_info` does not exist before 2017, the floor is 2012 | queried from 2017 only |
+| Exit codes contradicted each other and the guide's "possibly degraded" 0; "fails" undefined; "no row passes" had no code | failure defined, omissions are degradation, no row passing is 2 |
+| `size_in_bytes` is nullable | NULL fails the size check |
+| "the last lines" of stdout and "the last line" collided | order of stdout stated |
+| `check`'s probe reads another view, and `VerifyLocal` would create `OUTPUT_DIR` under `System32` | the query on the view is the probe |
+
+Also noted by that reader and kept: the 200 MB ceiling is "less than", in MiB,
+as in the guide; and `.dumps.zip` stays out of `collect`'s names only while
+`CheckProfile` refuses a dot in a profile name.
