@@ -1,9 +1,9 @@
 # Sending memory dumps on request
 
 Status: proposed on 17 October 2026, not implemented; version 3, of 17 October
-2026. Version 1 (`20e5bc0`) was read the same day by a panel of five readers
+2026. Version 1 (`ed39b88`) was read the same day by a panel of five readers
 (agy and codex, each with a directive and a neutral prompt, and a Claude
-reader on the neutral one), without a SQL Server lab. Version 2 (`3d878e2`)
+reader on the neutral one), without a SQL Server lab. Version 2 (`5c4f6d2`)
 answered them, and an adversarial reader aimed at version 2's own corrections
 found eight defects in them, which version 3 fixes. Both reviews are at the
 end.
