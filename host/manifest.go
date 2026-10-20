@@ -18,9 +18,15 @@ host with other instances names their errors and their databases too.
 
 Above all, review the copied text files. A job output file is whatever the step
 printed, and a CmdExec or PowerShell step can print a connection string or a
-password. The Azure extension logs and SQL Writer's log name databases and
-accounts. When SQL Writer is configured with its own TraceFile, every file of
-that directory named after it and followed by digits is copied.
+password. SQL Writer's log names databases and accounts. The Azure extension
+logs name them too, and hold the scripts the extensions ran and the settings
+they were given, a secret passed as a public setting included. When SQL Writer
+is configured with its own TraceFile, every file of that directory named after
+it and followed by digits is copied.
+
+The job output paths come from msdb, where only a sysadmin can set them, and
+the elevated run copies what they name: check every path under Copied files
+before you send the archive.
 `
 
 // manifest is MANIFEST.txt.

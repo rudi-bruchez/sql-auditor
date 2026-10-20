@@ -133,3 +133,24 @@ func TestHarmC_ManifestNamesEachCut(t *testing.T) {
 		}
 	}
 }
+
+// A refused read of the job steps names both rights it needs: sysjobs_view
+// answers 229 without SQLAgentReaderRole, and sysjobsteps without its grant.
+func TestHarmC_StepsRefusedNamesBothRights(t *testing.T) {
+	e := matchedEnv()
+	e.StepsRefused = true
+	res := readNamed(t, fakeCalls(), "070.job-outputs", e, &recordingSink{})
+	if res.Status != StatusRefused || !strings.Contains(res.Reason, "SQLAgentReaderRole") || !strings.Contains(res.Reason, "SELECT on msdb.dbo.sysjobsteps") {
+		t.Errorf("status %s, reason %q; want refused naming both rights", res.Status, res.Reason)
+	}
+}
+
+// The manifest tells the DBA who chose the job output paths, and what the
+// extension logs hold beyond names.
+func TestHarmC_DisclosureNamesSysadminAndExtensionSettings(t *testing.T) {
+	for _, s := range []string{"only a sysadmin can set them", "check every path under Copied files", "public setting"} {
+		if !strings.Contains(strings.Join(strings.Fields(disclosure), " "), s) {
+			t.Errorf("the disclosure lacks %q", s)
+		}
+	}
+}

@@ -317,7 +317,7 @@ Agent job steps.
   days before today.
 - `--to` is required and must be an existing directory. Besides `--to` and
   `--since`, it takes the connection options and `--debug`, and refuses any
-  other option.
+  other option and any argument that is not an option.
 - It refuses before reading anything on Linux and macOS, on a prompt that is
   not elevated, and on a `.env` that `collect` would refuse. It needs Windows
   Server 2016 or later.

@@ -2573,7 +2573,9 @@ do the System and Application logs say at that hour?
 separate archive. It is a separate request, like SQL LogScout below, and it is
 never run by `collect`, by the wizard, by a profile or by a `.env` setting. It
 reads once and stops: it installs nothing, downloads nothing, creates no shadow
-copy, collector, session or task, and writes no file but its archive.
+copy, collector, session or task, and writes no file but its archive, apart
+from the caches Windows PowerShell may write for itself (see
+[What Windows records about the run](#what-windows-records-about-the-run)).
 
 ### What it reads
 
@@ -2586,11 +2588,11 @@ Every source that keeps a history is read for one window, from `--since`
 | `020.events-application.json` | the Application log: every Critical, Error and Warning event, at most the 20,000 newest; every event of the instance's own source, at most the 20,000 newest, except `41050` to `41055`, which are counted per identifier with their first and last time; the instance's start and stop events (`17162`, `17147`, `17148`) |
 | `025.events-cluster.json` | on a failover cluster node, every event of `Microsoft-Windows-FailoverClustering/Operational`, at most the 20,000 newest |
 | `030.vss.json` | shadow copies with the volumes they belong to, shadow storage, VSS providers |
-| `035.sqlwriter/` | SQL Writer's own log and its rollover, copied whole: which databases were frozen and thawed, and when |
+| `035.sqlwriter/` | SQL Writer's own log and its rollover, the last 10 MiB of each: which databases were frozen and thawed, and when |
 | `040.filter-drivers.json` | file system filter drivers, what `fltmc filters` lists |
 | `050.power-plan.json` | the active power plan, by GUID and name |
 | `060.vm-extensions.json`, `060.vm-extensions/` | on an Azure VM, the listing of `C:\WindowsAzure\Logs\Plugins`, and the files written in the window, newest first, up to 50 MiB |
-| `070.job-outputs.json`, `070.job-outputs/` | the output files of Agent job steps: per step, the five newest written in the window, each cut to its last 1 MiB |
+| `070.job-outputs.json`, `070.job-outputs/` | the output files of Agent job steps: per step, the five newest written in the window, each cut to its last 1 MiB, up to 100 MiB for all the steps together. The paths come from msdb, where only a `sysadmin` can set them |
 | `080.cluster.json` | on a failover cluster node, the cluster's settings, nodes, networks, groups and resources, with the private properties of an availability group resource (`LeaseTimeout`, `HealthCheckTimeout`, `FailureConditionLevel`) |
 | `MANIFEST.txt` | what became of each source, and every file copied |
 
@@ -2620,10 +2622,14 @@ Their paths come from `msdb.dbo.sysjobsteps`, with the Agent tokens expanded
 `STRTDT` and `STRTTM` match any date or time), which finds the files of Ola
 Hallengren's maintenance solution. Only files on a local fixed drive are read:
 a UNC path, a mapped or removable drive, or a link leading to one is recorded
-with its step and left alone. A login without `SELECT` on
-`msdb.dbo.sysjobsteps` (error 229), or one that may not enter `msdb` at all
-(error 916), makes the source refused, not failed, as a refused permission is
-in `collect`: it does not change the exit code.
+with its step and left alone. Reading the steps needs `SQLAgentReaderRole` in
+`msdb` and `SELECT` on `msdb.dbo.sysjobsteps`: `sysjobs_view` answers error 229
+without the role, and the table without the grant. A login missing either, or
+one that may not enter `msdb` at all (error 916), makes the source refused, not
+failed, as a refused permission is in `collect`: it does not change the exit
+code. The steps are read under `READ UNCOMMITTED` with a 10-second lock
+timeout, like every collector; a lock held past it fails the source, and the
+manifest says it was a lock timeout.
 
 Some sources are legitimately absent, and recorded so: the cluster channel and
 configuration on a machine that is not a cluster node, the extension logs
@@ -2673,7 +2679,11 @@ both machines, and the run exits `2`.
 - the VSS and cluster classes are read through
   `powershell.exe -NoProfile -NonInteractive -Command`, with the script in
   clear text, never `-EncodedCommand`; where PowerShell logging is on, it
-  records both scripts.
+  records both scripts;
+- Windows PowerShell 5.1 may write `StartupProfileData-NonInteractive` and,
+  when a module loads, `ModuleAnalysisCache` under the running user's
+  `%LOCALAPPDATA%\Microsoft\Windows\PowerShell`. These caches are its own, and
+  the only files the command can leave outside `--to`.
 
 ### What the archive may contain
 
@@ -2686,9 +2696,21 @@ errors and their databases too.
 
 Above all, review the copied text files. A job output file is whatever the step
 printed, and a CmdExec or PowerShell step can print a connection string or a
-password. The Azure extension logs and SQL Writer's log name databases and
-accounts. `collect` withholds the text of non-T-SQL job commands for that reason
-(`50.agent/020.job-steps`); `host` copies their output, and says so.
+password. SQL Writer's log names databases and accounts. The Azure extension
+logs name them too, and they also hold the scripts the extensions ran and the
+settings they were given, where a secret passed as a public setting rather than
+a protected one appears in clear. `collect` withholds the text of non-T-SQL job
+commands for that reason (`50.agent/020.job-steps`); `host` copies their
+output, and says so.
+
+Which job output files are copied is decided in `msdb`, by whoever set each
+step's `output_file_name`, and only a `sysadmin` can set that column: anyone
+else gets error 14582. A `sysadmin` who is not a local administrator can
+therefore name any local file there. An unknown token becomes a wildcard and a
+literal path is read as well, so such a login chooses up to five local files
+per step that the elevated run copies into the archive. `MANIFEST.txt` lists
+every file copied with its path on the server: read that list before you send
+the archive, and remove what is not a job's output.
 
 ### What to check in `MANIFEST.txt`
 
@@ -2700,7 +2722,9 @@ accounts. `collect` withholds the text of non-T-SQL job commands for that reason
   `failed`, `skipped`) and its count. A `failed` line gives the error.
 - `Notes`: what a source left out, such as a job output path on a share or a log
   whose auto-backup archives were not read.
-- `Copied files`: every file copied, with its path on the server and its size.
+- `Copied files`: every file copied, with its path on the server and its size,
+  and how much of it was kept when it was cut. The job output paths were chosen
+  by a `sysadmin` (see above): check that each one is a job's output.
 
 ### Running it
 
@@ -2710,13 +2734,19 @@ of an elevated prompt is `C:\Windows\System32`. The archive is
 over, with one top-level folder of the same name. When the instance did not
 answer, `<instance>` is the machine's name. `--since yyyy-mm-dd` moves the start
 of the window. Besides those two, `host` takes the connection options and
-`--debug`, and refuses any other option.
+`--debug`, and refuses any other option, and any argument that is not an
+option: a word left on the line would silently drop every option after it. A
+`–since` pasted from a mail, where Outlook or Word turned `--` into a dash, is
+refused with a message saying so.
 
 stdout has one line per source with its status and count, then the archive
 path. The first `ctrl-c` prints `stopping: the archive will be removed`, and
 the archive is removed once the source in progress returns; a second one ends
 the process at once, and may leave an incomplete zip behind, to delete. An
-error writing the zip removes it too.
+error writing the zip removes it too. To stop a run, press `ctrl-c` rather than
+close the console window: Windows ends the process about five seconds after
+the window is closed, which may be before the archive is removed. Delete a
+`.host.zip` left behind that way; it is incomplete.
 
 From a prompt opened as Administrator, in the folder that holds the `.env`:
 
@@ -2746,7 +2776,7 @@ above about what sql-auditor does to your instance applies to it.
 | --- | --- | --- | --- |
 | Where it runs | anywhere that can reach the instance | on the server itself, Windows only | on the server itself; it only collects from local instances |
 | Windows rights | none | local administrator, from an elevated prompt | local administrator |
-| SQL Server rights | the read rights listed under [What permissions it needs](#what-permissions-it-needs) | a login that connects, and `SELECT` on `msdb.dbo.sysjobsteps` for the job output files; it reads the machine when the instance does not answer | `VIEW SERVER STATE` and `ALTER ANY EVENT SESSION` |
+| SQL Server rights | the read rights listed under [What permissions it needs](#what-permissions-it-needs) | a login that connects, and `SQLAgentReaderRole` plus `SELECT` on `msdb.dbo.sysjobsteps` for the job output files; it reads the machine when the instance does not answer | `VIEW SERVER STATE` and `ALTER ANY EVENT SESSION` |
 | What it writes on the server | nothing | its archive, in the `--to` folder | its output folder, a Perfmon collector and, in most performance scenarios, an Extended Events session |
 | Duration | minutes, then it stops | one read, then it stops | until the stop time you give it, or until you stop it |
 

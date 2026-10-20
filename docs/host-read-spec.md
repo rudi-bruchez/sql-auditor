@@ -228,8 +228,10 @@ source.
   digits, since the rollover name of a custom `TraceFile` is not measured), in
   `C:\Program Files\Microsoft SQL Server\90\Shared\` unless `TraceFile` in
   `SqlWriterConfig.ini`, in the same folder, names another path, which is then
-  used (Learn, "SQL Server VSS Writer logging"). Copied whole, into
-  `035.sqlwriter/`; their size is set by `TraceFileSizeMb`, 1 MB by default.
+  used (Learn, "SQL Server VSS Writer logging"). Copied into
+  `035.sqlwriter/`, the last 10 MiB of each; their size is set by
+  `TraceFileSizeMb`, 1 MB by default, and the harm review (batch C) bounded the
+  copy, which took a log of any size whole.
   The log does not name the requester. Absent on an older SQL Writer: recorded
   as absent.
 - Not the writers' state. `vssadmin list writers` makes every writer answer an
@@ -288,6 +290,9 @@ Azure only in this version: the tree under `C:\WindowsAzure\Logs\Plugins\`.
 - The listing of every file (path, size, last write time) goes in the archive.
 - The files written in the window are copied, newest first, up to 50 MiB in
   total; the rest are listed as left out.
+- They hold the scripts the extensions ran and the settings given to them, a
+  secret passed as a public setting included, not only database and account
+  names: the disclosure says so (harm review, batch C).
 - No folder means not an Azure VM, or no extension: recorded as absent, not an
   error.
 
@@ -348,13 +353,31 @@ Only when the instance answered.
   open can be read. SQL Writer's log and the extension logs are opened the
   same way.
 - Per step, the five newest files written in the window, each cut to its last
-  1 MiB.
+  1 MiB, and at most 100 MiB for all the steps together, counted in the bytes
+  copied; the files past it are recorded "budget reached, not copied" (harm
+  review, batch C: 300 steps would otherwise read 1.5 GB).
+- The paths are chosen by whoever set `output_file_name`, and only a
+  `sysadmin` can (error 14582 for anyone else, measured). A `sysadmin` who is
+  not a local administrator can thus name up to five local files per step,
+  through an unknown token, which becomes a wildcard, or a literal path, and
+  the elevated run copies them. Decided in the harm review (batch C): no change
+  of behaviour; the DBA guide and the disclosure tell the DBA to read the
+  manifest's list of copied files, which gives every source path, before
+  sending the archive.
 - A path that matches nothing is recorded with the step, not guessed.
-- When `msdb.dbo.sysjobsteps` is refused to the login (`SQLAgentReaderRole`
-  reads `sysjobs_view` but not this table, see the header of `020.job-steps`),
-  the source is "refused", as `collect` records a refused permission, and does
-  not change the exit code. The same holds for a login that may not enter
-  `msdb` at all (error 916).
+- Reading the steps needs `SQLAgentReaderRole` and `SELECT` on
+  `msdb.dbo.sysjobsteps`: `sysjobs_view` answers 229 without the role, and the
+  role does not carry the table (see the header of `020.job-steps`). Without
+  either, the source is "refused", as `collect` records a refused permission,
+  with a reason naming both, and does not change the exit code. The same holds
+  for a login that may not enter `msdb` at all (error 916).
+- The host's queries start with the collector contract's preamble:
+  `READ UNCOMMITTED` and `SET LOCK_TIMEOUT 10000` (harm review, batch C: the
+  read waited 23 s on a `sysjobsteps` key behind an open transaction). Error
+  1222 fails the source, its reason naming the lock timeout. Measured on SQL
+  Server 2022: read uncommitted reads past an open transaction's rows at once,
+  and a schema modification lock holds the query at compile time whatever
+  `LOCK_TIMEOUT` says.
 
 ## What it does not read
 
@@ -372,6 +395,10 @@ The allowlist pattern of `dumps`: the connection options of `collect`, `--to`,
   an elevated prompt is `C:\Windows\System32`.
 - `--since <yyyy-mm-dd>`: start of the window, in local time. Default 90 days
   before today.
+- Any argument that is not a flag is refused, naming it (harm review, batch
+  C): parsing stops at it and every flag after it would be dropped, and a
+  `--since` turned into a typographic dash by a mail client is such an
+  argument, which the message says.
 
 ## What it writes
 
@@ -411,12 +438,21 @@ should review: computer, cluster and volume names, addresses, paths, event
 messages, and above all the copied text files. Job output files are whatever
 the step printed, and a CmdExec or PowerShell step can print a connection
 string or a password; Azure extension logs and SQL Writer's log name databases
-and accounts. The repository already withholds the text of non-T-SQL job
-commands for that reason (`020.job-steps.sql`); this command copies their
-output, and says so.
+and accounts, and the extension logs hold the scripts and settings the
+extensions were given; the job output paths are chosen by a `sysadmin`. The
+repository already withholds the text of non-T-SQL job commands for that
+reason (`020.job-steps.sql`); this command copies their output, and says so.
 
 The archive is removed, and the run exits 2, on an error writing the zip or an
-interrupt.
+interrupt. Closing the console window is not an interrupt the run can finish:
+Windows ends the process about five seconds after the first signal, and the
+incomplete archive can remain, so the DBA guide says to press Ctrl+C and to
+delete a leftover zip (harm review, batch C).
+
+Windows PowerShell 5.1 may write `StartupProfileData-NonInteractive` and, when a
+module loads, `ModuleAnalysisCache` under the running user's
+`%LOCALAPPDATA%\Microsoft\Windows\PowerShell`: the only files the command can
+leave outside `--to`, documented rather than prevented (harm review, batch C).
 
 ## Output and exit codes
 
@@ -504,6 +540,11 @@ existing product reads it.
   `powershell.exe -NoProfile -NonInteractive -Command`, the executable named by
   its absolute path under the system directory, the script text a constant of
   the source: a COM binding would be a new module. (Decided in the plan.)
+  Every script starts with a preamble that turns module autoload off and
+  imports `CimCmdlets` and `Microsoft.PowerShell.Utility` by absolute path
+  under `$PSHOME`, and the child's `PSModulePath` is narrowed to the system
+  modules: the user's module path is writable by any unelevated process of
+  that user, and `-NoProfile` does not stop autoload (harm review, batch A).
 - `dumps` is not built yet. `host` does not wait for it: the pieces the two
   share (the flag allowlist, the machine check, the timestamped exclusive zip
   removed on interrupt) are written once, in a place `dumps` will reuse, and the
@@ -584,7 +625,8 @@ Taken by the auditor, 19 October 2026:
 
 Taken in this document, open to change: the command name, the 90-day default,
 the caps (20,000 events for query 1 per log and for queries 2 and 4, none for
-query 3, 50 MiB of extension logs, five job output files of 1 MiB per step),
+query 3, 50 MiB of extension logs, five job output files of 1 MiB per step and
+100 MiB of job outputs in all, 10 MiB of each SQL Writer log),
 reading the host when the
 instance does not answer, exit code 2 in that case, the instance source chosen
 from the local services, no `vssadmin list writers`, local fixed drives only for

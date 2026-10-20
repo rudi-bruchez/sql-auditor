@@ -393,7 +393,7 @@ func (c Calls) readJobOutputs(_ context.Context, e Env, put FileSink) SourceResu
 	case !e.MachineMatch:
 		return SourceResult{Status: StatusSkipped, Reason: "the instance is not on this machine"}
 	case e.StepsRefused:
-		return SourceResult{Status: StatusRefused, Reason: "msdb.dbo.sysjobsteps refused to the login"}
+		return SourceResult{Status: StatusRefused, Reason: "job steps refused to the login: reading them needs SQLAgentReaderRole in msdb and SELECT on msdb.dbo.sysjobsteps"}
 	case e.StepsErr != nil:
 		return failed(e.StepsErr)
 	}
