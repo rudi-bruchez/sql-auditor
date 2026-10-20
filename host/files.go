@@ -41,22 +41,44 @@ const (
 	jobOutputTail  = 1 << 20 // bytes kept of each
 )
 
-// CopyExtensions lists every file under root and copies those modified on or
-// after since, newest first, until the next one would exceed budget. The
-// paths given to check and listed are those of fsys. A missing root is
-// returned as an error wrapping fs.ErrNotExist.
+// CopyExtensions lists every file under fsys and copies those modified on or
+// after since, newest first, until the next one would exceed budget. fsys is
+// rooted at root, the Windows directory it reads: the paths given to check and
+// listed are root joined to the relative path, with backslashes. A directory
+// that cannot be read and a link, which is not followed, are listed with the
+// reason. A missing root is returned as an error wrapping fs.ErrNotExist.
 func CopyExtensions(fsys fs.FS, root string, since time.Time, budget int64, check PathCheck, sink FileSink) ([]Listed, error) {
 	var listed []Listed
+	var files []int // the regular files: their index in listed, path in fsys, time
+	var rels []string
 	var mods []time.Time
-	err := fs.WalkDir(fsys, root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || !d.Type().IsRegular() {
+	winPath := func(rel string) string {
+		if rel == "." {
+			return root
+		}
+		return root + `\` + strings.ReplaceAll(rel, "/", `\`)
+	}
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil && d == nil: // the root itself
 			return err
+		case err != nil:
+			listed = append(listed, Listed{Path: winPath(p), Reason: "unreadable: " + err.Error()})
+			return nil
+		case d.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0:
+			// Since Go 1.23 a junction is ModeIrregular, not ModeSymlink.
+			listed = append(listed, Listed{Path: winPath(p), Reason: "link, not followed"})
+			return nil
+		case !d.Type().IsRegular():
+			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
 			return err
 		}
-		listed = append(listed, Listed{Path: p, Size: info.Size(), Modified: info.ModTime().UTC().Format(time.RFC3339)})
+		files = append(files, len(listed))
+		listed = append(listed, Listed{Path: winPath(p), Size: info.Size(), Modified: info.ModTime().UTC().Format(time.RFC3339)})
+		rels = append(rels, p)
 		mods = append(mods, info.ModTime())
 		return nil
 	})
@@ -64,17 +86,17 @@ func CopyExtensions(fsys fs.FS, root string, since time.Time, budget int64, chec
 		return nil, err
 	}
 
-	order := make([]int, len(listed))
+	order := make([]int, len(files))
 	for i := range order {
 		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool { return mods[order[a]].After(mods[order[b]]) })
 	var used int64
 	full := false
-	for _, i := range order {
-		l := &listed[i]
+	for _, k := range order {
+		l := &listed[files[k]]
 		switch {
-		case mods[i].Before(since):
+		case mods[k].Before(since):
 			l.Reason = "before the window"
 			continue
 		case full || used+l.Size > budget:
@@ -86,11 +108,7 @@ func CopyExtensions(fsys fs.FS, root string, since time.Time, budget int64, chec
 			l.Reason = why
 			continue
 		}
-		rel := l.Path
-		if root != "." {
-			rel = strings.TrimPrefix(l.Path, root+"/")
-		}
-		if err := copyFile(fsys, l.Path, l.Size, "060.vm-extensions/"+rel, sink); err != nil {
+		if err := copyFile(fsys, rels[k], l.Size, "060.vm-extensions/"+rels[k], sink); err != nil {
 			return listed, err
 		}
 		l.Copied = true
@@ -112,15 +130,19 @@ func copyFile(fsys fs.FS, name string, size int64, archived string, sink FileSin
 
 // CopyJobOutputs copies the five newest files of p.Dir whose name p.Name
 // matches and modified on or after since, each cut to its last MiB, under
-// 070.job-outputs/<step>/. What is not read and why goes in the notes: an
-// unreadable pattern, a UNC directory, a wildcard token, no matching file, a
-// file check refuses.
+// 070.job-outputs/<step>/. A matching link is followed and kept if its target
+// is a regular file, which check then judges by its final path. What is not
+// read and why goes in the notes: an unreadable pattern, a UNC or relative
+// directory, a wildcard token, no matching file, a file check refuses.
 func CopyJobOutputs(open func(dir string) (fs.FS, error), p OutputPattern, step string, since time.Time, check PathCheck, sink FileSink) ([]CopiedFile, []string, error) {
 	if !p.Readable {
 		return nil, []string{p.Reason}, nil
 	}
 	if IsUNC(p.Dir) {
 		return nil, []string{"UNC path, not read: " + p.Dir}, nil
+	}
+	if !isDriveAbsolute(p.Dir) {
+		return nil, []string{p.Dir + ": not an absolute path"}, nil
 	}
 	var notes []string
 	if p.Reason != "" {
@@ -136,14 +158,26 @@ func CopyJobOutputs(open func(dir string) (fs.FS, error), p OutputPattern, step 
 	}
 	var infos []fs.FileInfo
 	for _, e := range entries {
-		if !e.Type().IsRegular() || !p.Name.MatchString(e.Name()) {
+		if !p.Name.MatchString(e.Name()) {
 			continue
 		}
-		info, err := e.Info()
+		var info fs.FileInfo
+		switch {
+		case e.Type().IsRegular():
+			info, err = e.Info()
+		case e.Type()&fs.ModeSymlink != 0:
+			// fs.Stat follows the link under os.DirFS; a broken one is noted.
+			if info, err = fs.Stat(fsys, e.Name()); err != nil {
+				notes = append(notes, e.Name()+": "+err.Error())
+				continue
+			}
+		default:
+			continue
+		}
 		if err != nil {
 			return nil, notes, err
 		}
-		if !info.ModTime().Before(since) {
+		if info.Mode().IsRegular() && !info.ModTime().Before(since) {
 			infos = append(infos, info)
 		}
 	}
@@ -204,6 +238,13 @@ func TailReader(f io.ReadSeeker, size, limit int64) (io.Reader, bool, error) {
 		return nil, false, err
 	}
 	return io.LimitReader(f, limit), true, nil
+}
+
+// isDriveAbsolute reports X:\ or X:/, the only directory form read: a relative
+// or drive-relative (C:Logs) path depends on the current directory.
+func isDriveAbsolute(p string) bool {
+	return len(p) >= 3 && ('A' <= p[0] && p[0] <= 'Z' || 'a' <= p[0] && p[0] <= 'z') &&
+		p[1] == ':' && (p[2] == '\\' || p[2] == '/')
 }
 
 // IsUNC reports a network path: \\server\share, \\?\UNC\ or \\.\UNC\, and
