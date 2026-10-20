@@ -235,12 +235,15 @@ source.
   `C:\Program Files\Microsoft SQL Server\90\Shared\` unless `TraceFile` in
   `SqlWriterConfig.ini`, in the same folder, names another path, which is then
   used (Learn, "SQL Server VSS Writer logging"). Copied into
-  `035.sqlwriter/`, the last 10 MiB of each, newest first, and at most 50 MiB
-  for all of them, the files past it recorded "budget reached, not copied";
+  `035.sqlwriter/`, the last 10 MiB of each, the active log (the exact
+  `TraceFile` name) first whatever its time, then the rollovers newest first,
+  and at most 50 MiB for all of them, the files past it recorded "budget
+  reached, not copied";
   their size is set by `TraceFileSizeMb`, 1 MB by default, and the harm review
   (batch C) bounded the copy, which took a log of any size whole, then (batch
   D) the total, since anyone who can write in the log's directory can add
-  files named after its stem.
+  files named after its stem, and (batch E) put the active log first, since
+  they can also give those files a time in the future.
   The log does not name the requester. Absent on an older SQL Writer: recorded
   as absent.
 - Not the writers' state. `vssadmin list writers` makes every writer answer an

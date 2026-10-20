@@ -60,9 +60,12 @@ type Platform struct {
 	Check    func() error // Windows and elevated
 	NetBIOS  func() (string, error)
 	Services func() ([]string, error)
-	Facts    func(ctx context.Context) (*InstanceFacts, error)
-	Steps    func(ctx context.Context) ([]JobStep, bool, error)
-	Sources  []Source
+	// Connect opens the connection Facts and Steps use, within collect's own
+	// login budget rather than sqlTimeout, which bounds only their queries.
+	Connect func(ctx context.Context) error
+	Facts   func(ctx context.Context) (*InstanceFacts, error)
+	Steps   func(ctx context.Context) ([]JobStep, bool, error)
+	Sources []Source
 }
 
 // Options are the command's.
@@ -118,12 +121,15 @@ func Run(ctx context.Context, o Options) int {
 	}
 	r := &run{o: o, now: o.Now()}
 	r.env.Since = o.Since
-	if p.Facts != nil {
+	if p.Connect != nil {
+		r.factsErr = p.Connect(ctx)
+	}
+	if p.Facts != nil && r.factsErr == nil {
 		r.factsErr = sqlBounded(ctx, func(ctx context.Context) (err error) {
 			r.env.Facts, err = p.Facts(ctx)
 			return err
 		})
-	} else {
+	} else if r.factsErr == nil {
 		r.factsErr = errors.New("no connection")
 	}
 	if p.NetBIOS != nil {

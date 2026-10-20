@@ -148,6 +148,13 @@ func (i *Instance) connect(ctx context.Context) (*sql.Conn, error) {
 	return i.conn, i.err
 }
 
+// Connect opens the connection, collect.Connect bounding the dial and the
+// login; Facts and Steps reuse it, or open it themselves when it was not.
+func (i *Instance) Connect(ctx context.Context) error {
+	_, err := i.connect(ctx)
+	return err
+}
+
 // Facts reads the instance's facts, nil when it does not answer.
 func (i *Instance) Facts(ctx context.Context) (*InstanceFacts, error) {
 	c, err := i.connect(ctx)

@@ -160,8 +160,10 @@ func TestHarmD_SQLWriterBudget(t *testing.T) {
 	c.OpenDir = func(string) (fs.FS, error) { return fsys, nil }
 	s := &recordingSink{}
 	res := readNamed(t, c, "035.sqlwriter", Env{Since: sourcesSince}, s)
-	if fmt.Sprint(s.names) != fmt.Sprint(newest[:5]) {
-		t.Errorf("copied %v, want the five newest %v", s.names, newest[:5])
+	// The active log, the oldest here, first (TestHarmE_SQLWriterActiveFirst).
+	want := append(newest[len(newest)-1:], newest[:4]...)
+	if fmt.Sprint(s.names) != fmt.Sprint(want) {
+		t.Errorf("copied %v, want the active log and the four newest %v", s.names, want)
 	}
 	budget := 0
 	for _, n := range res.Notes {

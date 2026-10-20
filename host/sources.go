@@ -50,9 +50,10 @@ const extensionBudget = 50 << 20
 // sqlWriterTail is the most copied of each SQL Writer log, its newest bytes.
 const sqlWriterTail = 10 << 20
 
-// sqlWriterBudget is the most copied of all the SQL Writer logs together,
-// newest first: anyone who can write in the TraceFile's directory can add
-// files named after its stem.
+// sqlWriterBudget is the most copied of all the SQL Writer logs together, the
+// active log first, then the rollovers newest first: anyone who can write in
+// the TraceFile's directory can add files named after its stem, with any
+// time.
 const sqlWriterBudget = 50 << 20
 
 // BuildSources returns the sources in archive order.
@@ -166,11 +167,14 @@ func (c Calls) readEvents(ctx context.Context, e Env, put FileSink, channel, fil
 		}
 		// ponytail: queries 1, 2 and 3b of Application are held together
 		// until Merge, at most 3 x eventCap events of about 9 KB each once Keep
-		// has bounded them (4 KiB of Data, 2,000 characters of message and of
-		// Binary, ASCII): about 540 MB live, and the heap runs at about twice
-		// the live bytes under the default GOGC, so about 1.1 GB. Measured
-		// (harm review, batch D): 105 MiB of peak HeapInuse for 3 x 2,000
-		// such events, 317 MiB for 3 x 6,000, so about 1.05 GiB at the caps.
+		// has bounded them (4 KiB of Data, string headers included, 2,000
+		// characters of message and of Binary, ASCII): about 540 MB live, and
+		// the heap runs at about twice the live bytes under the default GOGC,
+		// so about 1.1 GB. Measured (harm review, batch D): 105 MiB of peak
+		// HeapInuse for 3 x 2,000 such events, 317 MiB for 3 x 6,000, so about
+		// 1.05 GiB at the caps. Events of 5,000 empty Data values each, the
+		// most values ReportEvent makes cheap, now cost less (batch E): 20.5
+		// MiB of peak HeapInuse for 2,000, about 615 MiB at the caps.
 		// Merging as each query ends does not lower that peak, the union
 		// being held anyway; a lower eventCap or dataBytes does.
 		lists = append(lists, kept)
@@ -275,11 +279,12 @@ func (c Calls) readVSS(ctx context.Context, _ Env, put FileSink) SourceResult {
 }
 
 // readSQLWriter copies SQL Writer's log and its rollovers, the last
-// sqlWriterTail bytes of each, newest first within sqlWriterBudget, from the
-// directory SqlWriterConfig.ini names; the files past the budget are noted.
-// A directory or a file refused is a note, as job outputs record theirs, and
-// the source is still read. A file refused as moved under a link replaces the
-// notes with one, as job outputs do.
+// sqlWriterTail bytes of each, the active log first and then the rollovers
+// newest first, within sqlWriterBudget, from the directory SqlWriterConfig.ini
+// names; the files past the budget are noted. A directory or a file refused is
+// a note, as job outputs record theirs, and the source is still read. A file
+// refused as moved under a link replaces the notes with one, as job outputs
+// do.
 func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResult {
 	shared := c.ProgramFiles + `\Microsoft SQL Server\90\Shared`
 	ini, err := c.ReadFile(shared + `\SqlWriterConfig.ini`)
@@ -316,7 +321,15 @@ func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResul
 		}
 		logs = append(logs, info)
 	}
-	sort.SliceStable(logs, func(a, b int) bool { return logs[a].ModTime().After(logs[b].ModTime()) })
+	// The active log, the exact TraceFile name, whatever its time: a rollover
+	// can be given a time in the future.
+	active := func(i int) bool { return strings.EqualFold(logs[i].Name(), stem+ext) }
+	sort.SliceStable(logs, func(a, b int) bool {
+		if active(a) != active(b) {
+			return active(a)
+		}
+		return logs[a].ModTime().After(logs[b].ModTime())
+	})
 	res := SourceResult{Status: StatusRead}
 	left := int64(sqlWriterBudget)
 	for _, info := range logs {

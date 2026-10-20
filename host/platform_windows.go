@@ -109,6 +109,7 @@ func WindowsPlatform(inst *Instance) Platform {
 		},
 		NetBIOS:  netBIOS,
 		Services: services,
+		Connect:  inst.Connect,
 		Facts:    inst.Facts,
 		Steps:    inst.Steps,
 		Sources:  BuildSources(windowsCalls()),

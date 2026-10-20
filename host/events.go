@@ -257,6 +257,13 @@ const messageRunes = 2000
 // batch D).
 const dataBytes = 4 << 10
 
+// dataValueOverhead is what each Data value is charged against dataBytes on
+// top of its text, its string header: thousands of empty values otherwise
+// cost nothing, and 2,000 events of 5,000 empty values held 157 MiB live, 10.5
+// MiB once charged (harm review, batch E). Any local user can write such an
+// event with ReportEvent.
+const dataValueOverhead = 16
+
 // CutMessage returns s cut at 2,000 characters, counted in runes.
 func CutMessage(s string) string {
 	s, _ = cut(s)
@@ -277,25 +284,30 @@ func cut(s string) (string, bool) {
 }
 
 // Keep sets e's message and bounds what e holds: the message, each Data value
-// and Binary cut at messageRunes, Data past dataBytes in all left out.
+// and Binary cut at messageRunes, Data past dataBytes in all, each value
+// charged dataValueOverhead too, left out.
 func (e *Event) Keep(message string) {
 	var c bool
 	e.Message, c = cut(message)
 	e.Cut = e.Cut || c
 	e.Binary, c = cut(e.Binary)
 	e.Cut = e.Cut || c
-	total := 0
+	total, n := 0, len(e.Data)
 	for i, v := range e.Data {
 		v, c = cut(v)
 		e.Cut = e.Cut || c
-		if total += len(v); total > dataBytes {
-			e.DataDropped = len(e.Data) - i
-			clear(e.Data[i:]) // the array would keep them alive
-			e.Data = e.Data[:i]
-			return
+		if total += len(v) + dataValueOverhead; total > dataBytes {
+			n, e.DataDropped = i, len(e.Data)-i
+			break
+		}
+		if !c {
+			v = strings.Clone(v) // a strings.Builder's String keeps its spare capacity
 		}
 		e.Data[i] = v
 	}
+	// A new array: the parser's, as long as every value and grown by append,
+	// would stay alive with the event.
+	e.Data = slices.Clone(e.Data[:n])
 }
 
 // IDCount is how many events of one id query 2c met, and when.
