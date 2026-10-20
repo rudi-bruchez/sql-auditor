@@ -46,6 +46,7 @@ type Env struct {
 	Since        time.Time
 	Steps        []JobStep
 	StepsRefused bool
+	StepsErr     error // the steps could not be read, for a reason other than a refusal
 }
 
 // Source is one archive entry family, read in turn by Run.
@@ -97,13 +98,12 @@ type run struct {
 	now        time.Time
 	factsErr   error
 	netbiosErr error
-	stepsErr   error
 	results    []SourceResult
 }
 
 // Run reads every source into one archive in o.To and returns the exit code:
-// 0 when every source was read, absent or refused, 2 otherwise or when no
-// archive was written.
+// 0 when every source was read, absent or refused, 2 otherwise, when the job
+// steps could not be read, or when no archive was written.
 func Run(ctx context.Context, o Options) int {
 	p := o.Platform
 	if err := p.Check(); err != nil {
@@ -123,19 +123,30 @@ func Run(ctx context.Context, o Options) int {
 	} else {
 		r.factsErr = errors.New("no connection")
 	}
-	r.env.LocalNetBIOS, r.netbiosErr = p.NetBIOS()
+	if p.NetBIOS != nil {
+		r.env.LocalNetBIOS, r.netbiosErr = p.NetBIOS()
+	} else {
+		r.netbiosErr = errors.New("not available")
+	}
 	if r.env.Facts != nil {
 		r.env.MachineMatch = MachineMatches(r.env.Facts.NetBIOS, r.env.LocalNetBIOS)
 	}
 	// Without the list of services, only the instance's own name can decide.
-	services, _ := p.Services()
+	var services []string
+	if p.Services != nil {
+		services, _ = p.Services()
+	}
 	in := SourceInput{Answered: r.env.Facts != nil, MachineMatch: r.env.MachineMatch, EnvServer: o.EnvServer, LocalServices: services}
 	if r.env.Facts != nil {
 		in.InstanceName = r.env.Facts.InstanceName
 	}
 	r.env.EventSource, r.env.SourceRule = ChooseEventSource(in)
 	if r.env.Facts != nil && r.env.MachineMatch && p.Steps != nil {
-		r.env.Steps, r.env.StepsRefused, r.stepsErr = p.Steps(ctx)
+		var err error
+		r.env.Steps, r.env.StepsRefused, err = p.Steps(ctx)
+		if err != nil && !r.env.StepsRefused {
+			r.env.StepsErr = err
+		}
 	}
 
 	instance := r.env.LocalNetBIOS
@@ -151,8 +162,11 @@ func Run(ctx context.Context, o Options) int {
 		return 2
 	}
 	abort := func(why string) int {
-		a.Remove()
-		fmt.Fprintf(o.Stderr, "%s; %s removed\n", why, a.Path())
+		if err := a.Remove(); err != nil {
+			fmt.Fprintf(o.Stderr, "%s; %s could not be removed: %v\n", why, a.Path(), err)
+		} else {
+			fmt.Fprintf(o.Stderr, "%s; %s removed\n", why, a.Path())
+		}
 		return 2
 	}
 	for _, s := range p.Sources {
@@ -175,7 +189,8 @@ func Run(ctx context.Context, o Options) int {
 	}
 
 	code := 0
-	if r.env.Facts == nil || !r.env.MachineMatch {
+	// A source may ignore StepsErr; the run does not.
+	if r.env.Facts == nil || !r.env.MachineMatch || r.env.StepsErr != nil {
 		code = 2
 	}
 	for _, res := range r.results {

@@ -50,8 +50,8 @@ func (r *run) manifest() string {
 		source = "undecided, the instance's own event queries are not run"
 	}
 	fmt.Fprintf(&b, "Event source:  %s (rule: %s)\n", source, e.SourceRule)
-	if r.stepsErr != nil && !e.StepsRefused {
-		fmt.Fprintf(&b, "Job steps:     could not be read: %v\n", r.stepsErr)
+	if e.StepsErr != nil {
+		fmt.Fprintf(&b, "Job steps:     could not be read: %v\n", e.StepsErr)
 	}
 
 	b.WriteString("\nSources\n\n")

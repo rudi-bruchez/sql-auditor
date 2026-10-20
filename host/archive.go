@@ -96,8 +96,9 @@ func (a *Archive) Close() error {
 	return a.err
 }
 
-// Remove closes the file if it is open and deletes the zip.
-func (a *Archive) Remove() {
+// Remove closes the file if it is open and deletes the zip, returning what
+// the deletion returned.
+func (a *Archive) Remove() error {
 	a.f.Close()
-	os.Remove(a.path)
+	return os.Remove(a.path)
 }

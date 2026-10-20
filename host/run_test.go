@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -194,8 +195,60 @@ func TestRunMismatchSkipsInstanceSources(t *testing.T) {
 	if seen.MachineMatch || !strings.Contains(stdout(o), "070.job-outputs: skipped") {
 		t.Errorf("job outputs saw MachineMatch %v; stdout:\n%s", seen.MachineMatch, stdout(o))
 	}
-	if !strings.Contains(m, "SQL02") || !strings.Contains(m, "SQL01") {
-		t.Errorf("the manifest does not name both machines:\n%s", m)
+	line := manifestLine(m, "Machine check:")
+	if !strings.Contains(line, "SQL02") || !strings.Contains(line, "SQL01") {
+		t.Errorf("the machine check does not name both machines: %q", line)
+	}
+}
+
+// manifestLine is the manifest's line starting with prefix, "" when none does.
+func manifestLine(m, prefix string) string {
+	for _, l := range strings.Split(m, "\n") {
+		if strings.HasPrefix(l, prefix) {
+			return l
+		}
+	}
+	return ""
+}
+
+func TestRunStepsErrorIsTwo(t *testing.T) {
+	var seen Env
+	p := fakePlatform(readSource("010.a", 1), Source{Name: "070.job-outputs", Read: func(ctx context.Context, e Env, put FileSink) SourceResult {
+		seen = e
+		return SourceResult{Status: "read"}
+	}})
+	p.Steps = func(context.Context) ([]JobStep, bool, error) { return nil, false, errors.New("connection reset") }
+	o := runOptions(t, p)
+	m, code := manifestOf(t, o)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if seen.StepsErr == nil {
+		t.Error("job outputs saw no StepsErr")
+	}
+	if !strings.Contains(manifestLine(m, "Job steps:"), "connection reset") {
+		t.Errorf("the manifest does not name the error:\n%s", m)
+	}
+}
+
+func TestRunNamedInstanceArchiveName(t *testing.T) {
+	p := fakePlatform(readSource("010.a", 1))
+	p.Facts = func(context.Context) (*InstanceFacts, error) {
+		return &InstanceFacts{ServerName: `SQL01\PROD`, NetBIOS: "SQL01"}, nil
+	}
+	p.Services = func() ([]string, error) { return []string{"MSSQL$PROD"}, nil }
+	o := runOptions(t, p)
+	if code := Run(context.Background(), o); code != 0 {
+		t.Fatalf("exit %d, want 0; stderr:\n%s", code, stderr(o))
+	}
+	want := filepath.Join(o.To, "SQL01_PROD-2026-10-20-030405.host.zip")
+	if got := lastLine(stdout(o)); got != want {
+		t.Fatalf("last stdout line %q, want %q", got, want)
+	}
+	for name := range zipEntries(t, want) {
+		if !strings.HasPrefix(name, "SQL01_PROD-2026-10-20-030405.host/") {
+			t.Errorf("entry %q outside the top-level directory", name)
+		}
 	}
 }
 
@@ -236,14 +289,21 @@ func TestRunSourcePanicIsFailed(t *testing.T) {
 func TestRunInterruptRemovesArchive(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	secondRead := false
 	p := fakePlatform(Source{Name: "010.a", Read: func(ctx context.Context, e Env, put FileSink) SourceResult {
 		put("010.a.json", strings.NewReader("{}"))
 		cancel()
 		return SourceResult{Status: "read"}
-	}}, readSource("020.b", 0))
+	}}, Source{Name: "020.b", Read: func(context.Context, Env, FileSink) SourceResult {
+		secondRead = true
+		return SourceResult{Status: "read"}
+	}})
 	o := runOptions(t, p)
 	if code := Run(ctx, o); code != 2 {
 		t.Fatalf("exit %d, want 2", code)
+	}
+	if secondRead {
+		t.Error("the second source was read after the interrupt")
 	}
 	if names := dirEntries(t, o.To); len(names) != 0 {
 		t.Errorf("left in --to: %v", names)
@@ -259,10 +319,18 @@ func TestRunRefusesMissingTo(t *testing.T) {
 		read = true
 		return SourceResult{Status: "read"}
 	}})
+	factsCalled := false
+	p.Facts = func(context.Context) (*InstanceFacts, error) {
+		factsCalled = true
+		return nil, errors.New("not reached")
+	}
 	o := runOptions(t, p)
 	o.To = filepath.Join(o.To, "missing")
 	if code := Run(context.Background(), o); code != 2 {
 		t.Fatalf("exit %d, want 2", code)
+	}
+	if factsCalled {
+		t.Error("Facts was called before --to was checked")
 	}
 	if read || stdout(o) != "" {
 		t.Errorf("read %v, stdout %q", read, stdout(o))
@@ -310,6 +378,9 @@ func TestRunCheckFailureWritesNothing(t *testing.T) {
 }
 
 func TestRunRefusesUnwritableTo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode 0500 does not stop writes to a Windows directory")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root writes through mode 0500")
 	}
@@ -334,7 +405,8 @@ func TestRunRefusesUnwritableTo(t *testing.T) {
 	}
 }
 
-// failingWriter fails every write once after bytes have passed, or once fail is set.
+// failingWriter fails every write once after bytes have passed through it, or
+// once fail is set. An after of 0 sets no budget.
 type failingWriter struct {
 	w     io.Writer
 	after int
@@ -342,11 +414,15 @@ type failingWriter struct {
 }
 
 func (f *failingWriter) Write(p []byte) (int, error) {
-	if f.fail || (f.after > 0 && f.after-len(p) < 0) {
+	if f.after > 0 && len(p) > f.after {
+		f.fail = true
+	}
+	if f.fail {
 		return 0, errors.New("disk full")
 	}
 	if f.after > 0 {
 		f.after -= len(p)
+		f.fail = f.after == 0
 	}
 	return f.w.Write(p)
 }
