@@ -781,6 +781,10 @@ func run() int {
 	// Before the --profile refusal below, so host --profile gets the
 	// allowlist's message and every other command keeps its own.
 	if cmd == "host" {
+		if err := refusePositional(c.fs, cmd); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
 		if err := refuseOutsideAllowlist(c.fs, cmd,
 			"server", "user", "env", "password-file", "password-stdin", "to", "since", "debug"); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -994,6 +998,22 @@ func refuseOutsideAllowlist(fs *flag.FlagSet, cmd string, allowed ...string) err
 		}
 	})
 	return err
+}
+
+// refusePositional refuses an argument that is not a flag. Parsing stops at
+// the first one, so every flag after it would be dropped: `host --to DIR extra
+// --since 2026-01-01` reads the default window. Outlook and Word turn "--"
+// into a dash, which makes the flag itself positional, so the message says so.
+func refusePositional(fs *flag.FlagSet, cmd string) error {
+	if fs.NArg() == 0 {
+		return nil
+	}
+	arg := fs.Arg(0)
+	if strings.HasPrefix(arg, "–") || strings.HasPrefix(arg, "—") {
+		return fmt.Errorf("%q starts with a typographic dash, which looks like a dash that replaced \"--\": type --%s",
+			arg, strings.TrimLeft(arg, "–—"))
+	}
+	return fmt.Errorf("sql-auditor %s takes no argument, only options: %q is not one, and the options after it would be ignored", cmd, arg)
 }
 
 // typedFlag reports whether the operator typed the flag, whatever its value.

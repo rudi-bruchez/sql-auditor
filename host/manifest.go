@@ -75,7 +75,7 @@ func (r *run) manifest() string {
 		for _, c := range s.Copied {
 			cut := ""
 			if c.Cut {
-				cut = ", last 1 MiB only"
+				cut = fmt.Sprintf(", last %d MiB only", c.tail>>20)
 			}
 			fmt.Fprintf(&b, "%s -> %s (%d bytes%s)\n", c.Source, c.Archived, c.Size, cut)
 		}

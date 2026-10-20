@@ -45,6 +45,9 @@ type Calls struct {
 // extensionBudget is the most of the VM extension logs copied.
 const extensionBudget = 50 << 20
 
+// sqlWriterTail is the most copied of each SQL Writer log, its newest bytes.
+const sqlWriterTail = 10 << 20
+
 // BuildSources returns the sources in archive order.
 func BuildSources(c Calls) []Source {
 	events := func(channel, file string) func(context.Context, Env, FileSink) SourceResult {
@@ -250,9 +253,10 @@ func (c Calls) readVSS(ctx context.Context, _ Env, put FileSink) SourceResult {
 	return written(put, "030.vss.json", v, len(v.Shadows))
 }
 
-// readSQLWriter copies SQL Writer's log and its rollovers whole, from the
-// directory SqlWriterConfig.ini names. A directory or a file refused is a
-// note, as job outputs record theirs, and the source is still read.
+// readSQLWriter copies SQL Writer's log and its rollovers, the last
+// sqlWriterTail bytes of each, from the directory SqlWriterConfig.ini names.
+// A directory or a file refused is a note, as job outputs record theirs, and
+// the source is still read.
 func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResult {
 	shared := c.ProgramFiles + `\Microsoft SQL Server\90\Shared`
 	ini, err := c.ReadFile(shared + `\SqlWriterConfig.ini`)
@@ -289,9 +293,13 @@ func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResul
 			continue
 		}
 		var info fs.FileInfo
+		var cut bool
 		if err == nil {
 			if info, err = d.Info(); err == nil {
-				err = put("035.sqlwriter/"+d.Name(), io.LimitReader(f, size))
+				var r io.Reader
+				if r, cut, err = TailReader(f, size, sqlWriterTail); err == nil {
+					err = put("035.sqlwriter/"+d.Name(), r)
+				}
 			}
 			f.Close()
 		}
@@ -299,7 +307,7 @@ func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResul
 			res.Status, res.Reason = StatusFailed, err.Error()
 			break
 		}
-		res.Copied = append(res.Copied, CopiedFile{Source: src, Archived: "035.sqlwriter/" + d.Name(), Size: size, Modified: info.ModTime().UTC().Format(time.RFC3339)})
+		res.Copied = append(res.Copied, CopiedFile{Source: src, Archived: "035.sqlwriter/" + d.Name(), Size: size, Cut: cut, tail: sqlWriterTail, Modified: info.ModTime().UTC().Format(time.RFC3339)})
 	}
 	res.Count = len(res.Copied)
 	if res.Status == StatusRead && res.Count == 0 && len(res.Notes) == 0 {
@@ -402,10 +410,11 @@ func (c Calls) readJobOutputs(_ context.Context, e Env, put FileSink) SourceResu
 	steps := []JobOutputStep{}
 	var res SourceResult
 	var firstErr error
+	left := int64(jobOutputBudget)
 	for i, s := range e.Steps {
 		p := ExpandOutputFile(s.OutputFile, TokenValues{SQLLogDir: logDir, JobName: s.Job, StepName: s.Step, StepID: s.StepID, JobIDBinary: s.JobIDBinary})
 		folder := folders[i].Folder
-		copied, notes, err := CopyJobOutputs(c, p, folder, e.Since, put)
+		copied, notes, err := copyJobOutputs(c, p, folder, e.Since, &left, put)
 		st := JobOutputStep{Job: s.Job, StepID: s.StepID, Step: s.Step, OutputFile: s.OutputFile, Folder: "070.job-outputs/" + folder, Readable: p.Readable, Notes: notes, Copied: copied}
 		if err != nil {
 			st.Error = err.Error()

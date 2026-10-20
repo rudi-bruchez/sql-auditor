@@ -1028,3 +1028,26 @@ func TestHostOffWindowsRefuses(t *testing.T) {
 	}
 	assertEmptyDir(t, dir)
 }
+
+// Flag parsing stops at the first argument that is not a flag, so a stray word
+// dropped every flag after it, and a flag whose "--" Outlook turned into a
+// dash became such a word: the run read the default window.
+func TestHarmC_HostRefusesPositional(t *testing.T) {
+	clearSQLEnv(t)
+	env := writeDotEnv(t, "SQL_SERVER=SQL01\n")
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"extra", "--profile", "space"}, `sql-auditor host takes no argument, only options: "extra"`},
+		{[]string{"–since", "2026-01-01"}, "looks like a dash that replaced \"--\": type --since"},
+		{[]string{"—since", "2026-01-01"}, "looks like a dash that replaced \"--\": type --since"},
+	} {
+		dir := t.TempDir()
+		code, stderr := runCLI(t, append([]string{"host", "--env", env, "--to", dir}, tc.args...)...)
+		if code != 2 || !strings.Contains(stderr, tc.want) {
+			t.Errorf("%q: code %d, stderr %q; want 2 and %q", tc.args, code, stderr, tc.want)
+		}
+		assertEmptyDir(t, dir)
+	}
+}

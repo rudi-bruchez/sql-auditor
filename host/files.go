@@ -18,6 +18,8 @@ type CopiedFile struct {
 	Size     int64  `json:"size"` // of the source file
 	Cut      bool   `json:"cut"`  // only its tail was copied
 	Modified string `json:"modified_utc"`
+
+	tail int64 // the bytes kept when Cut, for the manifest
 }
 
 // Listed is one file of the VM extension logs, copied or not.
@@ -44,8 +46,9 @@ type PathCheck func(path string) (ok bool, reason string)
 type OpenFile func(path string) (f io.ReadSeekCloser, size int64, reason string, err error)
 
 const (
-	jobOutputFiles = 5       // per step, the newest
-	jobOutputTail  = 1 << 20 // bytes kept of each
+	jobOutputFiles  = 5         // per step, the newest
+	jobOutputTail   = 1 << 20   // bytes kept of each
+	jobOutputBudget = 100 << 20 // bytes kept of all the steps together
 )
 
 // CopyExtensions lists every file under fsys and copies those modified on or
@@ -141,6 +144,15 @@ func CopyExtensions(fsys fs.FS, root string, since time.Time, budget int64, open
 // notes: an unreadable pattern, a UNC or relative directory, a directory or a
 // file refused, a link, a wildcard token, no matching file.
 func CopyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, sink FileSink) ([]CopiedFile, []string, error) {
+	left := int64(jobOutputBudget)
+	return copyJobOutputs(c, p, step, since, &left, sink)
+}
+
+// copyJobOutputs is CopyJobOutputs drawing on a budget shared by every step:
+// 300 steps of five files of 1 MiB would otherwise read 1.5 GB. left is what
+// remains; once a file does not fit it goes negative, and every file after it
+// is noted "budget reached, not copied".
+func copyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, left *int64, sink FileSink) ([]CopiedFile, []string, error) {
 	if !p.Readable {
 		return nil, []string{p.Reason}, nil
 	}
@@ -198,6 +210,10 @@ func CopyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, sink
 		// The path opened is the file's final path: no link is followed, in
 		// the directory (DirCheck) or at the file (OpenFile).
 		src := strings.TrimRight(p.Dir, `\/`) + `\` + info.Name()
+		if *left < 0 {
+			notes = append(notes, src+": budget reached, not copied")
+			continue
+		}
 		f, size, why, err := c.OpenFile(src)
 		if err != nil {
 			return copied, notes, err
@@ -206,6 +222,14 @@ func CopyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, sink
 			notes = append(notes, src+": "+why)
 			continue
 		}
+		n := min(size, jobOutputTail)
+		if n > *left {
+			*left = -1
+			f.Close()
+			notes = append(notes, src+": budget reached, not copied")
+			continue
+		}
+		*left -= n
 		cf := CopiedFile{
 			Source:   src,
 			Archived: path.Join("070.job-outputs", step, info.Name()),
@@ -214,6 +238,7 @@ func CopyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, sink
 		}
 		var r io.Reader
 		r, cf.Cut, err = TailReader(f, size, jobOutputTail)
+		cf.tail = jobOutputTail
 		if err == nil {
 			err = sink(cf.Archived, r)
 		}

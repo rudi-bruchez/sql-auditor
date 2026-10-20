@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -21,7 +22,13 @@ type InstanceFacts struct {
 	Version      string
 }
 
-const factsSQL = `SELECT CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')), CONVERT(nvarchar(128), SERVERPROPERTY('ComputerNamePhysicalNetBIOS')), CONVERT(nvarchar(128), SERVERPROPERTY('InstanceName')), CONVERT(nvarchar(4000), SERVERPROPERTY('ErrorLogFileName')), CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion'));`
+// sqlPreamble starts every query of the host read, as the collector contract
+// demands of every collector (collect/queryset_test.go): read uncommitted, and
+// a lock wait bounded to 10 s rather than an audit holding msdb behind an open
+// transaction. A wait past it is error 1222, the source failed (lockTimedOut).
+const sqlPreamble = "SET NOCOUNT ON;\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\nSET LOCK_TIMEOUT 10000;\n"
+
+const factsSQL = sqlPreamble + `SELECT CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')), CONVERT(nvarchar(128), SERVERPROPERTY('ComputerNamePhysicalNetBIOS')), CONVERT(nvarchar(128), SERVERPROPERTY('InstanceName')), CONVERT(nvarchar(4000), SERVERPROPERTY('ErrorLogFileName')), CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion'));`
 
 // ReadFacts runs factsSQL. Every column is scanned nullably, as collect.Probe
 // does: InstanceName is NULL on a default instance, and a NULL elsewhere costs
@@ -47,16 +54,16 @@ type JobStep struct {
 	OutputFile  string // the template as typed, tokens included
 }
 
-const jobStepsSQL = `SELECT j.name, CONVERT(varchar(34), CONVERT(binary(16), j.job_id), 1), s.step_id, s.step_name, s.output_file_name FROM msdb.dbo.sysjobs_view AS j JOIN msdb.dbo.sysjobsteps AS s ON s.job_id = j.job_id WHERE s.output_file_name IS NOT NULL AND s.output_file_name <> N'' ORDER BY j.name, s.step_id OPTION (RECOMPILE, MAXDOP 1);`
+const jobStepsSQL = sqlPreamble + `SELECT j.name, CONVERT(varchar(34), CONVERT(binary(16), j.job_id), 1), s.step_id, s.step_name, s.output_file_name FROM msdb.dbo.sysjobs_view AS j JOIN msdb.dbo.sysjobsteps AS s ON s.job_id = j.job_id WHERE s.output_file_name IS NOT NULL AND s.output_file_name <> N'' ORDER BY j.name, s.step_id OPTION (RECOMPILE, MAXDOP 1);`
 
 // ReadJobSteps runs jobStepsSQL. refused is true when the login may not read
-// msdb.dbo.sysjobsteps (SQLAgentReaderRole reads sysjobs_view, but sysjobsteps
-// needs its own grant, see collect/grants.go): the source is then refused, not
-// failed.
+// msdb.dbo.sysjobsteps (sysjobs_view needs SQLAgentReaderRole, and sysjobsteps
+// its own grant, see collect/grants.go): the source is then refused, not
+// failed. A lock timeout is a failure whose reason says so.
 func ReadJobSteps(ctx context.Context, c *sql.Conn) (steps []JobStep, refused bool, err error) {
 	rows, err := c.QueryContext(ctx, jobStepsSQL)
 	if err != nil {
-		return nil, refusal(err), err
+		return nil, refusal(err), lockTimedOut(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -67,9 +74,19 @@ func ReadJobSteps(ctx context.Context, c *sql.Conn) (steps []JobStep, refused bo
 		steps = append(steps, s)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, refusal(err), err
+		return nil, refusal(err), lockTimedOut(err)
 	}
 	return steps, false, nil
+}
+
+// lockTimedOut names error 1222 in err, which alone says only "Lock request
+// time out period exceeded": the reason must tell a DBA msdb was held.
+func lockTimedOut(err error) error {
+	var e mssql.Error
+	if errors.As(err, &e) && e.Number == 1222 {
+		return fmt.Errorf("lock timeout: msdb stayed locked by another session past SET LOCK_TIMEOUT 10000 (error 1222): %w", err)
+	}
+	return err
 }
 
 // refusal reports a permission error: 229, 297 or 300, the numbers
