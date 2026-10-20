@@ -12,6 +12,7 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+	"unicode/utf8"
 )
 
 var sourcesSince = time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)
@@ -214,6 +215,38 @@ func TestEventsChannelNotFoundIsAbsent(t *testing.T) {
 	}
 }
 
+// Only Coverage reports the missing channel: the source is absent all the same.
+func TestEventsCoverageChannelNotFoundIsAbsent(t *testing.T) {
+	c := fakeCalls()
+	c.Coverage = func(string) (Coverage, error) { return Coverage{}, ErrChannelNotFound }
+	s := &recordingSink{}
+	if res := readNamed(t, c, "025.events-cluster", Env{Since: sourcesSince}, s); res.Status != StatusAbsent {
+		t.Errorf("status = %s (%s), want absent", res.Status, res.Reason)
+	}
+	if len(s.names) != 0 {
+		t.Errorf("wrote %q", s.names)
+	}
+}
+
+func TestEventsMessageIsCut(t *testing.T) {
+	c := fakeCalls()
+	c.Query = func(_ context.Context, _, xpath string, each func([]byte, string) bool) error {
+		if strings.Contains(xpath, "Level=1") {
+			each(eventAt(1, sourcesSince.Add(time.Hour)), strings.Repeat("é", 2001))
+		}
+		return nil
+	}
+	s := &recordingSink{}
+	readNamed(t, c, "010.events-system", Env{Since: sourcesSince}, s)
+	var f EventsFile
+	if err := json.Unmarshal(s.data["010.events-system.json"], &f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Events) != 1 || utf8.RuneCountInString(f.Events[0].Message) != 2000 {
+		t.Errorf("events = %+v, want one with a 2000-rune message", f.Events)
+	}
+}
+
 func TestEventsAutoBackupNote(t *testing.T) {
 	c := fakeCalls()
 	c.Coverage = func(string) (Coverage, error) { return Coverage{AutoBackup: true}, nil }
@@ -250,5 +283,40 @@ func TestSQLWriterCopiesRollovers(t *testing.T) {
 	}
 	if string(s.data["035.sqlwriter/SqlWriterLogger.txt"]) != "current" || string(s.data["035.sqlwriter/SqlWriterLogger1.txt"]) != "previous" || len(s.names) != 2 {
 		t.Errorf("entries = %q", s.names)
+	}
+}
+
+func TestSQLWriterIniMissingIsAbsent(t *testing.T) {
+	c := fakeCalls()
+	c.ProgramFiles = `C:\Program Files`
+	c.ReadFile = func(string) ([]byte, error) {
+		return nil, &fs.PathError{Op: "open", Path: "SqlWriterConfig.ini", Err: fs.ErrNotExist}
+	}
+	c.OpenDir = func(string) (fs.FS, error) {
+		t.Error("OpenDir called without a config file")
+		return fstest.MapFS{}, nil
+	}
+	if res := readNamed(t, c, "035.sqlwriter", Env{Since: sourcesSince}, &recordingSink{}); res.Status != StatusAbsent {
+		t.Errorf("status = %s (%s), want absent", res.Status, res.Reason)
+	}
+}
+
+func TestJobOutputsStepCopyFailureFails(t *testing.T) {
+	c := fakeCalls()
+	c.OpenDir = func(dir string) (fs.FS, error) {
+		if dir == `C:\out1` {
+			return nil, fmt.Errorf("access denied")
+		}
+		return fstest.MapFS{"b.txt": {Data: []byte("b"), ModTime: sourcesSince.Add(48 * time.Hour)}}, nil
+	}
+	e := matchedEnv()
+	e.Steps = []JobStep{{Job: "J1", StepID: 1, OutputFile: `C:\out1\a.txt`}, {Job: "J2", StepID: 1, OutputFile: `C:\out2\b.txt`}}
+	s := &recordingSink{}
+	res := readNamed(t, c, "070.job-outputs", e, s)
+	if res.Status != StatusFailed || !strings.HasPrefix(res.Reason, "J1 step 1: ") || !strings.Contains(res.Reason, "access denied") {
+		t.Errorf("got %s %q, want failed with the first step's error", res.Status, res.Reason)
+	}
+	if len(res.Copied) != 1 || len(s.data) != 2 { // b.txt and the JSON
+		t.Errorf("copied %d, wrote %q, want the second step read", len(res.Copied), s.names)
 	}
 }

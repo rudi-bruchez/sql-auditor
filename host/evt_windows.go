@@ -42,6 +42,8 @@ const (
 	errorInsufficientBuffer  = syscall.Errno(122)
 	errorEvtChannelNotFound  = syscall.Errno(15007)
 	errorEvtUnresolvedInsert = syscall.Errno(15029) // the message is formatted, an insert left as is
+	errorEvtUnresolvedParam  = syscall.Errno(15030) // ERROR_EVT_UNRESOLVED_PARAMETER_INSERT, same
+	errorEvtMaxInserts       = syscall.Errno(15031) // ERROR_EVT_MAX_INSERTS_REACHED, same
 	infinite                 = 0xFFFFFFFF
 )
 
@@ -168,7 +170,7 @@ func formatMessage(pub map[string]uintptr, ev uintptr, x []byte) string {
 		var used uint32
 		r, _, e := procEvtFormatMessage.Call(h, ev, 0, 0, 0, evtFormatMessageEvent, uintptr(len(buf)), uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&used)))
 		switch {
-		case r != 0, e == errorEvtUnresolvedInsert && used > 0:
+		case r != 0, partlyFormatted(e) && used > 0:
 			return syscall.UTF16ToString(buf[:min(int(used), len(buf))])
 		case e == errorInsufficientBuffer && int(used) > len(buf):
 			buf = make([]uint16, used)
@@ -176,6 +178,11 @@ func formatMessage(pub map[string]uintptr, ev uintptr, x []byte) string {
 			return ""
 		}
 	}
+}
+
+// partlyFormatted is true for the errors that come with a usable message text.
+func partlyFormatted(e error) bool {
+	return e == errorEvtUnresolvedInsert || e == errorEvtUnresolvedParam || e == errorEvtMaxInserts
 }
 
 // evtCoverage reads the time of the channel's oldest record and its logging
