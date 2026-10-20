@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -518,7 +519,7 @@ func TestOnlyRealCommandsAreSuggested(t *testing.T) {
 		want bool
 	}{
 		{"check", true}, {"collect", true}, {"env", true},
-		{"queries", true}, {"version", true},
+		{"queries", true}, {"version", true}, {"host", true},
 		{"all", false}, {"keep", false}, {"password-stdin", false}, {"", false},
 	} {
 		if got := isCommand(c.in); got != c.want {
@@ -715,12 +716,19 @@ func runCLI(t *testing.T, args ...string) (code int, stderr string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Drained while run() writes: the help alone can fill the pipe's buffer,
+	// and a write nobody reads blocks run() forever.
+	done := make(chan []byte)
+	go func() {
+		out, _ := io.ReadAll(r)
+		done <- out
+	}()
 	os.Args = append([]string{"sql-auditor"}, args...)
 	os.Stderr = w
 	code = run()
 	w.Close()
 	os.Args, os.Stderr = oldArgs, oldStderr
-	out, _ := io.ReadAll(r)
+	out := <-done
 	r.Close()
 	return code, string(out)
 }
@@ -851,4 +859,124 @@ func TestTheUsageNamesMaxDuration(t *testing.T) {
 	if !strings.Contains(buf.String(), "--max-duration D") {
 		t.Error("the usage text does not list --max-duration")
 	}
+}
+
+// clearSQLEnv empties every variable optionsFrom reads, so the developer's
+// shell cannot decide a host test's outcome.
+func clearSQLEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"SQL_SERVER", "SQL_USER", "SQL_LOGIN", "SQL_PASSWORD", "SQL_DATABASE",
+		"SQL_INTEGRATED_SECURITY", "SQL_ENCRYPT", "SQL_TRUST_SERVER_CERTIFICATE",
+		"SQL_APPLICATION_NAME", "SQL_CONNECT_TIMEOUT_SEC", "SQL_QUERY_TIMEOUT_SEC",
+		"QUERIES_DIR", "OUTPUT_DIR", "MAX_DURATION", "QUERY_STORE_DAYS",
+		"QUERY_STORE_FROM", "QUERY_STORE_TO", "QUERY_STORE_TOP", "QUERY_STORE_DB_INCLUDE",
+	} {
+		t.Setenv(k, "")
+	}
+}
+
+// assertEmptyDir fails when a refused host run left anything in --to.
+func assertEmptyDir(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("--to holds %d entries after a refusal, want none", len(entries))
+	}
+}
+
+func TestHostRefusesFlagsOutsideItsAllowlist(t *testing.T) {
+	clearSQLEnv(t)
+	env := writeDotEnv(t, "SQL_SERVER=SQL01\n")
+	for _, extra := range [][]string{{"--profile", "space"}, {"--all"}} {
+		dir := t.TempDir()
+		args := append([]string{"host", "--env", env, "--to", dir}, extra...)
+		code, stderr := runCLI(t, args...)
+		if code != 2 {
+			t.Errorf("%v: code = %d, want 2", extra, code)
+		}
+		want := extra[0] + " does not apply to sql-auditor host"
+		if !strings.Contains(stderr, want) {
+			t.Errorf("%v: stderr = %q, want %q", extra, stderr, want)
+		}
+		assertEmptyDir(t, dir)
+	}
+}
+
+func TestSinceBelongsToHost(t *testing.T) {
+	clearSQLEnv(t)
+	env := writeDotEnv(t, "SQL_SERVER=SQL01\n")
+	code, stderr := runCLI(t, "collect", "--env", env, "--since", "2026-01-01")
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "--since applies only to sql-auditor host") {
+		t.Errorf("stderr = %q, want the --since refusal", stderr)
+	}
+}
+
+func TestHostRequiresTo(t *testing.T) {
+	clearSQLEnv(t)
+	env := writeDotEnv(t, "SQL_SERVER=SQL01\n")
+	code, stderr := runCLI(t, "host", "--env", env)
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "--to is required for sql-auditor host") {
+		t.Errorf("stderr = %q, want the --to refusal", stderr)
+	}
+}
+
+func TestHostRefusesWithoutServer(t *testing.T) {
+	clearSQLEnv(t)
+	env := writeDotEnv(t, "SQL_DATABASE=master\n")
+	dir := t.TempDir()
+	code, stderr := runCLI(t, "host", "--env", env, "--to", dir)
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, collect.ErrNoServer.Error()) {
+		t.Errorf("stderr = %q, want %q", stderr, collect.ErrNoServer)
+	}
+	if strings.Contains(stderr, "reads the Windows server") {
+		t.Errorf("stderr = %q: the configuration must be refused before the platform", stderr)
+	}
+	assertEmptyDir(t, dir)
+}
+
+func TestHostRefusesBadAddress(t *testing.T) {
+	clearSQLEnv(t)
+	env := writeDotEnv(t, "")
+	dir := t.TempDir()
+	code, stderr := runCLI(t, "host", "--env", env, "--to", dir, "--server", `SQL01\`)
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "has a backslash but no instance name") {
+		t.Errorf("stderr = %q, want the bad address refusal", stderr)
+	}
+	if strings.Contains(stderr, "reads the Windows server") {
+		t.Errorf("stderr = %q: the address must be refused before the platform", stderr)
+	}
+	assertEmptyDir(t, dir)
+}
+
+func TestHostOffWindowsRefuses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the refusal of every other system")
+	}
+	clearSQLEnv(t)
+	env := writeDotEnv(t, "SQL_SERVER=SQL01\n")
+	dir := t.TempDir()
+	code, stderr := runCLI(t, "host", "--env", env, "--to", dir, "--since", "2026-01-01")
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "reads the Windows server it runs on") {
+		t.Errorf("stderr = %q, want the platform refusal", stderr)
+	}
+	assertEmptyDir(t, dir)
 }

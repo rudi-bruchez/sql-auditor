@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 
 	sqlauditor "github.com/rudi-bruchez/sql-auditor"
 	"github.com/rudi-bruchez/sql-auditor/collect"
+	"github.com/rudi-bruchez/sql-auditor/host"
 	"github.com/rudi-bruchez/sql-auditor/tui"
 	"github.com/rudi-bruchez/sql-auditor/tui/screen"
 )
@@ -90,7 +92,7 @@ type cliFlags struct {
 
 	server, user, envFile, queriesDir, outputDir string
 	maxDuration                                  string
-	to, grantScript, profile                     string
+	to, grantScript, profile, since              string
 	keep, force, all                             bool
 
 	passwordFile  string
@@ -156,7 +158,8 @@ func defineFlags(cmd string) *cliFlags {
 	fs.StringVar(&c.profile, "profile", "",
 		"collect only the collectors of this profile: space")
 	fs.StringVar(&c.to, "to", "",
-		"destination: a directory for 'queries export', a file for 'env init' (default .env)")
+		"destination: a directory for 'queries export' and 'host', a file for 'env init' (default .env)")
+	fs.StringVar(&c.since, "since", "", "start of the window for 'host', yyyy-mm-dd, local time (default 90 days ago)")
 	fs.BoolVar(&c.force, "force", false, "replace existing files: the destination of 'env init', the corpus of 'queries export', the file of 'check --grant-script'")
 	// Writes a file, never a permission. The collector connects with the
 	// login being measured, which by construction cannot grant anything —
@@ -650,7 +653,7 @@ func isVersionSwitch(s string) bool {
 // that the "did you mean" suggestion cannot offer a word that would fail again.
 func isCommand(s string) bool {
 	switch s {
-	case "check", "collect", "env", "queries", "version":
+	case "check", "collect", "env", "host", "queries", "version":
 		return true
 	}
 	return false
@@ -775,6 +778,19 @@ func run() int {
 	c := defineFlags(cmd)
 	_ = c.fs.Parse(args)
 
+	// Before the --profile refusal below, so host --profile gets the
+	// allowlist's message and every other command keeps its own.
+	if cmd == "host" {
+		if err := refuseOutsideAllowlist(c.fs, cmd,
+			"server", "user", "env", "password-file", "password-stdin", "to", "since", "debug"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+	} else if typedFlag(c.fs, "since") {
+		fmt.Fprintln(os.Stderr, "--since applies only to sql-auditor host")
+		return 2
+	}
+
 	// --profile is a check and collect option and the help says so, but
 	// nothing refused it anywhere else: `queries export --profile space`
 	// exported all 84 collectors, and `env init --profile bogus` wrote a
@@ -841,6 +857,9 @@ func run() int {
 		fmt.Printf("%s written — fill in SQL_SERVER, then run: sql-auditor check\n", dest)
 		return 0
 	}
+	if cmd == "host" {
+		return runHost(c, dbg)
+	}
 	if cmd != "collect" && cmd != "check" {
 		// Say what was wrong before printing the help. A wall of usage text
 		// with nothing pointing at the mistake leaves the reader to spot it,
@@ -857,7 +876,7 @@ func run() int {
 		// error a second time — "all" is not a command either.
 		case strings.HasPrefix(cmd, "-") && isCommand(strings.TrimLeft(cmd, "-")):
 			fmt.Fprintf(os.Stderr,
-				"%q is not a command: check, collect, env, queries and version are written without dashes. Did you mean %q?\n\n",
+				"%q is not a command: check, collect, env, host, queries and version are written without dashes. Did you mean %q?\n\n",
 				cmd, strings.TrimLeft(cmd, "-"))
 		case strings.HasPrefix(cmd, "-"):
 			fmt.Fprintf(os.Stderr,
@@ -964,6 +983,85 @@ func run() int {
 	return code
 }
 
+// refuseOutsideAllowlist refuses the first typed flag that cmd does not read.
+// A flag the operator typed and the command ignores is a run that is not the
+// one they asked for, so it is refused rather than dropped.
+func refuseOutsideAllowlist(fs *flag.FlagSet, cmd string, allowed ...string) error {
+	var err error
+	fs.Visit(func(f *flag.Flag) {
+		if err == nil && !slices.Contains(allowed, f.Name) {
+			err = fmt.Errorf("--%s does not apply to sql-auditor %s", f.Name, cmd)
+		}
+	})
+	return err
+}
+
+// typedFlag reports whether the operator typed the flag, whatever its value.
+func typedFlag(fs *flag.FlagSet, name string) bool {
+	typed := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			typed = true
+		}
+	})
+	return typed
+}
+
+// runHost is the host command after its allowlist: every refusal that needs no
+// machine comes first, so on Linux too a bad .env is named before the
+// platform is.
+func runHost(c *cliFlags, dbg *debugLog) int {
+	if c.to == "" {
+		fmt.Fprintln(os.Stderr, "--to is required for sql-auditor host")
+		return 2
+	}
+	since, err := host.ParseSince(c.since, time.Now())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	fmt.Fprintf(os.Stderr, "%s\n\n", banner())
+	opts, code, err := optionsFrom(c, os.Getenv, os.Stdin, dbg)
+	if err != nil {
+		dbg.printf("configuration refused: %v", err)
+		fmt.Fprintln(os.Stderr, err)
+		return code
+	}
+	if err := opts.Config.CheckConnectable(); err != nil {
+		dbg.printf("configuration refused: %v", err)
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	// Open dials nothing; it is here for the shape of the address, which
+	// host.Run would otherwise report as an instance that did not answer.
+	db, err := collect.Open(opts.Config)
+	if err != nil {
+		dbg.printf("configuration refused: %v", err)
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	db.Close()
+
+	inst := host.NewInstance(opts.Config)
+	defer inst.Close()
+	// interruptible's message promises a manifest and an archive, and host
+	// removes its archive on an interrupt; host.Run says that itself.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	ctx, stopSignals := interruptibleOn(context.Background(), sig, func() { signal.Stop(sig) }, io.Discard)
+	defer stopSignals()
+	dbg.printf("dispatching to host")
+	code = host.Run(ctx, host.Options{
+		To: c.to, EnvServer: opts.Config.Server,
+		Version: version + " (" + buildStamp() + ")",
+		Config:  opts.Config, Since: since, Now: time.Now,
+		Stdout: os.Stdout, Stderr: os.Stderr,
+		Platform: host.WindowsPlatform(inst),
+	})
+	dbg.printf("host finished, exit %d", code)
+	return code
+}
+
 func shouldHoldConsole(noArguments, alone, enteredWizard bool) bool {
 	return noArguments && alone && !enteredWizard
 }
@@ -1060,6 +1158,16 @@ func writeUsageBody(w io.Writer) {
                                        refuses to replace a file already there,
                                        so an edited corpus survives a second
                                        export; --force replaces them.
+  sql-auditor host --to DIR            on the Windows server that hosts the
+                                       instance, from an elevated prompt: read
+                                       its event logs, VSS, filter drivers,
+                                       power plan, cluster, VM extension logs
+                                       and job output files into one archive
+                                       in DIR. --since yyyy-mm-dd starts the
+                                       window, in local time (default 90 days
+                                       before today). It reads the connection
+                                       options and --debug, and refuses any
+                                       other option.
   sql-auditor version                  print the version and the build it came
                                        from. --version, -version and -V do the
                                        same thing.
@@ -1208,6 +1316,8 @@ Environment (read from the process environment, never from .env):
                               environment to set and no command line to change.
 
 Exit codes: 0 success, 2 partial failure or bad configuration, 1 fatal.
+host never exits 1: it reads the machine even when the instance does not
+answer, and exits 2 then.
 `)
 }
 
