@@ -22,6 +22,8 @@ func TestChooseEventSource(t *testing.T) {
 		{"listener, two services", SourceInput{EnvServer: "LISTENER01", LocalServices: []string{"MSSQLSERVER", "MSSQL$TEST"}}, "", "undecided"},
 		{"mismatch ignores the instance's name", SourceInput{Answered: true, InstanceName: &prod, EnvServer: "LISTENER01", LocalServices: []string{"MSSQL$A"}}, "MSSQL$A", "single service"},
 		{"no service", SourceInput{EnvServer: "LISTENER01"}, "", "undecided"},
+		{"other MSSQL services are not engines", SourceInput{EnvServer: "LISTENER01", LocalServices: []string{"MSSQLFDLauncher", "MSSQLLaunchpad$PROD", "MSSQL$MICROSOFT##WID", "MSSQLSERVER"}}, "MSSQLSERVER", "single service"},
+		{"service names compared case-insensitively", SourceInput{EnvServer: "LISTENER01", LocalServices: []string{"mssql$prod"}}, "mssql$prod", "single service"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

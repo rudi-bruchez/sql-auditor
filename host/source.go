@@ -30,7 +30,10 @@ func ChooseEventSource(in SourceInput) (source, rule string) {
 	}
 	var engines []string
 	for _, s := range in.LocalServices {
-		if strings.EqualFold(s, "MSSQLSERVER") || (len(s) > 6 && strings.EqualFold(s[:6], "MSSQL$")) {
+		// MSSQL$MICROSOFT##WID (and ##SSEE) is the Windows Internal Database of
+		// WSUS, AD FS or the RD Connection Broker, never the audited instance.
+		wid := len(s) >= 17 && strings.EqualFold(s[:17], "MSSQL$MICROSOFT##")
+		if strings.EqualFold(s, "MSSQLSERVER") || (len(s) > 6 && strings.EqualFold(s[:6], "MSSQL$") && !wid) {
 			engines = append(engines, s)
 		}
 	}

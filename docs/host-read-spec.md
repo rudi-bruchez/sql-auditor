@@ -117,7 +117,9 @@ this order, and the manifest says which rule decided it:
    source is undecided.
 3. Otherwise (a bare host, a port, a listener): if exactly one SQL Server
    service exists locally, in any state, its name is the source; if there are
-   several, or none, the source is undecided.
+   several, or none, the source is undecided. The Windows Internal Database
+   (`MSSQL$MICROSOFT##WID`, `##SSEE`) of WSUS, AD FS or the RD Connection
+   Broker is not counted. (Decided while building.)
 
 The services are listed through the service manager opened with
 `SC_MANAGER_ENUMERATE_SERVICE` only (`OpenSCManagerW`, then
