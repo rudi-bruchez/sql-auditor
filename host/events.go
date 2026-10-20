@@ -5,8 +5,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -84,8 +86,8 @@ type eventXML struct {
 		Channel       string `xml:"Channel"`
 	} `xml:"System"`
 	EventData struct {
-		Data   []string `xml:"Data"`
-		Binary string   `xml:"Binary"`
+		Inner  []byte `xml:",innerxml"`
+		Binary string `xml:"Binary"`
 	} `xml:"EventData"`
 	UserData struct {
 		Inner []byte `xml:",innerxml"`
@@ -93,11 +95,17 @@ type eventXML struct {
 }
 
 // ParseEventXML reads an event as EvtRender(EvtRenderEventXml) returns it.
-// Data holds the EventData values in order, or the text of UserData's leaf
-// elements in document order. Queries and Message are left to the caller.
+// Data holds the text of every Data element under EventData, at any depth and
+// in document order, or the text of UserData's leaf elements in document order;
+// it is empty, never nil, when the event has no payload. A character outside
+// the XML 1.0 range, as a reference or a raw byte, is kept as its \xNN text.
+// Queries and Message are left to the caller.
+//
+// ponytail: UserData attribute-only leaves and mixed content are not read; add
+// them when an event of interest carries its payload there.
 func ParseEventXML(b []byte) (Event, error) {
 	var x eventXML
-	if err := xml.Unmarshal(b, &x); err != nil {
+	if err := xml.Unmarshal(escapeControl(b), &x); err != nil {
 		return Event{}, fmt.Errorf("event XML: %w", err)
 	}
 	t, err := time.Parse(time.RFC3339Nano, x.System.TimeCreated.SystemTime)
@@ -111,15 +119,99 @@ func ParseEventXML(b []byte) (Event, error) {
 		Provider: x.System.Provider.Name,
 		EventID:  x.System.EventID,
 		RecordID: x.System.EventRecordID,
-		Data:     x.EventData.Data,
 		Binary:   x.EventData.Binary,
 	}
 	if len(x.UserData.Inner) > 0 {
-		if e.Data, err = leafTexts(x.UserData.Inner); err != nil {
-			return Event{}, fmt.Errorf("event XML: UserData: %w", err)
-		}
+		e.Data, err = leafTexts(x.UserData.Inner)
+	} else {
+		e.Data, err = dataTexts(x.EventData.Inner)
+	}
+	if err != nil {
+		return Event{}, fmt.Errorf("event XML: payload: %w", err)
+	}
+	if e.Data == nil {
+		e.Data = []string{}
 	}
 	return e, nil
+}
+
+var charRef = regexp.MustCompile(`&#[xX]([0-9a-fA-F]+);|&#([0-9]+);`)
+
+// escapeControl replaces the character references and the raw bytes that XML 1.0
+// forbids with their \xNN text, so that the value stays visible.
+func escapeControl(b []byte) []byte {
+	b = charRef.ReplaceAllFunc(b, func(m []byte) []byte {
+		s, base := string(m[2:len(m)-1]), 10
+		if s[0] == 'x' || s[0] == 'X' {
+			s, base = s[1:], 16
+		}
+		n, err := strconv.ParseUint(s, base, 32)
+		if err == nil && validXMLChar(rune(n)) {
+			return m
+		}
+		return []byte(escaped(n))
+	})
+	var out []byte
+	for i, c := range b {
+		if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+			if out == nil {
+				out = append(make([]byte, 0, len(b)+8), b[:i]...)
+			}
+			out = append(out, escaped(uint64(c))...)
+		} else if out != nil {
+			out = append(out, c)
+		}
+	}
+	if out == nil {
+		return b
+	}
+	return out
+}
+
+func validXMLChar(r rune) bool {
+	return r == 0x9 || r == 0xA || r == 0xD || r >= 0x20 && r <= 0xD7FF ||
+		r >= 0xE000 && r <= 0xFFFD || r >= 0x10000 && r <= 0x10FFFF
+}
+
+// escaped is the \xNN text of a character, or \u{N} past one byte.
+func escaped(n uint64) string {
+	if n < 0x100 {
+		return fmt.Sprintf(`\x%02X`, n)
+	}
+	return fmt.Sprintf(`\u{%X}`, n)
+}
+
+// dataTexts returns the text of every Data element at any depth, in order.
+func dataTexts(b []byte) ([]string, error) {
+	var out []string
+	var text strings.Builder
+	in := false
+	d := xml.NewDecoder(bytes.NewReader(b))
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			if err == io.EOF {
+				return out, nil
+			}
+			return nil, err
+		}
+		switch tok := tok.(type) {
+		case xml.StartElement:
+			if tok.Name.Local == "Data" {
+				in = true
+				text.Reset()
+			}
+		case xml.CharData:
+			if in {
+				text.Write(tok)
+			}
+		case xml.EndElement:
+			if in && tok.Name.Local == "Data" {
+				out = append(out, text.String())
+				in = false
+			}
+		}
+	}
 }
 
 // leafTexts returns the text of every element without child elements.

@@ -73,6 +73,79 @@ func TestParseEventXMLUserData(t *testing.T) {
 	}
 }
 
+// eventWith is an event with the given body after System and a fixed SystemTime.
+func eventWith(systemTime, body string) []byte {
+	return []byte("<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='P'/><EventID>1</EventID><Level>4</Level><TimeCreated SystemTime='" + systemTime + "'/><EventRecordID>1</EventRecordID><Channel>Application</Channel></System>" + body + "</Event>")
+}
+
+func TestParseEventXMLControlCharacter(t *testing.T) {
+	for name, body := range map[string]string{
+		"reference":    "<EventData><Data>a&#x1;b</Data></EventData>",
+		"decimal":      "<EventData><Data>a&#1;b</Data></EventData>",
+		"raw byte":     "<EventData><Data>a\x01b</Data></EventData>",
+		"null":         "<EventData><Data>a&#x0;b</Data></EventData>",
+		"in user data": "<UserData><P><a>a&#x1;b</a></P></UserData>",
+	} {
+		e, err := ParseEventXML(eventWith("2026-10-20T01:50:58Z", body))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		want := `a\x01b`
+		if name == "null" {
+			want = `a\x00b`
+		}
+		if !reflect.DeepEqual(e.Data, []string{want}) {
+			t.Errorf("%s: Data = %q, want [%s]", name, e.Data, want)
+		}
+	}
+	// a legal reference is left for the XML parser
+	e, err := ParseEventXML(eventWith("2026-10-20T01:50:58Z", "<EventData><Data>a&#x9;b&amp;</Data></EventData>"))
+	if err != nil || !reflect.DeepEqual(e.Data, []string{"a\tb&"}) {
+		t.Errorf("legal reference: Data = %q, err %v", e.Data, err)
+	}
+}
+
+func TestParseEventXMLNoPayload(t *testing.T) {
+	e, err := ParseEventXML(eventWith("2026-10-20T01:50:58Z", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Data == nil || len(e.Data) != 0 {
+		t.Errorf("Data = %#v, want []string{}", e.Data)
+	}
+}
+
+func TestParseEventXMLComplexData(t *testing.T) {
+	body := "<EventData><Data>a</Data><ComplexData><Data>b</Data><Inner><Data>c</Data></Inner></ComplexData><Data>d</Data></EventData>"
+	e, err := ParseEventXML(eventWith("2026-10-20T01:50:58Z", body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a", "b", "c", "d"}; !reflect.DeepEqual(e.Data, want) {
+		t.Errorf("Data = %q, want %q", e.Data, want)
+	}
+}
+
+func TestEventTimeIsFixedWidth(t *testing.T) {
+	e, err := ParseEventXML(eventWith("2026-10-20T01:50:58.1Z", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "2026-10-20T01:50:58.1000000Z"; e.TimeUTC != want {
+		t.Errorf("TimeUTC = %q, want %q", e.TimeUTC, want)
+	}
+}
+
+func TestMergeKeysOnLog(t *testing.T) {
+	sys := Event{Log: "System", RecordID: 12, TimeUTC: "2026-10-20T00:00:00.0000000Z", Queries: []string{"1"}}
+	app := sys
+	app.Log = "Application"
+	if got := Merge([]Event{sys}, []Event{app}); len(got) != 2 {
+		t.Errorf("Merge kept %d events, want 2 (same record id, two logs)", len(got))
+	}
+}
+
 func TestMergeUnionsQueries(t *testing.T) {
 	older := Event{Log: "Application", RecordID: 1, TimeUTC: "2026-10-19T00:00:00.0000000Z", Queries: []string{"1"}}
 	e1 := Event{Log: "Application", RecordID: 2, TimeUTC: "2026-10-20T00:00:00.0000000Z", Queries: []string{"1"}}
@@ -84,6 +157,10 @@ func TestMergeUnionsQueries(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got[0].Queries, []string{"1", "2"}) {
 		t.Errorf("Queries = %v, want [1 2]", got[0].Queries)
+	}
+	got = Merge([]Event{e2}, []Event{older, e1})
+	if !reflect.DeepEqual(got[0].Queries, []string{"1", "2"}) {
+		t.Errorf("reversed: Queries = %v, want [1 2]", got[0].Queries)
 	}
 }
 
