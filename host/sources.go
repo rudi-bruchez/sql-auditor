@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -277,7 +278,8 @@ func (c Calls) readVSS(ctx context.Context, _ Env, put FileSink) SourceResult {
 // sqlWriterTail bytes of each, newest first within sqlWriterBudget, from the
 // directory SqlWriterConfig.ini names; the files past the budget are noted.
 // A directory or a file refused is a note, as job outputs record theirs, and
-// the source is still read.
+// the source is still read. A file refused as moved under a link replaces the
+// notes with one, as job outputs do.
 func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResult {
 	shared := c.ProgramFiles + `\Microsoft SQL Server\90\Shared`
 	ini, err := c.ReadFile(shared + `\SqlWriterConfig.ini`)
@@ -324,6 +326,10 @@ func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResul
 			continue
 		}
 		f, size, why, err := openIn(c.OpenFile, src, final+`\`+info.Name())
+		if err == nil && why == movedUnderLink {
+			res.Notes = []string{dir + ": " + errChanged.Error()}
+			break
+		}
 		if err == nil && why != "" {
 			res.Notes = append(res.Notes, src+": "+why)
 			continue
@@ -394,6 +400,13 @@ func (c Calls) readExtensions(_ context.Context, e Env, put FileSink) SourceResu
 	if err == nil {
 		listed, err = CopyExtensions(fsys, c.AzurePlugins, final, e.Since, extensionBudget, c.OpenFile, put)
 	}
+	var notes []string
+	if errors.Is(err, errChanged) {
+		// What was copied was opened at its checked path; the rest of the
+		// listing may be another directory's.
+		notes, err = []string{c.AzurePlugins + ": " + err.Error()}, nil
+		listed = slices.DeleteFunc(listed, func(l Listed) bool { return !l.Copied })
+	}
 	if errors.Is(err, fs.ErrNotExist) {
 		return SourceResult{Status: StatusAbsent, Reason: c.AzurePlugins + " not found: not an Azure VM, or no extension"}
 	}
@@ -411,7 +424,7 @@ func (c Calls) readExtensions(_ context.Context, e Env, put FileSink) SourceResu
 		listed = []Listed{}
 	}
 	res := written(put, "060.vm-extensions.json", listed, len(copied))
-	res.Copied = copied
+	res.Copied, res.Notes = copied, notes
 	return res
 }
 

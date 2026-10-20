@@ -36,7 +36,8 @@ func TestHarmD_FileUnderTheCheckedFinalPath(t *testing.T) {
 		check := func(t *testing.T, s *recordingSink, reasons []string, data string) {
 			t.Helper()
 			_, wrote := s.data[data]
-			refused := strings.Contains(strings.Join(reasons, "\n"), "moved under a link after the check")
+			// One file, refused as moved, or the directory noted as changed.
+			refused := strings.Contains(strings.Join(reasons, "\n"), "under a link")
 			if wrote != tc.read || refused == tc.read {
 				t.Errorf("%s written %v, refusal recorded %v (%q); want read %v", data, wrote, refused, reasons, tc.read)
 			}
@@ -70,8 +71,8 @@ func TestHarmD_FileUnderTheCheckedFinalPath(t *testing.T) {
 			}
 			c.OpenFile = open
 			s := &recordingSink{}
-			readNamed(t, c, "060.vm-extensions", Env{Since: sourcesSince}, s)
-			var reasons []string
+			res := readNamed(t, c, "060.vm-extensions", Env{Since: sourcesSince}, s)
+			reasons := res.Notes
 			for _, l := range listedIn(t, s) {
 				reasons = append(reasons, l.Reason)
 			}
@@ -110,7 +111,7 @@ func TestHarmD_OnlyVolumeMountPoints(t *testing.T) {
 		{reparseBuffer(mountPoint, `\??\Volume{3f2504e0-4f89-11d3-9a0c-0305e82c3301}\`)[:20], false},
 		{nil, false},
 	} {
-		if got := isVolumeMount(tc.b); got != tc.want {
+		if _, got := isVolumeMount(tc.b); got != tc.want {
 			t.Errorf("isVolumeMount(% x...) = %v, want %v", tc.b[:min(len(tc.b), 24)], got, tc.want)
 		}
 	}

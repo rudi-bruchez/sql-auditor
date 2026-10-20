@@ -51,6 +51,14 @@ type PathCheck func(path string) (final string, ok bool, reason string)
 // the handle's final path, are read from the same handle.
 type OpenFile func(path string) (f io.ReadSeekCloser, size int64, final, reason string, err error)
 
+// movedUnderLink is openIn's refusal of a file whose final path is not the
+// one its directory had at the check.
+const movedUnderLink = "moved under a link after the check"
+
+// errChanged is a directory that openIn found changed under a link while it
+// was read: what was listed through it may be another directory's.
+var errChanged = errors.New("changed under a link during the read, nothing listed")
+
 // openIn opens path through open and refuses it unless its final path is
 // want, the final path PathCheck gave for the directory it was listed under
 // joined to the rest of path: a component of that directory swapped for a
@@ -62,32 +70,60 @@ func openIn(open OpenFile, path, want string) (io.ReadSeekCloser, int64, string,
 	}
 	if !strings.EqualFold(final, want) {
 		f.Close()
-		return nil, 0, "moved under a link after the check", nil
+		return nil, 0, movedUnderLink, nil
 	}
 	return f, size, "", nil
 }
 
-// isVolumeMount reads a REPARSE_DATA_BUFFER and accepts a mount point whose
-// substitute name is a volume, \??\Volume{...}: the failover cluster's log
-// volume mounted in a folder. A directory junction has the same tag and leads
-// to any local directory, a private one included, and needs no privilege to
-// plant.
-func isVolumeMount(b []byte) bool {
+// isVolumeMount reads a REPARSE_DATA_BUFFER and gives the volume of a mount
+// point whose substitute name is exactly a volume's root, \??\Volume{GUID}\,
+// as \\?\Volume{GUID}\: the failover cluster's log volume mounted in a
+// folder. A directory junction has the same tag and leads to any local
+// directory, a private one included, and needs no privilege to plant, with a
+// volume's root as its target too: the caller must also find the folder among
+// the volume's registered mount points.
+func isVolumeMount(b []byte) (string, bool) {
 	const mountPoint = 0xA0000003 // IO_REPARSE_TAG_MOUNT_POINT
 	if len(b) < 16 || binary.LittleEndian.Uint32(b) != mountPoint {
-		return false
+		return "", false
 	}
 	// The path buffer starts at 16; the substitute name's offset and length,
 	// in bytes, are at 8 and 10.
 	off, n := 16+int(binary.LittleEndian.Uint16(b[8:])), int(binary.LittleEndian.Uint16(b[10:]))
 	if off+n > len(b) || n%2 != 0 {
-		return false
+		return "", false
 	}
 	u := make([]uint16, n/2)
 	for i := range u {
 		u[i] = binary.LittleEndian.Uint16(b[off+2*i:])
 	}
-	return strings.HasPrefix(string(utf16.Decode(u)), `\??\Volume{`)
+	s := string(utf16.Decode(u))
+	guid, ok := strings.CutPrefix(s, `\??\Volume{`)
+	if !ok {
+		return "", false
+	}
+	if guid, ok = strings.CutSuffix(guid, `}\`); !ok || !isGUID(guid) {
+		return "", false
+	}
+	return `\\?\` + s[4:], true
+}
+
+// isGUID reports 8-4-4-4-12 hexadecimal digits.
+func isGUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			if c != '-' {
+				return false
+			}
+		case !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'):
+			return false
+		}
+	}
+	return true
 }
 
 const (
@@ -102,7 +138,9 @@ const (
 // listed are root joined to the relative path, with backslashes, and each
 // file's final path must be rootFinal, root's, joined the same way. A directory
 // that cannot be read and a link, which is not followed, are listed with the
-// reason. A missing root is returned as an error wrapping fs.ErrNotExist.
+// reason. A missing root is returned as an error wrapping fs.ErrNotExist. A
+// file openIn refuses as moved under a link stops the copy: the listing is
+// returned with errChanged, for the caller to drop all but what was copied.
 func CopyExtensions(fsys fs.FS, root, rootFinal string, since time.Time, budget int64, open OpenFile, sink FileSink) ([]Listed, error) {
 	var listed []Listed
 	var files []int // the regular files: their index in listed, path in fsys, time
@@ -164,6 +202,9 @@ func CopyExtensions(fsys fs.FS, root, rootFinal string, since time.Time, budget 
 		if err != nil {
 			return listed, err
 		}
+		if why == movedUnderLink {
+			return listed, errChanged
+		}
 		if why != "" {
 			l.Reason = why
 			continue
@@ -188,7 +229,9 @@ func CopyExtensions(fsys fs.FS, root, rootFinal string, since time.Time, budget 
 // not followed: a matching one is noted, so a planted link cannot export a
 // private file under the log's name. What is not read and why goes in the
 // notes: an unreadable pattern, a UNC or relative directory, a directory or a
-// file refused, a link, a wildcard token, no matching file.
+// file refused, a link, a wildcard token, no matching file. A file refused as
+// moved under a link replaces every note about the directory's files with
+// one: their names may be another directory's.
 func CopyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, sink FileSink) ([]CopiedFile, []string, error) {
 	left := int64(jobOutputBudget)
 	return copyJobOutputs(c, p, step, since, &left, sink)
@@ -212,6 +255,7 @@ func copyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, left
 	if p.Reason != "" {
 		notes = append(notes, p.Reason)
 	}
+	head := notes[:len(notes):len(notes)] // the notes not about a file
 	final, ok, why := c.DirCheck(p.Dir)
 	if !ok {
 		return nil, append(notes, p.Dir+": "+why), nil
@@ -264,6 +308,9 @@ func copyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, left
 		f, size, why, err := openIn(c.OpenFile, src, final+`\`+info.Name())
 		if err != nil {
 			return copied, notes, err
+		}
+		if why == movedUnderLink {
+			return copied, append(head, p.Dir+": "+errChanged.Error()), nil
 		}
 		if why != "" {
 			notes = append(notes, src+": "+why)

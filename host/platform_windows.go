@@ -27,6 +27,8 @@ var (
 	procGetComputerNameExW           = kernel32.NewProc("GetComputerNameExW")
 	procGetFinalPathNameByHandleW    = kernel32.NewProc("GetFinalPathNameByHandleW")
 	procGetVolumePathNameW           = kernel32.NewProc("GetVolumePathNameW")
+	procGetVolumePathNamesForVolume  = kernel32.NewProc("GetVolumePathNamesForVolumeNameW")
+	procGetLongPathNameW             = kernel32.NewProc("GetLongPathNameW")
 	procGetDriveTypeW                = kernel32.NewProc("GetDriveTypeW")
 	procLocalFree                    = kernel32.NewProc("LocalFree")
 	procSetDefaultDllDirectories     = kernel32.NewProc("SetDefaultDllDirectories")
@@ -472,12 +474,16 @@ func fixedVolume(path string) (bool, string) {
 // create where they can create a folder, to a private directory. Walking from
 // the root means every parent has been judged before a listing traverses it.
 // The volume of the whole path is judged next, then the directory's final
-// path is taken once, for openIn to compare each file's with. A missing
-// component is accepted, so that the caller reports the directory not found.
-// ponytail: a component swapped for a link between the walk and the final
-// path is not caught; one swapped after it is, by openIn. Closing that window
-// means opening each component by handle relative to its parent
-// (NtCreateFile), which syscall does not offer.
+// path is taken once, for openIn to compare each file's with, and must be the
+// long form of the path walked: a component swapped for a link between the
+// walk and the final path leads elsewhere. One swapped after it is caught by
+// openIn. A missing component is accepted, so that the caller reports the
+// directory not found.
+// ponytail: past a registered volume mount point the final path is the
+// volume's and is not compared, so a component swapped between the walk and
+// the final path, in a parent of the mount point that its owner can rename,
+// is not caught there. Closing it means opening each component by handle
+// relative to its parent (NtCreateFile), which syscall does not offer.
 func dirCheck(dir string) (string, bool, string) {
 	const mountPoint = 0xA0000003 // IO_REPARSE_TAG_MOUNT_POINT, junctions included
 	switch {
@@ -505,6 +511,7 @@ func dirCheck(dir string) (string, bool, string) {
 		}
 		return cur + ": " + why
 	}
+	mounted := false
 	for _, c := range strings.Split(strings.Trim(d[3:], `\`), `\`) {
 		if c == "" {
 			continue
@@ -529,6 +536,7 @@ func dirCheck(dir string) (string, bool, string) {
 			if why := volumeMount(cur); why != "" {
 				return "", false, at(why)
 			}
+			mounted = true
 		case fd.Reserved0 == syscall.IO_REPARSE_TAG_SYMLINK:
 			return "", false, at("symbolic link, not followed")
 		default:
@@ -538,11 +546,46 @@ func dirCheck(dir string) (string, bool, string) {
 	if ok, why := fixedVolume(d); !ok {
 		return "", false, why
 	}
-	return dirFinal(d)
+	final, ok, why := dirFinal(d)
+	if !ok || final == "" || mounted {
+		return final, ok, why
+	}
+	long, err := longPath(d)
+	if err != nil {
+		return "", false, err.Error()
+	}
+	if !strings.EqualFold(strings.TrimPrefix(final, `\\?\`), strings.TrimRight(long, `\`)) {
+		return "", false, "changed under a link during the check"
+	}
+	return final, true, ""
+}
+
+// longPath is GetLongPathNameW's answer for p: each 8.3 name expanded, by its
+// parent's listing, and no link resolved.
+func longPath(p string) (string, error) {
+	in, err := syscall.UTF16PtrFromString(p)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]uint16, syscall.MAX_PATH)
+	for {
+		n, _, err := procGetLongPathNameW.Call(uintptr(unsafe.Pointer(in)), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+		if n == 0 {
+			return "", fmt.Errorf("long path of %s: %w", p, err)
+		}
+		if int(n) < len(buf) {
+			return syscall.UTF16ToString(buf[:n]), nil
+		}
+		buf = make([]uint16, n)
+	}
 }
 
 // volumeMount reads the reparse data of a mount point component, opened
-// without following it, and refuses it unless isVolumeMount accepts it.
+// without following it, and refuses it unless isVolumeMount accepts it and
+// the mount manager lists path among the volume's mount points
+// (GetVolumePathNamesForVolumeNameW): only SetVolumeMountPoint, which needs an
+// administrator, registers one, and a junction any user sets to a volume's
+// root by FSCTL_SET_REPARSE_POINT is not listed.
 func volumeMount(path string) string {
 	const fileReadAttributes = 0x80
 	p, err := syscall.UTF16PtrFromString(path)
@@ -560,10 +603,55 @@ func volumeMount(path string) string {
 	if err := syscall.DeviceIoControl(h, syscall.FSCTL_GET_REPARSE_POINT, nil, 0, &buf[0], uint32(len(buf)), &n, nil); err != nil {
 		return "reparse data: " + err.Error()
 	}
-	if !isVolumeMount(buf[:n]) {
+	vol, ok := isVolumeMount(buf[:n])
+	if !ok {
 		return "junction, not followed"
 	}
-	return ""
+	names, err := volumePaths(vol)
+	if err != nil {
+		return "mount points of " + vol + ": " + err.Error()
+	}
+	// The mount manager lists long names; path may have been typed with 8.3
+	// ones, and its parents are already judged.
+	long, err := longPath(path)
+	if err != nil {
+		return err.Error()
+	}
+	for _, m := range names {
+		if strings.EqualFold(m, long+`\`) {
+			return ""
+		}
+	}
+	return "junction, not followed"
+}
+
+// volumePaths is GetVolumePathNamesForVolumeNameW's list for a volume name,
+// \\?\Volume{GUID}\: its drive letter and the folders it is mounted in, each
+// with a trailing separator.
+func volumePaths(vol string) ([]string, error) {
+	v, err := syscall.UTF16PtrFromString(vol)
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]uint16, syscall.MAX_PATH)
+	for {
+		var n uint32
+		r, _, err := procGetVolumePathNamesForVolume.Call(uintptr(unsafe.Pointer(v)), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&n)))
+		if r == 0 && err == syscall.ERROR_MORE_DATA && int(n) > len(buf) {
+			buf = make([]uint16, n)
+			continue
+		}
+		if r == 0 {
+			return nil, err
+		}
+		var names []string
+		for _, m := range strings.Split(string(utf16.Decode(buf[:n])), "\x00") {
+			if m != "" {
+				names = append(names, m)
+			}
+		}
+		return names, nil
+	}
 }
 
 // dirFinal opens a directory dirCheck accepted, following its last component

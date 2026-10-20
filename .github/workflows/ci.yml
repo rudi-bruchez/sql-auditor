@@ -57,10 +57,12 @@ jobs:
           diff -u "$RUNNER_TEMP/embedded.txt" "$RUNNER_TEMP/exported.txt"
           test -s "$RUNNER_TEMP/embedded.txt"
 
-  # The guards only Windows can run: the handle judged local, the DLLs from
-  # System32, the elevation check, and the PowerShell preamble in Windows
-  # PowerShell 5.1. None needs an administrator or SQL Server; a case the
-  # runner cannot set up skips with its reason.
+  # The guards only Windows can run: the handle judged local, links and
+  # junctions refused, only registered volume mount points followed, the DLLs
+  # from System32, the elevation check, and the PowerShell preamble in Windows
+  # PowerShell 5.1. None needs SQL Server. A case that needs a privilege the
+  # runner lacks (a symbolic link, a registered mount point, which needs an
+  # administrator) skips with its reason.
   windows:
     runs-on: windows-latest
     steps:

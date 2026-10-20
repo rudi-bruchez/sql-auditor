@@ -343,19 +343,28 @@ Only when the instance answered.
   mapped or removable drive, a symbolic link or a directory junction is
   recorded with the step and not read. A volume mount point, common for log
   directories on a failover cluster instance, leads to a local volume and is
-  read: its reparse data (`FSCTL_GET_REPARSE_POINT`) names `\??\Volume{...}`.
+  read: its reparse data (`FSCTL_GET_REPARSE_POINT`) names exactly a volume's
+  root, `\??\Volume{GUID}\`, and the mount manager lists the folder among
+  that volume's mount points (`GetVolumePathNamesForVolumeName`).
   A directory junction has the same reparse tag but names a directory, and
   any user may create one where they can create a folder (`C:\WindowsAzure`
   on a machine that is not an Azure VM, a job output directory that does not
   exist yet): followed, it would export a private directory under the log's
-  name (harm review, batch D).
+  name (harm review, batch D). Its target may be written
+  `\??\Volume{GUID}\Users\...`, or be a volume's root, with
+  `FSCTL_SET_REPARSE_POINT` and no privilege; only `SetVolumeMountPoint`,
+  which needs an administrator, registers a folder with the mount manager
+  (batch E).
 - The directory is judged as typed before it is listed, since listing a share
   already sends the account's credentials to it: its drive letter must be a
   local fixed drive (`GetDriveType`), each of its components is read from its
   parent's listing (`FindFirstFile`, which does not traverse it) and refused
   if it is a symbolic link or a directory junction, and its volume
   (`GetVolumePathName`) must be a local fixed drive. Its final path
-  (`GetFinalPathNameByHandle`) is then taken once. The same applies to SQL
+  (`GetFinalPathNameByHandle`) is then taken once, and must be the long form
+  of the path walked (`GetLongPathName`, which expands 8.3 names and resolves
+  no link), or the directory is refused, "changed under a link during the
+  check". The same applies to SQL
   Writer's directory and to the extension logs' folder. A path written
   `\\?\C:\...` is local and judged as `C:\...`.
 - A link in the directory is not followed, whatever it points to: a matching
@@ -377,9 +386,14 @@ Only when the instance answered.
   for a link after the check leads elsewhere, and the file is refused, "moved
   under a link after the check". A swap at the file itself, or of a
   component after the directory's final path was taken, cannot be read. A
-  swap between the component walk and the taking of the final path, a few
-  system calls apart, is not caught. SQL Writer's log and the extension logs
-  are opened the same way.
+  swap between the component walk and the taking of the final path is
+  caught by the long form, except past a registered volume mount point,
+  whose final path is the volume's and is not compared. SQL Writer's log and
+  the extension logs are opened the same way. A file refused as moved means
+  the listing was perhaps taken through the link: what was listed through
+  the directory, names, sizes and the notes per file, is replaced by one
+  note, "changed under a link during the read, nothing listed"; the files
+  copied before, at their checked path, stay recorded.
 - Per step, the five newest files written in the window, each cut to its last
   1 MiB, and at most 100 MiB for all the steps together, counted in the bytes
   copied; the files past it are recorded "budget reached, not copied" (harm

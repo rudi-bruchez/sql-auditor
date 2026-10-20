@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,11 +13,13 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"unicode/utf16"
 	"unsafe"
 )
 
 // The guards only Windows can run, named TestWin* for the windows-latest job
-// of ci.yml. None needs an administrator or SQL Server.
+// of ci.yml. None needs SQL Server; a case that needs a privilege the runner
+// lacks (a symbolic link, a registered mount point) skips with its reason.
 
 // A file under the test's temporary directory is on a local fixed drive; the
 // same machine's C: reached as an administrative share is a network path.
@@ -120,10 +123,136 @@ func TestWinDirCheckRefusesLinkComponents(t *testing.T) {
 		t.Errorf("dirCheck through a junction: ok %v, %q; want junction, not followed", ok, why)
 	}
 	if err := os.Symlink(private, filepath.Join(base, "symlink")); err != nil {
-		t.Fatal(err)
+		t.Skipf("no symbolic link on this runner (%v): the link case is not tested", err)
 	}
 	if _, ok, why := dirCheck(filepath.Join(base, "symlink", "Logs")); ok || !strings.Contains(why, "symbolic link, not followed") {
 		t.Errorf("dirCheck through a symbolic link: ok %v, %q; want symbolic link, not followed", ok, why)
+	}
+}
+
+// volumeOf gives the volume name, \\?\Volume{GUID}\, and the root, C:\, of the
+// volume dir lies on.
+func volumeOf(t *testing.T, dir string) (vol, root string) {
+	t.Helper()
+	p, _ := syscall.UTF16PtrFromString(dir)
+	r := make([]uint16, syscall.MAX_PATH)
+	if ok, _, err := procGetVolumePathNameW.Call(uintptr(unsafe.Pointer(p)), uintptr(unsafe.Pointer(&r[0])), uintptr(len(r))); ok == 0 {
+		t.Fatalf("GetVolumePathNameW(%s): %v", dir, err)
+	}
+	v := make([]uint16, 64)
+	if ok, _, err := kernel32.NewProc("GetVolumeNameForVolumeMountPointW").Call(uintptr(unsafe.Pointer(&r[0])), uintptr(unsafe.Pointer(&v[0])), uintptr(len(v))); ok == 0 {
+		t.Fatalf("GetVolumeNameForVolumeMountPointW(%s): %v", syscall.UTF16ToString(r), err)
+	}
+	return syscall.UTF16ToString(v), syscall.UTF16ToString(r)
+}
+
+// mountPoint makes the empty directory link a mount point to substitute by
+// FSCTL_SET_REPARSE_POINT, as any user may on a directory they own, and
+// removes the reparse point at the end of the test, before the temporary
+// directory is: nothing ever walks through it.
+func mountPoint(t *testing.T, link, substitute string) {
+	t.Helper()
+	const fsctlSetReparsePoint = 0x900A4
+	name := utf16.Encode([]rune(substitute))
+	b := make([]byte, 16+2*len(name)+4) // the substitute name, an empty print name, each NUL-terminated
+	binary.LittleEndian.PutUint32(b, 0xA0000003)
+	binary.LittleEndian.PutUint16(b[4:], uint16(len(b)-8))
+	binary.LittleEndian.PutUint16(b[10:], uint16(2*len(name)))
+	binary.LittleEndian.PutUint16(b[12:], uint16(2*len(name)+2))
+	for i, u := range name {
+		binary.LittleEndian.PutUint16(b[16+2*i:], u)
+	}
+	if err := os.Mkdir(link, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := syscall.UTF16PtrFromString(link)
+	h, err := syscall.CreateFile(p, syscall.GENERIC_WRITE, 0, nil, syscall.OPEN_EXISTING,
+		syscall.FILE_FLAG_OPEN_REPARSE_POINT|syscall.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", link, err)
+	}
+	defer syscall.CloseHandle(h)
+	var n uint32
+	if err := syscall.DeviceIoControl(h, fsctlSetReparsePoint, &b[0], uint32(len(b)), nil, 0, &n, nil); err != nil {
+		t.Fatalf("FSCTL_SET_REPARSE_POINT %s on %s: %v", substitute, link, err)
+	}
+	t.Cleanup(func() {
+		if err := syscall.RemoveDirectory(p); err != nil {
+			t.Errorf("remove the mount point %s: %v", link, err)
+		}
+	})
+}
+
+// A junction set by FSCTL_SET_REPARSE_POINT to \??\Volume{GUID}\ followed by
+// a private directory, which no privilege guards, is followed by Windows and
+// refused by dirCheck; so is one to the volume's root, which the mount
+// manager does not list.
+func TestWinDirCheckRefusesVolumeGUIDJunction(t *testing.T) {
+	base := t.TempDir()
+	private := filepath.Join(base, "private")
+	if err := os.MkdirAll(filepath.Join(private, "Logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(private, "secret.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vol, root := volumeOf(t, base)
+	long, err := longPath(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(strings.ToUpper(long), strings.ToUpper(root)) {
+		t.Fatalf("%s is not under its volume's root %s", long, root)
+	}
+	guidRoot := `\??\` + strings.TrimPrefix(vol, `\\?\`)
+	link := filepath.Join(base, "link")
+	mountPoint(t, link, guidRoot+long[len(root):])
+	entries, err := os.ReadDir(link)
+	if err != nil || !slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() == "secret.txt" }) {
+		t.Fatalf("os.ReadDir through %s to %s: %v, %v; want the private file listed, the threat this test is about", link, guidRoot+long[len(root):], entries, err)
+	}
+	for _, d := range []string{link, filepath.Join(link, "Logs")} {
+		if final, ok, why := dirCheck(d); ok || !strings.Contains(why, "junction, not followed") {
+			t.Errorf("dirCheck(%s) = %q, %v, %q; want junction, not followed", d, final, ok, why)
+		}
+	}
+
+	rootLink := filepath.Join(base, "root")
+	mountPoint(t, rootLink, guidRoot)
+	if entries, err := os.ReadDir(rootLink); err != nil || len(entries) == 0 {
+		t.Fatalf("os.ReadDir through %s to %s: %v, %v; want the volume's root listed", rootLink, guidRoot, entries, err)
+	}
+	if final, ok, why := dirCheck(rootLink); ok || !strings.Contains(why, "junction, not followed") {
+		t.Errorf("dirCheck(%s) = %q, %v, %q; want junction, not followed", rootLink, final, ok, why)
+	}
+}
+
+// A volume mount point the mount manager registered is accepted. Registering
+// one (SetVolumeMountPointW) needs an administrator; the test mounts the
+// temporary directory's own volume, and skips where that is refused.
+func TestWinDirCheckAcceptsRegisteredMountPoint(t *testing.T) {
+	base := t.TempDir()
+	mnt := filepath.Join(base, "mnt")
+	if err := os.Mkdir(mnt, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	vol, _ := volumeOf(t, base)
+	long, err := longPath(mnt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := syscall.UTF16PtrFromString(long + `\`)
+	v, _ := syscall.UTF16PtrFromString(vol)
+	if ok, _, err := kernel32.NewProc("SetVolumeMountPointW").Call(uintptr(unsafe.Pointer(m)), uintptr(unsafe.Pointer(v))); ok == 0 {
+		t.Skipf("SetVolumeMountPointW(%s, %s): %v: a registered mount point is not tested", long, vol, err)
+	}
+	t.Cleanup(func() {
+		if ok, _, err := kernel32.NewProc("DeleteVolumeMountPointW").Call(uintptr(unsafe.Pointer(m))); ok == 0 {
+			t.Errorf("DeleteVolumeMountPointW(%s): %v", long, err)
+		}
+	})
+	if final, ok, why := dirCheck(mnt); !ok || final == "" {
+		t.Errorf("dirCheck(%s) = %q, %v, %q; want a registered mount point accepted", mnt, final, ok, why)
 	}
 }
 
