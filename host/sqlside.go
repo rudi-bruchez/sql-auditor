@@ -72,14 +72,15 @@ func ReadJobSteps(ctx context.Context, c *sql.Conn) (steps []JobStep, refused bo
 }
 
 // refusal reports a permission error: 229, 297 or 300, the numbers
-// collect's blocking watch treats as refusals.
+// collect's blocking watch treats as refusals, and 916, a login that may not
+// enter msdb at all.
 func refusal(err error) bool {
 	var e mssql.Error
 	if !errors.As(err, &e) {
 		return false
 	}
 	switch e.Number {
-	case 229, 297, 300:
+	case 229, 297, 300, 916:
 		return true
 	}
 	return false
