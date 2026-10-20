@@ -20,7 +20,7 @@ const scriptHead = `[Console]::OutputEncoding=New-Object Text.UTF8Encoding $fals
 // VSSScript prints one JSON object: the shadow copies, their storage, the
 // providers and the volumes the shadow copies are mapped through. Every
 // collection is wrapped in @() so that one item stays an array. The scripts
-// hold no double quote, which powershell.exe -Command mangles.
+// hold no double quote, which keeps the command line trivially safe.
 const VSSScript = scriptHead + `function Iso($t) { if ($t) { $t.ToUniversalTime().ToString('o') } }
 [ordered]@{
   shadows = @(Get-CimInstance Win32_ShadowCopy | ForEach-Object { [ordered]@{
@@ -176,7 +176,15 @@ func ParseVSS(b []byte) (VSSInfo, error) {
 // ParseCluster reads ClusterScript's output.
 func ParseCluster(b []byte) (ClusterInfo, error) {
 	var c ClusterInfo
-	return c, decodeScript(b, &c)
+	if err := decodeScript(b, &c); err != nil {
+		return c, err
+	}
+	// Only InvalidNamespace means the host is not a cluster node; a stopped
+	// cluster service or an access denied is a failed read.
+	if c.Absent && c.Native != "InvalidNamespace" {
+		return c, fmt.Errorf("cluster query failed: %s", c.Native)
+	}
+	return c, nil
 }
 
 // decodeScript refuses output that is not UTF-8 rather than letting
@@ -222,9 +230,15 @@ func SQLWriterLog(ini []byte, defaultDir string) (dir, stem, ext string) {
 		if !ok || v == "" || !strings.EqualFold(section, "[Logging]") || !strings.EqualFold(strings.TrimSpace(k), "TraceFile") {
 			continue
 		}
+		if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+			v = v[1 : len(v)-1]
+		}
 		base := v
 		if i := strings.LastIndexAny(v, `\/`); i >= 0 {
 			dir, base = v[:i], v[i+1:]
+			if dir == "" || strings.HasSuffix(dir, ":") { // a bare D: is drive-relative
+				dir = v[:i+1]
+			}
 		}
 		stem, ext = base, ""
 		if i := strings.LastIndex(base, "."); i > 0 {

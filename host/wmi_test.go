@@ -25,11 +25,23 @@ func TestScriptsAreVisibleAndPlain(t *testing.T) {
 		regexp.MustCompile(`(?i)Invoke-Expression`),
 		regexp.MustCompile(`(?i)\biex\b`),
 		regexp.MustCompile(`[A-Za-z0-9+/=]{40,}`),
+		regexp.MustCompile(`"`),
 	}
 	for name, s := range map[string]string{"VSSScript": VSSScript, "ClusterScript": ClusterScript} {
 		for _, re := range bad {
 			if m := re.FindString(s); m != "" {
 				t.Errorf("%s holds %q (%s)", name, m, re)
+			}
+		}
+	}
+}
+
+func TestScriptsWrapEveryCollection(t *testing.T) {
+	keys := regexp.MustCompile(`\b(shadows|storage|providers|volumes|nodes|networks|groups|resources) = `)
+	for name, s := range map[string]string{"VSSScript": VSSScript, "ClusterScript": ClusterScript} {
+		for _, m := range keys.FindAllStringIndex(s, -1) {
+			if !strings.HasPrefix(s[m[1]:], "@(") {
+				t.Errorf("%s: %q is not followed by @(", name, s[m[0]:m[1]])
 			}
 		}
 	}
@@ -127,6 +139,13 @@ func TestParseClusterAbsent(t *testing.T) {
 	}
 }
 
+func TestParseClusterOtherErrorIsFailure(t *testing.T) {
+	c, err := ParseCluster([]byte(`{"absent":true,"native":"AccessDenied"}`))
+	if err == nil || !strings.Contains(err.Error(), "cluster query failed: AccessDenied") {
+		t.Errorf("got %+v, %v, want an error naming AccessDenied", c, err)
+	}
+}
+
 func TestParseClusterRefusesNonUTF8(t *testing.T) {
 	b := readFixture(t, "wmi-cluster.json")
 	c, err := ParseCluster(b)
@@ -167,6 +186,9 @@ func TestSQLWriterLog(t *testing.T) {
 		// The lab's TraceFile is the default path, so only a custom one shows
 		// that UTF-16LE is decoded at all.
 		{"custom UTF-16LE", utf16le(custom), `D:\logs`, "w", ".txt"},
+		{"drive root", []byte("[Logging]\nTraceFile=D:\\w.txt\n"), `D:\`, "w", ".txt"},
+		{"quoted", []byte("[Logging]\nTraceFile=\"D:\\my logs\\w.txt\"\n"), `D:\my logs`, "w", ".txt"},
+		{"dot in stem", []byte("[Logging]\nTraceFile=D:\\logs\\sql.writer.txt\n"), `D:\logs`, "sql.writer", ".txt"},
 		{"commented", []byte("[Logging]\n; TraceFile=D:\\logs\\w.txt\n"), def, "SqlWriterLogger", ".txt"},
 		{"other section", []byte("[Other]\nTraceFile=D:\\logs\\w.txt\n"), def, "SqlWriterLogger", ".txt"},
 		{"empty", nil, def, "SqlWriterLogger", ".txt"},
