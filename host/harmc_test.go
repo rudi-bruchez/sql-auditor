@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"strings"
 	"testing"
+	"time"
 
 	mssql "github.com/microsoft/go-mssqldb"
 )
@@ -152,5 +154,104 @@ func TestHarmC_DisclosureNamesSysadminAndExtensionSettings(t *testing.T) {
 		if !strings.Contains(strings.Join(strings.Fields(disclosure), " "), s) {
 			t.Errorf("the disclosure lacks %q", s)
 		}
+	}
+}
+
+// The guards the harm review could break without a test noticing.
+
+// The PowerShell child: the executable by its absolute path, no profile, the
+// script as a visible command line, PSModulePath narrowed, 120 s at most.
+func TestHarmC_PowerShellCommand(t *testing.T) {
+	if psTimeout != 120*time.Second {
+		t.Errorf("psTimeout = %v, want 120 s", psTimeout)
+	}
+	cmd, ctx, cancel := psCommand(context.Background(), `C:\Windows\system32`, "Get-Date", []string{`PSModulePath=C:\planted`, `PATH=C:\Windows`})
+	defer cancel()
+	want := []string{`C:\Windows\system32\WindowsPowerShell\v1.0\powershell.exe`, "-NoProfile", "-NonInteractive", "-Command", "Get-Date"}
+	if fmt.Sprint(cmd.Args) != fmt.Sprint(want) {
+		t.Errorf("args %q, want %q", cmd.Args, want)
+	}
+	if want := []string{`PATH=C:\Windows`, `PSModulePath=C:\Windows\system32\WindowsPowerShell\v1.0\Modules`}; fmt.Sprint(cmd.Env) != fmt.Sprint(want) {
+		t.Errorf("env %q, want %q", cmd.Env, want)
+	}
+	d, ok := ctx.Deadline()
+	if left := time.Until(d); !ok || left > 120*time.Second || left < 110*time.Second {
+		t.Errorf("deadline in %v (set %v), want 120 s", left, ok)
+	}
+}
+
+func TestHarmC_JobStepsQueryHint(t *testing.T) {
+	if !strings.HasSuffix(jobStepsSQL, " OPTION (RECOMPILE, MAXDOP 1);") {
+		t.Errorf("the job steps query does not end with OPTION (RECOMPILE, MAXDOP 1):\n%s", jobStepsSQL)
+	}
+}
+
+// A capped query stops the reader at its cap plus one event, the one that
+// tells a truncation apart, rather than reading the channel through.
+func TestHarmC_CapStopsAtOneMore(t *testing.T) {
+	c := fakeCalls()
+	c.capOverride = 3
+	fed := 0
+	c.Query = func(_ context.Context, _, xpath string, _ bool, each func([]byte, string) bool) error {
+		if !strings.Contains(xpath, "Level=1") {
+			return nil
+		}
+		for i := range 10 {
+			fed++
+			if !each(eventAt(100-i, sourcesSince.Add(time.Duration(100-i)*time.Hour)), "") {
+				break
+			}
+		}
+		return nil
+	}
+	readNamed(t, c, "010.events-system", Env{Since: sourcesSince}, &recordingSink{})
+	if fed != 4 {
+		t.Errorf("the reader was fed %d events, want the cap of 3 plus one", fed)
+	}
+}
+
+// The extension logs are copied up to 50 MiB: 30 and 20 MiB fit exactly, one
+// more byte does not.
+func TestHarmC_ExtensionBudgetIsFiftyMiB(t *testing.T) {
+	fsys := sizedFS{
+		"a.log": {name: "a.log", size: 30 * mib, mod: sourcesSince.Add(3 * time.Hour)},
+		"b.log": {name: "b.log", size: 20 * mib, mod: sourcesSince.Add(2 * time.Hour)},
+		"c.log": {name: "c.log", size: 1, mod: sourcesSince.Add(time.Hour)},
+	}
+	c := fakeCalls()
+	c.AzurePlugins = `C:\WindowsAzure\Logs\Plugins`
+	c.OpenDir = func(string) (fs.FS, error) { return fsys, nil }
+	s := &recordingSink{}
+	res := readNamed(t, c, "060.vm-extensions", Env{Since: sourcesSince}, s)
+	got := map[string]string{}
+	for _, l := range listedIn(t, s) {
+		got[l.Path] = fmt.Sprintf("copied %v %s", l.Copied, l.Reason)
+	}
+	want := map[string]string{
+		c.AzurePlugins + `\a.log`: "copied true ",
+		c.AzurePlugins + `\b.log`: "copied true ",
+		c.AzurePlugins + `\c.log`: "copied false over the 50 MiB budget",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) || res.Count != 2 {
+		t.Errorf("listed %v, count %d\nwant %v, count 2", got, res.Count, want)
+	}
+}
+
+// An error that only Close reports, the zip's buffered tail failing to reach
+// the disk, removes the archive and exits 2, as a write error does.
+func TestHarmC_RunFailsOnCloseError(t *testing.T) {
+	var putErr error
+	p := fakePlatform(Source{Name: "010.a", Read: func(_ context.Context, _ Env, put FileSink) SourceResult {
+		putErr = put("010.a.json", strings.NewReader("{}"))
+		return SourceResult{Status: StatusRead, Count: 1}
+	}})
+	o := runOptions(t, p)
+	o.wrapArchive = func(w io.Writer) io.Writer { return &failingWriter{w: w, fail: true} }
+	code := Run(context.Background(), o)
+	if putErr != nil {
+		t.Fatalf("the source's write failed (%v): the error must come from Close for this test", putErr)
+	}
+	if code != 2 || len(dirEntries(t, o.To)) != 0 || strings.Contains(stdout(o), ".zip") {
+		t.Errorf("exit %d, left %v, stdout %q; want 2, nothing, no archive line", code, dirEntries(t, o.To), stdout(o))
 	}
 }

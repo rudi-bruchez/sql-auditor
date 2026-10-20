@@ -2,10 +2,13 @@ package host
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
+	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -35,6 +38,22 @@ func psEnv(environ []string, systemDir string) []string {
 		}
 	}
 	return append(out, `PSModulePath=`+systemDir+`\WindowsPowerShell\v1.0\Modules`)
+}
+
+// psTimeout bounds one script: a WMI provider that hangs costs its source,
+// not the run.
+const psTimeout = 120 * time.Second
+
+// psCommand is the PowerShell child of one script: Windows PowerShell by its
+// absolute path under systemDir, never a name PATH resolves, the script as a
+// visible command line, never -EncodedCommand, no profile, the environment of
+// psEnv, and psTimeout from ctx. The context returned is the command's; cancel
+// releases it.
+func psCommand(ctx context.Context, systemDir, script string, environ []string) (*exec.Cmd, context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(ctx, psTimeout)
+	cmd := exec.CommandContext(ctx, systemDir+`\WindowsPowerShell\v1.0\powershell.exe`, "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd.Env = psEnv(environ, systemDir)
+	return cmd, ctx, cancel
 }
 
 // scriptHead starts every script. Windows PowerShell 5.1 writes redirected

@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unicode/utf16"
 	"unsafe"
 )
@@ -190,15 +189,11 @@ func utf16PtrToString(p *uint16) string {
 	return string(utf16.Decode(unsafe.Slice(p, n)))
 }
 
-// powerShell runs a script in Windows PowerShell by its absolute path, as a
-// visible command line, never -EncodedCommand, with PSModulePath narrowed to
-// the system modules (psEnv; the script's psPreamble is the real guard).
+// powerShell runs a script as psCommand builds it, with PSModulePath narrowed
+// to the system modules (psEnv; the script's psPreamble is the real guard).
 func powerShell(ctx context.Context, script string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	cmd, _, cancel := psCommand(ctx, systemDir(), script, os.Environ())
 	defer cancel()
-	exe := filepath.Join(systemDir(), `WindowsPowerShell\v1.0\powershell.exe`)
-	cmd := exec.CommandContext(ctx, exe, "-NoProfile", "-NonInteractive", "-Command", script)
-	cmd.Env = psEnv(os.Environ(), systemDir())
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
