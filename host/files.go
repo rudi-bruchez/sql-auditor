@@ -1,6 +1,7 @@
 package host
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 // CopiedFile is one file copied into the archive.
@@ -35,15 +37,58 @@ type Listed struct {
 type FileSink func(archived string, r io.Reader) error
 
 // PathCheck says whether a directory may be listed, judged before anything
-// opens it. On Windows: on a local fixed drive, no symbolic link on the way.
-type PathCheck func(path string) (ok bool, reason string)
+// opens it, and gives its final path, taken once after the check, against
+// which openIn judges every file opened under it: "" when the directory does
+// not exist. On Windows: on a local fixed drive, no symbolic link and no
+// directory junction on the way.
+type PathCheck func(path string) (final string, ok bool, reason string)
 
 // OpenFile opens a file to copy it, once: the handle it returns is the one
-// judged, so nothing swapped in between a check and an open is read. A reason
-// means refused, and f is nil. On Windows: the path itself is not followed if
-// it is a link, a link or a directory is refused, and the handle's final path
-// must lie on a local fixed drive. size is read from the same handle.
-type OpenFile func(path string) (f io.ReadSeekCloser, size int64, reason string, err error)
+// judged, so nothing swapped in at the file between a check and an open is
+// read. A reason means refused, and f is nil. On Windows: the path itself is
+// not followed if it is a link, a link, a hard link or a directory is refused,
+// and the handle's final path must lie on a local fixed drive. size and final,
+// the handle's final path, are read from the same handle.
+type OpenFile func(path string) (f io.ReadSeekCloser, size int64, final, reason string, err error)
+
+// openIn opens path through open and refuses it unless its final path is
+// want, the final path PathCheck gave for the directory it was listed under
+// joined to the rest of path: a component of that directory swapped for a
+// link after the check would lead elsewhere.
+func openIn(open OpenFile, path, want string) (io.ReadSeekCloser, int64, string, error) {
+	f, size, final, why, err := open(path)
+	if err != nil || why != "" {
+		return nil, 0, why, err
+	}
+	if !strings.EqualFold(final, want) {
+		f.Close()
+		return nil, 0, "moved under a link after the check", nil
+	}
+	return f, size, "", nil
+}
+
+// isVolumeMount reads a REPARSE_DATA_BUFFER and accepts a mount point whose
+// substitute name is a volume, \??\Volume{...}: the failover cluster's log
+// volume mounted in a folder. A directory junction has the same tag and leads
+// to any local directory, a private one included, and needs no privilege to
+// plant.
+func isVolumeMount(b []byte) bool {
+	const mountPoint = 0xA0000003 // IO_REPARSE_TAG_MOUNT_POINT
+	if len(b) < 16 || binary.LittleEndian.Uint32(b) != mountPoint {
+		return false
+	}
+	// The path buffer starts at 16; the substitute name's offset and length,
+	// in bytes, are at 8 and 10.
+	off, n := 16+int(binary.LittleEndian.Uint16(b[8:])), int(binary.LittleEndian.Uint16(b[10:]))
+	if off+n > len(b) || n%2 != 0 {
+		return false
+	}
+	u := make([]uint16, n/2)
+	for i := range u {
+		u[i] = binary.LittleEndian.Uint16(b[off+2*i:])
+	}
+	return strings.HasPrefix(string(utf16.Decode(u)), `\??\Volume{`)
+}
 
 const (
 	jobOutputFiles  = 5         // per step, the newest
@@ -54,10 +99,11 @@ const (
 // CopyExtensions lists every file under fsys and copies those modified on or
 // after since, newest first, until the next one would exceed budget. fsys is
 // rooted at root, the Windows directory it reads: the paths given to open and
-// listed are root joined to the relative path, with backslashes. A directory
+// listed are root joined to the relative path, with backslashes, and each
+// file's final path must be rootFinal, root's, joined the same way. A directory
 // that cannot be read and a link, which is not followed, are listed with the
 // reason. A missing root is returned as an error wrapping fs.ErrNotExist.
-func CopyExtensions(fsys fs.FS, root string, since time.Time, budget int64, open OpenFile, sink FileSink) ([]Listed, error) {
+func CopyExtensions(fsys fs.FS, root, rootFinal string, since time.Time, budget int64, open OpenFile, sink FileSink) ([]Listed, error) {
 	var listed []Listed
 	var files []int // the regular files: their index in listed, path in fsys, time
 	var rels []string
@@ -114,7 +160,7 @@ func CopyExtensions(fsys fs.FS, root string, since time.Time, budget int64, open
 			l.Reason = fmt.Sprintf("over the %d MiB budget", budget>>20)
 			continue
 		}
-		f, _, why, err := open(l.Path)
+		f, _, why, err := openIn(open, l.Path, rootFinal+`\`+strings.ReplaceAll(rels[k], "/", `\`))
 		if err != nil {
 			return listed, err
 		}
@@ -166,7 +212,8 @@ func copyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, left
 	if p.Reason != "" {
 		notes = append(notes, p.Reason)
 	}
-	if ok, why := c.DirCheck(p.Dir); !ok {
+	final, ok, why := c.DirCheck(p.Dir)
+	if !ok {
 		return nil, append(notes, p.Dir+": "+why), nil
 	}
 	fsys, err := c.OpenDir(p.Dir)
@@ -207,14 +254,14 @@ func copyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, left
 
 	var copied []CopiedFile
 	for _, info := range infos {
-		// The path opened is the file's final path: no link is followed, in
-		// the directory (DirCheck) or at the file (OpenFile).
+		// No link is followed, in the directory (DirCheck, then openIn) or at
+		// the file (OpenFile).
 		src := strings.TrimRight(p.Dir, `\/`) + `\` + info.Name()
 		if *left < 0 {
 			notes = append(notes, src+": budget reached, not copied")
 			continue
 		}
-		f, size, why, err := c.OpenFile(src)
+		f, size, why, err := openIn(c.OpenFile, src, final+`\`+info.Name())
 		if err != nil {
 			return copied, notes, err
 		}
@@ -264,9 +311,11 @@ func TailReader(f io.ReadSeeker, size, limit int64) (io.Reader, bool, error) {
 	return io.LimitReader(f, limit), true, nil
 }
 
-// isDriveAbsolute reports X:\ or X:/, the only directory form read: a relative
-// or drive-relative (C:Logs) path depends on the current directory.
+// isDriveAbsolute reports X:\ or X:/, the only directory form read, after a
+// leading \\?\, which is local: a relative or drive-relative (C:Logs) path
+// depends on the current directory.
 func isDriveAbsolute(p string) bool {
+	p = strings.TrimPrefix(p, `\\?\`)
 	return len(p) >= 3 && ('A' <= p[0] && p[0] <= 'Z' || 'a' <= p[0] && p[0] <= 'z') &&
 		p[1] == ':' && (p[2] == '\\' || p[2] == '/')
 }

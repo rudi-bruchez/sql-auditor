@@ -331,27 +331,46 @@ Only when the instance answered.
   them expand under the rules above.
 - Only local paths on a fixed drive are read: the command reads this
   machine, not a share an elevated account happens to reach. A UNC path, a
-  mapped or removable drive, or a symbolic link is recorded with the step and
-  not read. A volume mount point or a junction on a local disk, common for log
-  directories on a failover cluster instance, can only lead to a local volume
-  and is read.
+  mapped or removable drive, a symbolic link or a directory junction is
+  recorded with the step and not read. A volume mount point, common for log
+  directories on a failover cluster instance, leads to a local volume and is
+  read: its reparse data (`FSCTL_GET_REPARSE_POINT`) names `\??\Volume{...}`.
+  A directory junction has the same reparse tag but names a directory, and
+  any user may create one where they can create a folder (`C:\WindowsAzure`
+  on a machine that is not an Azure VM, a job output directory that does not
+  exist yet): followed, it would export a private directory under the log's
+  name (harm review, batch D).
 - The directory is judged as typed before it is listed, since listing a share
   already sends the account's credentials to it: its drive letter must be a
   local fixed drive (`GetDriveType`), each of its components is read from its
   parent's listing (`FindFirstFile`, which does not traverse it) and refused
-  if it is a symbolic link, and its volume (`GetVolumePathName`) must be a
-  local fixed drive. A junction's own target is not walked. The same applies
-  to SQL Writer's directory and to the extension logs' folder.
+  if it is a symbolic link or a directory junction, and its volume
+  (`GetVolumePathName`) must be a local fixed drive. Its final path
+  (`GetFinalPathNameByHandle`) is then taken once. The same applies to SQL
+  Writer's directory and to the extension logs' folder. A path written
+  `\\?\C:\...` is local and judged as `C:\...`.
 - A link in the directory is not followed, whatever it points to: a matching
   one is recorded with the step, so a planted link cannot export a private
   file under the log's name.
 - Each file is opened once, without following it if it is a link
   (`FILE_FLAG_OPEN_REPARSE_POINT`), and judged by the handle it is copied
-  from: a link or a directory is refused, and the handle's final path
+  from: a symbolic link or a junction (a name surrogate reparse point), a
+  file with more than one name (a hard link planted to a private file) or a
+  directory is refused, and the handle's final path
   (`GetFinalPathNameByHandle`, then `GetVolumePathName` and `GetDriveType`)
-  must be on a local fixed drive. Nothing swapped in between a check and an
-  open can be read. SQL Writer's log and the extension logs are opened the
-  same way.
+  must be on a local fixed drive. Another reparse point, a deduplicated
+  file, is read through its filter. A WOF-compressed file is still not read:
+  Go lists it as irregular, and the listing records it as a link before it is
+  opened. The file's final path must
+  also be the directory's final path, taken after its check, joined to the
+  file's name (for the extension logs, walked recursively, to its path under
+  the folder), compared without case: a component of the directory swapped
+  for a link after the check leads elsewhere, and the file is refused, "moved
+  under a link after the check". A swap at the file itself, or of a
+  component after the directory's final path was taken, cannot be read. A
+  swap between the component walk and the taking of the final path, a few
+  system calls apart, is not caught. SQL Writer's log and the extension logs
+  are opened the same way.
 - Per step, the five newest files written in the window, each cut to its last
   1 MiB, and at most 100 MiB for all the steps together, counted in the bytes
   copied; the files past it are recorded "budget reached, not copied" (harm

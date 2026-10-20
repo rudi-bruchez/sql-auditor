@@ -267,7 +267,8 @@ func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResul
 		return failed(err)
 	}
 	dir, stem, ext := SQLWriterLog(ini, shared)
-	if ok, why := c.DirCheck(dir); !ok {
+	final, ok, why := c.DirCheck(dir)
+	if !ok {
 		return SourceResult{Status: StatusRead, Notes: []string{dir + ": " + why}}
 	}
 	fsys, err := c.OpenDir(dir)
@@ -287,7 +288,7 @@ func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResul
 			continue
 		}
 		src := strings.TrimRight(dir, `\/`) + `\` + d.Name()
-		f, size, why, err := c.OpenFile(src)
+		f, size, why, err := openIn(c.OpenFile, src, final+`\`+d.Name())
 		if err == nil && why != "" {
 			res.Notes = append(res.Notes, src+": "+why)
 			continue
@@ -340,7 +341,8 @@ func (c Calls) readPower(_ context.Context, _ Env, put FileSink) SourceResult {
 // window. No folder means not an Azure VM, or no extension. A folder DirCheck
 // refuses is a note over an empty listing, as a refused file is.
 func (c Calls) readExtensions(_ context.Context, e Env, put FileSink) SourceResult {
-	if ok, why := c.DirCheck(c.AzurePlugins); !ok {
+	final, ok, why := c.DirCheck(c.AzurePlugins)
+	if !ok {
 		res := written(put, "060.vm-extensions.json", []Listed{}, 0)
 		res.Notes = []string{c.AzurePlugins + ": " + why}
 		return res
@@ -348,7 +350,7 @@ func (c Calls) readExtensions(_ context.Context, e Env, put FileSink) SourceResu
 	fsys, err := c.OpenDir(c.AzurePlugins)
 	var listed []Listed
 	if err == nil {
-		listed, err = CopyExtensions(fsys, c.AzurePlugins, e.Since, extensionBudget, c.OpenFile, put)
+		listed, err = CopyExtensions(fsys, c.AzurePlugins, final, e.Since, extensionBudget, c.OpenFile, put)
 	}
 	if errors.Is(err, fs.ErrNotExist) {
 		return SourceResult{Status: StatusAbsent, Reason: c.AzurePlugins + " not found: not an Azure VM, or no extension"}

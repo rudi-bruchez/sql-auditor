@@ -26,29 +26,29 @@ func TestWinLocalFixed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok, why := localFixed(syscall.Handle(f.Fd()))
+	_, why := localFixed(syscall.Handle(f.Fd()))
 	f.Close()
-	if !ok {
+	if why != "" {
 		t.Errorf("localFixed refused %s: %s", name, why)
 	}
-	if r, size, why, err := openFile(name); err != nil || why != "" || size != 3 {
+	if r, size, _, why, err := openFile(name); err != nil || why != "" || size != 3 {
 		t.Errorf("openFile(%s): size %d, reason %q, %v; want it opened", name, size, why, err)
 	} else {
 		r.Close()
 	}
-	if _, _, why, err := openFile(dir); err != nil || why != "a directory" {
+	if _, _, _, why, err := openFile(dir); err != nil || why != "a directory" {
 		t.Errorf("openFile(%s): reason %q, %v; want a directory", dir, why, err)
 	}
-	if ok, why := dirCheck(dir); !ok {
+	if _, ok, why := dirCheck(dir); !ok {
 		t.Errorf("dirCheck refused %s: %s", dir, why)
 	}
 
-	if ok, _ := dirCheck(`\\localhost\C$\Windows`); ok {
+	if _, ok, _ := dirCheck(`\\localhost\C$\Windows`); ok {
 		t.Errorf("dirCheck accepted an administrative share")
 	}
 
 	share := `\\localhost\C$\Windows\System32\drivers\etc\hosts`
-	r, _, why, err := openFile(share)
+	r, _, _, why, err := openFile(share)
 	switch {
 	case err != nil:
 		t.Fatalf("openFile(%s): %v", share, err)
@@ -73,7 +73,7 @@ func TestWinOpenFileRefusesLink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("no symbolic link on this runner (%v): the link case is not tested", err)
 	}
-	if r, _, why, err := openFile(link); err != nil || why != "link, not followed" {
+	if r, _, _, why, err := openFile(link); err != nil || why != "link, not followed" {
 		if r != nil {
 			r.Close()
 		}

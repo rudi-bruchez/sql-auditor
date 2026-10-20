@@ -47,28 +47,35 @@ func (s *recordingSink) sink(keep bool) FileSink {
 	}
 }
 
-func acceptAll(string) (bool, string) { return true, "" }
+// acceptAll accepts every directory, giving as its final path what finalOf
+// gives, which fsOpen gives for the files under it.
+func acceptAll(dir string) (string, bool, string) {
+	return finalOf(strings.TrimRight(dir, `\/`)), true, ""
+}
+
+// finalOf is the final path the doubles give for a path as typed.
+func finalOf(p string) string { return `\\?\` + p }
 
 // fsOpen is the portable double of the Windows OpenFile over fsys, rooted at
 // the Windows directory root: a link is refused by Lstat, then the file is
 // opened, and its size read from what was opened.
 func fsOpen(fsys fs.FS, root string) OpenFile {
-	return func(p string) (io.ReadSeekCloser, int64, string, error) {
+	return func(p string) (io.ReadSeekCloser, int64, string, string, error) {
 		rel := strings.ReplaceAll(strings.TrimPrefix(strings.TrimPrefix(p, root), `\`), `\`, "/")
 		if info, err := fs.Lstat(fsys, rel); err == nil && info.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
-			return nil, 0, "link, not followed", nil
+			return nil, 0, "", "link, not followed", nil
 		}
 		f, err := fsys.Open(rel)
 		if err != nil {
-			return nil, 0, "not opened: " + err.Error(), nil
+			return nil, 0, "", "not opened: " + err.Error(), nil
 		}
 		info, err := f.Stat()
 		rs, ok := f.(io.ReadSeekCloser)
 		if err != nil || !ok {
 			f.Close()
-			return nil, 0, "", fmt.Errorf("%s: no size or no seek (%v)", p, err)
+			return nil, 0, "", "", fmt.Errorf("%s: no size or no seek (%v)", p, err)
 		}
-		return rs, info.Size(), "", nil
+		return rs, info.Size(), finalOf(p), "", nil
 	}
 }
 
@@ -162,7 +169,7 @@ func TestCopyExtensionsBudgetNewestFirst(t *testing.T) {
 		"c.log": {name: "c.log", size: 10 * mib, mod: since.Add(1 * time.Hour)},
 	}
 	var rec recordingSink
-	listed, err := CopyExtensions(fsys, `C:\P`, since, 50*mib, fsOpen(fsys, `C:\P`), rec.sink(false))
+	listed, err := CopyExtensions(fsys, `C:\P`, finalOf(`C:\P`), since, 50*mib, fsOpen(fsys, `C:\P`), rec.sink(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +195,7 @@ func TestCopyExtensionsOldFilesListedNotCopied(t *testing.T) {
 		"Ext/1.0/new.log": {Data: []byte("new"), ModTime: since},
 	}
 	var rec recordingSink
-	listed, err := CopyExtensions(fsys, `C:\WindowsAzure\Logs\Plugins`, since, 50*mib, fsOpen(fsys, `C:\WindowsAzure\Logs\Plugins`), rec.sink(true))
+	listed, err := CopyExtensions(fsys, `C:\WindowsAzure\Logs\Plugins`, finalOf(`C:\WindowsAzure\Logs\Plugins`), since, 50*mib, fsOpen(fsys, `C:\WindowsAzure\Logs\Plugins`), rec.sink(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +231,7 @@ func TestCopyExtensionsUnreadableDirListed(t *testing.T) {
 		"Good/1.0/y.log": {Data: []byte("y"), ModTime: since},
 	}, bad: "Bad"}
 	var rec recordingSink
-	listed, err := CopyExtensions(fsys, `C:\P`, since, 50*mib, fsOpen(fsys, `C:\P`), rec.sink(false))
+	listed, err := CopyExtensions(fsys, `C:\P`, finalOf(`C:\P`), since, 50*mib, fsOpen(fsys, `C:\P`), rec.sink(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +254,7 @@ func TestCopyExtensionsLinksNotFollowed(t *testing.T) {
 		"Other/b.log":  {Data: []byte("b"), ModTime: since},
 	}
 	var rec recordingSink
-	listed, err := CopyExtensions(fsys, `C:\P`, since, 50*mib, fsOpen(fsys, `C:\P`), rec.sink(false))
+	listed, err := CopyExtensions(fsys, `C:\P`, finalOf(`C:\P`), since, 50*mib, fsOpen(fsys, `C:\P`), rec.sink(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,15 +280,15 @@ func TestCopyExtensionsRefusedUsesNoBudget(t *testing.T) {
 		"b.log": {name: "b.log", size: 20 * mib, mod: since.Add(1 * time.Hour)},
 	}
 	var asked []string
-	open := func(p string) (io.ReadSeekCloser, int64, string, error) {
+	open := func(p string) (io.ReadSeekCloser, int64, string, string, error) {
 		asked = append(asked, p)
 		if p == `C:\P\a.log` {
-			return nil, 0, "network drive", nil
+			return nil, 0, "", "network drive", nil
 		}
 		return fsOpen(fsys, `C:\P`)(p)
 	}
 	var rec recordingSink
-	listed, err := CopyExtensions(fsys, `C:\P`, since, 50*mib, open, rec.sink(false))
+	listed, err := CopyExtensions(fsys, `C:\P`, finalOf(`C:\P`), since, 50*mib, open, rec.sink(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +312,7 @@ func TestCopyExtensionsStopsAtFirstOverBudget(t *testing.T) {
 		"c.log": {name: "c.log", size: 5 * mib, mod: since.Add(1 * time.Hour)},
 	}
 	var rec recordingSink
-	listed, err := CopyExtensions(fsys, `C:\P`, since, 50*mib, fsOpen(fsys, `C:\P`), rec.sink(false))
+	listed, err := CopyExtensions(fsys, `C:\P`, finalOf(`C:\P`), since, 50*mib, fsOpen(fsys, `C:\P`), rec.sink(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +330,7 @@ func TestCopyExtensionsGrowingFileCutAtListedSize(t *testing.T) {
 	since := time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)
 	fsys := sizedFS{"a.log": {name: "a.log", size: 10, mod: since, extra: mib}}
 	var rec recordingSink
-	if _, err := CopyExtensions(fsys, `C:\P`, since, 50*mib, fsOpen(fsys, `C:\P`), rec.sink(false)); err != nil {
+	if _, err := CopyExtensions(fsys, `C:\P`, finalOf(`C:\P`), since, 50*mib, fsOpen(fsys, `C:\P`), rec.sink(false)); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(rec.sizes, []int64{10}) {
@@ -332,7 +339,7 @@ func TestCopyExtensionsGrowingFileCutAtListedSize(t *testing.T) {
 }
 
 func TestCopyExtensionsMissingRoot(t *testing.T) {
-	_, err := CopyExtensions(os.DirFS(filepath.Join(t.TempDir(), "missing")), `C:\P`, time.Time{}, 50*mib, fsOpen(fstest.MapFS{}, `C:\P`), (&recordingSink{}).sink(false))
+	_, err := CopyExtensions(os.DirFS(filepath.Join(t.TempDir(), "missing")), `C:\P`, finalOf(`C:\P`), time.Time{}, 50*mib, fsOpen(fstest.MapFS{}, `C:\P`), (&recordingSink{}).sink(false))
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("err %v, want fs.ErrNotExist", err)
 	}
@@ -429,9 +436,9 @@ func TestOpenFileRefusalIsRecorded(t *testing.T) {
 	m := fstest.MapFS{n: {Data: []byte("x"), ModTime: since.Add(time.Hour)}}
 	var asked []string
 	c := jobCalls(m, `X:\Logs`)
-	c.OpenFile = func(path string) (io.ReadSeekCloser, int64, string, error) {
+	c.OpenFile = func(path string) (io.ReadSeekCloser, int64, string, string, error) {
 		asked = append(asked, path)
-		return nil, 0, "network drive", nil
+		return nil, 0, "", "network drive", nil
 	}
 	var rec recordingSink
 	copied, notes, err := CopyJobOutputs(c, olaPattern(t, `X:\Logs`), "Backup_1", since, rec.sink(false))

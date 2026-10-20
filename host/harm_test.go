@@ -122,11 +122,11 @@ func (nopReadSeekCloser) Close() error { return nil }
 // listed name, and a refusal of that handle (the replacement is a link) is
 // recorded where a refusal is.
 func swappedOpen(refused string) OpenFile {
-	return func(p string) (io.ReadSeekCloser, int64, string, error) {
+	return func(p string) (io.ReadSeekCloser, int64, string, string, error) {
 		if strings.HasSuffix(p, `\`+refused) {
-			return nil, 0, "link, not followed", nil
+			return nil, 0, "", "link, not followed", nil
 		}
-		return nopReadSeekCloser{strings.NewReader("opened")}, 6, "", nil
+		return nopReadSeekCloser{strings.NewReader("opened")}, 6, finalOf(p), "", nil
 	}
 }
 
@@ -204,7 +204,7 @@ func TestHarmA_DirCheckBeforeOpenDir(t *testing.T) {
 	setup := func(t *testing.T) (Calls, *[]string) {
 		c := fakeCalls()
 		var asked []string
-		c.DirCheck = func(dir string) (bool, string) { asked = append(asked, dir); return false, "network drive" }
+		c.DirCheck = func(dir string) (string, bool, string) { asked = append(asked, dir); return "", false, "network drive" }
 		c.OpenDir = func(dir string) (fs.FS, error) {
 			t.Errorf("OpenDir(%q) called on a refused directory", dir)
 			return fstest.MapFS{}, nil
