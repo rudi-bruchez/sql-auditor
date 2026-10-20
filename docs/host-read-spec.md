@@ -81,7 +81,8 @@ On Windows, on the machine that hosts the instance, from an elevated prompt.
   Microsoft support since October 2023.
 - A process that is not elevated is refused before any read, with "run from an
   elevated prompt". The check is the token's elevation
-  (`windows.GetCurrentProcessToken().IsElevated()`), not a membership test: a
+  (`TokenElevation` read through `syscall.OpenProcessToken` and
+  `syscall.GetTokenInformation`), not a membership test: a
   non-elevated member of Administrators cannot enumerate filter drivers or read
   every log channel.
 - When the instance answers, the machine check is the one of
@@ -119,9 +120,8 @@ this order, and the manifest says which rule decided it:
    several, or none, the source is undecided.
 
 The services are listed through the service manager opened with
-`SC_MANAGER_ENUMERATE_SERVICE` only (`windows.OpenSCManager`, wrapped in a
-`mgr.Mgr` of `golang.org/x/sys/windows/svc/mgr`, whose `Connect` asks for full
-access). When the source is undecided, the queries that need it (2 and 3b
+`SC_MANAGER_ENUMERATE_SERVICE` only (`OpenSCManagerW`, then
+`EnumServicesStatusExW` over every state). When the source is undecided, the queries that need it (2 and 3b
 below) are not run, and the manifest says why.
 
 Those queries, and the job output files, belong to one instance. The machine
@@ -454,17 +454,23 @@ existing product reads it.
 - No PowerShell launched with `-EncodedCommand`. That is what EDRs flag on a
   production server, and the client's EDR is sometimes the subject of the
   audit.
-- `golang.org/x/sys/windows` (already a dependency) wraps the elevation check,
-  `GetComputerNameEx` and the service manager, and none of `wevtapi.dll`,
-  `fltlib.dll` or `powrprof.dll`: those calls are declared by hand with
-  `windows.NewLazySystemDLL`, which loads only from the system directory. Event
-  Log handles are used from one OS thread (`runtime.LockOSThread`), as the API
-  expects.
+- No new module. `golang.org/x/sys` is only an indirect dependency, and the
+  repository keeps it so on purpose (`tui/screen/terminal_windows.go`: the
+  tool's public argument is one module beyond the SQL driver). The Windows calls
+  go through the standard `syscall` package. Every DLL that is not one Go
+  itself loads from the system directory (`wevtapi.dll`, `fltlib.dll`,
+  `powrprof.dll`, `advapi32.dll` for the service manager) is loaded by its
+  absolute path in the system directory, from `GetSystemDirectoryW` in
+  `kernel32.dll`: the process is elevated, and a bare name would let a DLL left
+  beside the executable be loaded instead (the `syscall.LoadDLL` documentation
+  warns of it). Event Log handles are used from one OS thread
+  (`runtime.LockOSThread`), as the API expects.
 - WMI serves `Win32_ShadowCopy`, `Win32_ShadowStorage`, `Win32_ShadowProvider`,
-  `Win32_Volume`, and the `MSCluster_*` classes in `root\MSCluster`. How WMI is
-  reached (a new dependency on a COM binding, or a visible
-  `powershell.exe -NoProfile -Command` running `Get-CimInstance`) is the
-  builder's call, stated in the plan, and the same for all of them.
+  `Win32_Volume`, and the `MSCluster_*` classes in `root\MSCluster`, all
+  through `Get-CimInstance` in a visible
+  `powershell.exe -NoProfile -NonInteractive -Command`, the executable named by
+  its absolute path under the system directory, the script text a constant of
+  the source: a COM binding would be a new module. (Decided in the plan.)
 - `dumps` is not built yet. `host` does not wait for it: the pieces the two
   share (the flag allowlist, the machine check, the timestamped exclusive zip
   removed on interrupt) are written once, in a place `dumps` will reuse, and the
