@@ -206,6 +206,20 @@ func TestParseServerRejectsGarbage(t *testing.T) {
 	}
 }
 
+func TestServerInstance(t *testing.T) {
+	for in, want := range map[string]string{
+		"SQL01":               "",
+		`SQL01\PROD`:          "PROD",
+		`tcp:SQL01\PROD,1433`: "PROD",
+		"SQL01,1433":          "",
+	} {
+		got, err := ServerInstance(in)
+		if err != nil || got != want {
+			t.Errorf("ServerInstance(%q) = (%q, %v), want (%q, nil)", in, got, err, want)
+		}
+	}
+}
+
 func TestQuoteNameEscapesBracket(t *testing.T) {
 	if got := quoteName("we[i]rd"); got != "[we[i]]rd]" {
 		t.Errorf("quoteName = %q", got)
