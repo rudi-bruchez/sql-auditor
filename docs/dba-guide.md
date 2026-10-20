@@ -2614,7 +2614,7 @@ of these decides, the queries on the instance's own source are not run, and
 The job output files are read only when the instance answered on this machine.
 Their paths come from `msdb.dbo.sysjobsteps`, with the Agent tokens expanded
 (`SQLLOGDIR`, `JOBNAME`, `STEPNAME`, `STEPID`, `JOBID`; `DATE`, `TIME`,
-`STRTDT` and `STRTTM` match any value), which finds the files of Ola
+`STRTDT` and `STRTTM` match any date or time), which finds the files of Ola
 Hallengren's maintenance solution. Only files on a local fixed drive are read:
 a UNC path, a mapped or removable drive, or a link leading to one is recorded
 with its step and left alone. A login without `SELECT` on
@@ -2661,9 +2661,10 @@ both machines, and the run exits `2`.
 
 `host` writes nothing but its archive, but Windows records some of its activity:
 
-- the WMI queries on the shadow copy classes may start the VSS service on
-  demand; it stops by itself after its idle timeout, and its start and stop
-  leave `7036` events in the System log;
+- the WMI queries on the shadow copy classes may start the VSS service and
+  the software shadow copy provider (`swprv`) on demand; they stop by
+  themselves after their idle timeout, and each leaves `7036` events in the
+  System log;
 - where process creation auditing is on, the Security log records
   `sql-auditor.exe` and the `powershell.exe` it starts;
 - the VSS and cluster classes are read through

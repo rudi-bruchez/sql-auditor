@@ -325,8 +325,8 @@ Only when the instance answered.
 - Per step, the five newest files written in the window, each cut to its last
   1 MiB.
 - A path that matches nothing is recorded with the step, not guessed.
-- When `msdb.dbo.sysjobsteps` is refused to the login (a `SQLAgentReaderRole`
-  member can read jobs but not this table, see the header of `020.job-steps`),
+- When `msdb.dbo.sysjobsteps` is refused to the login (`SQLAgentReaderRole`
+  reads `sysjobs_view` but not this table, see the header of `020.job-steps`),
   the source is "refused", as `collect` records a refused permission, and does
   not change the exit code. The same holds for a login that may not enter
   `msdb` at all (error 916).

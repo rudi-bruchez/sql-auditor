@@ -47,11 +47,12 @@ type JobStep struct {
 	OutputFile  string // the template as typed, tokens included
 }
 
-const jobStepsSQL = `SELECT j.name, CONVERT(varchar(34), CONVERT(binary(16), j.job_id), 1), s.step_id, s.step_name, s.output_file_name FROM msdb.dbo.sysjobs AS j JOIN msdb.dbo.sysjobsteps AS s ON s.job_id = j.job_id WHERE s.output_file_name IS NOT NULL AND s.output_file_name <> N'' ORDER BY j.name, s.step_id OPTION (RECOMPILE, MAXDOP 1);`
+const jobStepsSQL = `SELECT j.name, CONVERT(varchar(34), CONVERT(binary(16), j.job_id), 1), s.step_id, s.step_name, s.output_file_name FROM msdb.dbo.sysjobs_view AS j JOIN msdb.dbo.sysjobsteps AS s ON s.job_id = j.job_id WHERE s.output_file_name IS NOT NULL AND s.output_file_name <> N'' ORDER BY j.name, s.step_id OPTION (RECOMPILE, MAXDOP 1);`
 
 // ReadJobSteps runs jobStepsSQL. refused is true when the login may not read
-// msdb.dbo.sysjobsteps (a SQLAgentReaderRole member can read jobs but not this
-// table): the source is then refused, not failed.
+// msdb.dbo.sysjobsteps (SQLAgentReaderRole reads sysjobs_view, but sysjobsteps
+// needs its own grant, see collect/grants.go): the source is then refused, not
+// failed.
 func ReadJobSteps(ctx context.Context, c *sql.Conn) (steps []JobStep, refused bool, err error) {
 	rows, err := c.QueryContext(ctx, jobStepsSQL)
 	if err != nil {
