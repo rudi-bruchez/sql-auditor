@@ -21,7 +21,7 @@ var sourcesSince = time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)
 // fakeCalls answers every primitive with nothing: no event, no file.
 func fakeCalls() Calls {
 	return Calls{
-		Query:      func(context.Context, string, string, func([]byte, string) bool) error { return nil },
+		Query:      func(context.Context, string, string, bool, func([]byte, string) bool) error { return nil },
 		Coverage:   func(string) (Coverage, error) { return Coverage{}, nil },
 		PowerShell: func(context.Context, string) ([]byte, error) { return nil, fmt.Errorf("no PowerShell here") },
 		Filters:    func() ([]Filter, error) { return nil, nil },
@@ -179,7 +179,7 @@ func TestEventsCapDetectsTruncation(t *testing.T) {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
 			c := fakeCalls()
 			c.capOverride = 3
-			c.Query = func(_ context.Context, channel, xpath string, each func([]byte, string) bool) error {
+			c.Query = func(_ context.Context, channel, xpath string, _ bool, each func([]byte, string) bool) error {
 				if !strings.Contains(xpath, "Level=1") {
 					return nil
 				}
@@ -217,7 +217,7 @@ func TestEventsChannelNotFoundIsAbsent(t *testing.T) {
 		}
 		return Coverage{}, nil
 	}
-	c.Query = func(_ context.Context, ch, _ string, _ func([]byte, string) bool) error {
+	c.Query = func(_ context.Context, ch, _ string, _ bool, _ func([]byte, string) bool) error {
 		if ch == ClusterChannel {
 			return ErrChannelNotFound
 		}
@@ -247,7 +247,7 @@ func TestEventsCoverageChannelNotFoundIsAbsent(t *testing.T) {
 
 func TestEventsMessageIsCut(t *testing.T) {
 	c := fakeCalls()
-	c.Query = func(_ context.Context, _, xpath string, each func([]byte, string) bool) error {
+	c.Query = func(_ context.Context, _, xpath string, _ bool, each func([]byte, string) bool) error {
 		if strings.Contains(xpath, "Level=1") {
 			each(eventAt(1, sourcesSince.Add(time.Hour)), strings.Repeat("é", 2001))
 		}

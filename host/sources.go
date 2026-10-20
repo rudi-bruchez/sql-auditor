@@ -23,8 +23,8 @@ var ErrChannelNotFound = errors.New("event channel not found")
 type Calls struct {
 	// Query runs an XPath query on a channel, newest first, giving each event
 	// as EvtRender XML with its EvtFormatMessage text, "" when the publisher's
-	// message file is gone. each returns false to stop.
-	Query      func(ctx context.Context, channel, xpath string, each func(eventXML []byte, message string) bool) error
+	// message file is gone or format is false. each returns false to stop.
+	Query      func(ctx context.Context, channel, xpath string, format bool, each func(eventXML []byte, message string) bool) error
 	Coverage   func(channel string) (Coverage, error)
 	PowerShell func(ctx context.Context, script string) ([]byte, error)
 	Filters    func() ([]Filter, error)
@@ -118,7 +118,7 @@ func (c Calls) readEvents(ctx context.Context, e Env, put FileSink, channel, fil
 		var kept []Event
 		// A capped query asks for one event more than its cap: getting it is
 		// what tells a truncation from exactly Cap events.
-		err := c.Query(ctx, channel, q.XPath, func(x []byte, msg string) bool {
+		err := c.Query(ctx, channel, q.XPath, !q.CountOnly, func(x []byte, msg string) bool {
 			if ctx.Err() != nil {
 				return false
 			}
@@ -134,7 +134,7 @@ func (c Calls) readEvents(ctx context.Context, e Env, put FileSink, channel, fil
 				return true
 			}
 			ev.Queries = []string{q.ID}
-			ev.Message = CutMessage(msg)
+			ev.Keep(msg)
 			kept = append(kept, ev)
 			return limit == 0 || len(kept) <= limit
 		})
@@ -154,6 +154,10 @@ func (c Calls) readEvents(ctx context.Context, e Env, put FileSink, channel, fil
 		if q.CountOnly {
 			f.Counted = counter.Counts()
 		}
+		// ponytail: queries 1 and 2 of Application are held together until
+		// Merge, at most 2 x eventCap events of about 26 KB each once Keep has
+		// bounded them (16 KiB of Data, 2,000 characters of message and of
+		// Binary): around 1 GB. Merge as each query ends if that is too much.
 		lists = append(lists, kept)
 	}
 	if bad > 0 {
@@ -163,9 +167,75 @@ func (c Calls) readEvents(ctx context.Context, e Env, put FileSink, channel, fil
 	if f.Events == nil {
 		f.Events = []Event{}
 	}
-	res := written(put, file, f, len(f.Events))
-	res.Notes = notes
-	return res
+	if err := writeEvents(put, file, f); err != nil {
+		res := failed(err)
+		res.Notes = notes
+		return res
+	}
+	return SourceResult{Status: StatusRead, Count: len(f.Events), Notes: notes}
+}
+
+// writeEvents writes f as json.MarshalIndent would, one event in memory at a
+// time rather than the whole file.
+func writeEvents(put FileSink, file string, f EventsFile) error {
+	events := f.Events
+	f.Events = []Event{}
+	head, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return err
+	}
+	// A JSON string holds no raw newline, so this is the field, not a value.
+	at := bytes.Index(head, []byte("\n  \"events\": []"))
+	if at < 0 {
+		return errors.New("events file: no events field")
+	}
+	at += len("\n  \"events\": [")
+	return streamed(put, file, func(w io.Writer) error {
+		if _, err := w.Write(head[:at]); err != nil {
+			return err
+		}
+		for i, ev := range events {
+			b, err := json.MarshalIndent(ev, "    ", "  ")
+			if err != nil {
+				return err
+			}
+			sep := ",\n    "
+			if i == 0 {
+				sep = "\n    "
+			}
+			if _, err := io.WriteString(w, sep); err != nil {
+				return err
+			}
+			if _, err := w.Write(b); err != nil {
+				return err
+			}
+		}
+		if len(events) > 0 {
+			if _, err := io.WriteString(w, "\n  "); err != nil {
+				return err
+			}
+		}
+		_, err := w.Write(head[at:])
+		return err
+	})
+}
+
+// streamed gives put what write writes, through a pipe, and returns the first
+// error of either; write's goroutine has ended when it returns.
+func streamed(put FileSink, file string, write func(io.Writer) error) error {
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		err := write(pw)
+		pw.CloseWithError(err)
+		done <- err
+	}()
+	err := put(file, pr)
+	pr.CloseWithError(errors.New("the sink stopped reading")) // unblocks write if put returned early
+	if werr := <-done; err == nil {
+		err = werr
+	}
+	return err
 }
 
 func (c Calls) readVSS(ctx context.Context, _ Env, put FileSink) SourceResult {

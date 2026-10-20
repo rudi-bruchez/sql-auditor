@@ -2596,7 +2596,10 @@ Every source that keeps a history is read for one window, from `--since`
 
 Each event is written with its time in UTC, its level as a number, its
 provider, its identifier, its record number, the values of its `EventData`, and
-its message cut at 2,000 characters. Each log also records its coverage: the
+its message cut at 2,000 characters. Each value and the binary data are cut at
+2,000 characters too, and an event keeps at most 16 KiB of values: `"cut": true`
+marks an event where something was cut, `data_dropped` counts the values left
+out at the end. Each log also records its coverage: the
 time of its oldest record, its maximum size, its retention and auto-backup
 settings. On a busy server the Application log wraps well before 90 days, and
 the coverage is what tells "no event" from "log too short". A query that hit its

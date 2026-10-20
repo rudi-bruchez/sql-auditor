@@ -65,6 +65,11 @@ type Event struct {
 	Data     []string `json:"data"`
 	Binary   string   `json:"binary,omitempty"` // hex
 	Message  string   `json:"message"`
+	// Cut is true when Keep cut the message, a Data value or Binary.
+	Cut bool `json:"cut,omitempty"`
+	// DataDropped is how many Data values, at the end, Keep left out to stay
+	// within dataBytes.
+	DataDropped int `json:"data_dropped,omitempty"`
 }
 
 // timeLayout keeps the seven fractional digits of SystemTime, always written,
@@ -243,19 +248,52 @@ func leafTexts(b []byte) ([]string, error) {
 	}
 }
 
-// messageRunes is where a rendered message is cut.
+// messageRunes is where a rendered message, a Data value or Binary is cut.
 const messageRunes = 2000
+
+// dataBytes is the most of Data text kept per event, the values cut first:
+// 20,000 events of 30 KB of Data each held 4.3 GB of the server's memory.
+const dataBytes = 16 << 10
 
 // CutMessage returns s cut at 2,000 characters, counted in runes.
 func CutMessage(s string) string {
+	s, _ = cut(s)
+	return s
+}
+
+// cut is s cut at messageRunes, a copy when cut so that s is not kept alive,
+// and whether it was.
+func cut(s string) (string, bool) {
 	n := 0
 	for i := range s {
 		if n == messageRunes {
-			return s[:i]
+			return strings.Clone(s[:i]), true
 		}
 		n++
 	}
-	return s
+	return s, false
+}
+
+// Keep sets e's message and bounds what e holds: the message, each Data value
+// and Binary cut at messageRunes, Data past dataBytes in all left out.
+func (e *Event) Keep(message string) {
+	var c bool
+	e.Message, c = cut(message)
+	e.Cut = e.Cut || c
+	e.Binary, c = cut(e.Binary)
+	e.Cut = e.Cut || c
+	total := 0
+	for i, v := range e.Data {
+		v, c = cut(v)
+		e.Cut = e.Cut || c
+		if total += len(v); total > dataBytes {
+			e.DataDropped = len(e.Data) - i
+			clear(e.Data[i:]) // the array would keep them alive
+			e.Data = e.Data[:i]
+			return
+		}
+		e.Data[i] = v
+	}
 }
 
 // IDCount is how many events of one id query 2c met, and when.

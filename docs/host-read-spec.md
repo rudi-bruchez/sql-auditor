@@ -180,6 +180,15 @@ cannot push out the events the analysis needs:
   parsing localized text, and survive a provider whose message file is gone,
   which renders no text. An event matched by two queries is written once, with
   both.
+- What one event holds is bounded, so that the read does not squeeze the
+  memory of the server it audits (the harm review measured 4.3 GB for 20,000
+  events of 30 KB): each value, and the binary data in hexadecimal, cut at
+  2,000 characters like the message, and at most 16 KiB of values per event,
+  the values past that left out. `"cut": true` marks an event where the
+  message, a value or the binary data was cut; `"data_dropped": N` counts the
+  values left out at the end. Both are absent when nothing was. The count-only
+  query 2c formats no message, and the events file is written one event at a
+  time rather than built whole in memory.
 - Caps: 20,000 events for query 1 per log, 20,000 for query 2, none for
   query 3, which is a handful per month, 20,000 for query 4. Newest kept; a
   truncation is recorded with the oldest time kept, so the reader knows counts

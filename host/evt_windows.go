@@ -39,12 +39,13 @@ const (
 	evtMaxSize               = 8 // EvtChannelLoggingConfigMaxSize
 
 	errorNoMoreItems         = syscall.Errno(259)
+	errorTimeout             = syscall.Errno(1460)
 	errorInsufficientBuffer  = syscall.Errno(122)
 	errorEvtChannelNotFound  = syscall.Errno(15007)
 	errorEvtUnresolvedInsert = syscall.Errno(15029) // the message is formatted, an insert left as is
 	errorEvtUnresolvedParam  = syscall.Errno(15030) // ERROR_EVT_UNRESOLVED_PARAMETER_INSERT, same
 	errorEvtMaxInserts       = syscall.Errno(15031) // ERROR_EVT_MAX_INSERTS_REACHED, same
-	infinite                 = 0xFFFFFFFF
+	nextTimeout              = 1000                 // ms EvtNext waits, so that ctx is seen within a second
 )
 
 // evtVariant is EVT_VARIANT: an 8-byte union, a count and a type.
@@ -62,8 +63,9 @@ func evtErr(fn string, err error) error {
 	return fmt.Errorf("%s: %w", fn, err)
 }
 
-// evtQuery runs xpath on channel newest first, in batches of 100.
-func evtQuery(ctx context.Context, channel, xpath string, each func(eventXML []byte, message string) bool) error {
+// evtQuery runs xpath on channel newest first, in batches of 100. Without
+// format, every message is "" and EvtFormatMessage is not called.
+func evtQuery(ctx context.Context, channel, xpath string, format bool, each func(eventXML []byte, message string) bool) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	pub := map[string]uintptr{} // publisher metadata by provider, 0 when it would not open
@@ -74,14 +76,17 @@ func evtQuery(ctx context.Context, channel, xpath string, each func(eventXML []b
 			}
 		}
 	}()
-	return evtEach(channel, xpath, evtQueryReverseDirection, func(ev uintptr, x []byte) bool {
+	return evtEach(ctx, channel, xpath, evtQueryReverseDirection, func(ev uintptr, x []byte) bool {
+		if !format {
+			return each(x, "")
+		}
 		return each(x, formatMessage(pub, ev, x))
 	})
 }
 
 // evtEach runs one query and hands each event's handle and XML to f until it
-// returns false or the events run out.
-func evtEach(channel, xpath string, direction uintptr, f func(ev uintptr, x []byte) bool) error {
+// returns false, the events run out or ctx is done, which returns ctx.Err().
+func evtEach(ctx context.Context, channel, xpath string, direction uintptr, f func(ev uintptr, x []byte) bool) error {
 	c, err := syscall.UTF16PtrFromString(channel)
 	if err != nil {
 		return err
@@ -98,11 +103,17 @@ func evtEach(channel, xpath string, direction uintptr, f func(ev uintptr, x []by
 	var events [100]uintptr
 	buf := make([]uint16, 4096)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var n uint32
-		r, _, e := procEvtNext.Call(rs, uintptr(len(events)), uintptr(unsafe.Pointer(&events[0])), infinite, 0, uintptr(unsafe.Pointer(&n)))
+		r, _, e := procEvtNext.Call(rs, uintptr(len(events)), uintptr(unsafe.Pointer(&events[0])), nextTimeout, 0, uintptr(unsafe.Pointer(&n)))
 		if r == 0 {
-			if e == errorNoMoreItems {
+			switch e {
+			case errorNoMoreItems:
 				return nil
+			case errorTimeout:
+				continue
 			}
 			return evtErr("EvtNext", e)
 		}
@@ -237,7 +248,7 @@ func evtCoverage(channel string) (Coverage, error) {
 	if v.Value == 0 { // an empty log
 		return cov, nil
 	}
-	err = evtEach(channel, fmt.Sprintf("*[System[EventRecordID=%d]]", v.Value), evtQueryForwardDirection, func(_ uintptr, x []byte) bool {
+	err = evtEach(context.Background(), channel, fmt.Sprintf("*[System[EventRecordID=%d]]", v.Value), evtQueryForwardDirection, func(_ uintptr, x []byte) bool {
 		if ev, err := ParseEventXML(x); err == nil {
 			cov.OldestUTC = ev.TimeUTC
 		}

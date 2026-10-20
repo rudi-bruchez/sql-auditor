@@ -3,11 +3,13 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -257,5 +259,141 @@ func TestHarmA_ArchiveSDDL(t *testing.T) {
 	const sid = "S-1-5-21-1-2-3-1001"
 	if got, want := archiveSDDL(sid), "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;"+sid+")"; got != want {
 		t.Errorf("archiveSDDL = %s, want %s", got, want)
+	}
+}
+
+// eventsWith reads the System file of one event with the given EventData and
+// a message of message.
+func eventsWith(t *testing.T, eventData, message string) Event {
+	t.Helper()
+	c := fakeCalls()
+	c.Query = func(_ context.Context, _, xpath string, _ bool, each func([]byte, string) bool) error {
+		if strings.Contains(xpath, "Level=1") {
+			each(eventWith("2026-10-20T01:50:58Z", "<EventData>"+eventData+"</EventData>"), message)
+		}
+		return nil
+	}
+	s := &recordingSink{}
+	readNamed(t, c, "010.events-system", Env{Since: sourcesSince}, s)
+	var f EventsFile
+	if err := json.Unmarshal(s.data["010.events-system.json"], &f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Events) != 1 {
+		t.Fatalf("%d events, want 1", len(f.Events))
+	}
+	return f.Events[0]
+}
+
+// A Data value and Binary are cut like the message, and the event says so.
+func TestHarmB_DataAndBinaryCut(t *testing.T) {
+	e := eventsWith(t, "<Data>"+strings.Repeat("é", 15000)+"</Data><Binary>"+strings.Repeat("AB", 5000)+"</Binary>", "short")
+	if len(e.Data) != 1 || e.Data[0] != strings.Repeat("é", messageRunes) || e.Binary != strings.Repeat("AB", messageRunes/2) || !e.Cut {
+		t.Errorf("data %d runes, binary %d, cut %v; want %d, %d, true", len([]rune(strings.Join(e.Data, ""))), len(e.Binary), e.Cut, messageRunes, messageRunes)
+	}
+	if e := eventsWith(t, "<Data>a</Data><Binary>AB</Binary>", "short"); e.Cut || e.DataDropped != 0 {
+		t.Errorf("nothing cut, got cut %v, dropped %d", e.Cut, e.DataDropped)
+	}
+}
+
+// Many values do not add up past dataBytes: the ones past it are counted.
+func TestHarmB_DataTotalBounded(t *testing.T) {
+	e := eventsWith(t, strings.Repeat("<Data>"+strings.Repeat("x", messageRunes)+"</Data>", 20), "")
+	total := 0
+	for _, v := range e.Data {
+		total += len(v)
+	}
+	if total > dataBytes || e.DataDropped == 0 || len(e.Data)+e.DataDropped != 20 {
+		t.Errorf("kept %d values, %d bytes, dropped %d; want at most %d bytes and the rest counted", len(e.Data), total, e.DataDropped, dataBytes)
+	}
+}
+
+// The streamed file is what json.MarshalIndent wrote, byte for byte.
+func TestHarmB_StreamedMatchesMarshalIndent(t *testing.T) {
+	ev := Event{Log: "Application", Queries: []string{"1", "2"}, TimeUTC: "2026-10-20T01:50:58.0000000Z", Level: 2, Provider: "MSSQLSERVER", EventID: 833, RecordID: 7, Data: []string{"a<b>&\"", "\n"}, Binary: "AB", Message: "m", Cut: true, DataDropped: 3}
+	for name, f := range map[string]EventsFile{
+		"none":  {Log: "System", Events: []Event{}},
+		"one":   {Log: "System", Events: []Event{ev}},
+		"whole": {Log: "Application", Source: `MSSQL$PROD`, Coverage: Coverage{OldestUTC: "x", MaxSizeBytes: 1}, Events: []Event{ev, {Log: "Application", Data: []string{}}}, Counted: []IDCount{{41050, 1, "a", "b"}}, NotRun: map[string]string{"3b": "r"}, Truncated: map[string]string{"1": "t"}},
+	} {
+		want, err := json.MarshalIndent(f, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := &recordingSink{}
+		if err := writeEvents(s.sink(true), "f.json", f); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.data["f.json"]; string(got) != string(want) {
+			t.Errorf("%s:\n got %s\nwant %s", name, got, want)
+		}
+	}
+}
+
+// A sink that stops and a writer that fails both come back as the error, and
+// the writing goroutine ends either way.
+func TestHarmB_StreamErrors(t *testing.T) {
+	before := runtime.NumGoroutine()
+	stop := errors.New("disk full")
+	f := EventsFile{Log: "System", Events: make([]Event, 1000)}
+	for i := range f.Events {
+		f.Events[i] = Event{Data: []string{strings.Repeat("x", 1000)}}
+	}
+	res := make(chan error, 1)
+	go func() {
+		res <- writeEvents(func(_ string, r io.Reader) error {
+			r.Read(make([]byte, 10))
+			return stop
+		}, "f.json", f)
+	}()
+	select {
+	case err := <-res:
+		if err != stop {
+			t.Errorf("sink error: got %v, want %v", err, stop)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("writeEvents still waiting for its writer after the sink stopped")
+	}
+	bad := errors.New("cannot encode")
+	var read []byte
+	err := streamed(func(_ string, r io.Reader) error {
+		read, _ = io.ReadAll(r)
+		return nil
+	}, "f.json", func(w io.Writer) error {
+		w.Write([]byte("{"))
+		return bad
+	})
+	if err != bad || string(read) != "{" {
+		t.Errorf("writer error: got %v after %q, want %v", err, read, bad)
+	}
+	for i := 0; runtime.NumGoroutine() > before && i < 100; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > before {
+		t.Errorf("%d goroutines, %d before", n, before)
+	}
+}
+
+// Query 2c counts and keeps nothing: its messages are not formatted.
+func TestHarmB_CountOnlyNotFormatted(t *testing.T) {
+	c := fakeCalls()
+	format := map[string]bool{}
+	for _, q := range BuildEventQueries("MSSQLSERVER", sourcesSince) {
+		if q.Channel == "Application" {
+			format[q.ID] = !q.CountOnly
+		}
+	}
+	got := map[string]bool{}
+	c.Query = func(_ context.Context, _, xpath string, f bool, _ func([]byte, string) bool) error {
+		for _, q := range BuildEventQueries("MSSQLSERVER", sourcesSince) {
+			if q.Channel == "Application" && q.XPath == xpath {
+				got[q.ID] = f
+			}
+		}
+		return nil
+	}
+	readNamed(t, c, "020.events-application", Env{Since: sourcesSince, EventSource: "MSSQLSERVER"}, &recordingSink{})
+	if !reflect.DeepEqual(got, format) || got["2c"] {
+		t.Errorf("format per query %v, want %v", got, format)
 	}
 }
