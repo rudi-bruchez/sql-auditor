@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -27,13 +28,29 @@ func fakeCalls() Calls {
 		Power:      func() (PowerPlan, error) { return PowerPlan{}, nil },
 		OpenDir:    func(string) (fs.FS, error) { return fstest.MapFS{}, nil },
 		ReadFile:   func(string) ([]byte, error) { return nil, fs.ErrNotExist },
-		PathCheck:  acceptAll,
+		DirCheck:   acceptAll,
+	}
+}
+
+// openThroughDir is an OpenFile that opens a file in the directory OpenDir
+// gives for the part of its path before the last backslash.
+func openThroughDir(openDir func(string) (fs.FS, error)) OpenFile {
+	return func(p string) (io.ReadSeekCloser, int64, string, error) {
+		dir := p[:strings.LastIndex(p, `\`)]
+		fsys, err := openDir(dir)
+		if err != nil {
+			return nil, 0, "", err
+		}
+		return fsOpen(fsys, dir)(p)
 	}
 }
 
 // readNamed runs the source called name.
 func readNamed(t *testing.T, c Calls, name string, e Env, s *recordingSink) SourceResult {
 	t.Helper()
+	if c.OpenFile == nil {
+		c.OpenFile = openThroughDir(c.OpenDir)
+	}
 	for _, src := range BuildSources(c) {
 		if src.Name == name {
 			return src.Read(context.Background(), e, s.sink(true))

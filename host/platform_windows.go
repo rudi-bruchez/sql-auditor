@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -34,6 +35,8 @@ var (
 	procOpenSCManagerW        = advapi32.NewProc("OpenSCManagerW")
 	procEnumServicesStatusExW = advapi32.NewProc("EnumServicesStatusExW")
 	procCloseServiceHandle    = advapi32.NewProc("CloseServiceHandle")
+
+	procConvertStringSecurityDescriptorToSecurityDescriptorW = advapi32.NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
 
 	fltlib              = systemDLL("fltlib.dll")
 	procFilterFindFirst = fltlib.NewProc("FilterFindFirst")
@@ -92,7 +95,8 @@ func windowsCalls() Calls {
 		Power:        power,
 		OpenDir:      func(dir string) (fs.FS, error) { return os.DirFS(dir), nil },
 		ReadFile:     os.ReadFile,
-		PathCheck:    localFixed,
+		DirCheck:     dirCheck,
+		OpenFile:     openFile,
 		ProgramFiles: pf,
 		AzurePlugins: `C:\WindowsAzure\Logs\Plugins`,
 	}
@@ -187,12 +191,15 @@ func utf16PtrToString(p *uint16) string {
 }
 
 // powerShell runs a script in Windows PowerShell by its absolute path, as a
-// visible command line, never -EncodedCommand.
+// visible command line, never -EncodedCommand, with PSModulePath narrowed to
+// the system modules (psEnv; the script's psPreamble is the real guard).
 func powerShell(ctx context.Context, script string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	exe := filepath.Join(systemDir(), `WindowsPowerShell\v1.0\powershell.exe`)
-	out, err := exec.CommandContext(ctx, exe, "-NoProfile", "-NonInteractive", "-Command", script).Output()
+	cmd := exec.CommandContext(ctx, exe, "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd.Env = psEnv(os.Environ(), systemDir())
+	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
@@ -305,20 +312,45 @@ func power() (PowerPlan, error) {
 	return p, nil
 }
 
-// localFixed accepts a file whose final path, links resolved, lies on a local
-// fixed volume. The volume is the one GetVolumePathNameW returns, so a mount
-// point on a local disk is judged as its own volume.
-func localFixed(path string) (bool, string) {
+// openFile opens path for reading without following it if it is a link, and
+// judges the handle it returns: a link or a directory is refused, and so is a
+// final path off a local fixed volume. Opening fails as a refusal, as a file
+// rotated away between the listing and the copy.
+func openFile(path string) (io.ReadSeekCloser, int64, string, error) {
 	p, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
-		return false, err.Error()
+		return nil, 0, err.Error(), nil
 	}
-	const fileReadAttributes = 0x80
-	h, err := syscall.CreateFile(p, fileReadAttributes, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE, nil, syscall.OPEN_EXISTING, syscall.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	h, err := syscall.CreateFile(p, syscall.GENERIC_READ, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE, nil,
+		syscall.OPEN_EXISTING, syscall.FILE_FLAG_OPEN_REPARSE_POINT|syscall.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
-		return false, "not opened: " + err.Error()
+		return nil, 0, "not opened: " + err.Error(), nil
 	}
-	defer syscall.CloseHandle(h)
+	var fi syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(h, &fi); err != nil {
+		syscall.CloseHandle(h)
+		return nil, 0, "", fmt.Errorf("%s: %w", path, err)
+	}
+	why := ""
+	switch {
+	case fi.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0:
+		why = "link, not followed"
+	case fi.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0:
+		why = "a directory"
+	default:
+		_, why = localFixed(h)
+	}
+	if why != "" {
+		syscall.CloseHandle(h)
+		return nil, 0, why, nil
+	}
+	return os.NewFile(uintptr(h), path), int64(fi.FileSizeHigh)<<32 | int64(fi.FileSizeLow), "", nil
+}
+
+// localFixed accepts an open file whose final path lies on a local fixed
+// volume. The volume is the one GetVolumePathNameW returns, so a mount point
+// on a local disk is judged as its own volume.
+func localFixed(h syscall.Handle) (bool, string) {
 	buf := make([]uint16, syscall.MAX_PATH)
 	for {
 		n, _, err := procGetFinalPathNameByHandleW.Call(uintptr(h), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), 0)
@@ -336,17 +368,124 @@ func localFixed(path string) (bool, string) {
 		return false, "network path " + final
 	}
 	final = strings.TrimPrefix(final, `\\?\`)
-	fp, err := syscall.UTF16PtrFromString(final)
+	return fixedVolume(final)
+}
+
+const driveFixed = 3 // DRIVE_FIXED; a mapped drive is DRIVE_REMOTE (4)
+
+// fixedVolume accepts a path whose volume, by GetVolumePathNameW, is a local
+// fixed drive.
+func fixedVolume(path string) (bool, string) {
+	fp, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		return false, err.Error()
 	}
-	root := make([]uint16, len(final)+2)
+	root := make([]uint16, len(path)+2)
 	if r, _, err := procGetVolumePathNameW.Call(uintptr(unsafe.Pointer(fp)), uintptr(unsafe.Pointer(&root[0])), uintptr(len(root))); r == 0 {
-		return false, "volume of " + final + ": " + err.Error()
+		return false, "volume of " + path + ": " + err.Error()
 	}
-	const driveFixed = 3
 	if t, _, _ := procGetDriveTypeW.Call(uintptr(unsafe.Pointer(&root[0]))); t != driveFixed {
-		return false, fmt.Sprintf("%s is not on a local fixed drive (drive type %d)", final, t)
+		return false, fmt.Sprintf("%s is not on a local fixed drive (drive type %d)", path, t)
 	}
 	return true, ""
+}
+
+// dirCheck judges a directory as typed without opening it, so that a network
+// directory is refused before anything is sent to it. The drive letter must be
+// a local fixed drive (a mapped drive is not); then each component is read
+// from its parent's listing by FindFirstFileW, which does not traverse it, and
+// refused if it is a reparse point other than a junction or mount point, which
+// can only lead to a local volume: a symbolic link can lead to \\server\share.
+// Walking from the root means every parent has been judged before a listing
+// traverses it. The volume of the whole path is judged last. A missing
+// component is accepted, so that the caller reports the directory not found.
+// ponytail: a junction is accepted without walking its target, so a junction
+// whose local target path holds a symbolic link component is not caught here;
+// each file's final path is still judged by openFile.
+func dirCheck(dir string) (bool, string) {
+	const mountPoint = 0xA0000003 // IO_REPARSE_TAG_MOUNT_POINT, junctions included
+	switch {
+	case IsUNC(dir):
+		return false, "network path"
+	case !isDriveAbsolute(dir):
+		return false, "not an absolute path"
+	case strings.ContainsAny(dir, `*?<>"`):
+		return false, "wildcard in the path" // FindFirstFileW would expand it
+	}
+	d := filepath.Clean(dir) // as Windows resolves it: / to \, .. removed
+	drive, err := syscall.UTF16PtrFromString(d[:3])
+	if err != nil {
+		return false, err.Error()
+	}
+	if t, _, _ := procGetDriveTypeW.Call(uintptr(unsafe.Pointer(drive))); t != driveFixed {
+		return false, fmt.Sprintf("%s is not a local fixed drive (drive type %d)", d[:3], t)
+	}
+	cur := d[:2]
+	for _, c := range strings.Split(strings.Trim(d[3:], `\`), `\`) {
+		if c == "" {
+			continue
+		}
+		cur += `\` + c
+		p, err := syscall.UTF16PtrFromString(cur)
+		if err != nil {
+			return false, err.Error()
+		}
+		var fd syscall.Win32finddata
+		h, err := syscall.FindFirstFile(p, &fd)
+		if err == syscall.ERROR_FILE_NOT_FOUND || err == syscall.ERROR_PATH_NOT_FOUND {
+			return true, ""
+		}
+		if err != nil {
+			return false, cur + ": " + err.Error()
+		}
+		syscall.FindClose(h)
+		if fd.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 && fd.Reserved0 != mountPoint {
+			if fd.Reserved0 == syscall.IO_REPARSE_TAG_SYMLINK {
+				return false, cur + ": symbolic link, not followed"
+			}
+			return false, fmt.Sprintf("%s: reparse point (tag 0x%08X), not followed", cur, fd.Reserved0)
+		}
+	}
+	return fixedVolume(d)
+}
+
+// createExclusive creates path for writing with CREATE_NEW, which refuses an
+// existing name and, with FILE_FLAG_OPEN_REPARSE_POINT, a link left there, and
+// gives the file archiveSDDL's protected DACL for the current user.
+func createExclusive(path string) (*os.File, error) {
+	t, err := syscall.OpenCurrentProcessToken()
+	if err != nil {
+		return nil, err
+	}
+	defer t.Close()
+	tu, err := t.GetTokenUser()
+	if err != nil {
+		return nil, err
+	}
+	sid, err := tu.User.Sid.String()
+	if err != nil {
+		return nil, err
+	}
+	sddl, err := syscall.UTF16PtrFromString(archiveSDDL(sid))
+	if err != nil {
+		return nil, err
+	}
+	const sddlRevision1 = 1
+	var sd uintptr
+	if r, _, err := procConvertStringSecurityDescriptorToSecurityDescriptorW.Call(uintptr(unsafe.Pointer(sddl)), sddlRevision1, uintptr(unsafe.Pointer(&sd)), 0); r == 0 {
+		return nil, fmt.Errorf("ConvertStringSecurityDescriptorToSecurityDescriptorW: %w", err)
+	}
+	defer procLocalFree.Call(sd)
+	sa := syscall.SecurityAttributes{SecurityDescriptor: sd}
+	sa.Length = uint32(unsafe.Sizeof(sa))
+	p, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	h, err := syscall.CreateFile(p, syscall.GENERIC_WRITE, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE, &sa,
+		syscall.CREATE_NEW, syscall.FILE_ATTRIBUTE_NORMAL|syscall.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(h), path), nil
 }

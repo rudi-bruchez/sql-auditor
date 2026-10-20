@@ -20,7 +20,9 @@ type Archive struct {
 }
 
 // CreateArchive creates <dir>/<name>.zip, refusing an existing name, a link
-// included: O_EXCL does not follow it.
+// included: O_EXCL, CREATE_NEW on Windows, does not follow it. On Windows the
+// file gets a protected DACL (archiveSDDL) rather than inheriting the
+// directory's, which gives BUILTIN\Users read access under C:\audit.
 func CreateArchive(dir, name string) (*Archive, error) {
 	return createArchive(dir, name, nil)
 }
@@ -29,7 +31,7 @@ func CreateArchive(dir, name string) (*Archive, error) {
 // file, so a test can make the writes fail.
 func createArchive(dir, name string, wrap func(io.Writer) io.Writer) (*Archive, error) {
 	path := filepath.Join(dir, name+".zip")
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := createExclusive(path)
 	if err != nil {
 		return nil, err
 	}
@@ -40,6 +42,13 @@ func createArchive(dir, name string, wrap func(io.Writer) io.Writer) (*Archive, 
 	}
 	a.zw = zip.NewWriter(stickyWriter{a, w})
 	return a, nil
+}
+
+// archiveSDDL is the security descriptor of the archive on Windows: a
+// protected DACL, nothing inherited, full access to SYSTEM, the
+// Administrators and the user whose SID is given, and to no one else.
+func archiveSDDL(sid string) string {
+	return "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;" + sid + ")"
 }
 
 // stickyWriter keeps the first write error in the archive, which is how Put

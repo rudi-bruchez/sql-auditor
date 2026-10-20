@@ -32,9 +32,16 @@ type Listed struct {
 // FileSink writes one archive entry.
 type FileSink func(archived string, r io.Reader) error
 
-// PathCheck says whether a file may be read. On Windows: its final path is on
-// a local fixed drive.
+// PathCheck says whether a directory may be listed, judged before anything
+// opens it. On Windows: on a local fixed drive, no symbolic link on the way.
 type PathCheck func(path string) (ok bool, reason string)
+
+// OpenFile opens a file to copy it, once: the handle it returns is the one
+// judged, so nothing swapped in between a check and an open is read. A reason
+// means refused, and f is nil. On Windows: the path itself is not followed if
+// it is a link, a link or a directory is refused, and the handle's final path
+// must lie on a local fixed drive. size is read from the same handle.
+type OpenFile func(path string) (f io.ReadSeekCloser, size int64, reason string, err error)
 
 const (
 	jobOutputFiles = 5       // per step, the newest
@@ -43,11 +50,11 @@ const (
 
 // CopyExtensions lists every file under fsys and copies those modified on or
 // after since, newest first, until the next one would exceed budget. fsys is
-// rooted at root, the Windows directory it reads: the paths given to check and
+// rooted at root, the Windows directory it reads: the paths given to open and
 // listed are root joined to the relative path, with backslashes. A directory
 // that cannot be read and a link, which is not followed, are listed with the
 // reason. A missing root is returned as an error wrapping fs.ErrNotExist.
-func CopyExtensions(fsys fs.FS, root string, since time.Time, budget int64, check PathCheck, sink FileSink) ([]Listed, error) {
+func CopyExtensions(fsys fs.FS, root string, since time.Time, budget int64, open OpenFile, sink FileSink) ([]Listed, error) {
 	var listed []Listed
 	var files []int // the regular files: their index in listed, path in fsys, time
 	var rels []string
@@ -104,11 +111,19 @@ func CopyExtensions(fsys fs.FS, root string, since time.Time, budget int64, chec
 			l.Reason = fmt.Sprintf("over the %d MiB budget", budget>>20)
 			continue
 		}
-		if ok, why := check(l.Path); !ok {
+		f, _, why, err := open(l.Path)
+		if err != nil {
+			return listed, err
+		}
+		if why != "" {
 			l.Reason = why
 			continue
 		}
-		if err := copyFile(fsys, rels[k], l.Size, "060.vm-extensions/"+rels[k], sink); err != nil {
+		// The listed size, which the budget counted: a log written to during
+		// the copy does not overrun it.
+		err = sink("060.vm-extensions/"+rels[k], io.LimitReader(f, l.Size))
+		f.Close()
+		if err != nil {
 			return listed, err
 		}
 		l.Copied = true
@@ -117,24 +132,15 @@ func CopyExtensions(fsys fs.FS, root string, since time.Time, budget int64, chec
 	return listed, nil
 }
 
-// copyFile writes the first size bytes of a file, the size it was listed at:
-// a log written to during the copy does not overrun the budget.
-func copyFile(fsys fs.FS, name string, size int64, archived string, sink FileSink) error {
-	f, err := fsys.Open(name)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return sink(archived, io.LimitReader(f, size))
-}
-
 // CopyJobOutputs copies the five newest files of p.Dir whose name p.Name
 // matches and modified on or after since, each cut to its last MiB, under
-// 070.job-outputs/<step>/. A matching link is followed and kept if its target
-// is a regular file, which check then judges by its final path. What is not
-// read and why goes in the notes: an unreadable pattern, a UNC or relative
-// directory, a wildcard token, no matching file, a file check refuses.
-func CopyJobOutputs(open func(dir string) (fs.FS, error), p OutputPattern, step string, since time.Time, check PathCheck, sink FileSink) ([]CopiedFile, []string, error) {
+// 070.job-outputs/<step>/. The directory is judged by c.DirCheck before it is
+// listed, and each file by the handle c.OpenFile copies it from. A link is
+// not followed: a matching one is noted, so a planted link cannot export a
+// private file under the log's name. What is not read and why goes in the
+// notes: an unreadable pattern, a UNC or relative directory, a directory or a
+// file refused, a link, a wildcard token, no matching file.
+func CopyJobOutputs(c Calls, p OutputPattern, step string, since time.Time, sink FileSink) ([]CopiedFile, []string, error) {
 	if !p.Readable {
 		return nil, []string{p.Reason}, nil
 	}
@@ -148,7 +154,10 @@ func CopyJobOutputs(open func(dir string) (fs.FS, error), p OutputPattern, step 
 	if p.Reason != "" {
 		notes = append(notes, p.Reason)
 	}
-	fsys, err := open(p.Dir)
+	if ok, why := c.DirCheck(p.Dir); !ok {
+		return nil, append(notes, p.Dir+": "+why), nil
+	}
+	fsys, err := c.OpenDir(p.Dir)
 	if err != nil {
 		return nil, notes, err
 	}
@@ -158,26 +167,21 @@ func CopyJobOutputs(open func(dir string) (fs.FS, error), p OutputPattern, step 
 	}
 	var infos []fs.FileInfo
 	for _, e := range entries {
-		if !p.Name.MatchString(e.Name()) {
-			continue
-		}
-		var info fs.FileInfo
 		switch {
-		case e.Type().IsRegular():
-			info, err = e.Info()
-		case e.Type()&fs.ModeSymlink != 0:
-			// fs.Stat follows the link under os.DirFS; a broken one is noted.
-			if info, err = fs.Stat(fsys, e.Name()); err != nil {
-				notes = append(notes, e.Name()+": "+err.Error())
-				continue
-			}
-		default:
+		case !p.Name.MatchString(e.Name()):
+			continue
+		case e.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0:
+			// Since Go 1.23 a junction is ModeIrregular, not ModeSymlink.
+			notes = append(notes, e.Name()+": link, not followed")
+			continue
+		case !e.Type().IsRegular():
 			continue
 		}
+		info, err := e.Info()
 		if err != nil {
 			return nil, notes, err
 		}
-		if info.Mode().IsRegular() && !info.ModTime().Before(since) {
+		if !info.ModTime().Before(since) {
 			infos = append(infos, info)
 		}
 	}
@@ -191,40 +195,35 @@ func CopyJobOutputs(open func(dir string) (fs.FS, error), p OutputPattern, step 
 
 	var copied []CopiedFile
 	for _, info := range infos {
+		// The path opened is the file's final path: no link is followed, in
+		// the directory (DirCheck) or at the file (OpenFile).
 		src := strings.TrimRight(p.Dir, `\/`) + `\` + info.Name()
-		if ok, why := check(src); !ok {
+		f, size, why, err := c.OpenFile(src)
+		if err != nil {
+			return copied, notes, err
+		}
+		if why != "" {
 			notes = append(notes, src+": "+why)
 			continue
 		}
-		c := CopiedFile{
+		cf := CopiedFile{
 			Source:   src,
 			Archived: path.Join("070.job-outputs", step, info.Name()),
-			Size:     info.Size(),
+			Size:     size,
 			Modified: info.ModTime().UTC().Format(time.RFC3339),
 		}
-		if c.Cut, err = copyTail(fsys, info.Name(), info.Size(), c.Archived, sink); err != nil {
+		var r io.Reader
+		r, cf.Cut, err = TailReader(f, size, jobOutputTail)
+		if err == nil {
+			err = sink(cf.Archived, r)
+		}
+		f.Close()
+		if err != nil {
 			return copied, notes, err
 		}
-		copied = append(copied, c)
+		copied = append(copied, cf)
 	}
 	return copied, notes, nil
-}
-
-func copyTail(fsys fs.FS, name string, size int64, archived string, sink FileSink) (bool, error) {
-	f, err := fsys.Open(name)
-	if err != nil {
-		return false, err
-	}
-	defer f.Close()
-	rs, ok := f.(io.ReadSeeker)
-	if !ok {
-		return false, fmt.Errorf("%s: file cannot seek", name)
-	}
-	r, cut, err := TailReader(rs, size, jobOutputTail)
-	if err != nil {
-		return false, err
-	}
-	return cut, sink(archived, r)
 }
 
 // TailReader returns the last limit bytes of a file of the given size,

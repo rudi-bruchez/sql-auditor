@@ -315,13 +315,29 @@ Only when the instance answered.
   (`MaintenanceSolution.sql`, since January 2019), in its output directory or
   the log directory; older versions used `JOBID`, `STRTDT` and `STRTTM`. All of
   them expand under the rules above.
-- Only local paths on a fixed drive are read, judged on the final path of
-  each file once links are resolved (`GetFinalPathNameByHandle`, then
-  `GetDriveType`). A UNC path, a mapped or removable drive, or a link that
-  leads to one is recorded with the step and not read: the command reads this
-  machine, not a share an elevated account happens to reach. A volume mount
-  point on a local disk, common for log directories on a failover cluster
-  instance, is a local fixed drive and is read.
+- Only local paths on a fixed drive are read: the command reads this
+  machine, not a share an elevated account happens to reach. A UNC path, a
+  mapped or removable drive, or a symbolic link is recorded with the step and
+  not read. A volume mount point or a junction on a local disk, common for log
+  directories on a failover cluster instance, can only lead to a local volume
+  and is read.
+- The directory is judged as typed before it is listed, since listing a share
+  already sends the account's credentials to it: its drive letter must be a
+  local fixed drive (`GetDriveType`), each of its components is read from its
+  parent's listing (`FindFirstFile`, which does not traverse it) and refused
+  if it is a symbolic link, and its volume (`GetVolumePathName`) must be a
+  local fixed drive. A junction's own target is not walked. The same applies
+  to SQL Writer's directory and to the extension logs' folder.
+- A link in the directory is not followed, whatever it points to: a matching
+  one is recorded with the step, so a planted link cannot export a private
+  file under the log's name.
+- Each file is opened once, without following it if it is a link
+  (`FILE_FLAG_OPEN_REPARSE_POINT`), and judged by the handle it is copied
+  from: a link or a directory is refused, and the handle's final path
+  (`GetFinalPathNameByHandle`, then `GetVolumePathName` and `GetDriveType`)
+  must be on a local fixed drive. Nothing swapped in between a check and an
+  open can be read. SQL Writer's log and the extension logs are opened the
+  same way.
 - Per step, the five newest files written in the window, each cut to its last
   1 MiB.
 - A path that matches nothing is recorded with the step, not guessed.
@@ -352,6 +368,10 @@ The allowlist pattern of `dumps`: the connection options of `collect`, `--to`,
 
 One zip in `--to`, named `<instance>-<yyyy-mm-dd>-<hhmmss>.host.zip`, created
 exclusively, with one top-level directory of the same name, as `dumps` does.
+It is created with a protected DACL, nothing inherited from `--to`, giving
+full access to `SYSTEM`, `BUILTIN\Administrators` and the user who ran the
+command, and to no one else: under a directory such as `C:\audit` the
+inherited ACL gives `BUILTIN\Users` read access, measured with `icacls`.
 When the instance did not answer, `<instance>` is the local NetBIOS name.
 
 ```

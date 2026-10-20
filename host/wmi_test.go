@@ -50,8 +50,8 @@ func TestScriptsWrapEveryCollection(t *testing.T) {
 func TestScriptsSetUTF8WithoutBOM(t *testing.T) {
 	const head = "[Console]::OutputEncoding=New-Object Text.UTF8Encoding $false;"
 	for name, s := range map[string]string{"VSSScript": VSSScript, "ClusterScript": ClusterScript} {
-		if !strings.HasPrefix(s, head) {
-			t.Errorf("%s does not start with %q", name, head)
+		if !strings.HasPrefix(s, psPreamble+head) {
+			t.Errorf("%s does not start with psPreamble then %q", name, head)
 		}
 	}
 }

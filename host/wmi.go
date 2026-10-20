@@ -10,11 +10,38 @@ import (
 	"unicode/utf8"
 )
 
+// psPreamble starts every script, before anything else runs. The elevated
+// child inherits the user's PSModulePath, whose user directory
+// (Documents\WindowsPowerShell\Modules) any unelevated process of that user
+// can write, and -NoProfile does
+// not stop module autoload: a planted module exporting Get-CimInstance would
+// run elevated. Autoload is turned off and the two modules the scripts use
+// (CimCmdlets for Get-CimInstance and Get-CimAssociatedInstance,
+// Microsoft.PowerShell.Utility for New-Object and ConvertTo-Json; ForEach-Object
+// and Import-Module are the engine's own) are imported by absolute path under
+// $PSHOME, which no environment variable moves. psEnv narrowing PSModulePath
+// is defence in depth, since Windows PowerShell 5.1 may add the user path back
+// at startup.
+const psPreamble = `$ErrorActionPreference='Stop'; $PSModuleAutoLoadingPreference='None'; Import-Module ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1'); Import-Module ($PSHOME + '\Modules\CimCmdlets\CimCmdlets.psd1')
+`
+
+// psEnv is environ with PSModulePath, under any spelling since Windows names
+// are not case-sensitive, replaced by the system modules directory alone.
+func psEnv(environ []string, systemDir string) []string {
+	var out []string
+	for _, kv := range environ {
+		if k, _, _ := strings.Cut(kv, "="); !strings.EqualFold(k, "PSModulePath") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, `PSModulePath=`+systemDir+`\WindowsPowerShell\v1.0\Modules`)
+}
+
 // scriptHead starts every script. Windows PowerShell 5.1 writes redirected
 // output in the OEM code page unless told otherwise, and encoding/json would
 // turn those bytes into U+FFFD without an error; the encoding is built with
 // $false because [Text.Encoding]::UTF8 writes a BOM.
-const scriptHead = `[Console]::OutputEncoding=New-Object Text.UTF8Encoding $false; $ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'
+const scriptHead = psPreamble + `[Console]::OutputEncoding=New-Object Text.UTF8Encoding $false; $ProgressPreference='SilentlyContinue'
 `
 
 // VSSScript prints one JSON object: the shadow copies, their storage, the
@@ -205,7 +232,9 @@ func decodeScript(b []byte, v any) error {
 
 // SQLWriterLog returns where SQL Writer writes its log: TraceFile in the
 // [Logging] section of SqlWriterConfig.ini when set, else
-// defaultDir\SqlWriterLogger.txt. The ini is read as UTF-16LE when it starts
+// defaultDir\SqlWriterLogger.txt. A TraceFile ending in a separator names
+// only a directory, and the log keeps its default name there: an empty stem
+// would match every file of the directory. The ini is read as UTF-16LE when it starts
 // with FF FE, else as UTF-8. Paths are split on \ and / so that this runs the
 // same away from Windows.
 func SQLWriterLog(ini []byte, defaultDir string) (dir, stem, ext string) {
@@ -241,6 +270,9 @@ func SQLWriterLog(ini []byte, defaultDir string) (dir, stem, ext string) {
 			}
 		}
 		stem, ext = base, ""
+		if base == "" {
+			stem, ext = "SqlWriterLogger", ".txt"
+		}
 		if i := strings.LastIndex(base, "."); i > 0 {
 			stem, ext = base[:i], base[i:]
 		}

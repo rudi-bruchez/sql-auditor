@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"strings"
 	"time"
@@ -30,7 +31,11 @@ type Calls struct {
 	Power      func() (PowerPlan, error)
 	OpenDir    func(dir string) (fs.FS, error)
 	ReadFile   func(path string) ([]byte, error)
-	PathCheck  PathCheck
+	// DirCheck judges a directory as typed, before OpenDir lists it: listing a
+	// network directory already sends the account's credentials to it.
+	DirCheck PathCheck
+	// OpenFile opens every file the sources copy.
+	OpenFile OpenFile
 
 	ProgramFiles, AzurePlugins string
 
@@ -176,7 +181,8 @@ func (c Calls) readVSS(ctx context.Context, _ Env, put FileSink) SourceResult {
 }
 
 // readSQLWriter copies SQL Writer's log and its rollovers whole, from the
-// directory SqlWriterConfig.ini names.
+// directory SqlWriterConfig.ini names. A directory or a file refused is a
+// note, as job outputs record theirs, and the source is still read.
 func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResult {
 	shared := c.ProgramFiles + `\Microsoft SQL Server\90\Shared`
 	ini, err := c.ReadFile(shared + `\SqlWriterConfig.ini`)
@@ -187,6 +193,9 @@ func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResul
 		return failed(err)
 	}
 	dir, stem, ext := SQLWriterLog(ini, shared)
+	if ok, why := c.DirCheck(dir); !ok {
+		return SourceResult{Status: StatusRead, Notes: []string{dir + ": " + why}}
+	}
 	fsys, err := c.OpenDir(dir)
 	var entries []fs.DirEntry
 	if err == nil {
@@ -204,19 +213,23 @@ func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResul
 			continue
 		}
 		src := strings.TrimRight(dir, `\/`) + `\` + d.Name()
-		if ok, why := c.PathCheck(src); !ok {
+		f, size, why, err := c.OpenFile(src)
+		if err == nil && why != "" {
 			res.Notes = append(res.Notes, src+": "+why)
 			continue
 		}
-		info, err := d.Info()
+		var info fs.FileInfo
 		if err == nil {
-			err = copyFile(fsys, d.Name(), info.Size(), "035.sqlwriter/"+d.Name(), put)
+			if info, err = d.Info(); err == nil {
+				err = put("035.sqlwriter/"+d.Name(), io.LimitReader(f, size))
+			}
+			f.Close()
 		}
 		if err != nil {
 			res.Status, res.Reason = StatusFailed, err.Error()
 			break
 		}
-		res.Copied = append(res.Copied, CopiedFile{Source: src, Archived: "035.sqlwriter/" + d.Name(), Size: info.Size(), Modified: info.ModTime().UTC().Format(time.RFC3339)})
+		res.Copied = append(res.Copied, CopiedFile{Source: src, Archived: "035.sqlwriter/" + d.Name(), Size: size, Modified: info.ModTime().UTC().Format(time.RFC3339)})
 	}
 	res.Count = len(res.Copied)
 	if res.Status == StatusRead && res.Count == 0 && len(res.Notes) == 0 {
@@ -246,12 +259,18 @@ func (c Calls) readPower(_ context.Context, _ Env, put FileSink) SourceResult {
 }
 
 // readExtensions lists the Azure extension logs and copies those of the
-// window. No folder means not an Azure VM, or no extension.
+// window. No folder means not an Azure VM, or no extension. A folder DirCheck
+// refuses is a note over an empty listing, as a refused file is.
 func (c Calls) readExtensions(_ context.Context, e Env, put FileSink) SourceResult {
+	if ok, why := c.DirCheck(c.AzurePlugins); !ok {
+		res := written(put, "060.vm-extensions.json", []Listed{}, 0)
+		res.Notes = []string{c.AzurePlugins + ": " + why}
+		return res
+	}
 	fsys, err := c.OpenDir(c.AzurePlugins)
 	var listed []Listed
 	if err == nil {
-		listed, err = CopyExtensions(fsys, c.AzurePlugins, e.Since, extensionBudget, c.PathCheck, put)
+		listed, err = CopyExtensions(fsys, c.AzurePlugins, e.Since, extensionBudget, c.OpenFile, put)
 	}
 	if errors.Is(err, fs.ErrNotExist) {
 		return SourceResult{Status: StatusAbsent, Reason: c.AzurePlugins + " not found: not an Azure VM, or no extension"}
@@ -316,7 +335,7 @@ func (c Calls) readJobOutputs(_ context.Context, e Env, put FileSink) SourceResu
 	for i, s := range e.Steps {
 		p := ExpandOutputFile(s.OutputFile, TokenValues{SQLLogDir: logDir, JobName: s.Job, StepName: s.Step, StepID: s.StepID, JobIDBinary: s.JobIDBinary})
 		folder := folders[i].Folder
-		copied, notes, err := CopyJobOutputs(c.OpenDir, p, folder, e.Since, c.PathCheck, put)
+		copied, notes, err := CopyJobOutputs(c, p, folder, e.Since, put)
 		st := JobOutputStep{Job: s.Job, StepID: s.StepID, Step: s.Step, OutputFile: s.OutputFile, Folder: "070.job-outputs/" + folder, Readable: p.Readable, Notes: notes, Copied: copied}
 		if err != nil {
 			st.Error = err.Error()
