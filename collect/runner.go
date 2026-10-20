@@ -199,6 +199,13 @@ type WidenedFor struct {
 	Reason  string
 }
 
+// ServerInstance returns the instance part of a SQL_SERVER value as
+// parseServer reads it, "" for a default instance, a port or a listener.
+func ServerInstance(server string) (string, error) {
+	_, instance, err := parseServer(server)
+	return instance, err
+}
+
 // parseServer normalises the ways a SQL Server address is written into the two
 // pieces the sqlserver:// URL needs: an authority for u.Host and an instance
 // name for u.Path.

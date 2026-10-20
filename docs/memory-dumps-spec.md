@@ -54,11 +54,13 @@ is on Windows by construction, so the view is not queried there.
 
 Before reading any file, `dumps` compares
 `SERVERPROPERTY('ComputerNamePhysicalNetBIOS')` with the local NetBIOS name,
-for exact equality, case-insensitively. The local name comes from
-`windows.GetComputerNameEx` in `golang.org/x/sys/windows` (already a dependency
-in `go.mod`), called with `windows.ComputerNamePhysicalNetBIOS`: it is the raw
-Win32 call, `(nametype uint32, buf *uint16, n *uint32)`, so the caller passes a
-buffer and retries once at the size the first call returns. Not `os.Hostname`, which on Windows returns the
+for exact equality, case-insensitively. The `host` command wrote that check
+first, and `dumps` reuses it: the comparison is `host.MachineMatches`, and the
+local name comes from `GetComputerNameExW` in `kernel32.dll`, called with
+`ComputerNamePhysicalNetBIOS` through the standard `syscall` package
+(`host/platform_windows.go`). `golang.org/x/sys` is only an indirect dependency
+in `go.mod`, and stays so (`tui/screen/terminal_windows.go` says why). Not
+`os.Hostname`, which on Windows returns the
 physical DNS host name (`$GOROOT/src/os/sys_windows.go`), and not a prefix
 comparison, which accepts two machines whose names share their first fifteen
 characters.
@@ -146,9 +148,11 @@ flag the operator believes in. So `dumps` works from an allowlist: the
 connection options (`--env` and the connection flags `collect` reads), `--to`,
 `--since`, `--with-memory-dump`, `--max-dump-mb`, `--list`, `--debug`. Any
 other flag typed with `dumps` is refused before dispatch, detected with
-`fs.Visit` as `--profile` already is. In the other direction, `--since`,
+`fs.Visit` as `--profile` already is. In the other direction,
 `--with-memory-dump`, `--max-dump-mb` and `--list` are new and refused by every
-other command the same way. `--to` already exists (`queries export`,
+other command the same way. `--since` already exists, for `host`, which gives
+it the meaning its own spec does (`docs/host-read-spec.md`); every command but
+those two refuses it. `--to` already exists (`queries export`,
 `env init`) and keeps its meaning there. `isCommand`, the usage text and the
 "did you mean" message gain `dumps`.
 

@@ -1,0 +1,4 @@
+{"shadows":[{"ID":"{6F1C2A3B-4D5E-4F60-8A7B-9C0D1E2F3A4B}","SetID":"{0A1B2C3D-4E5F-4A6B-8C7D-8E9F0A1B2C3D}","VolumeName":"\\\\?\\Volume{11111111-2222-4333-8444-555555555555}\\","DeviceObject":"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1","InstallDate":"2026-10-20T08:15:02.0000000Z","ProviderID":"{B5946137-7B9F-4925-AF80-51ABD60B20D5}","Persistent":true,"ClientAccessible":true,"NoAutoRelease":true,"State":12}],
+ "storage":[{"Volume":"\\\\?\\Volume{11111111-2222-4333-8444-555555555555}\\","DiffVolume":"\\\\?\\Volume{11111111-2222-4333-8444-555555555555}\\","UsedSpace":475136,"AllocatedSpace":335544320,"MaxSpace":6442450944}],
+ "providers":[{"Name":"Microsoft Software Shadow Copy provider 1.0","ID":"{B5946137-7B9F-4925-AF80-51ABD60B20D5}","Version":"1.0.0.7"}],
+ "volumes":[{"DeviceID":"\\\\?\\Volume{11111111-2222-4333-8444-555555555555}\\","DriveLetter":"C:","Name":"C:\\","Label":null,"DriveType":3}]}

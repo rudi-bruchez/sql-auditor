@@ -34,6 +34,7 @@ Read [what it does](#what-it-does-and-what-it-does-not-do) and
 - [`--include-blocked-process-reports`](#--include-blocked-process-reports)
 - [Authentication](#authentication)
 - [Reproducing a run locally](#reproducing-a-run-locally)
+- [Reading the host, on request](#reading-the-host-on-request)
 - [SQL LogScout, on request](#sql-logscout-on-request)
 
 ## What it does, and what it does not do
@@ -590,6 +591,15 @@ So read the two independently:
 | `0` | usable, possibly degraded |
 | `1` | the instance did not answer, so nothing can be collected |
 | `2` | the configuration is unusable, or the run was partial: a `SQL_SERVER` that cannot be parsed, a `--queries-dir` that cannot be read, a query corpus that fails its lint, an output directory that cannot be written, or, for `collect`, a collector that failed or a collection stopped with `ctrl-c` or `SIGTERM` |
+
+`host` is the exception: it does not use `1`, since it reads the machine
+whether the instance answers or not. It exits `0` when it wrote an archive and
+every source was read, absent, or refused by a permission. It exits `2` when it
+wrote an archive but a source failed, the instance did not answer, or the
+instance is on another machine; and `2` again when it wrote no archive: a
+refusal before any read, an error writing the zip, or a `ctrl-c`. The archive
+path, the last line on stdout, is printed only when an archive was written,
+which is how a script tells the two cases of `2` apart.
 
 A mistyped address is `2`, not `1`. `HOST\` with no instance name, or a bare
 `::1,1433` missing its brackets, is refused before a socket is opened. Nothing
@@ -2550,12 +2560,208 @@ When you are finished:
 podman rm -f sqlauditor-test
 ```
 
+## Reading the host, on request
+
+Some symptoms are only half explained by what a SQL connection sees: a `DBCC
+CHECKDB` that fails on an availability group primary, backups that wait,
+connections that drop. The questions then are about the machine. Is a backup
+agent taking VSS snapshots, and when? Did the VM's backup extension log a
+failure that night? What did the maintenance job write in its output file? What
+do the System and Application logs say at that hour?
+
+`sql-auditor host` reads those things on the server and packs them into a
+separate archive. It is a separate request, like SQL LogScout below, and it is
+never run by `collect`, by the wizard, by a profile or by a `.env` setting. It
+reads once and stops: it installs nothing, downloads nothing, creates no shadow
+copy, collector, session or task, and writes no file but its archive, apart
+from the caches Windows PowerShell may write for itself (see
+[What Windows records about the run](#what-windows-records-about-the-run)).
+
+### What it reads
+
+Every source that keeps a history is read for one window, from `--since`
+(a date, local midnight) to now, 90 days by default.
+
+| In the archive | What it holds |
+| --- | --- |
+| `010.events-system.json` | the System log: every Critical, Error and Warning event of the window, at most the 20,000 newest; and, whatever their level, the shutdowns and restarts (`1074`, `1076`, `6005`, `6006`, `6008`, Kernel-Power `41`) |
+| `020.events-application.json` | the Application log: every Critical, Error and Warning event, at most the 20,000 newest; every event of the instance's own source, at most the 20,000 newest, except `41050` to `41055`, which are counted per identifier with their first and last time; the instance's start and stop events (`17162`, `17147`, `17148`) |
+| `025.events-cluster.json` | on a failover cluster node, every event of `Microsoft-Windows-FailoverClustering/Operational`, at most the 20,000 newest |
+| `030.vss.json` | shadow copies with the volumes they belong to, shadow storage, VSS providers |
+| `035.sqlwriter/` | SQL Writer's own log and its rollovers, the last 10 MiB of each, the active log first and then the rollovers newest first, up to 50 MiB for all of them: which databases were frozen and thawed, and when |
+| `040.filter-drivers.json` | file system filter drivers, what `fltmc filters` lists |
+| `050.power-plan.json` | the active power plan, by GUID and name |
+| `060.vm-extensions.json`, `060.vm-extensions/` | on an Azure VM, the listing of `C:\WindowsAzure\Logs\Plugins`, and the files written in the window, newest first, up to 50 MiB |
+| `070.job-outputs.json`, `070.job-outputs/` | the output files of Agent job steps: per step, the five newest written in the window, each cut to its last 1 MiB, up to 100 MiB for all the steps together. The paths come from msdb, where only a `sysadmin` can set them |
+| `080.cluster.json` | on a failover cluster node, the cluster's settings, nodes, networks, groups and resources, with the private properties of an availability group resource (`LeaseTimeout`, `HealthCheckTimeout`, `FailureConditionLevel`) |
+| `MANIFEST.txt` | what became of each source, and every file copied |
+
+Each event is written with its time in UTC, its level as a number, its
+provider, its identifier, its record number, the values of its `EventData`, and
+its message cut at 2,000 characters. Each value and the binary data are cut at
+2,000 characters too, and an event keeps at most 4 KiB of values: `"cut": true`
+marks an event where something was cut, `data_dropped` counts the values left
+out at the end. Each log also records its coverage: the
+time of its oldest record, its maximum size, its retention and auto-backup
+settings. On a busy server the Application log wraps well before 90 days, and
+the coverage is what tells "no event" from "log too short". A query that hit its
+cap is named in `truncated_before_utc` with the oldest time kept.
+
+The instance's own source is `MSSQLSERVER` or `MSSQL$<name>`. When the instance
+answers on this machine, it gives its name. Otherwise the source is the service
+named by the `.env` server string (`SQL01\PROD` gives `MSSQL$PROD`) if that
+service exists here, or else the only SQL Server service on the machine. The
+Windows Internal Database (`MSSQL$MICROSOFT##WID`, `MSSQL$MICROSOFT##SSEE`) of
+WSUS, AD FS or the RD Connection Broker is not counted as an instance. When none
+of these decides, the queries on the instance's own source are not run, and
+`MANIFEST.txt` says why.
+
+The job output files are read only when the instance answered on this machine.
+Their paths come from `msdb.dbo.sysjobsteps`, with the Agent tokens expanded
+(`SQLLOGDIR`, `JOBNAME`, `STEPNAME`, `STEPID`, `JOBID`; `DATE`, `TIME`,
+`STRTDT` and `STRTTM` match any date or time), which finds the files of Ola
+Hallengren's maintenance solution. Only files on a local fixed drive are read:
+a UNC path, a mapped or removable drive, or a link leading to one is recorded
+with its step and left alone. Reading the steps needs `SQLAgentReaderRole` in
+`msdb` and `SELECT` on `msdb.dbo.sysjobsteps`: `sysjobs_view` answers error 229
+without the role, and the table without the grant. A login missing either, or
+one that may not enter `msdb` at all (error 916), makes the source refused, not
+failed, as a refused permission is in `collect`: it does not change the exit
+code. The steps are read under `READ UNCOMMITTED` with a 10-second lock
+timeout, like every collector; a lock held past it fails the source, and the
+manifest says it was a lock timeout.
+
+Some sources are legitimately absent, and recorded so: the cluster channel and
+configuration on a machine that is not a cluster node, the extension logs
+outside Azure, SQL Writer's log on a machine without `SqlWriterConfig.ini`.
+
+It does not read the Security log, the SQL Server error log (`collect` reads
+it), any database file, or the cluster log (`Get-ClusterLog` writes files on the
+server). It does not run `vssadmin list writers`, which makes every writer
+answer and writes into the very SQL Writer log it reads.
+
+### Why it needs an elevated prompt
+
+`host` runs on the Windows machine that hosts the instance, from a prompt opened
+as Administrator. Enumerating the filter drivers and reading every log channel
+need an elevated token, and membership of Administrators without elevation is
+not enough. A prompt that is not elevated is refused before anything is read,
+with "run from an elevated prompt". On Linux or macOS it is refused too, with a
+sentence saying that it reads the Windows server it runs on.
+
+It needs Windows Server 2016 or later. The tool is built with a Go that does not
+run on Windows Server 2012 or 2012 R2, out of Microsoft support since October
+2023.
+
+It reads the same `.env` as `collect`, and refuses what `collect` refuses: an
+unknown key, an invalid value such as a malformed `MAX_DURATION`, a `SQL_SERVER`
+that is missing or cannot be parsed. It does not read the machine without
+knowing which instance it is about.
+
+It does not need the instance to answer. When the connection fails, it reads
+every source of the machine, skips the job output files, records why, and exits
+`2`. When the instance answers from another machine, typically a `.env`
+pointing at an availability group listener while you run `host` on a node, the
+check of `ComputerNamePhysicalNetBIOS` against this machine's name fails: the
+machine is still read, the job output files are skipped, `MANIFEST.txt` names
+both machines, and the run exits `2`.
+
+### What Windows records about the run
+
+`host` writes nothing but its archive, but Windows records some of its activity:
+
+- the WMI queries on the shadow copy classes may start the VSS service and
+  the software shadow copy provider (`swprv`) on demand; they stop by
+  themselves after their idle timeout, and each leaves `7036` events in the
+  System log;
+- where process creation auditing is on, the Security log records
+  `sql-auditor.exe` and the `powershell.exe` it starts;
+- the VSS and cluster classes are read through
+  `powershell.exe -NoProfile -NonInteractive -Command`, with the script in
+  clear text, never `-EncodedCommand`; where PowerShell logging is on, it
+  records both scripts;
+- Windows PowerShell 5.1 may write `StartupProfileData-NonInteractive` and,
+  when a module loads, `ModuleAnalysisCache` under the running user's
+  `%LOCALAPPDATA%\Microsoft\Windows\PowerShell`. These caches are its own, and
+  the only files the command can leave outside `--to`.
+
+### What the archive may contain
+
+Read it before you send it, as `MANIFEST.txt` asks you to: it may hold what
+your organization does not send outside. Computer, cluster and volume names, IP
+addresses, file paths and the text of event messages are in it. The System and
+Application logs, the cluster channel and SQL Writer's log cover every instance
+on the machine, so an archive taken on a host with other instances names their
+errors and their databases too.
+
+Above all, review the copied text files. A job output file is whatever the step
+printed, and a CmdExec or PowerShell step can print a connection string or a
+password. SQL Writer's log names databases and accounts. The Azure extension
+logs name them too, and they also hold the scripts the extensions ran and the
+settings they were given, where a secret passed as a public setting rather than
+a protected one appears in clear. `collect` withholds the text of non-T-SQL job
+commands for that reason (`50.agent/020.job-steps`); `host` copies their
+output, and says so.
+
+Which job output files are copied is decided in `msdb`, by whoever set each
+step's `output_file_name`, and only a `sysadmin` can set that column: anyone
+else gets error 14582. A `sysadmin` who is not a local administrator can
+therefore name any local file there. An unknown token becomes a wildcard and a
+literal path is read as well, so such a login chooses up to five local files
+per step that the elevated run copies into the archive. `MANIFEST.txt` lists
+every file copied with its path on the server: read that list before you send
+the archive, and remove what is not a job's output.
+
+### What to check in `MANIFEST.txt`
+
+- `Machine check`: `match`, or `MISMATCH` with both machine names, or not run
+  because the instance did not answer.
+- `Event source`: the instance's source and the rule that decided it, or
+  `undecided` with the reason.
+- `Sources`: one line per source, with its status (`read`, `absent`, `refused`,
+  `failed`, `skipped`) and its count. A `failed` line gives the error.
+- `Notes`: what a source left out, such as a job output path on a share or a log
+  whose auto-backup archives were not read.
+- `Copied files`: every file copied, with its path on the server and its size,
+  and how much of it was kept when it was cut. The job output paths were chosen
+  by a `sysadmin` (see above): check that each one is a job's output.
+
+### Running it
+
+`--to` is required and must name an existing directory: the working directory
+of an elevated prompt is `C:\Windows\System32`. The archive is
+`<instance>-<yyyy-mm-dd>-<hhmmss>.host.zip`, created there and never written
+over, with one top-level folder of the same name. When the instance did not
+answer, `<instance>` is the machine's name. `--since yyyy-mm-dd` moves the start
+of the window. Besides those two, `host` takes the connection options and
+`--debug`, and refuses any other option, and any argument that is not an
+option: a word left on the line would silently drop every option after it. A
+`–since` pasted from a mail, where Outlook or Word turned `--` into a dash, is
+refused with a message saying so.
+
+stdout has one line per source with its status and count, then the archive
+path. The first `ctrl-c` prints `stopping: the archive will be removed`, and
+the archive is removed once the source in progress returns; a second one ends
+the process at once, and may leave an incomplete zip behind, to delete. An
+error writing the zip removes it too. To stop a run, press `ctrl-c` rather than
+close the console window: Windows ends the process about five seconds after
+the window is closed, which may be before the archive is removed. Delete a
+`.host.zip` left behind that way; it is incomplete.
+
+From a prompt opened as Administrator, in the folder that holds the `.env`:
+
+```
+sql-auditor host --to C:\audit
+```
+
 ## SQL LogScout, on request
 
-sql-auditor reads what a SQL connection can see. Some questions need what lies
-outside it: Windows performance counters over an hour, the Windows event logs,
-the cluster log, or the DMVs sampled every few seconds while the problem is
-happening. When one of those is needed, you may be asked to run a second tool,
+sql-auditor reads what a SQL connection can see, and `host` reads what the
+machine records: the event logs, the filter drivers, the power plan, VSS, the
+cluster's configuration. Some questions need a time window instead: Windows
+performance counters over an hour, or the DMVs sampled every few seconds while
+the problem is happening. Only when one of those is needed, you may be asked to
+run a second tool,
 [SQL LogScout](https://github.com/microsoft/SQL_LogScout), written and
 maintained by Microsoft's SQL Server support engineers and published under the
 MIT license.
@@ -2566,13 +2772,16 @@ above about what sql-auditor does to your instance applies to it.
 
 ### How it differs from sql-auditor
 
-| | sql-auditor | SQL LogScout |
-| --- | --- | --- |
-| Where it runs | anywhere that can reach the instance | on the server itself; it only collects from local instances |
-| Windows rights | none | local administrator |
-| SQL Server rights | the read rights listed under [What permissions it needs](#what-permissions-it-needs) | `VIEW SERVER STATE` and `ALTER ANY EVENT SESSION` |
-| What it writes on the server | nothing | its output folder, a Perfmon collector and, in most performance scenarios, an Extended Events session |
-| Duration | minutes, then it stops | until the stop time you give it, or until you stop it |
+| | sql-auditor | `sql-auditor host` | SQL LogScout |
+| --- | --- | --- | --- |
+| Where it runs | anywhere that can reach the instance | on the server itself, Windows only | on the server itself; it only collects from local instances |
+| Windows rights | none | local administrator, from an elevated prompt | local administrator |
+| SQL Server rights | the read rights listed under [What permissions it needs](#what-permissions-it-needs) | a login that connects, and `SQLAgentReaderRole` plus `SELECT` on `msdb.dbo.sysjobsteps` for the job output files; it reads the machine when the instance does not answer | `VIEW SERVER STATE` and `ALTER ANY EVENT SESSION` |
+| What it writes on the server | nothing | its archive, in the `--to` folder | its output folder, a Perfmon collector and, in most performance scenarios, an Extended Events session |
+| Duration | minutes, then it stops | one read, then it stops | until the stop time you give it, or until you stop it |
+
+The `sql-auditor` column is `check` and `collect`. `host` is the exception, and
+[Reading the host, on request](#reading-the-host-on-request) says what it reads.
 
 Its Linux variant, a set of Bash scripts, needs `sudo` and a `sysadmin` login.
 

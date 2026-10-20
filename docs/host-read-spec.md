@@ -117,7 +117,9 @@ this order, and the manifest says which rule decided it:
    source is undecided.
 3. Otherwise (a bare host, a port, a listener): if exactly one SQL Server
    service exists locally, in any state, its name is the source; if there are
-   several, or none, the source is undecided.
+   several, or none, the source is undecided. The Windows Internal Database
+   (`MSSQL$MICROSOFT##WID`, `##SSEE`) of WSUS, AD FS or the RD Connection
+   Broker is not counted. (Decided while building.)
 
 The services are listed through the service manager opened with
 `SC_MANAGER_ENUMERATE_SERVICE` only (`OpenSCManagerW`, then
@@ -178,8 +180,23 @@ cannot push out the events the analysis needs:
   parsing localized text, and survive a provider whose message file is gone,
   which renders no text. An event matched by two queries is written once, with
   both.
-- Caps: 20,000 events for query 1 per log, 20,000 for query 2, none for
-  query 3, which is a handful per month, 20,000 for query 4. Newest kept; a
+- What one event holds is bounded, so that the read does not squeeze the
+  memory of the server it audits (the harm review measured 4.3 GB for 20,000
+  events of 30 KB): each value, and the binary data in hexadecimal, cut at
+  2,000 characters like the message, and at most 4 KiB of values per event,
+  the values past that left out (16 KiB still left about 1.5 GB of heap for
+  two capped queries, harm review, batch D). `"cut": true` marks an event
+  where the message, a value or the binary data was cut; `"data_dropped": N`
+  counts the values left out at the end. Both are absent when nothing was.
+  The count-only query 2c formats no message, and the events file is written
+  one event at a time rather than built whole in memory.
+- Caps: 20,000 events for every query that keeps events: query 1 per log,
+  queries 2, 3a, 3b and 4. Query 3 is a handful per month, but any local
+  user can write events under the instance's source, so it is capped too
+  (harm review, batch D). The Application queries 1, 2 and 3b are held
+  together until they are merged: about 9 KB per event once bounded, and a
+  peak heap of about twice that, measured at 105 MiB for 3 x 2,000 events of
+  the largest kind, so about 1 GiB at the caps. Newest kept; a
   truncation is recorded with the oldest time kept, so the reader knows counts
   before that time are incomplete.
 - Per log or channel, its coverage: the time of its oldest record (the record
@@ -217,8 +234,16 @@ source.
   digits, since the rollover name of a custom `TraceFile` is not measured), in
   `C:\Program Files\Microsoft SQL Server\90\Shared\` unless `TraceFile` in
   `SqlWriterConfig.ini`, in the same folder, names another path, which is then
-  used (Learn, "SQL Server VSS Writer logging"). Copied whole, into
-  `035.sqlwriter/`; their size is set by `TraceFileSizeMb`, 1 MB by default.
+  used (Learn, "SQL Server VSS Writer logging"). Copied into
+  `035.sqlwriter/`, the last 10 MiB of each, the active log (the exact
+  `TraceFile` name) first whatever its time, then the rollovers newest first,
+  and at most 50 MiB for all of them, the files past it recorded "budget
+  reached, not copied";
+  their size is set by `TraceFileSizeMb`, 1 MB by default, and the harm review
+  (batch C) bounded the copy, which took a log of any size whole, then (batch
+  D) the total, since anyone who can write in the log's directory can add
+  files named after its stem, and (batch E) put the active log first, since
+  they can also give those files a time in the future.
   The log does not name the requester. Absent on an older SQL Writer: recorded
   as absent.
 - Not the writers' state. `vssadmin list writers` makes every writer answer an
@@ -277,6 +302,9 @@ Azure only in this version: the tree under `C:\WindowsAzure\Logs\Plugins\`.
 - The listing of every file (path, size, last write time) goes in the archive.
 - The files written in the window are copied, newest first, up to 50 MiB in
   total; the rest are listed as left out.
+- They hold the scripts the extensions ran and the settings given to them, a
+  secret passed as a public setting included, not only database and account
+  names: the disclosure says so (harm review, batch C).
 - No folder means not an Azure VM, or no extension: recorded as absent, not an
   error.
 
@@ -313,20 +341,91 @@ Only when the instance answered.
   (`MaintenanceSolution.sql`, since January 2019), in its output directory or
   the log directory; older versions used `JOBID`, `STRTDT` and `STRTTM`. All of
   them expand under the rules above.
-- Only local paths on a fixed drive are read, judged on the final path of
-  each file once links are resolved (`GetFinalPathNameByHandle`, then
-  `GetDriveType`). A UNC path, a mapped or removable drive, or a link that
-  leads to one is recorded with the step and not read: the command reads this
-  machine, not a share an elevated account happens to reach. A volume mount
-  point on a local disk, common for log directories on a failover cluster
-  instance, is a local fixed drive and is read.
+- Only local paths on a fixed drive are read: the command reads this
+  machine, not a share an elevated account happens to reach. A UNC path, a
+  mapped or removable drive, a symbolic link or a directory junction is
+  recorded with the step and not read. A volume mount point, common for log
+  directories on a failover cluster instance, leads to a local volume and is
+  read: its reparse data (`FSCTL_GET_REPARSE_POINT`) names exactly a volume's
+  root, `\??\Volume{GUID}\`, and the mount manager lists the folder among
+  that volume's mount points (`GetVolumePathNamesForVolumeName`).
+  A directory junction has the same reparse tag but names a directory, and
+  any user may create one where they can create a folder (`C:\WindowsAzure`
+  on a machine that is not an Azure VM, a job output directory that does not
+  exist yet): followed, it would export a private directory under the log's
+  name (harm review, batch D). Its target may be written
+  `\??\Volume{GUID}\Users\...`, or be a volume's root, with
+  `FSCTL_SET_REPARSE_POINT` and no privilege; only `SetVolumeMountPoint`,
+  which needs an administrator, registers a folder with the mount manager
+  (batch E).
+- The directory is judged as typed before it is listed, since listing a share
+  already sends the account's credentials to it: its drive letter must be a
+  local fixed drive (`GetDriveType`), each of its components is read from its
+  parent's listing (`FindFirstFile`, which does not traverse it) and refused
+  if it is a symbolic link or a directory junction, and its volume
+  (`GetVolumePathName`) must be a local fixed drive. Its final path
+  (`GetFinalPathNameByHandle`) is then taken once, and must be the long form
+  of the path walked (`GetLongPathName`, which expands 8.3 names and resolves
+  no link), or the directory is refused, "changed under a link during the
+  check". The same applies to SQL
+  Writer's directory and to the extension logs' folder. A path written
+  `\\?\C:\...` is local and judged as `C:\...`.
+- A link in the directory is not followed, whatever it points to: a matching
+  one is recorded with the step, so a planted link cannot export a private
+  file under the log's name.
+- Each file is opened once, without following it if it is a link
+  (`FILE_FLAG_OPEN_REPARSE_POINT`), and judged by the handle it is copied
+  from: a symbolic link or a junction (a name surrogate reparse point), a
+  file with more than one name (a hard link planted to a private file) or a
+  directory is refused, and the handle's final path
+  (`GetFinalPathNameByHandle`, then `GetVolumePathName` and `GetDriveType`)
+  must be on a local fixed drive. Another reparse point, a deduplicated
+  file, is read through its filter. A WOF-compressed file is still not read:
+  Go lists it as irregular, and the listing records it as a link before it is
+  opened. The file's final path must
+  also be the directory's final path, taken after its check, joined to the
+  file's name (for the extension logs, walked recursively, to its path under
+  the folder), compared without case: a component of the directory swapped
+  for a link after the check leads elsewhere, and the file is refused, "moved
+  under a link after the check". A swap at the file itself, or of a
+  component after the directory's final path was taken, cannot be read. A
+  swap between the component walk and the taking of the final path is
+  caught by the long form, except past a registered volume mount point,
+  whose final path is the volume's and is not compared. SQL Writer's log and
+  the extension logs are opened the same way. A file refused as moved means
+  the listing was perhaps taken through the link: what was listed through
+  the directory, names, sizes and the notes per file, is replaced by one
+  note, "changed under a link during the read, nothing listed"; the files
+  copied before, at their checked path, stay recorded.
 - Per step, the five newest files written in the window, each cut to its last
-  1 MiB.
+  1 MiB, and at most 100 MiB for all the steps together, counted in the bytes
+  copied; the files past it are recorded "budget reached, not copied" (harm
+  review, batch C: 300 steps would otherwise read 1.5 GB).
+- The paths are chosen by whoever set `output_file_name`, and only a
+  `sysadmin` can (error 14582 for anyone else, measured). A `sysadmin` who is
+  not a local administrator can thus name up to five local files per step,
+  through an unknown token, which becomes a wildcard, or a literal path, and
+  the elevated run copies them. Decided in the harm review (batch C): no change
+  of behaviour; the DBA guide and the disclosure tell the DBA to read the
+  manifest's list of copied files, which gives every source path, before
+  sending the archive.
 - A path that matches nothing is recorded with the step, not guessed.
-- When `msdb.dbo.sysjobsteps` is refused to the login (a `SQLAgentReaderRole`
-  member can read jobs but not this table, see the header of `020.job-steps`),
-  the source is "refused", as `collect` records a refused permission, and does
-  not change the exit code.
+- Reading the steps needs `SQLAgentReaderRole` and `SELECT` on
+  `msdb.dbo.sysjobsteps`: `sysjobs_view` answers 229 without the role, and the
+  role does not carry the table (see the header of `020.job-steps`). Without
+  either, the source is "refused", as `collect` records a refused permission,
+  with a reason naming both, and does not change the exit code. The same holds
+  for a login that may not enter `msdb` at all (error 916).
+- The host's queries start with the collector contract's preamble:
+  `READ UNCOMMITTED` and `SET LOCK_TIMEOUT 10000` (harm review, batch C: the
+  read waited 23 s on a `sysjobsteps` key behind an open transaction). Error
+  1222 fails the source, its reason naming the lock timeout. Measured on SQL
+  Server 2022: read uncommitted reads past an open transaction's rows at once,
+  and a schema modification lock holds the query at compile time whatever
+  `LOCK_TIMEOUT` says. Each query is therefore also bounded to 30 s, after
+  which it is cancelled; the job outputs then fail with a reason naming the
+  timeout (harm review, batch D: measured on SQL Server 2022 behind an
+  `ALTER INDEX ... REBUILD` left open on `msdb.dbo.sysjobsteps`).
 
 ## What it does not read
 
@@ -344,11 +443,19 @@ The allowlist pattern of `dumps`: the connection options of `collect`, `--to`,
   an elevated prompt is `C:\Windows\System32`.
 - `--since <yyyy-mm-dd>`: start of the window, in local time. Default 90 days
   before today.
+- Any argument that is not a flag is refused, naming it (harm review, batch
+  C): parsing stops at it and every flag after it would be dropped, and a
+  `--since` turned into a typographic dash by a mail client is such an
+  argument, which the message says.
 
 ## What it writes
 
 One zip in `--to`, named `<instance>-<yyyy-mm-dd>-<hhmmss>.host.zip`, created
 exclusively, with one top-level directory of the same name, as `dumps` does.
+It is created with a protected DACL, nothing inherited from `--to`, giving
+full access to `SYSTEM`, `BUILTIN\Administrators` and the user who ran the
+command, and to no one else: under a directory such as `C:\audit` the
+inherited ACL gives `BUILTIN\Users` read access, measured with `icacls`.
 When the instance did not answer, `<instance>` is the local NetBIOS name.
 
 ```
@@ -379,12 +486,21 @@ should review: computer, cluster and volume names, addresses, paths, event
 messages, and above all the copied text files. Job output files are whatever
 the step printed, and a CmdExec or PowerShell step can print a connection
 string or a password; Azure extension logs and SQL Writer's log name databases
-and accounts. The repository already withholds the text of non-T-SQL job
-commands for that reason (`020.job-steps.sql`); this command copies their
-output, and says so.
+and accounts, and the extension logs hold the scripts and settings the
+extensions were given; the job output paths are chosen by a `sysadmin`. The
+repository already withholds the text of non-T-SQL job commands for that
+reason (`020.job-steps.sql`); this command copies their output, and says so.
 
 The archive is removed, and the run exits 2, on an error writing the zip or an
-interrupt.
+interrupt. Closing the console window is not an interrupt the run can finish:
+Windows ends the process about five seconds after the first signal, and the
+incomplete archive can remain, so the DBA guide says to press Ctrl+C and to
+delete a leftover zip (harm review, batch C).
+
+Windows PowerShell 5.1 may write `StartupProfileData-NonInteractive` and, when a
+module loads, `ModuleAnalysisCache` under the running user's
+`%LOCALAPPDATA%\Microsoft\Windows\PowerShell`: the only files the command can
+leave outside `--to`, documented rather than prevented (harm review, batch C).
 
 ## Output and exit codes
 
@@ -464,7 +580,13 @@ existing product reads it.
   absolute path in the system directory, from `GetSystemDirectoryW` in
   `kernel32.dll`: the process is elevated, and a bare name would let a DLL left
   beside the executable be loaded instead (the `syscall.LoadDLL` documentation
-  warns of it). Event Log handles are used from one OS thread
+  warns of it). The absolute path covers the DLL, not its own imports, which
+  the loader would search from the executable's directory first (an elevated
+  `sql-auditor.exe` run from `Downloads`, where a browser drops files
+  unasked): before any of them is loaded, the host command restricts the
+  process's DLL search to the system directory
+  (`SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)`), and refuses to
+  run if that fails (harm review, batch D). Event Log handles are used from one OS thread
   (`runtime.LockOSThread`), as the API expects.
 - WMI serves `Win32_ShadowCopy`, `Win32_ShadowStorage`, `Win32_ShadowProvider`,
   `Win32_Volume`, and the `MSCluster_*` classes in `root\MSCluster`, all
@@ -472,6 +594,11 @@ existing product reads it.
   `powershell.exe -NoProfile -NonInteractive -Command`, the executable named by
   its absolute path under the system directory, the script text a constant of
   the source: a COM binding would be a new module. (Decided in the plan.)
+  Every script starts with a preamble that turns module autoload off and
+  imports `CimCmdlets` and `Microsoft.PowerShell.Utility` by absolute path
+  under `$PSHOME`, and the child's `PSModulePath` is narrowed to the system
+  modules: the user's module path is writable by any unelevated process of
+  that user, and `-NoProfile` does not stop autoload (harm review, batch A).
 - `dumps` is not built yet. `host` does not wait for it: the pieces the two
   share (the flag allowlist, the machine check, the timestamped exclusive zip
   removed on interrupt) are written once, in a place `dumps` will reuse, and the
@@ -508,6 +635,10 @@ their output files) was removed afterwards.
 | A host that is not a cluster node | `root\MSCluster` answers `InvalidNamespace`, and the Operational channel does not exist: both recorded as absent. |
 | Quorum without a witness | `MSCluster_ClusterToQuorumResource` returns nothing under node majority (`QuorumType` `Node Majority`): recorded as "no quorum resource", not as a failure. |
 | Duration | Through PowerShell, 11 to 16 seconds per event query over 90 days, 0.6 seconds for the cluster classes; the Go reads through the API are to be timed in the build. |
+| Acceptance of the built command, 20 October 2026 | `sql-auditor host --to` on SQL01, elevated, integrated authentication: exit 0 in 7 seconds through the system APIs, against 11 to 16 seconds per query through PowerShell. Every JSON file parses; `080.cluster` gives the AG resource with `LeaseTimeout` 20000, `HealthCheckTimeout` 30000, `FailureConditionLevel` 3 and a null quorum; `030.vss` the four Microsoft providers; query 2 kept 5,456 events and counted the 5,469 events `41050` to `41055`, their sum with 3b being the 10,960 events `Get-WinEvent` returns for the same XPath, so the `@SystemTime>=` bound works on the real engine. |
+| Job outputs, end to end | A temporary job named `verif_host Check de l'instance` with Ola's current template wrote `verif_host Check de l''instance_1_20261019_220322.txt`; the command read the step through `sysjobs_view`, matched the file and copied it into `070.job-outputs/verif_host Check de l'instance_1/`. Job and file removed afterwards. |
+| An instance that does not answer, and a host without SQL Server | On SQL01 with `SQL_SERVER=NOPE01`: exit 2 in 10 seconds, archive written, job outputs `skipped`, event source `MSSQLSERVER` by the single service rule. On DC01: exit 2 in 4 seconds; the cluster channel, the cluster, SQL Writer and the extension logs absent with their reasons; event source undecided. TCP 1433 of SQL01 answers from DC01: the instance did not answer because a WinRM session cannot pass its credentials on (`ANONYMOUS LOGON`), not because the port is closed. |
+| `SqlWriterConfig.ini` encoding | Its first bytes are `3B 20 43 6F` (`; Co`): single-byte text, no BOM. |
 
 Still not verified, and why:
 
@@ -547,8 +678,10 @@ Taken by the auditor, 19 October 2026:
   FailoverClustering Operational channel; no `cluster.log`.
 
 Taken in this document, open to change: the command name, the 90-day default,
-the caps (20,000 events for query 1 per log and for queries 2 and 4, none for
-query 3, 50 MiB of extension logs, five job output files of 1 MiB per step),
+the caps (20,000 events for query 1 per log and for queries 2, 3a, 3b and 4,
+50 MiB of extension logs, five job output files of 1 MiB per step and
+100 MiB of job outputs in all, 10 MiB of each SQL Writer log and 50 MiB of
+them in all),
 reading the host when the
 instance does not answer, exit code 2 in that case, the instance source chosen
 from the local services, no `vssadmin list writers`, local fixed drives only for

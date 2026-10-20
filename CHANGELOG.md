@@ -19,6 +19,10 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Added
+
+- `sql-auditor host --to DIR` reads the Windows machine that hosts the instance, from an elevated prompt, into a separate archive, `<instance>-<yyyy-mm-dd>-<hhmmss>.host.zip`: the System and Application event logs (Critical, Error and Warning events, every event of the instance's own source, the machine and instance restarts), the failover cluster's Operational channel and its configuration from WMI, VSS shadow copies, storage and providers, SQL Writer's own log, file system filter drivers, the active power plan, the Azure VM extension logs, and the output files of Agent job steps, their path templates expanded as Agent expands its tokens. The window is `--since yyyy-mm-dd` in local time, 90 days by default. It is the subset of SQL LogScout's output that needs no time window, read through the Windows APIs and WMI instead of localized text, plus what LogScout does not collect. It installs nothing and writes no file but its archive, still reads the machine when the instance does not answer, and does not use exit code `1`. It needs Windows Server 2016 or later, takes only the connection options, `--to`, `--since` and `--debug`, and is never run by `collect`, the wizard, a profile or `.env`. `--since` is refused by every other command. The DBA guide's new section "Reading the host, on request" says what it reads, what the archive may contain and what Windows records about the run; the SQL LogScout section now asks for LogScout only for a time window.
+
 ## [0.38.0] - 2026-10-17
 
 This release is mostly about listings that were cut without saying so. Caps
