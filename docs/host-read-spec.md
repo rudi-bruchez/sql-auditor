@@ -23,9 +23,13 @@ same `.env` as `collect`. The auditor runs the same command when they have the
 hand on the machine.
 
 It is an instantaneous read. It installs nothing, downloads nothing, creates no
-shadow copy, collector, session or task, and writes nothing but its archive. One
-side effect is accepted and stated: the WMI queries on `Win32_Shadow*` may start
-the VSS service on demand, which stops itself after its idle timeout.
+shadow copy, collector, session or task, and writes no file but its archive.
+What Windows itself records about the command's activity is accepted and
+stated in the guide: the WMI queries on `Win32_Shadow*` may start the VSS
+service on demand, which stops itself after its idle timeout and leaves a
+`7036` event in the System log; process creation is audited where auditing is
+on; and if WMI is reached through PowerShell, its own logging records the
+command.
 
 ## Why not SQL LogScout
 
@@ -101,15 +105,29 @@ host source, skips the job output files, records why in the manifest, and exits
 2. The machine check cannot run then; the manifest says it did not, and the host
 name it read is in the archive for the auditor to compare.
 
-The instance's event source (`MSSQLSERVER` or `MSSQL$<name>`) comes from
-`SERVERPROPERTY('InstanceName')` when the instance answers on the right machine.
-Otherwise it comes from the local services, listed through the service manager
-(`golang.org/x/sys/windows/svc/mgr`, read only): if exactly one service named
-`MSSQLSERVER` or `MSSQL$<name>` exists, its name is the source; if there are
-several, the instance part of the `.env` server string (`HOST\NAME`) chooses
-among them; if it still cannot be decided, the queries that need the source
-(2 and 3b below) are not run, and the manifest says why. No other instance's
-events are read in any case.
+The instance's event source (`MSSQLSERVER` or `MSSQL$<name>`) is decided in
+this order, and the manifest says which rule decided it:
+
+1. The instance answered on the right machine: `SERVERPROPERTY('InstanceName')`,
+   `NULL` for a default instance, which gives `MSSQLSERVER`, otherwise
+   `MSSQL$<name>`.
+2. Otherwise, the `.env` server string names an instance (`HOST\NAME`): the
+   source is `MSSQL$NAME` if that service exists locally; if it does not, the
+   source is undecided.
+3. Otherwise (a bare host, a port, a listener): if exactly one SQL Server
+   service exists locally, in any state, its name is the source; if there are
+   several, or none, the source is undecided.
+
+The services are listed through the service manager opened with
+`SC_MANAGER_ENUMERATE_SERVICE` only (`windows.OpenSCManager`, wrapped in a
+`mgr.Mgr` of `golang.org/x/sys/windows/svc/mgr`, whose `Connect` asks for full
+access). When the source is undecided, the queries that need it (2 and 3b
+below) are not run, and the manifest says why.
+
+Those queries, and the job output files, belong to one instance. The machine
+sources do not: query 1, the cluster channel and SQL Writer's log cover every
+instance on the host, and an archive taken on a host with several instances
+names the others' errors and databases. The manifest says so.
 
 ## What it reads
 
@@ -156,10 +174,14 @@ cannot push out the events the analysis needs:
   query 3, which is a handful per month, 20,000 for query 4. Newest kept; a
   truncation is recorded with the oldest time kept, so the reader knows counts
   before that time are incomplete.
-- Per log or channel, its coverage: the time of its oldest record, its maximum
-  size and its retention mode (`EvtGetLogInfo`, `EvtGetChannelConfigProperty`).
-  On a busy server the Application log wraps well before 90 days, and "no
-  event" must not read the same as "log too short".
+- Per log or channel, its coverage: the time of its oldest record (the record
+  number from `EvtGetLogInfo`, whose event is then read for its time), its
+  maximum size, and its `Retention` and `AutoBackup` settings
+  (`EvtGetChannelConfigProperty`). On a busy server the Application log wraps
+  well before 90 days, and "no event" must not read the same as "log too
+  short". With auto-backup on, older events sit in `Archive-*.evtx` files that
+  the command does not read; the manifest says so rather than calling the log
+  short.
 
 Read through the Event Log API (`EvtQuery`, `EvtNext`, `EvtRender`,
 `EvtFormatMessage` in `wevtapi.dll`). Not the classic API behind
@@ -181,11 +203,15 @@ source.
   provider is a hint of the backup software, not proof of it: the requester that
   starts a snapshot is not recorded here, and a transient shadow copy is gone by
   the time the command runs.
-- SQL Writer's own log, which answers "when were the databases frozen, and
-  by whom": `SqlWriterLogger.txt` and its single rollover `SqlWriterLogger1.txt`,
-  in `C:\Program Files\Microsoft SQL Server\90\Shared\` (Learn, "SQL Server
-  VSS Writer logging"). Copied as they are, 1 MiB each by default. Absent on an
-  older SQL Writer: recorded as absent.
+- SQL Writer's own log, which answers "when were which databases frozen and
+  thawed", for every instance of the host: `SqlWriterLogger.txt` and its single
+  rollover `SqlWriterLogger1.txt`, in
+  `C:\Program Files\Microsoft SQL Server\90\Shared\` unless `TraceFile` in
+  `SqlWriterConfig.ini`, in the same folder, names another path, which is then
+  used (Learn, "SQL Server VSS Writer logging"). Copied whole, into
+  `035.sqlwriter/`; their size is set by `TraceFileSizeMb`, 1 MB by default.
+  The log does not name the requester. Absent on an older SQL Writer: recorded
+  as absent.
 - Not the writers' state. `vssadmin list writers` makes every writer answer an
   `OnIdentify`, which SQL Writer writes in that same log (Learn, same page), so
   running it would add to the very file the auditor reads and rotate its
@@ -254,12 +280,16 @@ Only when the instance answered.
   and the step's id and name. `queries/50.agent/020.job-steps.sql` reads the
   column too, but not `job_id`. Agent stores the template as typed, tokens
   included.
-- Agent tokens are expanded before matching, the `ESCAPE_SQUOTE`,
-  `ESCAPE_NONE` and similar wrappers removed:
+- Agent tokens are expanded before matching. Tokens are case-sensitive, as
+  Agent's are: only the uppercase forms are tokens, anything else is literal
+  text. A wrapper applies its escape to the value as Agent does
+  (`ESCAPE_SQUOTE` doubles `'`, `ESCAPE_DQUOTE` doubles `"`, `ESCAPE_RBRACKET`
+  doubles `]`, `ESCAPE_NONE` leaves it), so a job named with an apostrophe
+  matches the file Agent wrote:
   - `SQLLOGDIR` becomes the directory of `SERVERPROPERTY('ErrorLogFileName')`
     (the token exists from SQL Server 2014);
-  - `JOBNAME`, `STEPNAME` (SQL Server 2016 and later), `STEPID` and `JOBID`
-    their values; `JOBID` is the binary form, `0x` and 32 hexadecimal digits,
+  - `JOBNAME` and `STEPNAME` (both SQL Server 2016 and later), `STEPID` and
+    `JOBID` their values; `JOBID` is the binary form, `0x` and 32 hexadecimal digits,
     whose first three groups are byte-swapped from the GUID text (measured on
     SQL Server 2022 by a reader), hence the conversion above;
   - the tokens that vary per run (`DATE`, `TIME`, `STRTDT`, `STRTTM`) become
@@ -274,10 +304,13 @@ Only when the instance answered.
   (`MaintenanceSolution.sql`, since January 2019), in its output directory or
   the log directory; older versions used `JOBID`, `STRTDT` and `STRTTM`. All of
   them expand under the rules above.
-- Only local paths on a fixed drive are read. A UNC path, a mapped or
-  removable drive, or a path that leaves its directory through a reparse point
-  is recorded with the step and not read: the command reads this machine, not a
-  share an elevated account happens to reach.
+- Only local paths on a fixed drive are read, judged on the final path of
+  each file once links are resolved (`GetFinalPathNameByHandle`, then
+  `GetDriveType`). A UNC path, a mapped or removable drive, or a link that
+  leads to one is recorded with the step and not read: the command reads this
+  machine, not a share an elevated account happens to reach. A volume mount
+  point on a local disk, common for log directories on a failover cluster
+  instance, is a local fixed drive and is read.
 - Per step, the five newest files written in the window, each cut to its last
   1 MiB.
 - A path that matches nothing is recorded with the step, not guessed.
@@ -290,7 +323,8 @@ Only when the instance answered.
 
 The Security log, the registry beyond what the APIs above consult, the SQL
 errorlog (`collect` already reads it, `10.system/040.error-log`), any database
-file, and any other instance on the host.
+file, and the instance-bound sources (queries 2 and 3b, job output files) of
+any other instance on the host.
 
 ## Options
 
@@ -320,6 +354,7 @@ When the instance did not answer, `<instance>` is the local NetBIOS name.
   060.vm-extensions.json
   060.vm-extensions/      copied files, original relative paths
   070.job-outputs.json
+  035.sqlwriter/          SQL Writer's log files
   070.job-outputs/        copied files, one folder per job step
   080.cluster.json
 ```
@@ -355,11 +390,15 @@ degraded:
   refused by a permission.
 - 2: partial or refused. An archive was written but a source failed, the
   instance did not answer, or the machine check failed; or no archive was
-  written because of a configuration the tool will not act on (wrong platform,
-  not elevated, usage error), as README already defines 2.
+  written: a configuration the tool will not act on (wrong platform, not
+  elevated, usage error, an unreadable `.env` or `SQL_SERVER`, which `host`
+  refuses as `collect` does rather than reading the machine without knowing
+  the instance), as README already defines 2; or an error writing the zip, or an
+  interrupt, after which the archive is removed.
 - 1 is not used. README gives 1 to "the instance could not be reached, so
-  nothing was collected", and `host` always collects the machine. The guide's
-  table gains that exception for `host`, and the `dumps` spec, which uses 1 for
+  nothing was collected", and `host` always collects the machine. README's
+  "Exit codes" and the DBA guide's "The three exit codes" both gain that
+  exception for `host`, and the `dumps` spec, which uses 1 for
   an unreachable instance because it then has nothing to read, keeps it.
 
 ## The reading side
@@ -436,6 +475,8 @@ existing product reads it.
 The lab (Windows Server 2019, SQL Server 2025, an availability group) answers
 most of these; the French Windows 11 VM answers the language ones.
 
+- Whether `SqlWriterLogger.txt` can be read while `sqlwriter.exe` holds it
+  open, and with which sharing mode.
 - Whether `3197`, `3198`, `18264` and `18265` reach the Application log, with
   which source and which `EventData`, during a VSS backup of a database, and how
   many events query 2 returns over 90 days on an instance that logs every
@@ -477,8 +518,9 @@ Taken by the auditor, 19 October 2026:
   FailoverClustering Operational channel; no `cluster.log`.
 
 Taken in this document, open to change: the command name, the 90-day default,
-the caps (20,000 events per query, 50 MiB of extension logs, five job output
-files of 1 MiB per step, 1 MiB per SQL Writer log), reading the host when the
+the caps (20,000 events for query 1 per log and for queries 2 and 4, none for
+query 3, 50 MiB of extension logs, five job output files of 1 MiB per step),
+reading the host when the
 instance does not answer, exit code 2 in that case, the instance source chosen
 from the local services, no `vssadmin list writers`, local fixed drives only for
 job outputs, Azure only for extensions.
@@ -522,6 +564,16 @@ Applied:
   directive); the `Get-EventLog` rationale confused two numberings (codex
   directive); providers do not name the backup software (codex neutral); the VSS
   service may start on demand (Claude).
+
+A fresh adversarial reader then read only the lines version 2 had added, and
+found that they reopened what they closed: "no other instance's events" was
+false of query 1 and of SQL Writer's log, which is host-wide (Learn); the
+instance source rule picked another instance when the `.env` named a missing
+one, and left `InstanceName` `NULL` unmapped; `svc/mgr` connects with full
+access; wrappers were removed instead of applied; the reparse rule refused
+mount points; `EvtGetLogInfo` gives a record number, not a time; auto-backup
+archives were ignored; the caps in "Decisions" did not match the body. All
+fixed above.
 
 Rejected:
 
