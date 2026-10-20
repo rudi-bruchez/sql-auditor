@@ -272,6 +272,7 @@ sql-auditor check                    verify connectivity, permissions and config
 sql-auditor collect                  collect, then archive
 sql-auditor env init                 write the annotated .env template
 sql-auditor queries export --to DIR  write the embedded queries to disk; refuses to replace files already there, --force to replace
+sql-auditor host --to DIR            on the Windows server, elevated: read the machine around the instance into a separate archive
 sql-auditor version                  print the version and the build it came from
 ```
 
@@ -301,6 +302,31 @@ accepts, to `.env` in the current directory, or to `--to FILE`.
 - The template is embedded in the binary, which is the point: the key set is
   closed, an unrecognised key stops the run, and the person who received the
   executable on its own has no other copy of the list.
+
+### `host`
+
+Run on the Windows machine that hosts the instance, from an elevated prompt,
+with the same `.env` as `collect`. It reads what the machine records around the
+instance into `<instance>-<yyyy-mm-dd>-<hhmmss>.host.zip` in `--to`: the System
+and Application event logs, the failover cluster's Operational channel and
+configuration, VSS shadow copies and SQL Writer's own log, file system filter
+drivers, the active power plan, Azure VM extension logs, and the output files of
+Agent job steps.
+
+- The window starts at `--since yyyy-mm-dd`, local midnight, and defaults to 90
+  days before today.
+- `--to` is required and must be an existing directory. Besides `--to` and
+  `--since`, it takes the connection options and `--debug`, and refuses any
+  other option.
+- It refuses before reading anything on Linux and macOS, on a prompt that is
+  not elevated, and on a `.env` that `collect` would refuse. It needs Windows
+  Server 2016 or later.
+- It still reads the machine when the instance does not answer, and exits `2`.
+- It is a separate command with a separate archive: `collect`, the wizard, the
+  profiles and `.env` never run it.
+
+The [DBA guide](docs/dba-guide.md#reading-the-host-on-request) says what it
+reads, what the archive may contain, and what Windows records about the run.
 
 ### Progress, on stderr
 
@@ -776,6 +802,13 @@ what the collector does.
 
 A refused permission exits `0`. It reduces what is collected, and the omission
 is recorded in the archive, but it is not a failure of the run.
+
+`host` does not use `1`: it reads the machine whether the instance answers or
+not. It exits `0` when it wrote an archive and every source was read, absent or
+refused, and `2` when a source failed, the instance did not answer or is on
+another machine, or no archive was written (a refusal, an error writing the
+zip, an interrupt). The archive path ends stdout only when an archive was
+written, which tells the two cases of `2` apart.
 
 The wizard is the exception for a stop: an operator who stops the collection
 from the wizard has read the screen that calls the archive partial, and the
