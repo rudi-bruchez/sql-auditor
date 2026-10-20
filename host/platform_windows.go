@@ -498,6 +498,13 @@ func dirCheck(dir string) (string, bool, string) {
 		return "", false, fmt.Sprintf("%s is not a local fixed drive (drive type %d)", d[:3], t)
 	}
 	cur := d[:2]
+	// The caller names d; a refusal names the component only when it is not d.
+	at := func(why string) string {
+		if strings.EqualFold(cur, strings.TrimRight(d, `\`)) {
+			return why
+		}
+		return cur + ": " + why
+	}
 	for _, c := range strings.Split(strings.Trim(d[3:], `\`), `\`) {
 		if c == "" {
 			continue
@@ -513,19 +520,19 @@ func dirCheck(dir string) (string, bool, string) {
 			return "", true, ""
 		}
 		if err != nil {
-			return "", false, cur + ": " + err.Error()
+			return "", false, at(err.Error())
 		}
 		syscall.FindClose(h)
 		switch {
 		case fd.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT == 0:
 		case fd.Reserved0 == mountPoint:
 			if why := volumeMount(cur); why != "" {
-				return "", false, cur + ": " + why
+				return "", false, at(why)
 			}
 		case fd.Reserved0 == syscall.IO_REPARSE_TAG_SYMLINK:
-			return "", false, cur + ": symbolic link, not followed"
+			return "", false, at("symbolic link, not followed")
 		default:
-			return "", false, fmt.Sprintf("%s: reparse point (tag 0x%08X), not followed", cur, fd.Reserved0)
+			return "", false, at(fmt.Sprintf("reparse point (tag 0x%08X), not followed", fd.Reserved0))
 		}
 	}
 	if ok, why := fixedVolume(d); !ok {
