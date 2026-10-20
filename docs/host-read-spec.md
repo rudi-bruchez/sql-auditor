@@ -212,8 +212,9 @@ source.
   starts a snapshot is not recorded here, and a transient shadow copy is gone by
   the time the command runs.
 - SQL Writer's own log, which answers "when were which databases frozen and
-  thawed", for every instance of the host: `SqlWriterLogger.txt` and its single
-  rollover `SqlWriterLogger1.txt`, in
+  thawed", for every instance of the host: `SqlWriterLogger.txt` and its
+  rollover `SqlWriterLogger1.txt` (every file named after the log's stem with
+  digits, since the rollover name of a custom `TraceFile` is not measured), in
   `C:\Program Files\Microsoft SQL Server\90\Shared\` unless `TraceFile` in
   `SqlWriterConfig.ini`, in the same folder, names another path, which is then
   used (Learn, "SQL Server VSS Writer logging"). Copied whole, into
