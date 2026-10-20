@@ -470,28 +470,41 @@ existing product reads it.
 - The rules of `CLAUDE.md`: no client identifier in fixtures, comments or
   messages.
 
-## To verify on the Windows lab before implementing
+## Measured on the Windows lab, 20 October 2026
 
-The lab (Windows Server 2019, SQL Server 2025, an availability group) answers
-most of these; the French Windows 11 VM answers the language ones.
+Windows Server 2019 (17763), SQL Server 2025 CU9 (17.0.5015.4), a two-node
+availability group with node majority quorum, and a domain controller that is
+not a cluster node. Everything created for the measures (a persistent shadow
+copy, a throwaway database holding Ola Hallengren's solution, its jobs and
+their output files) was removed afterwards.
 
-- Whether `SqlWriterLogger.txt` can be read while `sqlwriter.exe` holds it
-  open, and with which sharing mode.
-- Whether `3197`, `3198`, `18264` and `18265` reach the Application log, with
-  which source and which `EventData`, during a VSS backup of a database, and how
-  many events query 2 returns over 90 days on an instance that logs every
-  backup.
-- What `SqlWriterLogger.txt` records of a VSS backup (freeze, thaw, the
-  requester if any), and whether the WMI queries on `Win32_Shadow*` start the
-  VSS service, and for how long.
-- What `Win32_ShadowCopy` says of a persistent, client-accessible shadow
-  (`vssadmin create shadow`, then deleted).
-- The `output_file_name` of a stock Ola Hallengren installation on Windows,
-  and the file names Agent writes from it.
-- The elevation check from a non-elevated administrator.
-- How long the whole read takes on a VM with 90 days of logs.
-- `root\MSCluster` on Windows Server 2016, and what a host that is not a
-  cluster node answers when the namespace is queried.
+| Question | Measured |
+|---|---|
+| WMI starts VSS | `Get-CimInstance Win32_ShadowCopy` with VSS stopped: VSS and the software shadow copy provider start, two `7036` events in the System log. |
+| SQL Writer's log while held open | `SqlWriterLogger.txt` opens for reading with `FileShare.Read`; no need for a copy of the volume. |
+| What SQL Writer logs of a VSS backup | `diskshadow` backup of `C:`: `OnPrepareBackup` with the count and the names of the databases per instance, `OnPrepareSnapshot`, `OnFreeze`, `OnThaw`, `OnBackupComplete`, each with its local time; the trace header gives the UTC offset. No requester is named. The file's own `OnIdentify` lines come from each enumeration of writers, the snapshot's included. |
+| SQL Writer's configuration | `SqlWriterConfig.ini` holds `[Logging]` with `EnableTracing`, `TraceLevel`, `TraceFile`, `TraceFileSizeMb`, `ForceFlush`; the service rewrites it at start. |
+| Freeze events in the Application log | Same backup: per database, `3197`, `3198`, `3014` and `18264`, source `MSSQLSERVER`, level 4. The `EventData` of `18264` holds the insertion strings (database, dates, pages, LSNs, the virtual device) followed by the event's binary data; the reader keeps the strings, and the binary as hexadecimal. |
+| Query 2's volume | 9,626 events of `MSSQLSERVER` over 90 days on a lab that is off most of the time, nearly all `41050` to `41055` (availability group state messages, about 780 each). On a production replica the 20,000 cap will cover weeks, not 90 days; the truncation record is what tells the reader so. |
+| Event log sizes | System and Application 20 MB, circular; FailoverClustering Operational 100 MB, circular, 1,824 records, all of level 4 in the window. |
+| A persistent shadow copy | `vssadmin create shadow /for=C:`: `Persistent`, `ClientAccessible`, `NoAutoRelease` and `NoWriters` true, `State` 12, `OriginatingMachine` and `ServiceMachine` the host's DNS name; `Win32_ShadowStorage` gives the volume, the diff area, used, allocated and maximum space; `Win32_Volume.DriveType` 3 for a fixed disk. |
+| Ola Hallengren's output files | Current version installed: `output_file_name` is `$(ESCAPE_SQUOTE(SQLLOGDIR))\$(ESCAPE_SQUOTE(JOBNAME))_$(ESCAPE_SQUOTE(STEPID))_$(ESCAPE_SQUOTE(DATE))_$(ESCAPE_SQUOTE(TIME)).txt`, and the job wrote `DatabaseIntegrityCheck - SYSTEM_DATABASES_1_20261019_185206.txt` in the errorlog's directory. A job renamed with an apostrophe wrote `...de l''instance_1_....txt`: `ESCAPE_SQUOTE` doubles it in the file name, as the rules above say. |
+| `JOBID` | `4BCE4909-FFDB-42F7-BC01-D28BDEF4C9F3` is `0x0949CE4BDBFFF742BC01D28BDEF4C9F3` from `CONVERT(binary(16), job_id)`: the first three groups byte-swapped. |
+| A host that is not a cluster node | `root\MSCluster` answers `InvalidNamespace`, and the Operational channel does not exist: both recorded as absent. |
+| Quorum without a witness | `MSCluster_ClusterToQuorumResource` returns nothing under node majority (`QuorumType` `Node Majority`): recorded as "no quorum resource", not as a failure. |
+| Duration | Through PowerShell, 11 to 16 seconds per event query over 90 days, 0.6 seconds for the cluster classes; the Go reads through the API are to be timed in the build. |
+
+Still not verified, and why:
+
+- Windows Server 2016: no such machine in the lab. The APIs and classes named
+  are documented for it; the first client run on 2016 is the test.
+- A non-elevated administrator: WinRM sessions of an administrator are always
+  elevated, so the refusal message is tested in the build, by hand, from a
+  console.
+- Azure VM extension logs: the lab is not on Azure; the folder layout comes
+  from Microsoft's documentation, and the first Azure client run is the test.
+- A job name with accented letters: the lab measure was spoiled by the
+  transport of the T-SQL, not by Agent; to redo from a console.
 
 ## Documentation
 
