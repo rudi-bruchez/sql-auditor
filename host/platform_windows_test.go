@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,6 +96,42 @@ func TestWinSystemDLL(t *testing.T) {
 		if err := d.Load(); err != nil {
 			t.Errorf("load %s: %v", d.Name, err)
 		}
+	}
+}
+
+// WindowsPlatform restricts the loader to System32, for the DLLs the host
+// loads and for their imports. There is no getter for the default DLL
+// directories, so this proves it by its effect: once WindowsPlatform has run,
+// a DLL placed beside the test executable is not found by its bare name,
+// which the default search order finds there first. It cannot prove the order
+// in main, that WindowsPlatform runs before the host's first load: that is by
+// reading (main builds Options, WindowsPlatform included, before Run).
+func TestWinDLLSearchRestricted(t *testing.T) {
+	WindowsPlatform(nil)
+	if dllSearchErr != nil {
+		t.Fatal(dllSearchErr)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("sqlauditor-probe-%d.dll", os.Getpid())
+	probe := filepath.Join(filepath.Dir(exe), name)
+	b, err := os.ReadFile(filepath.Join(systemDir(), "version.dll"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(probe, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(probe)
+	h, err := syscall.LoadLibrary(name)
+	if err == nil {
+		syscall.FreeLibrary(h)
+		t.Fatalf("%s was loaded from beside the executable", name)
+	}
+	if err != syscall.Errno(126) { // ERROR_MOD_NOT_FOUND
+		t.Errorf("LoadLibrary(%s): %v, want the module not found", name, err)
 	}
 }
 

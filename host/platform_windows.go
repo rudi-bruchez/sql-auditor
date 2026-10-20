@@ -29,6 +29,7 @@ var (
 	procGetVolumePathNameW           = kernel32.NewProc("GetVolumePathNameW")
 	procGetDriveTypeW                = kernel32.NewProc("GetDriveTypeW")
 	procLocalFree                    = kernel32.NewProc("LocalFree")
+	procSetDefaultDllDirectories     = kernel32.NewProc("SetDefaultDllDirectories")
 	procGetFileInformationByHandleEx = kernel32.NewProc("GetFileInformationByHandleEx")
 	procReOpenFile                   = kernel32.NewProc("ReOpenFile")
 
@@ -66,15 +67,44 @@ var systemDir = sync.OnceValue(func() string {
 	}
 })
 
-// systemDLL loads name by its absolute path in the system directory.
+// systemDLL loads name by its absolute path in the system directory. The
+// absolute path covers the DLL itself, not its own imports, which the loader
+// searches from the executable's directory first: restrictDLLSearch covers
+// those.
 func systemDLL(name string) *syscall.LazyDLL {
 	return syscall.NewLazyDLL(filepath.Join(systemDir(), name))
 }
 
+// dllSearchErr is restrictDLLSearch's answer, which Check returns: the host
+// does not run with its DLLs' imports searched beside the executable.
+var dllSearchErr error
+
+// restrictDLLSearch makes System32 the only directory the loader searches,
+// for the DLLs this process loads and for their imports
+// (SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_SYSTEM32). An elevated
+// sql-auditor.exe run from Downloads would otherwise load an import of
+// powrprof.dll or wevtapi.dll that a browser left there. It is called by
+// WindowsPlatform, which main evaluates before Run makes the host's first
+// call into a DLL, and not in an init: the host package is imported by every
+// command of the binary, and only this one is meant to run elevated.
+func restrictDLLSearch() error {
+	const loadLibrarySearchSystem32 = 0x800
+	if r, _, err := procSetDefaultDllDirectories.Call(loadLibrarySearchSystem32); r == 0 {
+		return fmt.Errorf("SetDefaultDllDirectories: %w", err)
+	}
+	return nil
+}
+
 // WindowsPlatform reads this machine, and the instance through inst.
 func WindowsPlatform(inst *Instance) Platform {
+	dllSearchErr = restrictDLLSearch()
 	return Platform{
-		Check:    checkElevated,
+		Check: func() error {
+			if dllSearchErr != nil {
+				return dllSearchErr
+			}
+			return checkElevated()
+		},
 		NetBIOS:  netBIOS,
 		Services: services,
 		Facts:    inst.Facts,

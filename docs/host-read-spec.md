@@ -551,7 +551,13 @@ existing product reads it.
   absolute path in the system directory, from `GetSystemDirectoryW` in
   `kernel32.dll`: the process is elevated, and a bare name would let a DLL left
   beside the executable be loaded instead (the `syscall.LoadDLL` documentation
-  warns of it). Event Log handles are used from one OS thread
+  warns of it). The absolute path covers the DLL, not its own imports, which
+  the loader would search from the executable's directory first (an elevated
+  `sql-auditor.exe` run from `Downloads`, where a browser drops files
+  unasked): before any of them is loaded, the host command restricts the
+  process's DLL search to the system directory
+  (`SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)`), and refuses to
+  run if that fails (harm review, batch D). Event Log handles are used from one OS thread
   (`runtime.LockOSThread`), as the API expects.
 - WMI serves `Win32_ShadowCopy`, `Win32_ShadowStorage`, `Win32_ShadowProvider`,
   `Win32_Volume`, and the `MSCluster_*` classes in `root\MSCluster`, all
