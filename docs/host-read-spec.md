@@ -149,7 +149,15 @@ cannot push out the events the analysis needs:
    `833` (slow I/O), `19406` (AG health), `3197` and `3198` (I/O frozen and
    resumed for a snapshot), `18264` and `18265` (backups). The existing
    topics name these in their detection steps; a closed list would miss the
-   next one a topic cites.
+   next one a topic cites. Except `41050` to `41055`, the availability group's
+   steps of reconnection to the local cluster service ("waiting for", "started",
+   "is online"): on the lab they were more than half of this source's events
+   over 90 days (see "Measured on the Windows lab"), enough to push the rest
+   out of the cap. They are not dropped silently: a count per identifier, with
+   the first and last time, goes in the same file, since a burst of them is the
+   trace of a lost connection to the cluster. `41048` and `41049` (the cluster
+   service or node became unavailable) stay in the query. (Decided by the
+   auditor, 20 October 2026.)
 3. Whatever its level, two closed lists, filtered on provider and identifier as
    the private reader does: (a) System, `1074`, `1076` (User32), `6005`,
    `6006`, `6008` (EventLog), `41` (Kernel-Power); (b) Application, the
@@ -485,7 +493,7 @@ their output files) was removed afterwards.
 | What SQL Writer logs of a VSS backup | `diskshadow` backup of `C:`: `OnPrepareBackup` with the count and the names of the databases per instance, `OnPrepareSnapshot`, `OnFreeze`, `OnThaw`, `OnBackupComplete`, each with its local time; the trace header gives the UTC offset. No requester is named. The file's own `OnIdentify` lines come from each enumeration of writers, the snapshot's included. |
 | SQL Writer's configuration | `SqlWriterConfig.ini` holds `[Logging]` with `EnableTracing`, `TraceLevel`, `TraceFile`, `TraceFileSizeMb`, `ForceFlush`; the service rewrites it at start. |
 | Freeze events in the Application log | Same backup: per database, `3197`, `3198`, `3014` and `18264`, source `MSSQLSERVER`, level 4. The `EventData` of `18264` holds the insertion strings (database, dates, pages, LSNs, the virtual device) followed by the event's binary data; the reader keeps the strings, and the binary as hexadecimal. |
-| Query 2's volume | 9,626 events of `MSSQLSERVER` over 90 days on a lab that is off most of the time, nearly all `41050` to `41055` (availability group state messages, about 780 each). On a production replica the 20,000 cap will cover weeks, not 90 days; the truncation record is what tells the reader so. |
+| Query 2's volume | 9,626 events of `MSSQLSERVER` over 90 days on a lab that is off most of the time, of which about 4,650 are `41050` to `41055` (reconnection steps to the cluster service, about 780 each). They are now counted instead of kept (query 2); the cap still binds on a busy replica, and the truncation record tells the reader so. |
 | Event log sizes | System and Application 20 MB, circular; FailoverClustering Operational 100 MB, circular, 1,824 records, all of level 4 in the window. |
 | A persistent shadow copy | `vssadmin create shadow /for=C:`: `Persistent`, `ClientAccessible`, `NoAutoRelease` and `NoWriters` true, `State` 12, `OriginatingMachine` and `ServiceMachine` the host's DNS name; `Win32_ShadowStorage` gives the volume, the diff area, used, allocated and maximum space; `Win32_Volume.DriveType` 3 for a fixed disk. |
 | Ola Hallengren's output files | Current version installed: `output_file_name` is `$(ESCAPE_SQUOTE(SQLLOGDIR))\$(ESCAPE_SQUOTE(JOBNAME))_$(ESCAPE_SQUOTE(STEPID))_$(ESCAPE_SQUOTE(DATE))_$(ESCAPE_SQUOTE(TIME)).txt`, and the job wrote `DatabaseIntegrityCheck - SYSTEM_DATABASES_1_20261019_185206.txt` in the errorlog's directory. A job renamed with an apostrophe wrote `...de l''instance_1_....txt`: `ESCAPE_SQUOTE` doubles it in the file name, as the rules above say. |
@@ -526,6 +534,7 @@ Taken by the auditor, 19 October 2026:
 - Only LogScout's data matters: the command reads the subset itself and does
   not launch LogScout.
 - An instantaneous read is enough for the first version.
+- `41050` to `41055` are counted, not kept, in the instance's events.
 - Windows Server 2012 R2 and older are not supported, and the documentation says so.
 - On a cluster node, the cluster configuration from WMI and the
   FailoverClustering Operational channel; no `cluster.log`.
