@@ -125,6 +125,25 @@ func TestExpandOutputFile(t *testing.T) {
 			reason: []string{"separator in JOBNAME"},
 		},
 		{
+			name: "anchored name", template: olaCurrent, values: ola, readable: true, dir: logDir,
+			noMatch: []string{
+				"old_DatabaseIntegrityCheck - SYSTEM_DATABASES_1_20261019_185206.txt",
+				"DatabaseIntegrityCheck - SYSTEM_DATABASES_1_20261019_185206.txt.bak",
+			},
+		},
+		{
+			name: "digit shapes", template: olaCurrent,
+			values:   with(func(v *TokenValues) { v.JobName = "Backup" }),
+			readable: true, dir: logDir,
+			match:   []string{"Backup_1_20261019_185206.txt"},
+			noMatch: []string{"Backup_1_1_20261019_185206.txt"}, // a job named Backup_1
+		},
+		{
+			name: "separator in a directory value", template: `$(SQLLOGDIR)\$(JOBNAME)\x.txt`,
+			values: with(func(v *TokenValues) { v.JobName = "a/b" }),
+			reason: []string{"separator in JOBNAME"},
+		},
+		{
 			name: "per-run token in directory", template: `$(SQLLOGDIR)\$(DATE)\x.txt`, values: ola,
 			reason: []string{"DATE"},
 		},

@@ -87,6 +87,7 @@ func ExpandOutputFile(template string, v TokenValues) OutputPattern {
 			case known && name == "SQLLOGDIR" && val == "":
 				return "SQLLOGDIR unknown before SQL Server 2014"
 			case known:
+				// SQLLOGDIR is a path, so its separators are the directory's own.
 				if strings.ContainsAny(val, `\/`) && !(inDir && name == "SQLLOGDIR") {
 					return "separator in " + name
 				}
