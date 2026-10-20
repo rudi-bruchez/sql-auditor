@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,6 +48,11 @@ const extensionBudget = 50 << 20
 
 // sqlWriterTail is the most copied of each SQL Writer log, its newest bytes.
 const sqlWriterTail = 10 << 20
+
+// sqlWriterBudget is the most copied of all the SQL Writer logs together,
+// newest first: anyone who can write in the TraceFile's directory can add
+// files named after its stem.
+const sqlWriterBudget = 50 << 20
 
 // BuildSources returns the sources in archive order.
 func BuildSources(c Calls) []Source {
@@ -157,10 +163,15 @@ func (c Calls) readEvents(ctx context.Context, e Env, put FileSink, channel, fil
 		if q.CountOnly {
 			f.Counted = counter.Counts()
 		}
-		// ponytail: queries 1 and 2 of Application are held together until
-		// Merge, at most 2 x eventCap events of about 26 KB each once Keep has
-		// bounded them (16 KiB of Data, 2,000 characters of message and of
-		// Binary): around 1 GB. Merge as each query ends if that is too much.
+		// ponytail: queries 1, 2 and 3b of Application are held together
+		// until Merge, at most 3 x eventCap events of about 9 KB each once Keep
+		// has bounded them (4 KiB of Data, 2,000 characters of message and of
+		// Binary, ASCII): about 540 MB live, and the heap runs at about twice
+		// the live bytes under the default GOGC, so about 1.1 GB. Measured
+		// (harm review, batch D): 105 MiB of peak HeapInuse for 3 x 2,000
+		// such events, 317 MiB for 3 x 6,000, so about 1.05 GiB at the caps.
+		// Merging as each query ends does not lower that peak, the union
+		// being held anyway; a lower eventCap or dataBytes does.
 		lists = append(lists, kept)
 	}
 	if bad > 0 {
@@ -229,9 +240,18 @@ func streamed(put FileSink, file string, write func(io.Writer) error) error {
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := write(pw)
-		pw.CloseWithError(err)
-		done <- err
+		var err error
+		// A panic here is outside readOne's recover, which runs in the
+		// caller's goroutine: it would end the process and leave the zip
+		// without its central directory.
+		defer func() {
+			if v := recover(); v != nil {
+				err = fmt.Errorf("panic: %v", v)
+			}
+			pw.CloseWithError(err)
+			done <- err
+		}()
+		err = write(pw)
 	}()
 	err := put(file, pr)
 	pr.CloseWithError(errors.New("the sink stopped reading")) // unblocks write if put returned early
@@ -254,7 +274,8 @@ func (c Calls) readVSS(ctx context.Context, _ Env, put FileSink) SourceResult {
 }
 
 // readSQLWriter copies SQL Writer's log and its rollovers, the last
-// sqlWriterTail bytes of each, from the directory SqlWriterConfig.ini names.
+// sqlWriterTail bytes of each, newest first within sqlWriterBudget, from the
+// directory SqlWriterConfig.ini names; the files past the budget are noted.
 // A directory or a file refused is a note, as job outputs record theirs, and
 // the source is still read.
 func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResult {
@@ -282,25 +303,46 @@ func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResul
 	if err != nil {
 		return failed(err)
 	}
-	res := SourceResult{Status: StatusRead}
+	var logs []fs.FileInfo
 	for _, d := range entries {
 		if !d.Type().IsRegular() || !IsSQLWriterLog(d.Name(), stem, ext) {
 			continue
 		}
-		src := strings.TrimRight(dir, `\/`) + `\` + d.Name()
-		f, size, why, err := openIn(c.OpenFile, src, final+`\`+d.Name())
+		info, err := d.Info()
+		if err != nil {
+			return failed(err)
+		}
+		logs = append(logs, info)
+	}
+	sort.SliceStable(logs, func(a, b int) bool { return logs[a].ModTime().After(logs[b].ModTime()) })
+	res := SourceResult{Status: StatusRead}
+	left := int64(sqlWriterBudget)
+	for _, info := range logs {
+		src := strings.TrimRight(dir, `\/`) + `\` + info.Name()
+		if left < 0 {
+			res.Notes = append(res.Notes, src+": budget reached, not copied")
+			continue
+		}
+		f, size, why, err := openIn(c.OpenFile, src, final+`\`+info.Name())
 		if err == nil && why != "" {
 			res.Notes = append(res.Notes, src+": "+why)
 			continue
 		}
-		var info fs.FileInfo
 		var cut bool
 		if err == nil {
-			if info, err = d.Info(); err == nil {
-				var r io.Reader
-				if r, cut, err = TailReader(f, size, sqlWriterTail); err == nil {
-					err = put("035.sqlwriter/"+d.Name(), r)
-				}
+			// Charged before the copy, as job outputs are: once a file does
+			// not fit, every file after it is noted.
+			n := min(size, sqlWriterTail)
+			if n > left {
+				left = -1
+				f.Close()
+				res.Notes = append(res.Notes, src+": budget reached, not copied")
+				continue
+			}
+			left -= n
+			var r io.Reader
+			if r, cut, err = TailReader(f, size, sqlWriterTail); err == nil {
+				err = put("035.sqlwriter/"+info.Name(), r)
 			}
 			f.Close()
 		}
@@ -308,7 +350,7 @@ func (c Calls) readSQLWriter(_ context.Context, _ Env, put FileSink) SourceResul
 			res.Status, res.Reason = StatusFailed, err.Error()
 			break
 		}
-		res.Copied = append(res.Copied, CopiedFile{Source: src, Archived: "035.sqlwriter/" + d.Name(), Size: size, Cut: cut, tail: sqlWriterTail, Modified: info.ModTime().UTC().Format(time.RFC3339)})
+		res.Copied = append(res.Copied, CopiedFile{Source: src, Archived: "035.sqlwriter/" + info.Name(), Size: size, Cut: cut, tail: sqlWriterTail, Modified: info.ModTime().UTC().Format(time.RFC3339)})
 	}
 	res.Count = len(res.Copied)
 	if res.Status == StatusRead && res.Count == 0 && len(res.Notes) == 0 {

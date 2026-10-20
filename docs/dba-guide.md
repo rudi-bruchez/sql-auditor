@@ -2588,7 +2588,7 @@ Every source that keeps a history is read for one window, from `--since`
 | `020.events-application.json` | the Application log: every Critical, Error and Warning event, at most the 20,000 newest; every event of the instance's own source, at most the 20,000 newest, except `41050` to `41055`, which are counted per identifier with their first and last time; the instance's start and stop events (`17162`, `17147`, `17148`) |
 | `025.events-cluster.json` | on a failover cluster node, every event of `Microsoft-Windows-FailoverClustering/Operational`, at most the 20,000 newest |
 | `030.vss.json` | shadow copies with the volumes they belong to, shadow storage, VSS providers |
-| `035.sqlwriter/` | SQL Writer's own log and its rollover, the last 10 MiB of each: which databases were frozen and thawed, and when |
+| `035.sqlwriter/` | SQL Writer's own log and its rollovers, the last 10 MiB of each, newest first, up to 50 MiB for all of them: which databases were frozen and thawed, and when |
 | `040.filter-drivers.json` | file system filter drivers, what `fltmc filters` lists |
 | `050.power-plan.json` | the active power plan, by GUID and name |
 | `060.vm-extensions.json`, `060.vm-extensions/` | on an Azure VM, the listing of `C:\WindowsAzure\Logs\Plugins`, and the files written in the window, newest first, up to 50 MiB |
@@ -2599,7 +2599,7 @@ Every source that keeps a history is read for one window, from `--since`
 Each event is written with its time in UTC, its level as a number, its
 provider, its identifier, its record number, the values of its `EventData`, and
 its message cut at 2,000 characters. Each value and the binary data are cut at
-2,000 characters too, and an event keeps at most 16 KiB of values: `"cut": true`
+2,000 characters too, and an event keeps at most 4 KiB of values: `"cut": true`
 marks an event where something was cut, `data_dropped` counts the values left
 out at the end. Each log also records its coverage: the
 time of its oldest record, its maximum size, its retention and auto-backup

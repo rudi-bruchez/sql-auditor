@@ -1,7 +1,10 @@
 package host
 
 import (
+	"context"
 	"encoding/binary"
+	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"strings"
@@ -135,4 +138,113 @@ func TestHarmD_LongPathPrefixIsLocal(t *testing.T) {
 	if len(asked) != 1 || asked[0] != `\\?\C:\Logs` || strings.Contains(strings.Join(res.Notes, "\n"), "not an absolute path") {
 		t.Errorf("DirCheck asked %q, notes %q", asked, res.Notes)
 	}
+}
+
+// SQL Writer's logs share one budget, newest first: the files past it are
+// noted, as a directory any user can write may hold thousands of them.
+func TestHarmD_SQLWriterBudget(t *testing.T) {
+	fsys := sizedFS{}
+	var newest []string
+	for i := range 8 {
+		n := "SqlWriterLogger.txt"
+		if i > 0 {
+			n = fmt.Sprintf("SqlWriterLogger%d.txt", i)
+		}
+		// The higher the number, the newer, so name order is not time order.
+		fsys[n] = sizedInfo{name: n, size: 10 * mib, mod: sourcesSince.Add(time.Duration(i) * time.Hour)}
+		newest = append([]string{"035.sqlwriter/" + n}, newest...)
+	}
+	c := fakeCalls()
+	c.ReadFile = func(string) ([]byte, error) { return []byte("[Logging]\r\n"), nil }
+	c.OpenDir = func(string) (fs.FS, error) { return fsys, nil }
+	s := &recordingSink{}
+	res := readNamed(t, c, "035.sqlwriter", Env{Since: sourcesSince}, s)
+	if fmt.Sprint(s.names) != fmt.Sprint(newest[:5]) {
+		t.Errorf("copied %v, want the five newest %v", s.names, newest[:5])
+	}
+	budget := 0
+	for _, n := range res.Notes {
+		if strings.HasSuffix(n, ": budget reached, not copied") {
+			budget++
+		}
+	}
+	if budget != 3 || res.Status != StatusRead {
+		t.Errorf("status %s, notes %q; want read, the three oldest noted", res.Status, res.Notes)
+	}
+}
+
+// Every query that keeps events is capped, the restarts of 3a and 3b
+// included: any local user can write events under the instance's source.
+func TestHarmD_EveryKeepingQueryCapped(t *testing.T) {
+	for _, q := range BuildEventQueries("MSSQLSERVER", sourcesSince) {
+		if !q.CountOnly && q.Cap <= 0 {
+			t.Errorf("query %s on %s keeps events without a cap", q.ID, q.Channel)
+		}
+	}
+}
+
+type panicky struct{}
+
+func (panicky) MarshalJSON() ([]byte, error) { panic("marshal") }
+
+// A panic in the goroutine that writes a streamed file is that file's error,
+// not the end of the process.
+func TestHarmD_StreamedWriterPanic(t *testing.T) {
+	err := streamed((&recordingSink{}).sink(false), "f.json", func(w io.Writer) error {
+		return json.NewEncoder(w).Encode(panicky{})
+	})
+	if err == nil || !strings.Contains(err.Error(), "panic: marshal") {
+		t.Errorf("err = %v, want the panic", err)
+	}
+}
+
+// A query held past sqlTimeout ends, and the job outputs fail with a reason
+// naming the timeout, as they do for error 1222.
+func TestHarmD_SQLTimeoutNamed(t *testing.T) {
+	defer func(d time.Duration) { sqlTimeout = d }(sqlTimeout)
+	sqlTimeout = 50 * time.Millisecond
+	// Held until the context ends, or 5 s, so that a missing deadline fails
+	// rather than hanging the run.
+	held := func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("held 5 s: no deadline")
+		}
+	}
+	t.Run("job steps", func(t *testing.T) {
+		var seen Env
+		p := fakePlatform(jobOutputs(&seen))
+		p.Steps = func(ctx context.Context) ([]JobStep, bool, error) { return nil, false, held(ctx) }
+		o := runOptions(t, p)
+		start := time.Now()
+		code := Run(context.Background(), o)
+		if took := time.Since(start); code != 2 || took > 5*time.Second {
+			t.Errorf("exit %d after %v; want 2 within the timeout", code, took)
+		}
+		if seen.StepsErr == nil || !strings.Contains(seen.StepsErr.Error(), "timeout: the instance did not answer within 50ms") {
+			t.Errorf("StepsErr = %v, want the timeout named", seen.StepsErr)
+		}
+		res := readNamed(t, fakeCalls(), "070.job-outputs", Env{Facts: &InstanceFacts{}, MachineMatch: true, StepsErr: seen.StepsErr}, &recordingSink{})
+		if res.Status != StatusFailed || !strings.Contains(res.Reason, "timeout") {
+			t.Errorf("job outputs %s, %q; want failed naming the timeout", res.Status, res.Reason)
+		}
+	})
+	t.Run("facts", func(t *testing.T) {
+		var seen Env
+		p := fakePlatform(jobOutputs(&seen))
+		p.Facts = func(ctx context.Context) (*InstanceFacts, error) { return nil, held(ctx) }
+		o := runOptions(t, p)
+		if code := Run(context.Background(), o); code != 2 || seen.Facts != nil {
+			t.Errorf("exit %d, facts %v; want 2 and none", code, seen.Facts)
+		}
+	})
+	t.Run("interrupt is not a timeout", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := sqlBounded(ctx, held); err != context.Canceled {
+			t.Errorf("err = %v, want context.Canceled as is", err)
+		}
+	})
 }

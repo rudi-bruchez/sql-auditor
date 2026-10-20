@@ -46,9 +46,9 @@ func BuildEventQueries(source string, since time.Time) []EventQuery {
 			EventQuery{ID: "2", Channel: "Application", XPath: "*[System[" + prov + " and " + tm + " and (EventID<41050 or EventID>41055) and EventID!=17162 and EventID!=17147 and EventID!=17148]]", Cap: eventCap},
 			EventQuery{ID: "2c", Channel: "Application", XPath: "*[System[" + prov + " and " + tm + " and EventID>=41050 and EventID<=41055]]", CountOnly: true})
 	}
-	qs = append(qs, EventQuery{ID: "3a", Channel: "System", XPath: "*[System[" + tm + " and ((Provider[@Name='User32'] and (EventID=1074 or EventID=1076)) or (Provider[@Name='EventLog'] and (EventID=6005 or EventID=6006 or EventID=6008)) or (Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=41))]]"})
+	qs = append(qs, EventQuery{ID: "3a", Channel: "System", XPath: "*[System[" + tm + " and ((Provider[@Name='User32'] and (EventID=1074 or EventID=1076)) or (Provider[@Name='EventLog'] and (EventID=6005 or EventID=6006 or EventID=6008)) or (Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=41))]]", Cap: eventCap})
 	if source != "" {
-		qs = append(qs, EventQuery{ID: "3b", Channel: "Application", XPath: "*[System[" + prov + " and " + tm + " and (EventID=17162 or EventID=17147 or EventID=17148)]]"})
+		qs = append(qs, EventQuery{ID: "3b", Channel: "Application", XPath: "*[System[" + prov + " and " + tm + " and (EventID=17162 or EventID=17147 or EventID=17148)]]", Cap: eventCap})
 	}
 	return append(qs, EventQuery{ID: "4", Channel: ClusterChannel, XPath: "*[System[" + tm + "]]", Cap: eventCap})
 }
@@ -252,8 +252,10 @@ func leafTexts(b []byte) ([]string, error) {
 const messageRunes = 2000
 
 // dataBytes is the most of Data text kept per event, the values cut first:
-// 20,000 events of 30 KB of Data each held 4.3 GB of the server's memory.
-const dataBytes = 16 << 10
+// 20,000 events of 30 KB of Data each held 4.3 GB of the server's memory, and
+// 16 KiB still left about 1.5 GB of heap for two capped queries (harm review,
+// batch D).
+const dataBytes = 4 << 10
 
 // CutMessage returns s cut at 2,000 characters, counted in runes.
 func CutMessage(s string) string {

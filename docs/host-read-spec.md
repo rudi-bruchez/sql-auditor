@@ -183,14 +183,20 @@ cannot push out the events the analysis needs:
 - What one event holds is bounded, so that the read does not squeeze the
   memory of the server it audits (the harm review measured 4.3 GB for 20,000
   events of 30 KB): each value, and the binary data in hexadecimal, cut at
-  2,000 characters like the message, and at most 16 KiB of values per event,
-  the values past that left out. `"cut": true` marks an event where the
-  message, a value or the binary data was cut; `"data_dropped": N` counts the
-  values left out at the end. Both are absent when nothing was. The count-only
-  query 2c formats no message, and the events file is written one event at a
-  time rather than built whole in memory.
-- Caps: 20,000 events for query 1 per log, 20,000 for query 2, none for
-  query 3, which is a handful per month, 20,000 for query 4. Newest kept; a
+  2,000 characters like the message, and at most 4 KiB of values per event,
+  the values past that left out (16 KiB still left about 1.5 GB of heap for
+  two capped queries, harm review, batch D). `"cut": true` marks an event
+  where the message, a value or the binary data was cut; `"data_dropped": N`
+  counts the values left out at the end. Both are absent when nothing was.
+  The count-only query 2c formats no message, and the events file is written
+  one event at a time rather than built whole in memory.
+- Caps: 20,000 events for every query that keeps events: query 1 per log,
+  queries 2, 3a, 3b and 4. Query 3 is a handful per month, but any local
+  user can write events under the instance's source, so it is capped too
+  (harm review, batch D). The Application queries 1, 2 and 3b are held
+  together until they are merged: about 9 KB per event once bounded, and a
+  peak heap of about twice that, measured at 105 MiB for 3 x 2,000 events of
+  the largest kind, so about 1 GiB at the caps. Newest kept; a
   truncation is recorded with the oldest time kept, so the reader knows counts
   before that time are incomplete.
 - Per log or channel, its coverage: the time of its oldest record (the record
@@ -229,9 +235,12 @@ source.
   `C:\Program Files\Microsoft SQL Server\90\Shared\` unless `TraceFile` in
   `SqlWriterConfig.ini`, in the same folder, names another path, which is then
   used (Learn, "SQL Server VSS Writer logging"). Copied into
-  `035.sqlwriter/`, the last 10 MiB of each; their size is set by
-  `TraceFileSizeMb`, 1 MB by default, and the harm review (batch C) bounded the
-  copy, which took a log of any size whole.
+  `035.sqlwriter/`, the last 10 MiB of each, newest first, and at most 50 MiB
+  for all of them, the files past it recorded "budget reached, not copied";
+  their size is set by `TraceFileSizeMb`, 1 MB by default, and the harm review
+  (batch C) bounded the copy, which took a log of any size whole, then (batch
+  D) the total, since anyone who can write in the log's directory can add
+  files named after its stem.
   The log does not name the requester. Absent on an older SQL Writer: recorded
   as absent.
 - Not the writers' state. `vssadmin list writers` makes every writer answer an
@@ -396,7 +405,10 @@ Only when the instance answered.
   1222 fails the source, its reason naming the lock timeout. Measured on SQL
   Server 2022: read uncommitted reads past an open transaction's rows at once,
   and a schema modification lock holds the query at compile time whatever
-  `LOCK_TIMEOUT` says.
+  `LOCK_TIMEOUT` says. Each query is therefore also bounded to 30 s, after
+  which it is cancelled; the job outputs then fail with a reason naming the
+  timeout (harm review, batch D: measured on SQL Server 2022 behind an
+  `ALTER INDEX ... REBUILD` left open on `msdb.dbo.sysjobsteps`).
 
 ## What it does not read
 
@@ -649,9 +661,10 @@ Taken by the auditor, 19 October 2026:
   FailoverClustering Operational channel; no `cluster.log`.
 
 Taken in this document, open to change: the command name, the 90-day default,
-the caps (20,000 events for query 1 per log and for queries 2 and 4, none for
-query 3, 50 MiB of extension logs, five job output files of 1 MiB per step and
-100 MiB of job outputs in all, 10 MiB of each SQL Writer log),
+the caps (20,000 events for query 1 per log and for queries 2, 3a, 3b and 4,
+50 MiB of extension logs, five job output files of 1 MiB per step and
+100 MiB of job outputs in all, 10 MiB of each SQL Writer log and 50 MiB of
+them in all),
 reading the host when the
 instance does not answer, exit code 2 in that case, the instance source chosen
 from the local services, no `vssadmin list writers`, local fixed drives only for

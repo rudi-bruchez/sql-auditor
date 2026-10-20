@@ -119,7 +119,10 @@ func Run(ctx context.Context, o Options) int {
 	r := &run{o: o, now: o.Now()}
 	r.env.Since = o.Since
 	if p.Facts != nil {
-		r.env.Facts, r.factsErr = p.Facts(ctx)
+		r.factsErr = sqlBounded(ctx, func(ctx context.Context) (err error) {
+			r.env.Facts, err = p.Facts(ctx)
+			return err
+		})
 	} else {
 		r.factsErr = errors.New("no connection")
 	}
@@ -142,8 +145,10 @@ func Run(ctx context.Context, o Options) int {
 	}
 	r.env.EventSource, r.env.SourceRule = ChooseEventSource(in)
 	if r.env.Facts != nil && r.env.MachineMatch && p.Steps != nil {
-		var err error
-		r.env.Steps, r.env.StepsRefused, err = p.Steps(ctx)
+		err := sqlBounded(ctx, func(ctx context.Context) (err error) {
+			r.env.Steps, r.env.StepsRefused, err = p.Steps(ctx)
+			return err
+		})
 		if err != nil && !r.env.StepsRefused {
 			r.env.StepsErr = err
 		}
@@ -200,6 +205,28 @@ func Run(ctx context.Context, o Options) int {
 	}
 	fmt.Fprintln(o.Stdout, a.Path())
 	return code
+}
+
+// sqlTimeout bounds each query of the host read. Read uncommitted takes no
+// data lock, so LOCK_TIMEOUT has nothing left to bound: the wait that remains
+// is the schema stability lock taken at compile, which OPTION (RECOMPILE)
+// asks for on every run and which LOCK_TIMEOUT does not cover. A session that
+// left a transaction open after an ALTER INDEX on a msdb job table would
+// otherwise hold the run until it ends (harm review, batch D, measured on
+// SQL Server 2022). A variable so that a test need not wait it out.
+var sqlTimeout = 30 * time.Second
+
+// sqlBounded runs query under sqlTimeout; go-mssqldb sends an attention when
+// the deadline passes. A deadline reached is named in the error, which alone
+// may say only "context deadline exceeded" or nothing about msdb.
+func sqlBounded(ctx context.Context, query func(context.Context) error) error {
+	qctx, cancel := context.WithTimeout(ctx, sqlTimeout)
+	defer cancel()
+	err := query(qctx)
+	if err != nil && qctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+		return fmt.Errorf("timeout: the instance did not answer within %v, a schema lock on a msdb table held by another session can do that: %w", sqlTimeout, err)
+	}
+	return err
 }
 
 // readOne reads one source, a panic becoming the source failed: one broken
