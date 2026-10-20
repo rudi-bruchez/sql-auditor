@@ -1,6 +1,10 @@
 # Reading the host on request
 
-Status: proposed on 19 October 2026, not implemented; version 1.
+Status: proposed on 19 October 2026, not implemented; version 2, of 20 October
+2026. Version 1 (`6ec7ec3`) was read by a panel of five readers (DeepSeek V4 Pro
+and codex, each with a directive and a neutral prompt, and a Claude reader on the
+neutral one; DeepSeek replaced agy, out of quota). What changed is summarized at
+the end.
 
 ## The gesture
 
@@ -18,8 +22,10 @@ from a mail of instructions, on the server, from an elevated prompt, with the
 same `.env` as `collect`. The auditor runs the same command when they have the
 hand on the machine.
 
-It is an instantaneous read. It installs nothing, starts nothing that outlives
-it, downloads nothing, and writes nothing but its archive.
+It is an instantaneous read. It installs nothing, downloads nothing, creates no
+shadow copy, collector, session or task, and writes nothing but its archive. One
+side effect is accepted and stated: the WMI queries on `Win32_Shadow*` may start
+the VSS service on demand, which stops itself after its idle timeout.
 
 ## Why not SQL LogScout
 
@@ -41,7 +47,8 @@ hour, a Perfmon collector and often an Extended Events session left on the
 server, and localized text files that the private reader had to learn to parse
 in two languages. Only its data mattered (decision of 19 October 2026), so this
 command reads that subset itself, plus what LogScout does not collect: VSS
-state, VM extension logs, Agent job output files.
+state and SQL Writer's own log, VM extension logs, Agent job output files, the
+failover cluster's configuration.
 
 LogScout stays in the guide for what needs a window. That window is out of
 scope here (see "Not covered").
@@ -70,18 +77,19 @@ On Windows, on the machine that hosts the instance, from an elevated prompt.
   Microsoft support since October 2023.
 - A process that is not elevated is refused before any read, with "run from an
   elevated prompt". The check is the token's elevation
-  (`windows.GetCurrentProcessToken().IsElevated()`), not a membership test:
-  a non-elevated member of Administrators cannot run `vssadmin`.
+  (`windows.GetCurrentProcessToken().IsElevated()`), not a membership test: a
+  non-elevated member of Administrators cannot enumerate filter drivers or read
+  every log channel.
 - When the instance answers, the machine check is the one of
   `docs/memory-dumps-spec.md`, "The machine check": `ComputerNamePhysicalNetBIOS`
   against `GetComputerNameEx(ComputerNamePhysicalNetBIOS)`. Whichever of the two
   commands is built first writes it; the second reuses it. There is no second
   check by file, since nothing here is listed by the instance with a size.
-- On a mismatch, the instance-bound sources (job output files, the instance's
-  own event source) are skipped, and the machine sources (event logs, VSS,
-  filter drivers, power plan, VM extensions) are still read, as when the
-  instance does not answer. The manifest names both machines and the run exits
-  2. The typical case is a `.env` pointing at an availability group listener
+- On a mismatch, the job output files are skipped, the instance's event
+  source is identified as when the instance does not answer (next section), and
+  the machine sources (event logs, VSS, filter drivers, power plan, cluster, VM
+  extensions) are still read. The manifest names both machines and the run
+  exits 2. The typical case is a `.env` pointing at an availability group listener
   while the DBA runs `host` on the node they were asked about: the machine is
   the one the auditor wants, the instance is not. (Decided in this document.)
 
@@ -89,50 +97,77 @@ On Windows, on the machine that hosts the instance, from an elevated prompt.
 
 The command is most useful precisely when the instance misbehaves, so it does
 not need the instance to read the host. If the connection fails, it reads every
-host source, skips the two that need SQL (job output files, the instance's own
-event source name), records why in the manifest, and exits 2. The machine check
-cannot run then; the manifest says it did not, and the host name it read is in
-the archive for the auditor to compare.
+host source, skips the job output files, records why in the manifest, and exits
+2. The machine check cannot run then; the manifest says it did not, and the host
+name it read is in the archive for the auditor to compare.
+
+The instance's event source (`MSSQLSERVER` or `MSSQL$<name>`) comes from
+`SERVERPROPERTY('InstanceName')` when the instance answers on the right machine.
+Otherwise it comes from the local services, listed through the service manager
+(`golang.org/x/sys/windows/svc/mgr`, read only): if exactly one service named
+`MSSQLSERVER` or `MSSQL$<name>` exists, its name is the source; if there are
+several, the instance part of the `.env` server string (`HOST\NAME`) chooses
+among them; if it still cannot be decided, the queries that need the source
+(2 and 3b below) are not run, and the manifest says why. No other instance's
+events are read in any case.
 
 ## What it reads
 
-All sources are read for one window, `--since`, default 30 days before the local
-date. Everything is written as JSON, one file per source, with stable
-identifiers (numbers, GUIDs, provider names) next to any localized text, so the
-reader never parses a translated label.
+All sources are read for one window, `--since`, default 90 days before the local
+date, the window the private reader and its topics were written against for
+LogScout's event extract. Everything is written as JSON, one file per source,
+with stable identifiers (numbers, GUIDs, provider names, event data values) next
+to any localized text, so the reader never parses a translated label.
 
 ### Event logs, System and Application
 
-Three queries, each with its own cap, so that a chatty log cannot push out the
-events the analysis needs:
+Four queries, each with its own cap, so that a chatty log or a busy source
+cannot push out the events the analysis needs:
 
-1. Every event of level Critical, Error or Warning in the window, both logs.
-2. Every event of the instance's own source in the Application log
-   (`MSSQLSERVER` or `MSSQL$<name>`), whatever its level. SQL Server writes much
-   of what matters at the Information level: `833` (slow I/O), `19406` (AG
-   health), `3197` and `3198` (I/O frozen and resumed for a snapshot), `17162`,
-   `17147`, `17148` (start and stop), `18264` (backup completed). A closed list
-   of identifiers would miss the next one a topic cites. When the instance did
-   not answer, or on a machine mismatch, the source is not known: every source
-   named `MSSQLSERVER` or starting with `MSSQL$` is read, and the manifest says
-   so.
-3. Whatever its level, a closed list in the System log: `1074`, `1076`
-   (User32), `6005`, `6006`, `6008` (EventLog), `41` (Kernel-Power).
-4. On a cluster node, every event of `Microsoft-Windows-FailoverClustering/Operational`
-   in the window, whatever its level: the history of failovers, lost nodes and
-   resource failures, which a `cluster.log` of a few minutes never shows.
-   Written to its own file, `025.events-cluster.json`.
+1. Every event of level Critical (1), Error (2) or Warning (3) in the window,
+   both logs.
+2. Every event of the instance's own source in the Application log, whatever
+   its level. SQL Server writes much of what matters at the Information level:
+   `833` (slow I/O), `19406` (AG health), `3197` and `3198` (I/O frozen and
+   resumed for a snapshot), `18264` and `18265` (backups). The existing
+   topics name these in their detection steps; a closed list would miss the
+   next one a topic cites.
+3. Whatever its level, two closed lists, filtered on provider and identifier as
+   the private reader does: (a) System, `1074`, `1076` (User32), `6005`,
+   `6006`, `6008` (EventLog), `41` (Kernel-Power); (b) Application, the
+   instance's source, `17162`, `17147`, `17148` (start and stop). These are
+   kept apart from query 2 because `18265` alone writes one event per log
+   backup per database, enough to fill any cap in days and push the restarts
+   out.
+4. On a cluster node, every event of
+   `Microsoft-Windows-FailoverClustering/Operational` in the window, whatever
+   its level: the history of failovers, lost nodes and resource failures,
+   which a `cluster.log` of a few minutes never shows. Written to its own file,
+   `025.events-cluster.json`.
 
-- Per event: log, query (1, 2 or 3), time in UTC, level as a number, provider
-  name, event id, record id, and the rendered message cut at 2,000 characters.
-  An event matched by two queries is written once, with both.
+- Per event: log, query (1, 2, 3 or 4), time in UTC, level as a number,
+  provider name, event id, record id, the values of `EventData` (or
+  `UserData`) as strings, and the rendered message cut at 2,000 characters. The
+  values hold what the topics need (the file and database of an `833`) without
+  parsing localized text, and survive a provider whose message file is gone,
+  which renders no text. An event matched by two queries is written once, with
+  both.
 - Caps: 20,000 events for query 1 per log, 20,000 for query 2, none for
-  query 3, which is a handful per month, 20,000 for query 4. Newest kept; a truncation is recorded
-  with the oldest time kept, so the reader knows counts before that time are
-  incomplete.
+  query 3, which is a handful per month, 20,000 for query 4. Newest kept; a
+  truncation is recorded with the oldest time kept, so the reader knows counts
+  before that time are incomplete.
+- Per log or channel, its coverage: the time of its oldest record, its maximum
+  size and its retention mode (`EvtGetLogInfo`, `EvtGetChannelConfigProperty`).
+  On a busy server the Application log wraps well before 90 days, and "no
+  event" must not read the same as "log too short".
 
-Read through the Event Log API (`EvtQuery`, `EvtRender`, `EvtFormatMessage`), not
-`Get-EventLog`, whose levels stop at five and miss Critical.
+Read through the Event Log API (`EvtQuery`, `EvtNext`, `EvtRender`,
+`EvtFormatMessage` in `wevtapi.dll`). Not the classic API behind
+`Get-EventLog`, whose entry types (`EventLogEntryType`: Error 1, Warning 2,
+Information 4, audits 8 and 16) have no Critical and number levels differently
+from the modern API (Critical 1, Error 2, Warning 3, Information 4, Verbose 5).
+Event Log XPath has no `starts-with`, which is why query 2 names one exact
+source.
 
 ### VSS
 
@@ -142,12 +177,21 @@ Read through the Event Log API (`EvtQuery`, `EvtRender`, `EvtFormatMessage`), no
   `Win32_Volume`.
 - Shadow storage: `Win32_ShadowStorage` (volume, diff area volume, used,
   allocated and maximum space).
-- Providers: `Win32_ShadowProvider` (name, id, version). A third-party provider
-  is what names the backup software.
-- Writers: `vssadmin list writers`, the only source without a WMI class. Kept
-  as raw text, plus what parses without depending on the language: writer name
-  (between quotes), writer id and instance id (GUIDs), state number (between
-  brackets). The last-error line is localized and kept as text.
+- Providers: `Win32_ShadowProvider` (name, id, version). A third-party
+  provider is a hint of the backup software, not proof of it: the requester that
+  starts a snapshot is not recorded here, and a transient shadow copy is gone by
+  the time the command runs.
+- SQL Writer's own log, which answers "when were the databases frozen, and
+  by whom": `SqlWriterLogger.txt` and its single rollover `SqlWriterLogger1.txt`,
+  in `C:\Program Files\Microsoft SQL Server\90\Shared\` (Learn, "SQL Server
+  VSS Writer logging"). Copied as they are, 1 MiB each by default. Absent on an
+  older SQL Writer: recorded as absent.
+- Not the writers' state. `vssadmin list writers` makes every writer answer an
+  `OnIdentify`, which SQL Writer writes in that same log (Learn, same page), so
+  running it would add to the very file the auditor reads and rotate its
+  history out; it can also hang on the stuck writer under investigation. Writer
+  failures reach the Application log under `VSS` and `SQLWRITER`, which query 1
+  reads.
 
 ### File system filter drivers
 
@@ -166,9 +210,11 @@ Only when the machine is a node of a Windows Server Failover Cluster (the
 `root\MSCluster` WMI namespace exists and answers); otherwise recorded as
 absent, not an error. Read through WMI, which writes nothing:
 
-- `MSCluster_Cluster`: name, quorum type and resource, `SameSubnetDelay`,
+- `MSCluster_Cluster`: name, quorum type, `SameSubnetDelay`,
   `SameSubnetThreshold`, `CrossSubnetDelay`, `CrossSubnetThreshold`,
-  `RouteHistoryLength`, `QuorumArbitrationTimeMax`;
+  `RouteHistoryLength`, `QuorumArbitrationTimeMax`; the quorum resource
+  through the `MSCluster_ClusterToQuorumResource` association, since the class
+  has no such property;
 - `MSCluster_Node`: name, state, node weight;
 - `MSCluster_Network`: name, role, address and mask, state;
 - `MSCluster_ResourceGroup`: name, state, owner node, failover threshold and
@@ -203,18 +249,42 @@ Azure only in this version: the tree under `C:\WindowsAzure\Logs\Plugins\`.
 
 Only when the instance answered.
 
-- The paths come from `msdb.dbo.sysjobsteps.output_file_name`, the column
-  `queries/50.agent/020.job-steps.sql` already reads.
-- Agent tokens are expanded before matching. `$(ESCAPE_SQUOTE(SQLLOGDIR))`
-  becomes the directory of `SERVERPROPERTY('ErrorLogFileName')`,
-  `$(ESCAPE_SQUOTE(JOBID))` and `STEPID` their values, and the tokens that vary
-  per run (`DATE`, `TIME`, `STRTDT`, `STRTTM`) become wildcards. Ola
-  Hallengren's jobs write `DatabaseIntegrityCheck_<jobid>_<stepid>_<date>_<time>.txt`
-  in the log directory, which is the case this exists for.
+- The paths come from `msdb.dbo.sysjobsteps.output_file_name`, read by the
+  command's own query with the job's name, id (`CONVERT(binary(16), job_id)`)
+  and the step's id and name. `queries/50.agent/020.job-steps.sql` reads the
+  column too, but not `job_id`. Agent stores the template as typed, tokens
+  included.
+- Agent tokens are expanded before matching, the `ESCAPE_SQUOTE`,
+  `ESCAPE_NONE` and similar wrappers removed:
+  - `SQLLOGDIR` becomes the directory of `SERVERPROPERTY('ErrorLogFileName')`
+    (the token exists from SQL Server 2014);
+  - `JOBNAME`, `STEPNAME` (SQL Server 2016 and later), `STEPID` and `JOBID`
+    their values; `JOBID` is the binary form, `0x` and 32 hexadecimal digits,
+    whose first three groups are byte-swapped from the GUID text (measured on
+    SQL Server 2022 by a reader), hence the conversion above;
+  - the tokens that vary per run (`DATE`, `TIME`, `STRTDT`, `STRTTM`) become
+    wildcards;
+  - any other token in the file name becomes a wildcard too, and is recorded
+    with the step; any other token in the directory part (`SQLDIR` among them)
+    makes the step recorded and not read, since a wildcard directory would
+    search the disk.
+- The case this exists for is Ola Hallengren's maintenance solution. Its
+  current version names the file
+  `$(ESCAPE_SQUOTE(JOBNAME))_$(ESCAPE_SQUOTE(STEPID))_$(ESCAPE_SQUOTE(DATE))_$(ESCAPE_SQUOTE(TIME)).txt`
+  (`MaintenanceSolution.sql`, since January 2019), in its output directory or
+  the log directory; older versions used `JOBID`, `STRTDT` and `STRTTM`. All of
+  them expand under the rules above.
+- Only local paths on a fixed drive are read. A UNC path, a mapped or
+  removable drive, or a path that leaves its directory through a reparse point
+  is recorded with the step and not read: the command reads this machine, not a
+  share an elevated account happens to reach.
 - Per step, the five newest files written in the window, each cut to its last
   1 MiB.
-- A path that matches nothing, or a token the command does not know, is
-  recorded with the step, not guessed.
+- A path that matches nothing is recorded with the step, not guessed.
+- When `msdb.dbo.sysjobsteps` is refused to the login (a `SQLAgentReaderRole`
+  member can read jobs but not this table, see the header of `020.job-steps`),
+  the source is "refused", as `collect` records a refused permission, and does
+  not change the exit code.
 
 ## What it does not read
 
@@ -229,7 +299,7 @@ The allowlist pattern of `dumps`: the connection options of `collect`, `--to`,
 
 - `--to <dir>`: required, for the reason `dumps` gives: the working directory of
   an elevated prompt is `C:\Windows\System32`.
-- `--since <yyyy-mm-dd>`: start of the window, in local time. Default 30 days
+- `--since <yyyy-mm-dd>`: start of the window, in local time. Default 90 days
   before today.
 
 ## What it writes
@@ -255,11 +325,19 @@ When the instance did not answer, `<instance>` is the local NetBIOS name.
 ```
 
 `MANIFEST.txt`: tool version, host, instance, run time, window, elevation, the
-result of the machine check, and per source its status (read, absent, failed
-with the error, skipped because the instance did not answer) and what it left
-out. It also says what the archive may contain that the client may want to
-review: computer and volume names, paths, the text of job outputs (database
-names, error messages), event messages.
+result of the machine check, how the instance's event source was identified,
+and per source its status (read, absent, refused, failed with the error,
+skipped because the instance did not answer) and what it left out. It lists
+every copied file with its source path and size.
+
+It also says, before the archive is sent, what it may contain that the client
+should review: computer, cluster and volume names, addresses, paths, event
+messages, and above all the copied text files. Job output files are whatever
+the step printed, and a CmdExec or PowerShell step can print a connection
+string or a password; Azure extension logs and SQL Writer's log name databases
+and accounts. The repository already withholds the text of non-T-SQL job
+commands for that reason (`020.job-steps.sql`); this command copies their
+output, and says so.
 
 The archive is removed, and the run exits 2, on an error writing the zip or an
 interrupt.
@@ -267,25 +345,47 @@ interrupt.
 ## Output and exit codes
 
 On stdout, one line per source with its count, then the archive path as the
-last line, as `collect` does.
+last line, as `collect` does. The archive path is printed only when an archive
+was written, so a script tells the two cases of code 2 apart by that line.
 
-- 0: every source read or legitimately absent.
-- 2: an archive was written but a source failed, or the instance did not
-  answer; or nothing was read (wrong platform, not elevated, wrong machine,
-  usage error).
-- 1 is not used: a host that answers is always worth an archive.
+The codes follow README's "Exit codes", where 0 is a usable result, possibly
+degraded:
+
+- 0: an archive was written; every source was read, legitimately absent, or
+  refused by a permission.
+- 2: partial or refused. An archive was written but a source failed, the
+  instance did not answer, or the machine check failed; or no archive was
+  written because of a configuration the tool will not act on (wrong platform,
+  not elevated, usage error), as README already defines 2.
+- 1 is not used. README gives 1 to "the instance could not be reached, so
+  nothing was collected", and `host` always collects the machine. The guide's
+  table gains that exception for `host`, and the `dumps` spec, which uses 1 for
+  an unreachable instance because it then has nothing to read, keeps it.
 
 ## The reading side
 
 The private analysis reads the archive. Its reader is designed separately, in
-the private repository. One constraint from here: the topics that cite the
-event logs, filter drivers and power plan from LogScout today must resolve from
-a `host` archive without being rewritten. Checked against them on 19 October
-2026: they read groups by source, identifier and level over Error and Warning,
-the start and stop identifiers of the machine and of the instance, and
-Information events of the instance's source (`833`, `19406`). Queries 1 to 3
-cover all of these. What a `host` archive lacks is the Information level of
-every other source, which no topic reads.
+the private repository. The `host` files are raw: one record per event, English
+keys. The LogScout products the topics cite are derived: groups by source,
+identifier and level (`groupes`, with `occurrences`, first and last), the
+machine and instance restarts (`arrets_demarrages`, `demarrages_instance`), the
+period covered (`periode`), filters (`filtres`), the plan's `type`. The
+constraint from here is that every field a topic cites today can be rebuilt by
+that reader from a `host` archive:
+
+- the groups and restarts from queries 1 and 3, the period from each log's
+  coverage and truncation time;
+- the filters from `040.filter-drivers.json`;
+- the plan's `type` from the scheme GUID, which tells the four standard plans
+  apart without the translated name.
+
+Three differences the reader must handle, decided there and not here: whether
+the evidence keeps the `logscout:` genre or gains one of its own (a finding
+should not credit LogScout for data `host` collected); Critical events, which
+LogScout's export folded into another type, and which change group counts; and
+the shorter coverage of a wrapped log. Query 2 serves the topics' detection
+steps (`833`, `19406`), which today ask for a hand-run `Get-WinEvent`; no
+existing product reads it.
 
 ## Not covered
 
@@ -296,7 +396,8 @@ every other source, which no topic reads.
   analysis needs from it is read from WMI and the Operational channel instead.
   SQL LogScout remains for a detailed trace.
 - Anything that creates state: shadow copies, Perfmon collectors, event
-  sessions, scheduled tasks.
+  sessions, scheduled tasks; and `vssadmin list writers`, which writes to SQL
+  Writer's log (see "VSS").
 - `msdb` of another availability group replica: that is `collect` run against
   that replica.
 - Hypervisor extensions other than Azure, Linux hosts, the wizard, profiles.
@@ -305,10 +406,18 @@ every other source, which no topic reads.
 
 - No PowerShell launched with `-EncodedCommand`. That is what EDRs flag on a
   production server, and the client's EDR is sometimes the subject of the
-  audit. Prefer direct API calls through `golang.org/x/sys/windows`, already a
-  dependency; WMI is the exception for the three `Win32_Shadow*` classes. How
-  WMI is reached (a new dependency, or a visible `powershell.exe -Command` with
-  `Get-CimInstance`) is the builder's call, stated in the plan.
+  audit.
+- `golang.org/x/sys/windows` (already a dependency) wraps the elevation check,
+  `GetComputerNameEx` and the service manager, and none of `wevtapi.dll`,
+  `fltlib.dll` or `powrprof.dll`: those calls are declared by hand with
+  `windows.NewLazySystemDLL`, which loads only from the system directory. Event
+  Log handles are used from one OS thread (`runtime.LockOSThread`), as the API
+  expects.
+- WMI serves `Win32_ShadowCopy`, `Win32_ShadowStorage`, `Win32_ShadowProvider`,
+  `Win32_Volume`, and the `MSCluster_*` classes in `root\MSCluster`. How WMI is
+  reached (a new dependency on a COM binding, or a visible
+  `powershell.exe -NoProfile -Command` running `Get-CimInstance`) is the
+  builder's call, stated in the plan, and the same for all of them.
 - `dumps` is not built yet. `host` does not wait for it: the pieces the two
   share (the flag allowlist, the machine check, the timestamped exclusive zip
   removed on interrupt) are written once, in a place `dumps` will reuse, and the
@@ -316,8 +425,9 @@ every other source, which no topic reads.
   spec gives it; the sentence of `docs/memory-dumps-spec.md` saying every other
   command refuses `--since` is amended in the same change. (Decided in this
   document.)
-- Windows-only code behind build tags; the parsing of `vssadmin` text, the token
-  expansion and the JSON shapes are plain functions tested on the Linux CI.
+- Windows-only code behind build tags; the token expansion, the path boundary
+  rules, the instance source choice and the JSON shapes are plain functions
+  tested on the Linux CI.
 - The rules of `CLAUDE.md`: no client identifier in fixtures, comments or
   messages.
 
@@ -326,17 +436,19 @@ every other source, which no topic reads.
 The lab (Windows Server 2019, SQL Server 2025, an availability group) answers
 most of these; the French Windows 11 VM answers the language ones.
 
-- Whether `3197`, `3198` and `18264` reach the Application log, with which
-  source, during a VSS backup of a database, and how many events query 2
-  returns over 30 days on an instance that logs every backup.
+- Whether `3197`, `3198`, `18264` and `18265` reach the Application log, with
+  which source and which `EventData`, during a VSS backup of a database, and how
+  many events query 2 returns over 90 days on an instance that logs every
+  backup.
+- What `SqlWriterLogger.txt` records of a VSS backup (freeze, thaw, the
+  requester if any), and whether the WMI queries on `Win32_Shadow*` start the
+  VSS service, and for how long.
 - What `Win32_ShadowCopy` says of a persistent, client-accessible shadow
   (`vssadmin create shadow`, then deleted).
-- `vssadmin list writers` on the French VM: which parts parse without the
-  language.
-- The `output_file_name` of a stock Ola Hallengren installation, and the token
-  values Agent writes in the file name (format of `JOBID`).
+- The `output_file_name` of a stock Ola Hallengren installation on Windows,
+  and the file names Agent writes from it.
 - The elevation check from a non-elevated administrator.
-- How long the whole read takes on a VM with 30 days of logs.
+- How long the whole read takes on a VM with 90 days of logs.
 - `root\MSCluster` on Windows Server 2016, and what a host that is not a
   cluster node answers when the namespace is queried.
 
@@ -364,7 +476,59 @@ Taken by the auditor, 19 October 2026:
 - On a cluster node, the cluster configuration from WMI and the
   FailoverClustering Operational channel; no `cluster.log`.
 
-Taken in this document, open to change: the command name, the 30-day default,
-the caps (20,000 events per log, 50 MiB of extension logs, five job output files
-of 1 MiB per step), reading the host when the instance does not answer, exit
-code 2 in that case, Azure only for extensions.
+Taken in this document, open to change: the command name, the 90-day default,
+the caps (20,000 events per query, 50 MiB of extension logs, five job output
+files of 1 MiB per step, 1 MiB per SQL Writer log), reading the host when the
+instance does not answer, exit code 2 in that case, the instance source chosen
+from the local services, no `vssadmin list writers`, local fixed drives only for
+job outputs, Azure only for extensions.
+
+## Review of 20 October 2026
+
+Five readers on version 1. Every finding was taken individually; the expensive
+ones were checked against their source before being applied.
+
+Applied:
+
+- `vssadmin list writers` writes to SQL Writer's log (Learn, "SQL Server VSS
+  Writer logging", checked): dropped, and that log is read instead, which also
+  gives the history the providers could not (codex directive and neutral,
+  Claude).
+- Ola Hallengren's files are named by `JOBNAME`, not `JOBID`, since 2019
+  (`MaintenanceSolution.sql`, three readers); `JOBID` is the byte-swapped
+  binary form (Claude, measured on SQL Server 2022); `STEPNAME`, `SQLDIR` and
+  unknown tokens handled; `SQLLOGDIR` from 2014.
+- Query 2's cap could push the instance's restarts out (Claude): they move to
+  the uncapped closed list.
+- The fallback to every `MSSQL*` source read other instances' events, against
+  "What it does not read" (codex, Claude): the source is now chosen from the
+  local services, or the queries are not run. Event Log XPath has no
+  `starts-with` (Claude).
+- Exit codes contradicted README and themselves, and a refused permission on
+  `sysjobsteps` would have given 2 (all readers): rewritten against README,
+  with the stdout line as the marker of an archive.
+- The window: 90 days, the window of the private reader; per-log coverage
+  recorded, since a wrapped log otherwise reads as "no event" (codex, Claude).
+- `EventData` values kept beside the rendered message (Claude).
+- The reading-side claim was false as written: the `host` files are raw and the
+  topics cite derived LogScout products (DeepSeek, codex, Claude); restated as
+  "every cited field can be rebuilt", with the differences left to the private
+  spec.
+- The disclosure understated what copied files hold (codex neutral, DeepSeek
+  neutral); job output paths limited to local fixed drives (codex neutral).
+- `x/sys/windows` wraps none of the event, filter and power APIs (DeepSeek,
+  Claude, codex), and WMI serves more than three classes (DeepSeek neutral,
+  Claude); `MSCluster_Cluster` has no quorum resource property (codex
+  directive); the `Get-EventLog` rationale confused two numberings (codex
+  directive); providers do not name the backup software (codex neutral); the VSS
+  service may start on demand (Claude).
+
+Rejected:
+
+- `STRTDT` and `STRTTM` "are not Agent tokens" (DeepSeek directive): Learn's
+  token table lists both, checked.
+- `vssadmin list writers` "is read-only and leaves no state" (DeepSeek
+  directive): contradicted by Learn, above.
+- The `MSCluster_*` documentation "returns 404" (DeepSeek neutral): codex
+  fetched both class pages under `previous-versions/windows/desktop/cluswmi/`;
+  the lab measurement stands, Server 2016 stays to verify.
