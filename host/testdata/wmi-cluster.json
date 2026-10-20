@@ -1,0 +1,6 @@
+{"cluster":{"Name":"cluster","QuorumType":"Node Majority","SameSubnetDelay":1000,"SameSubnetThreshold":10,"CrossSubnetDelay":1000,"CrossSubnetThreshold":20,"RouteHistoryLength":20,"QuorumArbitrationTimeMax":20},
+ "quorum":null,
+ "nodes":[{"Name":"SQL01","State":0,"NodeWeight":1},{"Name":"SQL02","State":0,"NodeWeight":1}],
+ "networks":[{"Name":"Réseau de cluster 1","Role":3,"Address":"192.0.2.0","AddressMask":"255.255.255.0","State":3}],
+ "groups":[{"Name":"AG1","State":0,"OwnerNode":"SQL01","FailoverThreshold":4294967295,"FailoverPeriod":6}],
+ "resources":[{"Name":"AG1","Type":"SQL Server Availability Group","State":2,"OwnerGroup":"AG1","RestartAction":2,"RestartThreshold":1,"RestartPeriod":900000,"RetryPeriodOnFailure":3600000,"PendingTimeout":180000,"PrivateProperties":{"LeaseTimeout":20000,"HealthCheckTimeout":30000,"FailureConditionLevel":3,"VerboseLogging":0}}]}
