@@ -454,10 +454,11 @@ func TestRunZipErrorRemovesArchive(t *testing.T) {
 	}
 }
 
-// incompressible is 64 KiB that deflate cannot shrink: zeros compress under
-// 1 KiB and stay in the zip writer's buffers, never reaching a failing writer.
+// incompressible is 1 MiB that deflate cannot shrink: zeros compress under
+// 1 KiB and stay in the zip writer's buffers, never reaching a failing writer,
+// and Go 1.26 keeps 64 KiB of random bytes in its window.
 func incompressible() []byte {
-	b := make([]byte, 64<<10)
+	b := make([]byte, 1<<20)
 	r := rand.New(rand.NewPCG(1, 2))
 	for i := range b {
 		b[i] = byte(r.Uint32())

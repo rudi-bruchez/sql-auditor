@@ -453,10 +453,19 @@ func TestWinArchiveDACL(t *testing.T) {
 			t.Errorf("ACE %q in %s, want an allow of full access", ace, sddl)
 			continue
 		}
-		trustees = append(trustees, f[5])
+		// SDDL writes some SIDs as aliases: the built-in Administrator is LA.
+		sid, err := syscall.StringToSid(f[5])
+		if err != nil {
+			t.Fatalf("trustee %q: %v", f[5], err)
+		}
+		s, err := sid.String()
+		if err != nil {
+			t.Fatal(err)
+		}
+		trustees = append(trustees, s)
 	}
 	slices.Sort(trustees)
-	want := []string{"BA", "SY", user}
+	want := []string{"S-1-5-32-544", "S-1-5-18", user}
 	slices.Sort(want)
 	if !strings.HasPrefix(head, "D:P") || !slices.Equal(trustees, want) {
 		t.Errorf("DACL %s, want protected with full access to SY, BA and %s only", sddl, user)
