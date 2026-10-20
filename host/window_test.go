@@ -17,6 +17,20 @@ func TestParseSinceDefaultIsNinetyDaysAtLocalMidnight(t *testing.T) {
 	if !got.Equal(want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
+
+	// Across a daylight saving change, 90 calendar days and 90 times 24 hours
+	// differ by an hour: only the first lands on local midnight.
+	paris, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		t.Skip("no zone database:", err)
+	}
+	got, err = ParseSince("", time.Date(2026, 11, 15, 10, 0, 0, 0, paris))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 8, 17, 0, 0, 0, 0, paris); !got.Equal(want) {
+		t.Errorf("across DST: got %v, want %v", got, want)
+	}
 }
 
 func TestParseSinceReadsLocalDate(t *testing.T) {

@@ -1,6 +1,7 @@
 // Package host reads what the Windows machine knows about a SQL Server
-// instance and its surroundings: event logs, cluster state, extension logs and
-// job output files, all for one window of time.
+// instance and its surroundings: event logs, VSS, the cluster, extension logs
+// and job output files. The sources that keep a history are read for one
+// window of time; the others are read as they stand.
 package host
 
 import (
@@ -23,7 +24,7 @@ func ParseSince(s string, now time.Time) (time.Time, error) {
 	}
 	t, err := time.ParseInLocation("2006-01-02", s, now.Location())
 	if err != nil {
-		return time.Time{}, fmt.Errorf("--since %q: expected a date as yyyy-mm-dd", s)
+		return time.Time{}, fmt.Errorf("--since %q: expected a valid date as yyyy-mm-dd", s)
 	}
 	if t.After(today) {
 		return time.Time{}, fmt.Errorf("--since %s is in the future", s)
