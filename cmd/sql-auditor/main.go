@@ -1015,6 +1015,14 @@ func runHost(c *cliFlags, dbg *debugLog) int {
 		fmt.Fprintln(os.Stderr, "--to is required for sql-auditor host")
 		return 2
 	}
+	// Detected from the flag set, not the value, like --profile: a wrapper
+	// expanding an unset variable into --since "" must not silently take the
+	// default window.
+	if typedFlag(c.fs, "since") && c.since == "" {
+		fmt.Fprintln(os.Stderr, "--since was given an empty date: "+
+			"give yyyy-mm-dd, or drop the option for the default window")
+		return 2
+	}
 	since, err := host.ParseSince(c.since, time.Now())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -1045,10 +1053,12 @@ func runHost(c *cliFlags, dbg *debugLog) int {
 	inst := host.NewInstance(opts.Config)
 	defer inst.Close()
 	// interruptible's message promises a manifest and an archive, and host
-	// removes its archive on an interrupt; host.Run says that itself.
+	// removes its archive on an interrupt, so it gets its own line, at once:
+	// the source in progress may take a while to return.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	ctx, stopSignals := interruptibleOn(context.Background(), sig, func() { signal.Stop(sig) }, io.Discard)
+	ctx, stopSignals := interruptibleOn(context.Background(), sig, func() { signal.Stop(sig) },
+		"stopping: the archive will be removed", os.Stderr)
 	defer stopSignals()
 	dbg.printf("dispatching to host")
 	code = host.Run(ctx, host.Options{
@@ -1346,21 +1356,22 @@ answer, and exits 2 then.
 func interruptible(parent context.Context) (context.Context, func()) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	return interruptibleOn(parent, sig, func() { signal.Stop(sig) }, os.Stderr)
+	return interruptibleOn(parent, sig, func() { signal.Stop(sig) },
+		"stopping: abandoning the collector in progress, then writing the manifest and the archive of what was collected before it",
+		os.Stderr)
 }
 
 // interruptibleOn is the half that can be tested. Sending a real signal to the
 // test process is not portable — Windows has no kill(2) and Go refuses
 // Process.Signal(os.Interrupt) there — so the channel and the hand-back are
 // parameters, and the only thing interruptible itself adds is signal.Notify.
-func interruptibleOn(parent context.Context, sig <-chan os.Signal, handBack func(), out io.Writer) (context.Context, func()) {
+func interruptibleOn(parent context.Context, sig <-chan os.Signal, handBack func(), stopping string, out io.Writer) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(parent)
 	go func() {
 		if _, ok := <-sig; !ok {
 			return
 		}
-		fmt.Fprintln(out,
-			"\nstopping: abandoning the collector in progress, then writing the manifest and the archive of what was collected before it")
+		fmt.Fprintln(out, "\n"+stopping)
 		fmt.Fprintln(out,
 			"press ctrl-c again to abandon the run instead")
 		// Before the cancel, so the window in which a second signal is still

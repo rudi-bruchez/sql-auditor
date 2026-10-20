@@ -602,7 +602,7 @@ func TestInterruptCancelsTheRunAndHandsTheSignalBack(t *testing.T) {
 			case handedBack <- struct{}{}:
 			default:
 			}
-		}, &out)
+		}, "stopping: the test line", &out)
 	defer stop()
 
 	select {
@@ -629,7 +629,9 @@ func TestInterruptCancelsTheRunAndHandsTheSignalBack(t *testing.T) {
 	// And the operator is told which of the two happened, on stderr, or a run
 	// that appears to ignore ctrl-c gets killed by someone who had no reason to
 	// wait.
-	if s := out.String(); !strings.Contains(s, "manifest") || !strings.Contains(s, "again") {
+	// The first line is the caller's: host says its archive is removed where
+	// collect says its manifest is written.
+	if s := out.String(); !strings.Contains(s, "the test line") || !strings.Contains(s, "again") {
 		t.Errorf("the stop said nothing useful: %q", s)
 	}
 }
@@ -927,6 +929,52 @@ func TestHostRequiresTo(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "--to is required for sql-auditor host") {
 		t.Errorf("stderr = %q, want the --to refusal", stderr)
+	}
+}
+
+func TestHostRefusesEmptySince(t *testing.T) {
+	clearSQLEnv(t)
+	env := writeDotEnv(t, "SQL_SERVER=SQL01\n")
+	dir := t.TempDir()
+	code, stderr := runCLI(t, "host", "--env", env, "--to", dir, "--since", "")
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "--since was given an empty date") {
+		t.Errorf("stderr = %q, want the empty --since refusal", stderr)
+	}
+	assertEmptyDir(t, dir)
+}
+
+// The refusals come in a fixed order, and the order is what an operator who
+// made two mistakes sees first.
+func TestHostAllowlistBeforeTo(t *testing.T) {
+	clearSQLEnv(t)
+	env := writeDotEnv(t, "SQL_SERVER=SQL01\n")
+	code, stderr := runCLI(t, "host", "--env", env, "--profile", "space")
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "--profile does not apply to sql-auditor host") {
+		t.Errorf("stderr = %q, want the allowlist refusal", stderr)
+	}
+	if strings.Contains(stderr, "--to is required") {
+		t.Errorf("stderr = %q: the allowlist must come before --to", stderr)
+	}
+}
+
+func TestHostToBeforeConfig(t *testing.T) {
+	clearSQLEnv(t)
+	env := writeDotEnv(t, "SQL_DATABASE=master\n")
+	code, stderr := runCLI(t, "host", "--env", env)
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "--to is required for sql-auditor host") {
+		t.Errorf("stderr = %q, want the --to refusal", stderr)
+	}
+	if strings.Contains(stderr, collect.ErrNoServer.Error()) {
+		t.Errorf("stderr = %q: --to must come before the configuration", stderr)
 	}
 }
 
