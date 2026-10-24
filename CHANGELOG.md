@@ -19,9 +19,25 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-10-24
+
+This release adds `sql-auditor host`, which reads the Windows machine under
+the instance: event logs, the cluster, VSS, SQL Writer, filter drivers, the
+power plan, VM extension logs and Agent job output files. It is the part of
+an investigation that used to need SQL LogScout or a remote session, and it
+runs only when asked, from an elevated prompt, into its own archive.
+
 ### Added
 
 - `sql-auditor host --to DIR` reads the Windows machine that hosts the instance, from an elevated prompt, into a separate archive, `<instance>-<yyyy-mm-dd>-<hhmmss>.host.zip`: the System and Application event logs (Critical, Error and Warning events, every event of the instance's own source, the machine and instance restarts), the failover cluster's Operational channel and its configuration from WMI, VSS shadow copies, storage and providers, SQL Writer's own log, file system filter drivers, the active power plan, the Azure VM extension logs, and the output files of Agent job steps, their path templates expanded as Agent expands its tokens. The window is `--since yyyy-mm-dd` in local time, 90 days by default. It is the subset of SQL LogScout's output that needs no time window, read through the Windows APIs and WMI instead of localized text, plus what LogScout does not collect. It installs nothing and writes no file but its archive, still reads the machine when the instance does not answer, and does not use exit code `1`. It needs Windows Server 2016 or later, takes only the connection options, `--to`, `--since` and `--debug`, and is never run by `collect`, the wizard, a profile or `.env`. `--since` is refused by every other command. The DBA guide's new section "Reading the host, on request" says what it reads, what the archive may contain and what Windows records about the run; the SQL LogScout section now asks for LogScout only for a time window.
+- `host` runs elevated and reads files whose path others can influence, so it refuses what would make it read something else. A job output or extension log reached through a symbolic link, a junction or a hard link is not read, nor is a directory on a network drive or a UNC path; a junction is followed only when it is a volume mount point Windows has registered. Each refusal is named once in `MANIFEST.txt`. The archive is created new, with an access list limited to SYSTEM, the Administrators and the user who ran the command, nothing inherited. Reads are bounded: each job output file to its last MiB and 100 MiB for all of them, SQL Writer's log to 10 MiB per file and 50 MiB in all, the extension logs to 50 MiB, and each event's message and values to 2,000 characters, with `"cut": true` and `"data_dropped"` saying what was shortened. msdb is read under `READ UNCOMMITTED` with a 10-second lock timeout and 30 seconds per query, and the PowerShell it starts loads only the two system modules it needs. Checked on Windows Server 2019 with PowerShell 5.1: planted links, junctions and modules were refused or ignored, and a standard user, a local administrator with a filtered token and a restricted token were each refused with exit code `2` and no file written.
+
+### Limits
+
+- A file compressed by Windows Overlay Filter (WOF) is seen as irregular and not read.
+- A registered mount point can still be swapped by someone who can modify its parent folder.
+- A sysadmin who is not a local administrator can set a job step's output path, and `host` then copies what that path names. `MANIFEST.txt` lists the source path of every copied file, so the archive can be checked before it is sent; the DBA guide says so.
+- The configuration is read before elevation is checked: run without a `.env` or `--server`, `host` first reports the missing `SQL_SERVER`.
 
 ## [0.38.0] - 2026-10-17
 
