@@ -13,9 +13,11 @@
 -- context switched to it.
 --
 -- WHY THIS COLLECTOR EXISTS. IndexOptimize, DatabaseIntegrityCheck and
--- DatabaseBackup log one row per command when they run with @LogToTable = 'Y',
--- which is the default: the start, the end, the error number, and for an
--- index the page count and fragmentation it was chosen on. That is the only
+-- DatabaseBackup log one row per command when they run with @LogToTable = 'Y'.
+-- That is not the default of the procedures ('N'); only the Agent jobs that
+-- MaintenanceSolution.sql creates pass 'Y', so an empty table does not prove
+-- there is no maintenance. Each row holds the start, the end, the error number,
+-- and for an index the page count and fragmentation it was chosen on. That is the only
 -- record of how long the nightly maintenance of one given index takes, and of
 -- an ALTER INDEX that was cut off. An ALTER_INDEX row with no EndTime is a
 -- command interrupted by a killed job, a failover or a restart, or one still

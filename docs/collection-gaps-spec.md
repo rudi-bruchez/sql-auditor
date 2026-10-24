@@ -1974,8 +1974,10 @@ record of how long each REORGANIZE ran.
 slug: commandlog-history
 
 Ola Hallengren's IndexOptimize, DatabaseIntegrityCheck and DatabaseBackup write
-one row per command to `dbo.CommandLog` when `@LogToTable = 'Y'`, the default:
-start, end, error number, and for an index the page count and fragmentation it
+one row per command to `dbo.CommandLog` when `@LogToTable = 'Y'`. The
+procedures default to `'N'`; only the Agent jobs that `MaintenanceSolution.sql`
+creates pass `'Y'`, so an empty `CommandLog` does not prove there is no
+maintenance. Each row holds the start, end, error number, and for an index the page count and fragmentation it
 was chosen on. No collector reads it. `50.agent/020.job-steps.sql` says that a
 job calls IndexOptimize and with which parameters, when they fit in the first
 200 characters, and nothing about what any run of it did.
