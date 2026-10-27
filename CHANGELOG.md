@@ -19,6 +19,10 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Added
+
+- `60.backup/010.history.sql` counts every backup msdb holds by month of its finish date, in a new `history_by_month` result set: full, differential, log and other, the databases seen, and the first and last finish of the month. It reads the whole history rather than the 30-day window, to say whether the history purge runs: a working purge leaves regular months that start at the retention, a purge that stopped leaves every month since. The month is cut on `backup_finish_date`, the column `sp_delete_backuphistory` compares. One row per month, not capped; a month with no backup has no row. Run on SQL Server 2025 CU7: the months summed to the 43 rows of `backupset`.
+
 ## [0.40.0] - 2026-10-28
 
 This release describes how each database is partitioned, from the

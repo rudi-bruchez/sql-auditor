@@ -1,5 +1,5 @@
 -- @scope:       instance
--- @resultsets:  root:object, per_database:array, devices:array, recent:array, growth:array, fulls:array
+-- @resultsets:  root:object, per_database:array, devices:array, recent:array, growth:array, fulls:array, history_by_month:array
 -- @permissions: CONNECT, MSDB READ
 -- @timeout:     120
 -- @profiles:    space
@@ -39,7 +39,8 @@
 -- THIRTY DAYS IS A WINDOW, NOT A RETENTION. msdb keeps whatever the purge job
 -- leaves it; the count of rows outside the window is projected so a reader can
 -- see whether history is being trimmed aggressively, which itself changes what
--- can be audited later.
+-- can be audited later. history_by_month, the last result set, says whether
+-- that purge runs at all.
 --
 -- GROWTH IS MEASURED HERE BECAUSE NOTHING ELSE CAN MEASURE IT. A collection
 -- is one point in time: file sizes say how big the database is, never how fast
@@ -494,4 +495,45 @@ SELECT
 FROM fulls AS f
 WHERE f.newest_first <= 10
 ORDER BY f.database_name, f.newest_first
+OPTION (RECOMPILE, MAXDOP 1);
+
+/* Every backup msdb still holds, counted by calendar month of its finish, over
+   the whole history and not the thirty-day window: the question is whether the
+   history purge runs, and only the full depth answers it.
+
+   WHY THE MONTHS AND NOT JUST THE OLDEST DATE. root.window.oldest_record says
+   how far back msdb goes and cannot say why. A purge that runs with a long
+   retention and a purge that stopped two years ago both leave an old first
+   row; what tells them apart is the shape. A working purge leaves months of
+   about the same count that start abruptly at the retention, the oldest one
+   partial; a purge that stopped leaves every month since it stopped, and
+   none was ever trimmed. A purge that never ran goes back to the install, or
+   to the last time msdb was rebuilt.
+
+   THE FINISH DATE, because it is what msdb.dbo.sp_delete_backuphistory
+   compares to its @oldest_date, so the first month here is where the purge
+   cut. Local clock, as everywhere in this file.
+
+   A MONTH WITHOUT A BACKUP HAS NO ROW. The purge deletes from the oldest end
+   only, so a hole between two months is not its work: either nothing was
+   backed up then, or the history was deleted by hand. Measured on the SQL
+   Server 2025 lab, whose 43 rows gave a single month in 2020 and then
+   nothing until July 2026.
+
+   NOT CAPPED. One row per month of history: twenty years of it is 240 rows,
+   and the count per type keeps a row to a few dozen bytes. The read is one
+   scan of backupset, which growth above already makes. */
+SELECT
+    CONVERT(char(7), bs.backup_finish_date, 126)                AS [month],
+    COUNT(*)                                                    AS [backups],
+    SUM(CASE WHEN bs.type = 'D' THEN 1 ELSE 0 END)              AS [full],
+    SUM(CASE WHEN bs.type = 'I' THEN 1 ELSE 0 END)              AS [differential],
+    SUM(CASE WHEN bs.type = 'L' THEN 1 ELSE 0 END)              AS [log],
+    SUM(CASE WHEN bs.type NOT IN ('D', 'I', 'L') THEN 1 ELSE 0 END) AS [other],
+    COUNT(DISTINCT bs.database_name)                            AS [databases],
+    CONVERT(varchar(19), MIN(bs.backup_finish_date), 126)       AS [first],
+    CONVERT(varchar(19), MAX(bs.backup_finish_date), 126)       AS [last]
+FROM msdb.dbo.backupset AS bs
+GROUP BY CONVERT(char(7), bs.backup_finish_date, 126)
+ORDER BY [month]
 OPTION (RECOMPILE, MAXDOP 1);
