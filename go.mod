@@ -2,6 +2,13 @@ module github.com/rudi-bruchez/sql-auditor
 
 go 1.26
 
+// The floor of the toolchain that builds a release. setup-go resolves "go 1.26"
+// to whatever 1.26 patch the runner offers, and 0.39.0 was built with go1.26.9,
+// before GO-2026-6809 (crypto/x509, compromised intermediate certificates) was
+// fixed in go1.26.10. Every release goes through that package on its TLS
+// connection to SQL Server. docs/harm-review-2026-10-28.md, finding 8.
+toolchain go1.26.10
+
 // SQL Server on Linux generates its self-signed certificate at startup with a
 // random serial number. When the high bit happens to be set, the DER encodes a
 // negative integer, and crypto/x509 has rejected that since Go 1.23 — so the

@@ -28,6 +28,12 @@ release workflow refuses a tag that disagrees with either this file or
   the first opt-out: a collector declares it with the new
   `@skipped_by_flag` directive, the skip reason says the operator left it
   out, `_run.json` records the setting, and `--all` leaves it off.
+- `70.schema/046.partitioning.sql` describes how each database is partitioned, from the catalogue alone. It lists the partition functions with their key type, side, partition count, first and last boundary and the steps between boundaries (smallest, largest, and the most frequent with its share), so a daily or monthly grain reads from the numbers. It lists the schemes with their filegroups, the read-only ones and the `NEXT USED` one. It collapses each scheme into runs of consecutive partitions on one filegroup with the boundaries that enclose them, which, joined to `20.databases/020.properties`, says which dates live on which volume. It lists every index of every partitioned table, unaligned ones included, with empty and read-only partitions. And it lists every filegroup with `is_read_only`. Boundary values leave the server for date, time-stamp and exact numeric keys only; a character, binary or `uniqueidentifier` boundary is withheld and counted. It needs `VIEW ANY DEFINITION` and not `VIEW SERVER STATE`, runs in the `space` profile, and took 2.6 s on a lab database holding a 15 000-partition table with three indexes. `docs/partitioning-spec.md` is the specification. Found on a client warehouse whose archive years were read 22 to 92 times their size in eleven days, where nothing in the archive could say how its 367 filegroups were mapped or whether they were read only.
+- `70.schema/090.statistics.sql` projects `is_incremental` in `statistics` and `statistics_all`: whether an automatic update reads only the partitions that changed or samples the whole table, archive included. It is read only where the column exists, 2014 and later, and is NULL on 2012.
+
+### Security
+
+- Releases are built with Go 1.26.10 or later: `go.mod` carries `toolchain go1.26.10`. 0.39.0 was built with go1.26.9 and so carried GO-2026-6809 (`crypto/x509`, compromised intermediate certificates), which the TLS connection to SQL Server reaches. `docs/harm-review-2026-10-28.md` reviews this release: two defects in the new collector were found and fixed before it shipped (a join that took 323 s on many partitions, and a `9999-12-31` boundary that failed the functions area), and `040.compression` exceeding its timeout on 47 000 partitions is recorded as open.
 
 ## [0.39.0] - 2026-10-24
 
