@@ -154,10 +154,17 @@ local toolchain, so what matters is the release's:
 - on the 1.26 branch, GO-2026-6607 is fixed in 1.26.9 and GO-2026-6809 in
   1.26.10, according to the Go vulnerability database.
 
-**0.39.0 shipped with GO-2026-6809.** `go.mod` now carries
-`toolchain go1.26.10`, a floor that `setup-go` reads, so a release can no
-longer be built below the fixed patch whatever the runner caches. The build
-log of 0.40.0 has to show 1.26.10 or later. It is checked there, not assumed.
+**0.39.0 shipped with GO-2026-6809.** The cause is in the workflow: without
+`check-latest`, `setup-go` takes any version cached on the runner that
+satisfies `1.26`, and the runner had go1.26.9.
+
+The first fix tried was `toolchain go1.26.10` in `go.mod`. The CI log shows
+that `setup-go` reads it as an exact version ("Setup go version spec
+1.26.10"), not as a floor, so every later patch would have needed the line
+raised by hand. It was replaced by `check-latest: true` on every `setup-go`
+step of `release.yml` and `ci.yml`: each build takes the latest 1.26 patch,
+and CI builds with what a release builds with. The build log of 0.40.0 has to
+show 1.26.10 or later. It is checked there, not assumed.
 
 No new dependency is added. The Go code changes are the flag, its closed set
 and the skip reason, with no new input from the network or the file system.

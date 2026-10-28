@@ -22,6 +22,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # The toolchain release.yml builds with; see the comment there.
+          check-latest: true
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -70,6 +72,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # The toolchain release.yml builds with; see the comment there.
+          check-latest: true
       - run: go test ./host/... -run '^TestWin' -count=1 -v
 
   integration:
@@ -109,6 +113,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # The toolchain release.yml builds with; see the comment there.
+          check-latest: true
       # A service container is "started" as soon as the process is up, which is
       # well before SQL Server accepts logins. Retrying a statement that also
       # creates the user database collapses the wait and the fixture into one
@@ -133,15 +139,10 @@ jobs:
       # same. Planted: a monthly function on date whose two oldest partitions
       # sit on a filegroup then made read only, one empty partition, an index
       # left on PRIMARY (unaligned), an incremental statistic for 090, and a
-      # function on varchar whose boundaries must not leave the server. The
-      # filegroup goes read only last, once its rows are in. One statement per
-      # sqlcmd call.
-      # THIS STEP IS FIRST because the READ_ONLY at its end changes the state
-      # of ci_probe, which empties the database's cached plans: placed after the
-      # implicit conversion step, it took that step's statement out of the cache
-      # (28 October 2026: on the 2022 leg the oldest cached plan postdated the
-      # plant, and both legs failed that assertion). Planted first, nothing
-      # that lives in the cache or the usage DMVs comes after it.
+      # function on varchar whose boundaries must not leave the server. One
+      # statement per sqlcmd call. The filegroup is made read only by a step
+      # of its own further down, "make the planted filegroup read only", whose
+      # comment says why it cannot be here.
       - name: plant a partitioned table on a read-only filegroup
         run: |
           tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
@@ -158,9 +159,6 @@ jobs:
           tools -Q "CREATE PARTITION SCHEME ps_ci_code AS PARTITION pf_ci_code ALL TO ([PRIMARY]);"
           tools -Q "CREATE TABLE dbo.code_probe (code varchar(10) NOT NULL PRIMARY KEY) ON ps_ci_code (code);"
           tools -Q "CREATE PARTITION FUNCTION pf_ci_end (date) AS RANGE RIGHT FOR VALUES ('2026-01-01', '9999-12-31');"
-          docker run --rm --network host mcr.microsoft.com/mssql-tools \
-            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d master -b \
-            -Q "ALTER DATABASE ci_probe MODIFY FILEGROUP fg_ci_old READ_ONLY;"
       # 80.workload/026 classifies interrupted executions from the Query Store,
       # and an empty store proves nothing about that: every total is zero
       # whatever the collector filters on. So the store is switched on for
@@ -297,6 +295,19 @@ jobs:
             /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -b "$@"; }
           tools -Q "BACKUP DATABASE model TO DISK = N'/var/opt/mssql/data/ci_model_1.bak' WITH INIT, COPY_ONLY;"
           tools -Q "BACKUP DATABASE model TO DISK = N'/var/opt/mssql/data/ci_model_2.bak' WITH INIT, COPY_ONLY;"
+      # The READ_ONLY that completes the partitioning plant, apart from it and
+      # between two constraints, both measured on 28 October 2026. After the
+      # database encryption key: CREATE DATABASE ENCRYPTION KEY refuses a
+      # database with a read-only file (error 33118). Before the implicit
+      # conversion: the state change empties the database's cached plans,
+      # which took that step's statement away. dm_db_index_usage_stats
+      # survives it (checked on SQL Server 2025), so the index plant above
+      # keeps its counts.
+      - name: make the planted filegroup read only
+        run: |
+          docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d master -b \
+            -Q "ALTER DATABASE ci_probe MODIFY FILEGROUP fg_ci_old READ_ONLY;"
       # 80.workload/030 names the column a cached plan converts to nvarchar,
       # and the form it exists for is the silent one: a varchar column under a
       # Windows collation, sought with nvarchar parameters, which the engine

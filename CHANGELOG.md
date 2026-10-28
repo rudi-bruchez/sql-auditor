@@ -33,7 +33,7 @@ release workflow refuses a tag that disagrees with either this file or
 
 ### Security
 
-- Releases are built with Go 1.26.10 or later: `go.mod` carries `toolchain go1.26.10`. 0.39.0 was built with go1.26.9 and so carried GO-2026-6809 (`crypto/x509`, compromised intermediate certificates), which the TLS connection to SQL Server reaches. `docs/harm-review-2026-10-28.md` reviews this release: two defects in the new collector were found and fixed before it shipped (a join that took 323 s on many partitions, and a `9999-12-31` boundary that failed the functions area), and `040.compression` exceeding its timeout on 47 000 partitions is recorded as open.
+- Releases are built with the latest Go 1.26 patch: the release and CI workflows set `check-latest: true`, so `setup-go` no longer takes whichever 1.26 version the runner has cached. 0.39.0 was built that way with go1.26.9 and so carried GO-2026-6809 (`crypto/x509`, compromised intermediate certificates), which the TLS connection to SQL Server reaches. `docs/harm-review-2026-10-28.md` reviews this release: two defects in the new collector were found and fixed before it shipped (a join that took 323 s on many partitions, and a `9999-12-31` boundary that failed the functions area), and `040.compression` exceeding its timeout on 47 000 partitions is recorded as open.
 
 ## [0.39.0] - 2026-10-24
 

@@ -38,6 +38,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # The latest 1.26 patch, not whichever one the runner has cached:
+          # without it any cached version satisfying "1.26" is taken, and
+          # 0.39.0 was built with go1.26.9, which lacks the fix for
+          # GO-2026-6809 (crypto/x509, go1.26.10).
+          # docs/harm-review-2026-10-28.md, finding 8.
+          check-latest: true
 
       # Two things have to agree with the tag before anything is built.
       #
