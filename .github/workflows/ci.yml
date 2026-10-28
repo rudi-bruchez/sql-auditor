@@ -128,6 +128,39 @@ jobs:
           echo "SQL Server did not become reachable" >&2
           docker ps -a
           exit 1
+      # 70.schema/046 describes the partitioning and a fresh database has
+      # none, so every list would be empty and a broken join would look the
+      # same. Planted: a monthly function on date whose two oldest partitions
+      # sit on a filegroup then made read only, one empty partition, an index
+      # left on PRIMARY (unaligned), an incremental statistic for 090, and a
+      # function on varchar whose boundaries must not leave the server. The
+      # filegroup goes read only last, once its rows are in. One statement per
+      # sqlcmd call.
+      # THIS STEP IS FIRST because the READ_ONLY at its end changes the state
+      # of ci_probe, which empties the database's cached plans: placed after the
+      # implicit conversion step, it took that step's statement out of the cache
+      # (28 October 2026: on the 2022 leg the oldest cached plan postdated the
+      # plant, and both legs failed that assertion). Planted first, nothing
+      # that lives in the cache or the usage DMVs comes after it.
+      - name: plant a partitioned table on a read-only filegroup
+        run: |
+          tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b "$@"; }
+          tools -Q "ALTER DATABASE ci_probe ADD FILEGROUP fg_ci_old;"
+          tools -Q "ALTER DATABASE ci_probe ADD FILE (NAME = ci_probe_old, FILENAME = '/var/opt/mssql/data/ci_probe_old.ndf', SIZE = 8MB) TO FILEGROUP fg_ci_old;"
+          tools -Q "CREATE PARTITION FUNCTION pf_ci_month (date) AS RANGE RIGHT FOR VALUES ('2026-01-01', '2026-02-01', '2026-03-01');"
+          tools -Q "CREATE PARTITION SCHEME ps_ci_month AS PARTITION pf_ci_month TO (fg_ci_old, fg_ci_old, [PRIMARY], [PRIMARY], [PRIMARY]);"
+          tools -Q "CREATE TABLE dbo.part_probe (d date NOT NULL, id int NOT NULL, v int NULL, CONSTRAINT pk_part_probe PRIMARY KEY (d, id)) ON ps_ci_month (d);"
+          tools -Q "INSERT dbo.part_probe (d, id, v) SELECT DATEADD(day, n, '20251202'), n, n FROM (SELECT TOP (89) ROW_NUMBER() OVER (ORDER BY (SELECT 1)) - 1 AS n FROM sys.all_columns) AS x;"
+          tools -Q "CREATE INDEX ix_part_probe_v ON dbo.part_probe (v) ON [PRIMARY];"
+          tools -Q "CREATE STATISTICS st_part_probe_v ON dbo.part_probe (v) WITH INCREMENTAL = ON;"
+          tools -Q "CREATE PARTITION FUNCTION pf_ci_code (varchar(10)) AS RANGE RIGHT FOR VALUES ('M');"
+          tools -Q "CREATE PARTITION SCHEME ps_ci_code AS PARTITION pf_ci_code ALL TO ([PRIMARY]);"
+          tools -Q "CREATE TABLE dbo.code_probe (code varchar(10) NOT NULL PRIMARY KEY) ON ps_ci_code (code);"
+          tools -Q "CREATE PARTITION FUNCTION pf_ci_end (date) AS RANGE RIGHT FOR VALUES ('2026-01-01', '9999-12-31');"
+          docker run --rm --network host mcr.microsoft.com/mssql-tools \
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d master -b \
+            -Q "ALTER DATABASE ci_probe MODIFY FILEGROUP fg_ci_old READ_ONLY;"
       # 80.workload/026 classifies interrupted executions from the Query Store,
       # and an empty store proves nothing about that: every total is zero
       # whatever the collector filters on. So the store is switched on for
@@ -292,33 +325,6 @@ jobs:
           tools -Q "INSERT dbo.ic_probe (code, region) SELECT TOP (1000) CONCAT('c', ROW_NUMBER() OVER (ORDER BY (SELECT 1))), CONCAT('r', ROW_NUMBER() OVER (ORDER BY (SELECT 1)) % 10) FROM sys.all_columns;"
           tools -Q "CREATE INDEX ic_probe_code ON dbo.ic_probe (code, region);"
           tools -Q "SET NOCOUNT ON; DECLARE @i int = 0; WHILE @i < 5000 BEGIN EXEC sys.sp_executesql N'SELECT id FROM dbo.ic_probe WHERE code = @p AND region = @r;', N'@p nvarchar(20), @r nvarchar(10)', N'c5', N'r5'; SET @i += 1; END;" > /dev/null
-      # 70.schema/046 describes the partitioning and a fresh database has
-      # none, so every list would be empty and a broken join would look the
-      # same. Planted: a monthly function on date whose two oldest partitions
-      # sit on a filegroup then made read only, one empty partition, an index
-      # left on PRIMARY (unaligned), an incremental statistic for 090, and a
-      # function on varchar whose boundaries must not leave the server. The
-      # filegroup goes read only last, once its rows are in. One statement per
-      # sqlcmd call, as in the step above.
-      - name: plant a partitioned table on a read-only filegroup
-        run: |
-          tools() { docker run --rm --network host mcr.microsoft.com/mssql-tools \
-            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d ci_probe -b "$@"; }
-          tools -Q "ALTER DATABASE ci_probe ADD FILEGROUP fg_ci_old;"
-          tools -Q "ALTER DATABASE ci_probe ADD FILE (NAME = ci_probe_old, FILENAME = '/var/opt/mssql/data/ci_probe_old.ndf', SIZE = 8MB) TO FILEGROUP fg_ci_old;"
-          tools -Q "CREATE PARTITION FUNCTION pf_ci_month (date) AS RANGE RIGHT FOR VALUES ('2026-01-01', '2026-02-01', '2026-03-01');"
-          tools -Q "CREATE PARTITION SCHEME ps_ci_month AS PARTITION pf_ci_month TO (fg_ci_old, fg_ci_old, [PRIMARY], [PRIMARY], [PRIMARY]);"
-          tools -Q "CREATE TABLE dbo.part_probe (d date NOT NULL, id int NOT NULL, v int NULL, CONSTRAINT pk_part_probe PRIMARY KEY (d, id)) ON ps_ci_month (d);"
-          tools -Q "INSERT dbo.part_probe (d, id, v) SELECT DATEADD(day, n, '20251202'), n, n FROM (SELECT TOP (89) ROW_NUMBER() OVER (ORDER BY (SELECT 1)) - 1 AS n FROM sys.all_columns) AS x;"
-          tools -Q "CREATE INDEX ix_part_probe_v ON dbo.part_probe (v) ON [PRIMARY];"
-          tools -Q "CREATE STATISTICS st_part_probe_v ON dbo.part_probe (v) WITH INCREMENTAL = ON;"
-          tools -Q "CREATE PARTITION FUNCTION pf_ci_code (varchar(10)) AS RANGE RIGHT FOR VALUES ('M');"
-          tools -Q "CREATE PARTITION SCHEME ps_ci_code AS PARTITION pf_ci_code ALL TO ([PRIMARY]);"
-          tools -Q "CREATE TABLE dbo.code_probe (code varchar(10) NOT NULL PRIMARY KEY) ON ps_ci_code (code);"
-          tools -Q "CREATE PARTITION FUNCTION pf_ci_end (date) AS RANGE RIGHT FOR VALUES ('2026-01-01', '9999-12-31');"
-          docker run --rm --network host mcr.microsoft.com/mssql-tools \
-            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "$SQL_PASSWORD" -d master -b \
-            -Q "ALTER DATABASE ci_probe MODIFY FILEGROUP fg_ci_old READ_ONLY;"
       # --env /dev/null is not decoration. Configuration precedence is
       # flag > .env > process environment, so a .env file appearing in the
       # workspace — generated, or committed by accident — would outrank the
