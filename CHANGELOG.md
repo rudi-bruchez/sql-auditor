@@ -19,6 +19,15 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-28
+
+This release describes how each database is partitioned, from the
+catalogue: the functions and their grain, which dates sit on which
+filegroup, the read-only filegroups, the unaligned indexes, and whether the
+statistics of partitioned tables are incremental. It adds the first
+opt-out, `--skip-fragmentation`, and builds with the latest Go 1.26 patch,
+which 0.39.0 did not. `docs/harm-review-2026-10-28.md` reviews all three.
+
 ### Added
 
 - `--skip-fragmentation` leaves out `20.databases/025.fragmentation.sql`,
