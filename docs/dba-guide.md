@@ -100,6 +100,18 @@ the eleven change what kind of data ends up in the archive, and the widest of
 them have sections of their own below. `--estimate-compression` and
 `--measure-page-density` are opt-in for cost rather than for disclosure.
 
+### The opt-out file
+
+One file runs by default and can be left out:
+
+| File | Option |
+| --- | --- |
+| `20.databases/025.fragmentation.sql` | `--skip-fragmentation` |
+
+Its `LIMITED` scan is cheap on most instances, and on databases of several
+terabytes it can spend its 300 seconds on each one. Left out, it is listed in
+`skipped_scripts` as left out by the option, and `--all` never leaves it out.
+
 `--plan-cache-plans` deserves reading twice before it is used on an instance you
 do not own. It keeps execution plans from the cache when the Query Store is off,
 and the statement text it resolves comes from the cache, where it can carry the
@@ -1454,7 +1466,7 @@ one, in these tiers:
 | --- | --- |
 | 30 s | 9 |
 | 60 s | 56 |
-| 120 s | 30 |
+| 120 s | 31 |
 | 180 s | 3 |
 | 300 s | 15 |
 | 600 s | 1 |

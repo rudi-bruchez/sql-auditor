@@ -64,8 +64,8 @@
 -- would bring the question of which tables a count covers back; it is kept
 -- because archives already collected carry it and the analysis reads it. The
 -- short row carries identity, columns, the auto/user/index origin,
--- has_filter, last_updated, rows, modifications_since and
--- persisted_sample_percent, and leaves out the filter text, the sampling
+-- has_filter, last_updated, rows, modifications_since,
+-- persisted_sample_percent and is_incremental, and leaves out the filter text, the sampling
 -- detail and the histogram figures. statistics_total counts the statistics on
 -- user tables and statistics_listed those on the listed tables, tables_total
 -- the user tables and tables_covered the listed ones; each pair is equal
@@ -128,9 +128,22 @@
 -- COL_LENGTH, table variables with a composite primary key and datetime2 are
 -- all 2008 or older.
 --
+-- IS_INCREMENTAL IS ABOVE THE FLOOR TOO, and is read the same way since
+-- October 2026. sys.stats.is_incremental arrived in 2014. An incremental
+-- statistic on a partitioned table keeps one histogram per partition and an
+-- automatic update reads only the partitions that changed; one that is not
+-- incremental samples the whole table, archive included, every time it
+-- crosses its threshold. Found on a client warehouse whose oldest partitions,
+-- on a slow volume, were read tens of times their size, where nothing in the
+-- archive could say which of the two the statistics were. The column is
+-- staged into @incremental by sp_executesql when COL_LENGTH finds it, and
+-- both lists project it: 1 or 0, NULL on 2012, which reads "not knowable on
+-- this build". The partitioning itself is 70.schema/046.partitioning.sql.
+--
 -- Not collected, because the floor is below them:
---   sys.stats.is_incremental              (2014)
---   sys.dm_db_incremental_stats_properties (2014)
+--   sys.dm_db_incremental_stats_properties (2014; one row per statistic and
+--                                          per partition, which on a daily
+--                                          function is thousands per table)
 --   sys.stats.has_persisted_sample        (2019; this line said 2016 SP1 until
 --                                          September 2026, and sys.stats
 --                                          documents 2019. It says only
@@ -215,6 +228,24 @@ ELSE
     JOIN #listed_tables AS lt ON lt.object_id = t.object_id
     CROSS APPLY sys.dm_db_stats_properties(st.object_id, st.stats_id) AS sp
     OPTION (RECOMPILE, MAXDOP 1);
+
+/* is_incremental, staged apart because the static lists below cannot name a
+   column 2012 does not have: see the header. No row here leaves the column
+   NULL in both lists. */
+DECLARE @incremental TABLE (
+    [object_id]      int NOT NULL,
+    [stats_id]       int NOT NULL,
+    [is_incremental] bit NOT NULL,
+    PRIMARY KEY ([object_id], [stats_id]));
+
+IF COL_LENGTH('sys.stats', 'is_incremental') IS NOT NULL
+    INSERT INTO @incremental ([object_id], [stats_id], [is_incremental])
+    EXEC sys.sp_executesql
+        N'SELECT st.object_id, st.stats_id, st.is_incremental
+          FROM sys.stats  AS st
+          JOIN sys.tables AS t ON t.object_id = st.object_id AND t.is_ms_shipped = 0
+          JOIN #listed_tables AS lt ON lt.object_id = t.object_id
+          OPTION (RECOMPILE, MAXDOP 1)';
 
 SELECT DB_NAME()                                                  AS [database],
        CONVERT(varchar(23), SYSDATETIME(), 126)                   AS [collected_at],
@@ -302,7 +333,10 @@ SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
           NULL where the build cannot say. Beside sampled_pct because the two
           answer different questions: what the last update sampled, and what
           the next one will. */
-       sp.persisted_sample_percent                                AS [persisted_sample_percent]
+       sp.persisted_sample_percent                                AS [persisted_sample_percent],
+       /* 1 when the statistic keeps a histogram per partition, NULL where the
+          build cannot say. It only means something on a partitioned table. */
+       CAST(inc.is_incremental AS int)                            AS [is_incremental]
 FROM       sys.stats    AS st
 JOIN       sys.tables   AS t ON t.object_id = st.object_id AND t.is_ms_shipped = 0
 JOIN       #listed_tables AS lt ON lt.object_id = t.object_id
@@ -310,6 +344,7 @@ LEFT JOIN  sys.indexes  AS i ON i.object_id = st.object_id AND i.index_id = st.s
 /* LEFT, not inner: a caller the DMF refuses gets no row for any statistic,
    and an inner join would turn "not readable" into "no statistics". */
 LEFT JOIN  @props       AS sp ON sp.object_id = st.object_id AND sp.stats_id = st.stats_id
+LEFT JOIN  @incremental AS inc ON inc.object_id = st.object_id AND inc.stats_id = st.stats_id
 ORDER BY t.schema_id, t.name, st.name
 OPTION (RECOMPILE, MAXDOP 1);
 
@@ -344,12 +379,14 @@ SELECT SCHEMA_NAME(t.schema_id) + '.' + t.name                    AS [table],
           against the size it is a share of. */
        sp.rows                                                    AS [rows],
        sp.modification_counter                                    AS [modifications_since],
-       sp.persisted_sample_percent                                AS [persisted_sample_percent]
+       sp.persisted_sample_percent                                AS [persisted_sample_percent],
+       CAST(inc.is_incremental AS int)                            AS [is_incremental]
 FROM       sys.stats    AS st
 JOIN       sys.tables   AS t ON t.object_id = st.object_id AND t.is_ms_shipped = 0
 JOIN       #listed_tables AS lt ON lt.object_id = t.object_id
 LEFT JOIN  sys.indexes  AS i ON i.object_id = st.object_id AND i.index_id = st.stats_id
 LEFT JOIN  @props       AS sp ON sp.object_id = st.object_id AND sp.stats_id = st.stats_id
+LEFT JOIN  @incremental AS inc ON inc.object_id = st.object_id AND inc.stats_id = st.stats_id
 ORDER BY t.schema_id, t.name, st.name
 OPTION (RECOMPILE, MAXDOP 1);
 

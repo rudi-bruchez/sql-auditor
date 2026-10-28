@@ -327,8 +327,9 @@ func TestSchemaFilesShareOneTableSelection(t *testing.T) {
 	files := []schemaFile{
 		{"010.objects.sql", 1, []string{"counts.tables", "counts.tables_listed"}},
 		{"060.columns.sql", 2, []string{"tables_covered", "tables_total", "columns_listed", "columns_total"}},
-		// The DMF staging read, the two lists, and statistics_listed.
-		{"090.statistics.sql", 5, []string{"tables_covered", "tables_total", "statistics_listed", "statistics_total"}},
+		// The DMF staging read, the is_incremental staging read, the two
+		// lists, and statistics_listed.
+		{"090.statistics.sql", 6, []string{"tables_covered", "tables_total", "statistics_listed", "statistics_total"}},
 		{"091.statistics-density.sql", 1, []string{"counts.statistics", "counts.statistics_total",
 			"counts.tables_covered", "counts.tables_total"}},
 	}
@@ -506,6 +507,19 @@ func TestSchemaCapsAreProjectedWithTheirTotals(t *testing.T) {
 		{"030.index-operational.sql",
 			`DECLARE @heaps_listing_cap int = (\d+);[\s\S]*INSERT INTO @heaps\s+SELECT TOP \(@heaps_listing_cap\)`,
 			`@heaps_listing_cap\s+AS \[heaps_listing_cap\]()`, "AS [heaps_listed]"},
+		// 046 declares its five caps once and projects each variable, so the
+		// value is the TOP's by construction; what is checked is that each
+		// list takes its own cap and that the root counts what it would hold.
+		{"046.partitioning.sql", `DECLARE @cap_functions int = (\d+)`,
+			`@cap_functions\s+AS \[listing_cap\.functions\]()`, "AS [counts.functions]"},
+		{"046.partitioning.sql", `@cap_schemes int = (\d+)`,
+			`@cap_schemes\s+AS \[listing_cap\.schemes\]()`, "AS [counts.schemes]"},
+		{"046.partitioning.sql", `@cap_ranges int = (\d+)`,
+			`@cap_ranges\s+AS \[listing_cap\.ranges\]()`, "AS [counts.ranges]"},
+		{"046.partitioning.sql", `@cap_indexes int = (\d+)`,
+			`@cap_indexes\s+AS \[listing_cap\.indexes\]()`, "AS [counts.indexes]"},
+		{"046.partitioning.sql", `@cap_filegroups int = (\d+)`,
+			`@cap_filegroups\s+AS \[listing_cap\.filegroups\]()`, "AS [counts.filegroups]"},
 	}
 	for _, c := range cases {
 		b, err := sqlauditor.Queries.ReadFile("queries/70.schema/" + c.file)
