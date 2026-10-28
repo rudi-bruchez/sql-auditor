@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -309,6 +310,44 @@ func TestSkipReasonForRequiredFlag(t *testing.T) {
 	}
 	if _, skip := skipReason(s, "", nil, nil, map[string]bool{FlagIncludeSessionText: true}); skip {
 		t.Error("the flag was set; the script must run")
+	}
+}
+
+func TestSkipReasonForOptOut(t *testing.T) {
+	s := parseScript("20.databases/025.fragmentation.sql",
+		"-- @scope: database\n-- @resultsets: root:object\n-- @skipped_by_flag: skip_fragmentation\nSELECT 1;")
+	if s.SkippedByFlag != FlagSkipFragmentation || strings.Contains(s.LintError, "@skipped_by_flag") {
+		t.Fatalf("SkippedByFlag = %q, lint %q", s.SkippedByFlag, s.LintError)
+	}
+	if _, skip := skipReason(s, "", nil, nil, nil); skip {
+		t.Error("an opt-out not passed must leave the script to run")
+	}
+	reason, skip := skipReason(s, "", nil, nil, map[string]bool{FlagSkipFragmentation: true})
+	if !skip || !strings.Contains(reason, "--skip-fragmentation") {
+		t.Errorf("skip = %v, reason %q: want skipped, naming the option", skip, reason)
+	}
+	if bad := parseScript("x.sql", "-- @scope: database\n-- @skipped_by_flag: skip_fragmentatoin\nSELECT 1;"); !strings.Contains(bad.LintError, "@skipped_by_flag") {
+		t.Error("a misspelt opt-out must fail the lint")
+	}
+}
+
+// A run that turned the opt-out on loses the collector, said once by
+// scopeLost rather than once per database by skipLoses.
+func TestOptOutLossIsNamedOnce(t *testing.T) {
+	reason := optOutSkipReason(FlagSkipFragmentation)
+	off := runScope{Config: map[string]string{FlagSkipFragmentation: "false"}}
+	on := runScope{Config: map[string]string{FlagSkipFragmentation: "true"}}
+	if skipLoses(reason, off, on) {
+		t.Error("off then on is named by scopeLost; skipLoses must not repeat it")
+	}
+	if !skipLoses(reason, on, on) {
+		t.Error("on in both runs and a result in prev: the collector became an opt-out, a loss")
+	}
+	if !slices.Contains(scopeLost(off, on), "the collectors left out by --skip-fragmentation") {
+		t.Errorf("scopeLost = %q, want the opt-out named", scopeLost(off, on))
+	}
+	if slices.Contains(scopeLost(on, off), "the collectors left out by --skip-fragmentation") {
+		t.Error("on then off collects more, not less")
 	}
 }
 

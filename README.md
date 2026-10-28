@@ -506,6 +506,12 @@ Exactly three cases.
 | `--query-store-detail` | also collect the full text and the execution plans of the heaviest Query Store queries, per database |
 | `--query-store-plan-stats` | also look for the last profiled plan of each query the option above extracted. Does nothing on its own |
 
+### Collecting less than the default
+
+| Flag | Meaning |
+| --- | --- |
+| `--skip-fragmentation` | leave out `20.databases/025.fragmentation.sql`, the logical fragmentation of the largest indexes. It runs by default and is cheap on most instances, but `LIMITED` still reads the level above the leaf of each index it visits, and on databases of several terabytes it can spend its 300-second timeout on each one. The collector is then listed in `skipped_scripts` as left out by the option. `--all` does not turn it on |
+
 ### The Query Store window
 
 | Flag | Meaning |

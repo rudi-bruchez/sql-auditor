@@ -55,6 +55,12 @@ type Script struct {
 	// has to be "not collected" and the gate has to be visible in the file
 	// itself rather than in a list held somewhere else.
 	RequiresFlag string
+	// SkippedByFlag names an opt-out: a script that runs by default and that
+	// the operator can leave out. It is RequiresFlag read the other way, for
+	// a collector cheap enough to run everywhere and costly on the few
+	// instances where its tables are very large. Empty means no option
+	// removes it.
+	SkippedByFlag string
 	// Widened names the widening purpose this script serves. Empty means the
 	// script is never offered a database that only the selection's second pass
 	// retained — see SelectTargets. A collector declaring one is saying "the
@@ -159,13 +165,24 @@ var ValueFlags = map[string]string{
 	"query_store_compare": "--query-store-compare-at",
 }
 
-// flagOption names the option that sets a flag, from either map, or the flag
-// itself when neither knows it.
+// SkipFlags is the closed set of names @skipped_by_flag accepts, for the same
+// reason KnownFlags is closed: a misspelt name would be an option no command
+// line can set, and the collector could never be left out. They are opt-outs,
+// so --all and the wizard leave them alone. Disjoint from the two maps above.
+var SkipFlags = map[string]string{
+	"skip_fragmentation": "--skip-fragmentation",
+}
+
+// flagOption names the option that sets a flag, from any of the three maps,
+// or the flag itself when none knows it.
 func flagOption(name string) string {
 	if o, ok := KnownFlags[name]; ok {
 		return o
 	}
 	if o, ok := ValueFlags[name]; ok {
+		return o
+	}
+	if o, ok := SkipFlags[name]; ok {
 		return o
 	}
 	return name
@@ -303,8 +320,8 @@ func filepathRel(root, p string) (string, error) {
 // what the nine are.
 var knownDirectives = []string{
 	"scope", "timeout", "permissions", "optional_permissions", "resultsets", "min_version",
-	"max_version", "requires_flag", "writer", "widened", "correlated", "discloses",
-	"profiles",
+	"max_version", "requires_flag", "skipped_by_flag", "writer", "widened", "correlated",
+	"discloses", "profiles",
 }
 
 func parseScript(rel, sql string) Script {
@@ -392,6 +409,19 @@ func parseScript(rel, sql string) Script {
 				continue
 			}
 			s.RequiresFlag = name
+		case "skipped_by_flag":
+			name := strings.ToLower(strings.TrimSpace(val))
+			if _, ok := SkipFlags[name]; !ok {
+				names := make([]string, 0, len(SkipFlags))
+				for n := range SkipFlags {
+					names = append(names, n)
+				}
+				sort.Strings(names)
+				setLint(fmt.Sprintf("@skipped_by_flag: unknown flag %q; expected one of %s",
+					val, strings.Join(names, ", ")))
+				continue
+			}
+			s.SkippedByFlag = name
 		case "writer":
 			name := strings.ToLower(strings.TrimSpace(val))
 			if _, ok := KnownWriters[name]; !ok {

@@ -2,9 +2,12 @@
 -- @resultsets:  root:object, fragmentation:array
 -- @permissions: CONNECT, VIEW SERVER STATE, VIEW ANY DEFINITION
 -- @timeout:     300
+-- @skipped_by_flag: skip_fragmentation
 -- @profiles:    space
 --
 -- Runs once per user database, with the connection context switched to it.
+-- --skip-fragmentation leaves it out, for instances whose indexes are large
+-- enough that the timeout below is spent on every database.
 --
 -- Logical fragmentation of the largest index partitions, in LIMITED mode, the
 -- ones above 1000 pages and 10 %.

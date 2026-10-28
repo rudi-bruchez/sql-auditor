@@ -49,6 +49,11 @@ const FlagEstimateCompression = "estimate_compression"
 // partition into the buffer pool, LOB pages included, and all of a small one.
 const FlagMeasurePageDensity = "measure_page_density"
 
+// FlagSkipFragmentation leaves out 20.databases/025.fragmentation.sql, the one
+// default collector that calls sys.dm_db_index_physical_stats on every
+// database. An opt-out, in SkipFlags: off means the collector runs.
+const FlagSkipFragmentation = "skip_fragmentation"
+
 // FlagJobStepCommands turns on 50.agent/021.job-step-commands.sql, which reads
 // the FULL text of every Transact-SQL job step instead of the first 200
 // characters 020.job-steps.sql projects.
@@ -534,7 +539,7 @@ func manifestInZip(path string) ([]byte, error) {
 }
 
 // scopeLost names what prev collected that cur did not: an opt-in prev had
-// on and cur had off, every collector outside cur's profile when prev had
+// on and cur had off, an opt-out prev had off and cur had on, every collector outside cur's profile when prev had
 // none or another, a setting that let prev run more or return more
 // (settingsLost), each database prev read and cur did not, and each collector
 // prev ran that cur did not plan, or skipped for a reason that did not hold
@@ -555,6 +560,17 @@ func scopeLost(prev, cur runScope) []string {
 	for _, n := range names {
 		if prev.Config[n] == "true" && cur.Config[n] != "true" {
 			lost = append(lost, flagOption(n))
+		}
+	}
+	// An opt-out loses in the other direction: off in prev, on in cur.
+	skips := make([]string, 0, len(SkipFlags))
+	for n := range SkipFlags {
+		skips = append(skips, n)
+	}
+	sort.Strings(skips)
+	for _, n := range skips {
+		if prev.Config[n] != "true" && cur.Config[n] == "true" {
+			lost = append(lost, "the collectors left out by "+flagOption(n))
 		}
 	}
 	if cur.Profile.Name != "" && prev.Profile.Name != cur.Profile.Name {
@@ -684,6 +700,9 @@ func collectorsLost(prev, cur runScope, gone map[string]bool) []string {
 //	opt-in not passed (--x)         only when prev did not have --x on either,
 //	                                so the collector became opt-in; --x on in
 //	                                prev and off in cur is named above
+//	opt-out passed (--skip-x)       only when prev had --skip-x on as well,
+//	                                so the collector became an opt-out; --skip-x
+//	                                off in prev and on in cur is named above
 //	QUERY_STORE_DB_INCLUDE          never: settingsLost names every pattern
 //	                                that can narrow, and an unchanged one cannot
 //	                                have matched the database for prev alone
@@ -715,6 +734,11 @@ func skipLoses(reason string, prev, cur runScope) bool {
 			if reason == flagSkipReason(n) {
 				return !(prev.Config[n] == "true" && cur.Config[n] != "true")
 			}
+		}
+	}
+	for n := range SkipFlags {
+		if reason == optOutSkipReason(n) {
+			return !(prev.Config[n] != "true" && cur.Config[n] == "true")
 		}
 	}
 	return true
@@ -1157,6 +1181,9 @@ func skipReason(s Script, profile string, denied map[string]bool, serverVersion 
 	if s.RequiresFlag != "" && !enabled[s.RequiresFlag] {
 		return flagSkipReason(s.RequiresFlag), true
 	}
+	if s.SkippedByFlag != "" && enabled[s.SkippedByFlag] {
+		return optOutSkipReason(s.SkippedByFlag), true
+	}
 	// An unparseable or absent ProductVersion is not evidence that the server
 	// is old. Gating on it would silently drop every version-gated collector
 	// from an instance that can run them all.
@@ -1186,6 +1213,12 @@ func skipReason(s Script, profile string, denied map[string]bool, serverVersion 
 // this skip from the others by equality rather than by searching the text.
 func flagSkipReason(flag string) string {
 	return fmt.Sprintf("not collected by default; pass %s to include it", flagOption(flag))
+}
+
+// optOutSkipReason is the reason for a collector an opt-out left out. It says
+// the operator asked, so a reader does not take the gap for a failure.
+func optOutSkipReason(flag string) string {
+	return fmt.Sprintf("left out by %s", flagOption(flag))
 }
 
 // skipNotInQueryStoreInclude is the reason for a Query Store unit dropped by
@@ -1686,6 +1719,9 @@ func runConfig(o Options) map[string]string {
 	for name := range ValueFlags {
 		c[name] = fmt.Sprint(o.Flags[name])
 	}
+	for name := range SkipFlags {
+		c[name] = fmt.Sprint(o.Flags[name])
+	}
 	// In whole seconds, the unit of duration_sec beside it, and absent when no
 	// bound was set. Without this line every other part of the bound can be in
 	// place and no manifest records it.
@@ -1816,6 +1852,13 @@ func scriptNote(s Script, enabled map[string]bool) string {
 			state = "on"
 		}
 		notes = append(notes, flagOption(s.RequiresFlag)+" ("+state+")")
+	}
+	if s.SkippedByFlag != "" {
+		state := "runs"
+		if enabled[s.SkippedByFlag] {
+			state = "left out"
+		}
+		notes = append(notes, flagOption(s.SkippedByFlag)+" ("+state+")")
 	}
 	// A writer script produces a directory, not a document, and `check` is what
 	// a DBA reads before authorising one. "one directory per database: query

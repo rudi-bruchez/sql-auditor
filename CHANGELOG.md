@@ -19,6 +19,16 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+### Added
+
+- `--skip-fragmentation` leaves out `20.databases/025.fragmentation.sql`,
+  which otherwise runs on every database. On databases of several terabytes
+  its `sys.dm_db_index_physical_stats` call can use up the 300-second timeout
+  on each one, and the result is rarely what such an audit is about. It is
+  the first opt-out: a collector declares it with the new
+  `@skipped_by_flag` directive, the skip reason says the operator left it
+  out, `_run.json` records the setting, and `--all` leaves it off.
+
 ## [0.39.0] - 2026-10-24
 
 This release adds `sql-auditor host`, which reads the Windows machine under

@@ -102,6 +102,7 @@ type cliFlags struct {
 	deadlockGraphs, blockedProcessReports       bool
 	defaultTrace, planCachePlans                bool
 	estimateCompression                         bool
+	skipFragmentation                           bool
 	measurePageDensity                          bool
 	jobStepCommands                             bool
 	queryStoreDetail, queryStorePlanStats       bool
@@ -217,6 +218,12 @@ func defineFlags(cmd string) *cliFlags {
 	fs.BoolVar(&c.measurePageDensity, "measure-page-density", false,
 		"also measure how full the pages of the largest index partitions are: "+
 			"this reads 8 to 12 % of every large partition into the buffer pool, LOB included, and all of a small one")
+	// The opposite way round: fragmentation runs by default, and LIMITED is
+	// cheap until the indexes are very large, where it reads a level of every
+	// one and can use up its timeout on each database.
+	fs.BoolVar(&c.skipFragmentation, "skip-fragmentation", false,
+		"leave out the logical fragmentation of the largest indexes (20.databases/025.fragmentation.sql): "+
+			"it reads the level above the leaf of each index it visits, which is slow on very large databases")
 	// Off by default for DISCLOSURE, unlike the two above it, and the
 	// distinction is the reason this is a separate option rather than a wider
 	// cap on 020.job-steps.sql. A job step is application code, and a job step
@@ -537,6 +544,8 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 			collect.FlagJobStepCommands:       c.all || c.jobStepCommands,
 			// Not c.all: a ValueFlag, on exactly when the moment was given.
 			collect.FlagQueryStoreCompare: c.queryStoreCompareAt != "",
+			// Not c.all either: an opt-out, and --all only turns things on.
+			collect.FlagSkipFragmentation: c.skipFragmentation,
 		},
 	}
 	if cfg.QueriesDir != "" {
@@ -1297,6 +1306,12 @@ Options (check, collect):
                               would give back. Off for cost: SAMPLED reads 8 to
                               12 % of every large partition into the buffer pool,
                               LOB pages included, and all of a small one.
+  --skip-fragmentation        leave out the logical fragmentation of the largest
+                              indexes, which runs by default. LIMITED reads the
+                              level above the leaf of each index it visits: cheap
+                              on most instances, slow on very large databases,
+                              where it can use up its 300 seconds on each one.
+                              --all does not turn it on.
   --include-job-step-commands also collect the COMPLETE text of every Transact-SQL
                               job step, instead of the first 200 characters that
                               50.agent/020.job-steps.sql projects. Off by default

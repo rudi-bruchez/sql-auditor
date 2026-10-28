@@ -44,6 +44,9 @@ func membershipPurposes(scripts []Script, profile string, flags map[string]bool)
 		if s.RequiresFlag != "" && !flags[s.RequiresFlag] {
 			continue
 		}
+		if s.SkippedByFlag != "" && flags[s.SkippedByFlag] {
+			continue
+		}
 		out[s.Widened] = true
 	}
 	return out
@@ -105,6 +108,10 @@ func CheckProfile(scripts []Script, profile string, flags map[string]bool) error
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		// An opt-out with nothing to leave out in the profile loses nothing.
+		if _, skip := SkipFlags[name]; skip {
+			continue
+		}
 		if slices.ContainsFunc(members, func(s Script) bool { return s.RequiresFlag == name }) {
 			continue
 		}
