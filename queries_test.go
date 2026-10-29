@@ -520,6 +520,10 @@ func TestSchemaCapsAreProjectedWithTheirTotals(t *testing.T) {
 			`@cap_indexes\s+AS \[listing_cap\.indexes\]()`, "AS [counts.indexes]"},
 		{"046.partitioning.sql", `@cap_filegroups int = (\d+)`,
 			`@cap_filegroups\s+AS \[listing_cap\.filegroups\]()`, "AS [counts.filegroups]"},
+		{"047.partition-activity.sql", `DECLARE @cap_filegroups int = (\d+)`,
+			`@cap_filegroups\s+AS \[listing_cap\.filegroups\]()`, "AS [counts.filegroups]"},
+		{"047.partition-activity.sql", `@cap_indexes int = (\d+)`,
+			`@cap_indexes\s+AS \[listing_cap\.indexes\]()`, "AS [counts.indexes]"},
 	}
 	for _, c := range cases {
 		b, err := sqlauditor.Queries.ReadFile("queries/70.schema/" + c.file)

@@ -588,6 +588,20 @@ jobs:
                        | .is_read_only == 1 and .files == 1 and .partitions == 2
                          and .scheme_slots == 2] == [true])' "$f" \
             || { jq . "$f"; exit 1; }
+          # The counters themselves are not asserted: making fg_ci_old read
+          # only may reload the metadata, and with it the counters. What is
+          # asserted is the mapping to partitions and filegroups.
+          f="$run_dir/70.schema/ci_probe/047.partition-activity.json"
+          jq -e '.collected == {"counters": 1, "partitions": 1}
+                 and (.filegroups | length) == .counts.filegroups
+                 and (.indexes | length) == .counts.indexes
+                 and ([.indexes[] | select(.table == "dbo.part_probe") | [.index_name, .partitions]]
+                      | sort == [["ix_part_probe_v", 1], ["pk_part_probe", 4]])
+                 and ([.filegroups[] | select(.filegroup == "fg_ci_old")
+                       | .is_read_only == 1 and .partitions == 2] == [true])
+                 and all(.indexes[]; (.range_scans | type) == "number"
+                                     and (.io_latch.wait_ms | type) == "number")' "$f" \
+            || { jq . "$f"; exit 1; }
           f="$run_dir/70.schema/ci_probe/090.statistics.json"
           jq -e '([.statistics_all[] | select(.table == "dbo.part_probe")
                    | [.statistic, .is_incremental]] | sort
