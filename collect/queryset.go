@@ -170,7 +170,8 @@ var ValueFlags = map[string]string{
 // line can set, and the collector could never be left out. They are opt-outs,
 // so --all and the wizard leave them alone. Disjoint from the two maps above.
 var SkipFlags = map[string]string{
-	"skip_fragmentation": "--skip-fragmentation",
+	"skip_fragmentation":              "--skip-fragmentation",
+	"skip_parallel_cost_distribution": "--skip-parallel-cost-distribution",
 }
 
 // flagOption names the option that sets a flag, from any of the three maps,

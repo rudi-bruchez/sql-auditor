@@ -511,6 +511,7 @@ Exactly three cases.
 | Flag | Meaning |
 | --- | --- |
 | `--skip-fragmentation` | leave out `20.databases/025.fragmentation.sql`, the logical fragmentation of the largest indexes. It runs by default and is cheap on most instances, but `LIMITED` still reads the level above the leaf of each index it visits, and on databases of several terabytes it can spend its 300-second timeout on each one. The collector is then listed in `skipped_scripts` as left out by the option. `--all` does not turn it on |
+| `--skip-parallel-cost-distribution` | leave out `80.workload/042.parallel-cost-distribution.sql`, which shreds the XML plans of up to 1 000 cached statements to measure how their costs are distributed. On a large plan cache this can take long, and a collection of October 2026 stayed on it after the server had no request of it left. Listed in `skipped_scripts` like the option above, and `--all` does not turn it on |
 
 ### The Query Store window
 

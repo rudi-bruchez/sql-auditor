@@ -100,17 +100,20 @@ the eleven change what kind of data ends up in the archive, and the widest of
 them have sections of their own below. `--estimate-compression` and
 `--measure-page-density` are opt-in for cost rather than for disclosure.
 
-### The opt-out file
+### The opt-out files
 
-One file runs by default and can be left out:
+Two files run by default and can be left out:
 
 | File | Option |
 | --- | --- |
 | `20.databases/025.fragmentation.sql` | `--skip-fragmentation` |
+| `80.workload/042.parallel-cost-distribution.sql` | `--skip-parallel-cost-distribution` |
 
-Its `LIMITED` scan is cheap on most instances, and on databases of several
-terabytes it can spend its 300 seconds on each one. Left out, it is listed in
-`skipped_scripts` as left out by the option, and `--all` never leaves it out.
+The fragmentation's `LIMITED` scan is cheap on most instances, and on databases
+of several terabytes it can spend its 300 seconds on each one. The cost
+distribution shreds the XML plans of up to 1 000 cached statements, which can
+take long on a large cache. Left out, each is listed in `skipped_scripts` as
+left out by its option, and `--all` never leaves either out.
 
 `--plan-cache-plans` deserves reading twice before it is used on an instance you
 do not own. It keeps execution plans from the cache when the Query Store is off,

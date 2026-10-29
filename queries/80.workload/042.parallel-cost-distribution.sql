@@ -3,6 +3,7 @@
 -- @permissions: CONNECT, VIEW SERVER STATE
 -- @timeout:     120
 -- @min_version: 13
+-- @skipped_by_flag: skip_parallel_cost_distribution
 --
 -- How the estimated costs of the statements that actually run are distributed,
 -- and which of them go parallel: the only measurement that can choose a value

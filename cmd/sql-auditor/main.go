@@ -103,6 +103,7 @@ type cliFlags struct {
 	defaultTrace, planCachePlans                bool
 	estimateCompression                         bool
 	skipFragmentation                           bool
+	skipParallelCostDistribution                bool
 	measurePageDensity                          bool
 	jobStepCommands                             bool
 	queryStoreDetail, queryStorePlanStats       bool
@@ -224,6 +225,9 @@ func defineFlags(cmd string) *cliFlags {
 	fs.BoolVar(&c.skipFragmentation, "skip-fragmentation", false,
 		"leave out the logical fragmentation of the largest indexes (20.databases/025.fragmentation.sql): "+
 			"it reads the level above the leaf of each index it visits, which is slow on very large databases")
+	fs.BoolVar(&c.skipParallelCostDistribution, "skip-parallel-cost-distribution", false,
+		"leave out the distribution of plan costs (80.workload/042.parallel-cost-distribution.sql): "+
+			"it shreds the XML plans of up to 1 000 cached statements, which can take long on large plans")
 	// Off by default for DISCLOSURE, unlike the two above it, and the
 	// distinction is the reason this is a separate option rather than a wider
 	// cap on 020.job-steps.sql. A job step is application code, and a job step
@@ -545,7 +549,8 @@ func optionsFrom(c *cliFlags, env func(string) string, stdin io.Reader, dbg *deb
 			// Not c.all: a ValueFlag, on exactly when the moment was given.
 			collect.FlagQueryStoreCompare: c.queryStoreCompareAt != "",
 			// Not c.all either: an opt-out, and --all only turns things on.
-			collect.FlagSkipFragmentation: c.skipFragmentation,
+			collect.FlagSkipFragmentation:            c.skipFragmentation,
+			collect.FlagSkipParallelCostDistribution: c.skipParallelCostDistribution,
 		},
 	}
 	if cfg.QueriesDir != "" {

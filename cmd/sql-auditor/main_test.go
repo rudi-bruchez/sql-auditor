@@ -404,16 +404,18 @@ func TestAllTurnsOnEveryOptIn(t *testing.T) {
 	}
 }
 
-// --skip-fragmentation decides its own opt-out and nothing else.
+// Each --skip-x option decides its own opt-out and nothing else.
 func TestSkipFragmentationSetsItsFlag(t *testing.T) {
 	env := writeDotEnv(t, "SQL_SERVER=invalid.invalid\n")
-	o, code, err := buildOptions("collect", []string{"--env", env, "--skip-fragmentation"}, noEnv, noStdin)
-	if err != nil || code != 0 {
-		t.Fatalf("buildOptions: code %d, err %v", code, err)
-	}
-	for name, on := range o.Flags {
-		if on != (name == collect.FlagSkipFragmentation) {
-			t.Errorf("--skip-fragmentation left %s = %v", name, on)
+	for flag, option := range collect.SkipFlags {
+		o, code, err := buildOptions("collect", []string{"--env", env, option}, noEnv, noStdin)
+		if err != nil || code != 0 {
+			t.Fatalf("buildOptions %s: code %d, err %v", option, code, err)
+		}
+		for name, on := range o.Flags {
+			if on != (name == flag) {
+				t.Errorf("%s left %s = %v", option, name, on)
+			}
 		}
 	}
 	for name := range collect.SkipFlags {

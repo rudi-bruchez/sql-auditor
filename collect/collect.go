@@ -54,6 +54,12 @@ const FlagMeasurePageDensity = "measure_page_density"
 // database. An opt-out, in SkipFlags: off means the collector runs.
 const FlagSkipFragmentation = "skip_fragmentation"
 
+// FlagSkipParallelCostDistribution leaves out
+// 80.workload/042.parallel-cost-distribution.sql, which shreds the XML plans of
+// up to 1 000 cached statements: a collection of October 2026 stayed on it long
+// after the server had no request of it left. An opt-out.
+const FlagSkipParallelCostDistribution = "skip_parallel_cost_distribution"
+
 // FlagJobStepCommands turns on 50.agent/021.job-step-commands.sql, which reads
 // the FULL text of every Transact-SQL job step instead of the first 200
 // characters 020.job-steps.sql projects.

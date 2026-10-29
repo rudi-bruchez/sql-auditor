@@ -60,7 +60,18 @@ visible in the data, not only in the documentation.
 
 **Checked.**
 
-## 6. Left open
+## 6. `--skip-parallel-cost-distribution` can only remove
+
+Built on the opt-out mechanism of 0.40.0, unchanged: an entry in `SkipFlags`,
+a `@skipped_by_flag` directive on `042`, and the option. Off, the run is
+identical to 0.40.0's. On, `042` is listed in `skipped_scripts` with the
+option named, `_run.json` records the setting, and a rerun comparison names the
+loss once. `--all` does not set it. The test that each `--skip-x` option sets
+its own flag and nothing else now covers both options.
+
+**Checked.**
+
+## 7. Left open
 
 `70.schema/040.compression.sql` used up its 120-second timeout on the lab
 database of 60 249 partitions in the same run, as recorded in
