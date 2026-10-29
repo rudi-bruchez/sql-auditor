@@ -78,13 +78,24 @@ I/O latch wait first, capped at 2 000: `table`, `index_name`, `index_id`,
 `partitions_written`, `first_partition_written`, `last_partition_written`.
 
 `partitions_scanned` equal to `partitions`, with `range_scans_min` close to
-`range_scans_max`, is the shape of a predicate that does not eliminate. The
-first and last partition written, read against `046` `ranges`, are the months
-still modified.
+`range_scans_max`, is what a predicate that does not eliminate leaves. It is
+not proof of one: the counters are cumulative, and separate queries that each
+eliminate down to a different partition leave the same even spread. It says
+which table's plans to read. The first and last partition written are the
+index's own partition numbers: on an aligned index (`046` `indexes.aligned`)
+they are the table's, and read against `046` `ranges` they are the months still
+modified; an index on one filegroup reads 1 to 1. Empty when the counters were
+refused, like `filegroups`.
 
 No judgement is applied, for the reasons `046` gives.
 
 ## 4. Limits
+
+- An even spread of scans does not prove a predicate that fails to eliminate:
+  the counters cannot tell one query over every partition from several queries
+  that each eliminate to a different one. Found by the external review of
+  29 October 2026, which measured 2 and 2 scans on 3 of 3 partitions from three
+  eliminating queries.
 
 - The counters start when a partition's metadata is cached and vanish when it
   is evicted, on restart, or when the database closes. `partitions_reporting`

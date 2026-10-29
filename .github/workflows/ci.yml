@@ -151,7 +151,7 @@ jobs:
           tools -Q "ALTER DATABASE ci_probe ADD FILE (NAME = ci_probe_old, FILENAME = '/var/opt/mssql/data/ci_probe_old.ndf', SIZE = 8MB) TO FILEGROUP fg_ci_old;"
           tools -Q "CREATE PARTITION FUNCTION pf_ci_month (date) AS RANGE RIGHT FOR VALUES ('2026-01-01', '2026-02-01', '2026-03-01');"
           tools -Q "CREATE PARTITION SCHEME ps_ci_month AS PARTITION pf_ci_month TO (fg_ci_old, fg_ci_old, [PRIMARY], [PRIMARY], [PRIMARY]);"
-          tools -Q "CREATE TABLE dbo.part_probe (d date NOT NULL, id int NOT NULL, v int NULL, CONSTRAINT pk_part_probe PRIMARY KEY (d, id)) ON ps_ci_month (d);"
+          tools -Q "CREATE TABLE dbo.part_probe (d date NOT NULL, id int NOT NULL, v int NULL, note varchar(max) NULL, CONSTRAINT pk_part_probe PRIMARY KEY (d, id)) ON ps_ci_month (d);"
           tools -Q "INSERT dbo.part_probe (d, id, v) SELECT DATEADD(day, n, '20251202'), n, n FROM (SELECT TOP (89) ROW_NUMBER() OVER (ORDER BY (SELECT 1)) - 1 AS n FROM sys.all_columns) AS x;"
           tools -Q "CREATE INDEX ix_part_probe_v ON dbo.part_probe (v) ON [PRIMARY];"
           tools -Q "CREATE STATISTICS st_part_probe_v ON dbo.part_probe (v) WITH INCREMENTAL = ON;"

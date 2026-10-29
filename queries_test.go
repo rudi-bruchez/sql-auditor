@@ -278,6 +278,56 @@ func TestEveryKnownProfileHasACollector(t *testing.T) {
 	}
 }
 
+// Each opt-out leaves out exactly the collector it names in its help. The
+// directive is the only link between the two: lost or pointed at the other
+// flag, the option still parses, still lands in _run.json as on, and leaves
+// the collector running. Found surviving every test by the external review
+// of 29 October 2026.
+func TestEachSkipFlagLeavesOutItsCollector(t *testing.T) {
+	want := map[string]string{
+		"skip_fragmentation":              "20.databases/025.fragmentation.sql",
+		"skip_parallel_cost_distribution": "80.workload/042.parallel-cost-distribution.sql",
+	}
+	scripts, err := collect.Discover(sqlauditor.Queries, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := map[string][]string{}
+	for _, s := range scripts {
+		if s.SkippedByFlag != "" {
+			got[s.SkippedByFlag] = append(got[s.SkippedByFlag], s.Path)
+		}
+	}
+	for flag := range collect.SkipFlags {
+		if w, ok := want[flag]; !ok {
+			t.Errorf("%s is a skip flag this test does not know: add the collector it leaves out", flag)
+		} else if len(got[flag]) != 1 || got[flag][0] != w {
+			t.Errorf("%s leaves out %v, want exactly %s", flag, got[flag], w)
+		}
+	}
+}
+
+// 047 empties both listings when the counters were refused: every sum would
+// otherwise read zero, an idle index or filegroup, which is an answer. Behind
+// a schema-modification lock the lab returned 1222 on both areas; without the
+// guards the filegroups came back full of zeros (external review, 29 October
+// 2026). No test can hold a lock, so the guards themselves are held here.
+func TestPartitionActivityListingsEmptyOnARefusedArea(t *testing.T) {
+	b, err := sqlauditor.Queries.ReadFile("queries/70.schema/047.partition-activity.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := collect.StripSQLComments(string(b))
+	for name, re := range map[string]string{
+		"filegroups": `WHERE @err_counters = 0 AND @err_partitions = 0\s+GROUP BY fg\.data_space_id`,
+		"indexes":    `WHERE pt\.partitioned_table = 1 AND @err_counters = 0\s+GROUP BY pt\.object_id`,
+	} {
+		if !regexp.MustCompile(re).MatchString(code) {
+			t.Errorf("047 %s: the listing is no longer emptied when an area is refused", name)
+		}
+	}
+}
+
 // A widening purpose nobody declares brings a database into the run that no
 // collector reads: MANIFEST.txt lists it as covered and the archive holds
 // nothing for it. The other direction, a declared value that is not known, is
@@ -507,22 +557,25 @@ func TestSchemaCapsAreProjectedWithTheirTotals(t *testing.T) {
 		{"030.index-operational.sql",
 			`DECLARE @heaps_listing_cap int = (\d+);[\s\S]*INSERT INTO @heaps\s+SELECT TOP \(@heaps_listing_cap\)`,
 			`@heaps_listing_cap\s+AS \[heaps_listing_cap\]()`, "AS [heaps_listed]"},
-		// 046 declares its five caps once and projects each variable, so the
-		// value is the TOP's by construction; what is checked is that each
-		// list takes its own cap and that the root counts what it would hold.
-		{"046.partitioning.sql", `DECLARE @cap_functions int = (\d+)`,
+		// 046 and 047 declare their caps once and project each variable, so
+		// the value is the TOP's by construction. What is checked is that each
+		// list's own SELECT, found by its first columns, takes its own cap, and
+		// that the root counts what it would hold. Until the external review of
+		// 29 October 2026 only the DECLARE was matched, and a TOP removed or two
+		// caps swapped passed.
+		{"046.partitioning.sql", `@cap_functions int = (\d+)[\s\S]*SELECT TOP \(@cap_functions\)\s+f\.\[name\]`,
 			`@cap_functions\s+AS \[listing_cap\.functions\]()`, "AS [counts.functions]"},
-		{"046.partitioning.sql", `@cap_schemes int = (\d+)`,
+		{"046.partitioning.sql", `@cap_schemes int = (\d+)[\s\S]*SELECT TOP \(@cap_schemes\)\s+ps\.name\s+AS \[scheme\],\s+pf\.name`,
 			`@cap_schemes\s+AS \[listing_cap\.schemes\]()`, "AS [counts.schemes]"},
-		{"046.partitioning.sql", `@cap_ranges int = (\d+)`,
+		{"046.partitioning.sql", `@cap_ranges int = (\d+)[\s\S]*SELECT TOP \(@cap_ranges\)\s+ps\.name\s+AS \[scheme\],\s+fg\.name`,
 			`@cap_ranges\s+AS \[listing_cap\.ranges\]()`, "AS [counts.ranges]"},
-		{"046.partitioning.sql", `@cap_indexes int = (\d+)`,
+		{"046.partitioning.sql", `@cap_indexes int = (\d+)[\s\S]*SELECT TOP \(@cap_indexes\)\s+s\.name \+ N'\.' \+ o\.name`,
 			`@cap_indexes\s+AS \[listing_cap\.indexes\]()`, "AS [counts.indexes]"},
-		{"046.partitioning.sql", `@cap_filegroups int = (\d+)`,
+		{"046.partitioning.sql", `@cap_filegroups int = (\d+)[\s\S]*SELECT TOP \(@cap_filegroups\)\s+fg\.name\s+AS \[filegroup\],\s+fg\.type_desc`,
 			`@cap_filegroups\s+AS \[listing_cap\.filegroups\]()`, "AS [counts.filegroups]"},
-		{"047.partition-activity.sql", `DECLARE @cap_filegroups int = (\d+)`,
+		{"047.partition-activity.sql", `@cap_filegroups int = (\d+)[\s\S]*SELECT TOP \(@cap_filegroups\)\s+fg\.name\s+AS \[filegroup\],\s+CAST\(fg\.is_read_only`,
 			`@cap_filegroups\s+AS \[listing_cap\.filegroups\]()`, "AS [counts.filegroups]"},
-		{"047.partition-activity.sql", `@cap_indexes int = (\d+)`,
+		{"047.partition-activity.sql", `@cap_indexes int = (\d+)[\s\S]*SELECT TOP \(@cap_indexes\)\s+s\.name \+ N'\.' \+ o\.name`,
 			`@cap_indexes\s+AS \[listing_cap\.indexes\]()`, "AS [counts.indexes]"},
 	}
 	for _, c := range cases {

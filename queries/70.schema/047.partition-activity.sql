@@ -34,14 +34,19 @@
 -- volume's reads the counters can attribute.
 --
 -- indexes: every index of every partitioned table, the non-partitioned ones
--- included, with the same sums, and four numbers that say whether queries
--- eliminate partitions: partitions_scanned against partitions, and the least
--- and the most range scans any non-empty partition received. A query that
--- eliminates touches the partitions it needs; a predicate that defeats
--- elimination starts a scan on every partition, and min and max then come
--- close to each other and to the number of executions. first and last
--- partition written say where the writes go: on a date key they are the
--- months still modified.
+-- included, with the same sums, and four numbers on how the scans spread:
+-- partitions_scanned against partitions, and the least and the most range
+-- scans any non-empty partition received. A predicate that defeats
+-- elimination starts a scan on every partition, so min and max come close to
+-- each other. The converse does not hold: the counters are cumulative, and
+-- separate queries that each eliminate down to a different partition leave
+-- the same even spread (the external review of 29 October 2026 measured three
+-- such queries giving 2 and 2 on 3 partitions of 3). An even spread is a
+-- reason to read the plans of the queries on that table, not a verdict.
+-- first and last partition written are the index's own partition numbers.
+-- On an aligned index (046 indexes.aligned = 1) they are the table's, and
+-- read against 046 ranges they name the months still modified; an index on
+-- one filegroup has one partition and reads 1 to 1 whatever was written.
 --
 -- WHAT THE COUNTERS COUNT. range_scan_count is the number of scans started on
 -- the partition, a seek with a range included, not the pages read.
@@ -237,7 +242,9 @@ FROM (SELECT pt.object_id, pt.index_id,
       FROM @parts AS pt
       LEFT JOIN @ops AS op ON op.object_id = pt.object_id AND op.index_id = pt.index_id
                           AND op.partition_number = pt.partition_number
-      WHERE pt.partitioned_table = 1
+      /* As for filegroups: with the counters refused every row would read
+         idle, so the listing comes back empty and errors.* says why. */
+      WHERE pt.partitioned_table = 1 AND @err_counters = 0
       GROUP BY pt.object_id, pt.index_id) AS a
 JOIN sys.objects AS o ON o.object_id = a.object_id
 JOIN sys.schemas AS s ON s.schema_id = o.schema_id
