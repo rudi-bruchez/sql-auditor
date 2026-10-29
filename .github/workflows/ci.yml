@@ -1166,6 +1166,18 @@ jobs:
           grep -q '^--- PASS' "$RUNNER_TEMP/maxdur.log"
           if grep -q '^--- SKIP' "$RUNNER_TEMP/maxdur.log"; then exit 1; fi
           if grep -q '^--- FAIL' "$RUNNER_TEMP/maxdur.log"; then exit 1; fi
+      # The mid-batch hang of 0.41.0: a lock timeout behind an open ALTER,
+      # then the session reused. The test creates one dbo.zz_lock_probe_*
+      # table in master and drops it. Required by name, so a rename fails.
+      - name: mid-batch error live test
+        env:
+          SQL_AUDITOR_LIVE_SERVER: localhost,1433
+          SQL_AUDITOR_LIVE_USER: sa
+          SQL_AUDITOR_LIVE_PASSWORD: ${{ env.SQL_PASSWORD }}
+        run: |
+          set -o pipefail
+          go test ./collect/ -run '^TestLiveAMidBatchErrorDoesNotHangTheSession$' -count=1 -v -timeout 5m | tee "$RUNNER_TEMP/midbatch.log"
+          grep -q '^--- PASS: TestLiveAMidBatchErrorDoesNotHangTheSession ' "$RUNNER_TEMP/midbatch.log"
       # 043's live tests, against the same container. They build their own
       # databases (ZzAvgDopLive...) with a ladder of heaps up to 2 000 000
       # rows and drop them; ci_probe is not touched. The fixture's premises
