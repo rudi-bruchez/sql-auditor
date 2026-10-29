@@ -37,7 +37,7 @@ import (
 // the tool that produced it, and "dev" told a reader nothing about which
 // collectors were in the corpus. So the number lives here and moves with the
 // corpus, while buildStamp fills in the revision from the build itself.
-var version = "0.41.0"
+var version = "0.41.1"
 var commit = ""
 
 // buildStamp returns what to print after the version. When -ldflags supplied a
@@ -693,6 +693,7 @@ func run() int {
 	var dbg *debugLog
 	if debugRequested(os.Args[1:], os.Getenv) {
 		dbg = newDebugLog(os.Stderr, time.Now)
+		go dbg.watchStalls()
 	}
 	dbg.printf("start, %s, %s/%s, %s", banner(), runtime.GOOS, runtime.GOARCH, runtime.Version())
 	if wd, err := os.Getwd(); err == nil {

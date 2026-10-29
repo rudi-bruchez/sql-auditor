@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2654,6 +2655,27 @@ func Run(ctx context.Context, o Options) (int, error) {
 	watchNoted := false
 	notStarted, stoppedByBound := 0, false
 
+	// reconnect replaces conn with a new session, reset before the next unit
+	// uses it — the PowerShell version skipped that step and quietly broke its
+	// own invariant.
+	reconnect := func() error {
+		conn.Close()
+		fresh, err := Connect(bound, db, o.Config)
+		if err != nil {
+			return fmt.Errorf("reconnect failed: %w", err)
+		}
+		conn = fresh
+		if err := resetWithDeadline(bound, conn, o.Config); err != nil {
+			return fmt.Errorf("session reset after reconnect failed: %w", err)
+		}
+		// A new connection is a new session: watching the old id would watch
+		// nothing. Zero, if it cannot be read, matches no waiter. Under the
+		// bound: its error is ignored, and on the run's context it would be a
+		// query after the bound with nothing to report it.
+		spid, _ = sessionID(bound, conn, o.Config)
+		return nil
+	}
+
 	for _, u := range units {
 		s, target := u.Script, u.Target
 		reason, byBound, skip := skipBefore(cancelledOn, droppedOn, bound, limit, target.Name)
@@ -2675,6 +2697,21 @@ func Run(ctx context.Context, o Options) (int, error) {
 		o.Debugf("running %s on %s", s.Path, target.Name)
 		cut, err := runUnit(ctx, bound, conn, o, m, rw, s, target, watch, spid)
 		pause("after a unit", bound)
+		// A failed query leaves its session unusable (discardConn), and the
+		// catalog check just below would be the first thing to hang on it.
+		// Not after a stop or the bound: nothing uses the connection then.
+		if connClosed(conn) && ctx.Err() == nil && !boundReached(bound) {
+			o.Debugf("  reconnecting: %s on %s closed its connection", s.Path, target.Name)
+			if rerr := reconnect(); rerr != nil {
+				if stopRequested(ctx, m) {
+					break
+				}
+				if !boundReached(bound) {
+					m.Errors = append(m.Errors, ErrorEntry{Message: rerr.Error()})
+					return finishWith(runFolder, 1, rerr)
+				}
+			}
+		}
 		// The fact, from the call the bound stopped, never from the error's
 		// words: a SQL Server number returned after the bound, or a stop
 		// landing while the driver returns, leaves cut true.
@@ -2772,9 +2809,7 @@ func Run(ctx context.Context, o Options) (int, error) {
 			earned = code
 		}
 
-		// One reconnect attempt on a dead connection. The replacement is
-		// reset before the next unit uses it — the PowerShell version
-		// skipped that step and quietly broke its own invariant.
+		// One reconnect attempt on a dead connection.
 		// Asked again here, and not only inside recordUnitFailure above. The
 		// two calls are a few instructions apart, but a stop landing between
 		// them takes the whole reconnect down the wrong path: the ping runs on
@@ -2801,36 +2836,16 @@ func Run(ctx context.Context, o Options) (int, error) {
 				continue
 			}
 			fmt.Fprintln(o.progress(), "connection lost; attempting one reconnect")
-			conn.Close()
-			fresh, cerr := Connect(bound, db, o.Config)
-			if cerr != nil {
+			if rerr := reconnect(); rerr != nil {
 				if stopRequested(ctx, m) {
 					break
 				}
 				if boundReached(bound) {
 					continue
 				}
-				cerr = fmt.Errorf("reconnect failed: %w", cerr)
-				m.Errors = append(m.Errors, ErrorEntry{Message: cerr.Error()})
-				return finishWith(runFolder, 1, cerr)
-			}
-			conn = fresh
-			if rerr := resetWithDeadline(bound, conn, o.Config); rerr != nil {
-				if stopRequested(ctx, m) {
-					break
-				}
-				if boundReached(bound) {
-					continue
-				}
-				rerr = fmt.Errorf("session reset after reconnect failed: %w", rerr)
 				m.Errors = append(m.Errors, ErrorEntry{Message: rerr.Error()})
 				return finishWith(runFolder, 1, rerr)
 			}
-			// A new connection is a new session: watching the old id would
-			// watch nothing. Zero, if it cannot be read, matches no waiter.
-			// Under the bound: its error is ignored, and on the run's context
-			// it would be a query after the bound with nothing to report it.
-			spid, _ = sessionID(bound, conn, o.Config)
 		} else if conn, spid, err = recycleConn(bound, db, conn, o.Config); err != nil {
 			if stopRequested(ctx, m) {
 				break
@@ -3010,6 +3025,10 @@ func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
 			return
 		}
 		left = true
+		// A discarded connection has no session left to move.
+		if connClosed(conn) {
+			return
+		}
 		if rerr := resetWithDeadline(ctx, conn, o.Config); rerr != nil {
 			o.Debugf("  leaving %s after %s failed: %v", u.Name, s.Path, rerr)
 		}
@@ -3056,6 +3075,7 @@ func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
 	if err != nil {
 		pause("after a failing call", bound)
 		cut = context.Cause(qctx) == errMaxDurationReached
+		discardConn(conn)
 		return cut, blocked(outOfTime(ctx, qctx, timeout, limit, knob, err))
 	}
 	defer rows.Close()
@@ -3064,6 +3084,8 @@ func runUnit(ctx, bound context.Context, conn *sql.Conn, o Options, m *Manifest,
 	if err != nil {
 		pause("after a failing call", bound)
 		cut = context.Cause(qctx) == errMaxDurationReached
+		rows.Close()
+		discardConn(conn)
 		return cut, blocked(outOfTime(ctx, qctx, timeout, limit, knob, err))
 	}
 	rows.Close()
@@ -3266,6 +3288,30 @@ func connAlive(ctx context.Context, c *sql.Conn, cfg *Config) bool {
 	dctx, cancel := deadline(ctx, cfg)
 	defer cancel()
 	return c.PingContext(dctx) == nil
+}
+
+// discardConn closes the driver connection under c without sending the server
+// a word, so that the run reconnects instead of reusing the session.
+//
+// A query that fails mid-batch cannot be followed on the same session.
+// go-mssqldb (v1.10.0, unchanged in v1.11.2) closes its rows on the error and
+// leaves the goroutine reading the rest of the response blocked on a channel
+// nobody reads; the next statement on the session waits for that goroutine
+// and never looks at its context. Measured on a lock timeout (1222) in
+// 060.columns, with a Sch-M held on a table: the session sleeping on the
+// server, the run waiting on the client, no deadline and no ctrl-c able to
+// end it, for hours on a client instance.
+//
+// ponytail: the stuck goroutine and its buffers leak, one per failed query;
+// drop this once the driver drains the response on Close.
+func discardConn(c *sql.Conn) {
+	_ = c.Raw(func(any) error { return driver.ErrBadConn })
+}
+
+// connClosed says whether discardConn, or the driver, has already closed c.
+// It sends nothing to the server.
+func connClosed(c *sql.Conn) bool {
+	return errors.Is(c.Raw(func(any) error { return nil }), sql.ErrConnDone)
 }
 
 // sqlErrorNumber extracts the SQL Server error number so the manifest records

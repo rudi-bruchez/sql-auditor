@@ -23,6 +23,33 @@ func clock(steps ...time.Duration) func() time.Time {
 	}
 }
 
+// A silence of stallAfter gets the stacks once, and the next line rearms it.
+func TestDebugLogDumpsTheStacksOncePerSilence(t *testing.T) {
+	var buf bytes.Buffer
+	d := newDebugLog(&buf, clock(0, time.Minute, 5*time.Minute, 12*time.Minute, 12*time.Minute,
+		14*time.Minute, 15*time.Minute))
+	d.printf("start")
+	d.dumpIfStalled(stallAfter) // 4 min of silence
+	if strings.Contains(buf.String(), "goroutine") {
+		t.Fatalf("stacks after 4 minutes:\n%s", buf.String())
+	}
+	d.dumpIfStalled(stallAfter) // 11 min
+	d.dumpIfStalled(stallAfter) // the same silence
+	if n := strings.Count(buf.String(), "the stack of every goroutine follows"); n != 1 {
+		t.Fatalf("%d dumps for one silence:\n%s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), "TestDebugLogDumpsTheStacksOncePerSilence") {
+		t.Error("the dump does not carry the stack of the calling goroutine")
+	}
+	d.printf("next")
+	d.dumpIfStalled(stallAfter) // 1 min after "next"
+	if n := strings.Count(buf.String(), "the stack of every goroutine follows"); n != 1 {
+		t.Errorf("a new line did not rearm the watch: %d dumps", n)
+	}
+	var nilLog *debugLog
+	nilLog.dumpIfStalled(stallAfter)
+}
+
 func TestADisabledDebugLogWritesNothingAndPanicsNowhere(t *testing.T) {
 	// The nil log is the ordinary case — every run without SQL_AUDITOR_DEBUG —
 	// and it reaches exactly the same call sites as an enabled one. If any of

@@ -19,6 +19,27 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-10-29
+
+### Fixed
+
+- A collection could hang for good after a collector failed in the middle of
+  its batch, most often on a lock timeout (error 1222) behind a DDL: the
+  session slept on the server, the run waited on the client, and neither the
+  collector's timeout, `--max-duration` nor ctrl-c could end it. Seen for
+  hours on `70.schema/060.columns.sql`. The driver, go-mssqldb (v1.10.0,
+  unchanged in v1.11.2), leaves the reader of the failed response blocked,
+  and the next statement on the session waits for it without looking at its
+  context. A failed query now discards its connection, and the run
+  reconnects before the next unit; a live test reproduces the hang.
+
+### Added
+
+- In debug mode (`--debug` or `SQL_AUDITOR_DEBUG`), the timeline writes the
+  stack of every goroutine after ten minutes without a line, once per
+  silence: the last line says which step a run is in, the stacks say what it
+  is waiting on.
+
 ## [0.41.0] - 2026-10-29
 
 This release says where the reads and writes of a partitioned database land:

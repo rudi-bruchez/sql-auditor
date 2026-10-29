@@ -365,6 +365,9 @@ debug   +3.02s  check finished, exit 1
 It is the **gap between two stamps** that answers the question, which is why
 every line is written before the thing it names rather than after: a run that
 hangs prints no "finished" line, so the last line you see is the one that hung.
+After ten minutes without a line, the timeline also writes the stack of every
+goroutine, once per silence, which says what that step is waiting on. Redirect
+stderr to a file (`2> debug.log`) to keep it: it is long.
 
 The counting from process start is deliberate too. If the first line itself
 arrives seconds after you pressed enter, the time went into loading twelve

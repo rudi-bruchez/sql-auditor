@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,10 @@ type debugLog struct {
 	// pending is the tail of a line the writer has been handed but has not
 	// been given a newline for yet.
 	pending bytes.Buffer
+	// last is when the last line was written, and dumped says the silence
+	// since then has already had its stacks written (dumpIfStalled).
+	last   time.Time
+	dumped bool
 }
 
 // newDebugLog returns a log writing to w, or a disabled one when w is nil.
@@ -53,7 +58,42 @@ func newDebugLog(w io.Writer, now func() time.Time) *debugLog {
 	if w == nil {
 		return nil
 	}
-	return &debugLog{w: w, start: now(), now: now}
+	start := now()
+	return &debugLog{w: w, start: start, now: now, last: start}
+}
+
+// stallAfter is how long the timeline may stay silent before dumpIfStalled
+// writes where every goroutine is waiting. Longer than any collector but the
+// few declaring @timeout above it, which cost one extra dump in a debug run.
+const stallAfter = 10 * time.Minute
+
+// dumpIfStalled writes the stack of every goroutine, once per silence, when no
+// line has been written for after. The timeline says which step a run is in;
+// a run that hangs inside one shows only its last line, and on 29 October 2026
+// that line was all a four-hour hang on a client instance left to read. The
+// stacks say what the step is waiting on, which is the question.
+func (d *debugLog) dumpIfStalled(after time.Duration) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.dumped || d.now().Sub(d.last) < after {
+		return
+	}
+	d.emit(fmt.Sprintf("no line for %s; the stack of every goroutine follows", after))
+	_ = pprof.Lookup("goroutine").WriteTo(d.w, 2)
+	d.dumped = true
+}
+
+// watchStalls runs dumpIfStalled every minute for the life of the process.
+func (d *debugLog) watchStalls() {
+	if d == nil {
+		return
+	}
+	for range time.Tick(time.Minute) {
+		d.dumpIfStalled(stallAfter)
+	}
 }
 
 // enabled says whether anything is being recorded, for the few call sites that
@@ -71,7 +111,9 @@ func (d *debugLog) printf(format string, args ...any) {
 
 // emit writes one stamped line. The caller holds the lock.
 func (d *debugLog) emit(msg string) {
-	fmt.Fprintf(d.w, "debug %8s  %s\n", sinceStart(d.now().Sub(d.start)), strings.TrimRight(msg, "\r\n"))
+	t := d.now()
+	fmt.Fprintf(d.w, "debug %8s  %s\n", sinceStart(t.Sub(d.start)), strings.TrimRight(msg, "\r\n"))
+	d.last, d.dumped = t, false
 }
 
 // setWriter changes where the timeline goes, once. The wizard uses it: while
