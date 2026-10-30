@@ -1097,12 +1097,21 @@ jobs:
           while read -r rel; do
             test -e "$run_dir/$rel" || { echo "recorded but missing: $rel" >&2; exit 1; }
           done < <(jq -r '.results[] | select(.status == "ok") | .output' "$run_dir/_run.json")
-          # One file per ok result. This equality holds because no collector in
-          # this run writes a directory; the Query Store writers do, and they
-          # are off here. Turning one on in CI means counting differently.
-          on_disk=$(find "$run_dir" -name '*.json' ! -name '_run.json' | wc -l)
+          # One file per ok result, except 021.query-store-detail, which writes
+          # a directory (an _index.json, then a .sql, a .stats.json and plans
+          # per query). Its files are left out of the count and each of its
+          # directories must hold an index and at least one query: a skipped
+          # or empty 021 would otherwise pass, and its USE HINT run nowhere.
+          detail=$(jq -r '.results[] | select(.status == "ok") | .output
+                          | select(endswith("/021.query-store-detail"))' "$run_dir/_run.json")
+          test -n "$detail" || { echo "021.query-store-detail did not run" >&2; exit 1; }
+          while read -r rel; do
+            test -f "$run_dir/$rel/_index.json" || { echo "no _index.json in $rel" >&2; exit 1; }
+            ls "$run_dir/$rel"/query_*.sql > /dev/null || { echo "no query in $rel" >&2; exit 1; }
+          done <<< "$detail"
+          on_disk=$(find "$run_dir" -name '*.json' ! -name '_run.json' ! -path '*/021.query-store-detail/*' | wc -l)
           echo "json files on disk: $on_disk"
-          test "$on_disk" -eq "$ok"
+          test "$on_disk" -eq "$(( ok - $(wc -l <<< "$detail") ))"
               # Nothing blocks a CI run, so waits is empty here. Asserting that the
           # field is present and empty is still worth a line: it tells "nobody
           # waited" from an archive that never recorded any, and a nil slice

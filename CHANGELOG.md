@@ -27,8 +27,11 @@ release workflow refuses a tag that disagrees with either this file or
   instead of 300. On a client instance its read of a store of a few thousand
   queries ran past five minutes, and the full texts and plans that
   `--query-store-detail` exists to collect came back empty for that database.
-  The flag is opt-in and `QUERY_STORE_DB_INCLUDE` narrows it, so the longer
-  limit is only paid by a run that asked for it.
+  The limit is per database: without `QUERY_STORE_DB_INCLUDE`, the flag reads
+  every store that is on, and twenty of them can now take five hours instead
+  of one hour forty. `--max-duration` bounds the run.
+- The hint lint accepts `USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION')`
+  after `OPTION (RECOMPILE, MAXDOP 1)`, and nothing else after the pair.
 - The same collector forces the legacy cardinality estimator on its three
   statements, which join up to eleven Query Store views, with
   `USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION')`. The hint exists from

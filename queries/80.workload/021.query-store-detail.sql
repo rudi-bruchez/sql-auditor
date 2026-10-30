@@ -9,9 +9,11 @@
 -- 900 seconds, not the 300 it had until 0.41.2. One unit already ran 295 s
 -- against the old limit (docs/caps-inventory.md), and on a client instance in
 -- October 2026 a store of a few thousand queries ran past it, so the one read
--- the operator turned this flag on for came back empty. The flag is opt-in and
--- QUERY_STORE_DB_INCLUDE narrows it to the databases being investigated, so a
--- longer limit costs a run that asked for it.
+-- the operator turned this flag on for came back empty. The limit is per
+-- database: without QUERY_STORE_DB_INCLUDE the flag reads every store that is
+-- on, and twenty of them can now take five hours where they took one hour
+-- forty. --max-duration bounds the run, and the include list is the way to
+-- spend the time on the databases being investigated.
 --
 -- Every statement also forces the legacy cardinality estimator. They join up
 -- to eleven Query Store views, each one a function over in-memory and on-disk

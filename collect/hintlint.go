@@ -114,10 +114,16 @@ func (s *scannedStatement) emits() bool {
 type unhintable struct{ at int }
 
 var (
-	// hintAt is the contract's two hints, first and in that order. Hints the
-	// contract does not ask for may follow them (021 forces the legacy
-	// estimator with USE HINT); the scanner steps over the rest of the clause.
-	hintAt = regexp.MustCompile(`(?i)^OPTION\s*\(\s*RECOMPILE\s*,\s*MAXDOP\s+1\s*[,)]`)
+	// hintAt is the contract's two hints, written so, and optionally the one
+	// addition the corpus allows: forcing the legacy cardinality estimator,
+	// which 021 does. An allowlist rather than "anything after the pair": a
+	// trailing QUERYTRACEON 8649 or ENABLE_PARALLEL_PLAN_PREFERENCE would undo
+	// the MAXDOP 1 the contract exists for.
+	// The scan runs on blanked literals, so it sees USE HINT('   ') here;
+	// useHintLint reads the unblanked text for which hint it names.
+	hintAt = regexp.MustCompile(`(?i)^OPTION\s*\(\s*RECOMPILE\s*,\s*MAXDOP\s+1\s*` +
+		`(,\s*USE\s+HINT\s*\(\s*'[^']*'\s*\)\s*)?\)`)
+	useHintAt = regexp.MustCompile(`(?i)\bUSE\s+HINT\s*\(([^)]*)\)`)
 	// optionAt matches an OPTION clause of any content, so the scanner can
 	// step over it whole: its parentheses would otherwise be read as a
 	// subquery's.
@@ -267,9 +273,13 @@ func scanDataStatements(code string) ([]scannedStatement, []unhintable) {
 					i = j
 					continue
 				}
-				cur.hinted = hintAt.MatchString(code[i:])
-				cur.otherHint = !cur.hinted
-				i = skipParens(code, i+len(optionAt.FindString(code[i:])))
+				if m := hintAt.FindString(code[i:]); m != "" {
+					cur.hinted = true
+					i += len(m)
+				} else {
+					cur.otherHint = true
+					i = skipParens(code, i+len(optionAt.FindString(code[i:])))
+				}
 				closeAt(i)
 				prev = [2]string{}
 				continue
@@ -403,7 +413,8 @@ func skipParens(code string, i int) int {
 }
 
 // hintLint is the first half of the hint rule: every statement that can read
-// rows carries OPTION (RECOMPILE, MAXDOP 1), written exactly so, and no read
+// rows carries OPTION (RECOMPILE, MAXDOP 1), written exactly so (hintAt names
+// the one hint that may follow), and no read
 // stands where no statement could carry it. It returns the statements, so the
 // caller can count the ones that return rows.
 func hintLint(code string) ([]scannedStatement, string) {
@@ -414,6 +425,7 @@ func hintLint(code string) ([]scannedStatement, string) {
 		}
 		if s.otherHint {
 			return stmts, fmt.Sprintf("every statement that reads rows needs OPTION (RECOMPILE, MAXDOP 1) written exactly so, "+
+				"with USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION') as the only hint allowed after them, "+
 				"and this one has an OPTION clause in another form: %s", excerpt(code[s.start:s.end]))
 		}
 		return stmts, fmt.Sprintf("every statement that reads rows needs OPTION (RECOMPILE, MAXDOP 1), "+
@@ -427,6 +439,20 @@ func hintLint(code string) ([]scannedStatement, string) {
 			excerpt(code[max(0, lineStart(code, at)):]))
 	}
 	return stmts, ""
+}
+
+// useHintLint is the other half of hintAt's allowlist: every USE HINT in the
+// file, comments stripped and literals intact, names the legacy estimator and
+// nothing else.
+func useHintLint(sql string) string {
+	for _, m := range useHintAt.FindAllStringSubmatch(sql, -1) {
+		for _, h := range strings.Split(m[1], ",") {
+			if !strings.EqualFold(strings.TrimSpace(h), "'FORCE_LEGACY_CARDINALITY_ESTIMATION'") {
+				return fmt.Sprintf("USE HINT may only name 'FORCE_LEGACY_CARDINALITY_ESTIMATION'; found: %s", m[0])
+			}
+		}
+	}
+	return ""
 }
 
 // lineStart returns the offset of the start of the line holding at.

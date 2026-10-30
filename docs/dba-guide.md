@@ -484,7 +484,7 @@ Queries (38):
   80.workload/010.wait-stats.sql
   80.workload/011.batch-response-times.sql
   80.workload/020.query-store.sql            per database, SQL Server 13.0+
-  80.workload/021.query-store-detail.sql     per database, SQL Server 13+, --query-store-detail (off), one directory per database: query text, plans and per-interval statistics
+  80.workload/021.query-store-detail.sql     per database, SQL Server 13.0.4001+, --query-store-detail (off), one directory per database: query text, plans and per-interval statistics
   80.workload/022.query-store-profiled.sql   per database, SQL Server 15.0+, --query-store-plan-stats (off), the last profiled plan, when the instance still holds one
   80.workload/023.query-store-most-executed.sql per database, SQL Server 13+
   80.workload/024.query-store-rowcount.sql   per database, SQL Server 14+
