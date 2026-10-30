@@ -534,6 +534,20 @@ func TestLintAcceptsMoreHintsThanResultSets(t *testing.T) {
 	}
 }
 
+// The contract's two hints come first; a hint it does not ask for may follow,
+// nested parentheses and all, and the statement still counts as hinted.
+func TestLintAcceptsAHintAfterTheContractPair(t *testing.T) {
+	body := "-- @resultsets: a:array\n-- @timeout: 60\n" + contractPreamble +
+		"SELECT name FROM sys.databases OPTION (RECOMPILE, MAXDOP 1, USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION'));"
+	got, err := Discover(fstest.MapFS{"queries/10.system/010.a.sql": {Data: []byte(body)}}, "queries")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if got[0].LintError != "" {
+		t.Errorf("unexpected lint error: %s", got[0].LintError)
+	}
+}
+
 // The hint count only ever refused too many declarations. Removing an entry
 // from @resultsets left the hints in place, so the lint passed and the runner
 // refused the file at execution ("returned more result sets than declared").

@@ -114,7 +114,10 @@ func (s *scannedStatement) emits() bool {
 type unhintable struct{ at int }
 
 var (
-	hintAt = regexp.MustCompile(`(?i)^OPTION\s*\(\s*RECOMPILE\s*,\s*MAXDOP\s+1\s*\)`)
+	// hintAt is the contract's two hints, first and in that order. Hints the
+	// contract does not ask for may follow them (021 forces the legacy
+	// estimator with USE HINT); the scanner steps over the rest of the clause.
+	hintAt = regexp.MustCompile(`(?i)^OPTION\s*\(\s*RECOMPILE\s*,\s*MAXDOP\s+1\s*[,)]`)
 	// optionAt matches an OPTION clause of any content, so the scanner can
 	// step over it whole: its parentheses would otherwise be read as a
 	// subquery's.
@@ -264,13 +267,9 @@ func scanDataStatements(code string) ([]scannedStatement, []unhintable) {
 					i = j
 					continue
 				}
-				if m := hintAt.FindString(code[i:]); m != "" {
-					cur.hinted = true
-					i += len(m)
-				} else {
-					cur.otherHint = true
-					i = skipParens(code, i+len(optionAt.FindString(code[i:])))
-				}
+				cur.hinted = hintAt.MatchString(code[i:])
+				cur.otherHint = !cur.hinted
+				i = skipParens(code, i+len(optionAt.FindString(code[i:])))
 				closeAt(i)
 				prev = [2]string{}
 				continue
