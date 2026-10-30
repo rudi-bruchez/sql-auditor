@@ -347,9 +347,10 @@ jobs:
       - name: collect
         # --query-store-compare-at runs 025, which no other option reaches.
         # Yesterday is over in any zone the container may run in.
+        # --query-store-detail runs 021, whose USE HINT nothing else executes.
         run: |
           go run ./cmd/sql-auditor collect --env /dev/null --output-dir "$RUNNER_TEMP/out" \
-            --query-store-compare-at "$(date -u -d yesterday +%F)"
+            --query-store-compare-at "$(date -u -d yesterday +%F)" --query-store-detail
       # collect exits 0 on a clean run, but an empty run also exits 0 if the
       # corpus somehow produced nothing. Assert on the artefacts instead: the
       # per-database results below are the ones a missing fixture would drop.
