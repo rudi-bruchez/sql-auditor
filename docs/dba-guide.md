@@ -1471,8 +1471,9 @@ one, in these tiers:
 | 60 s | 56 |
 | 120 s | 32 |
 | 180 s | 3 |
-| 300 s | 15 |
+| 300 s | 14 |
 | 600 s | 1 |
+| 900 s | 1 |
 | 1800 s | 2 |
 
 So raising `SQL_QUERY_TIMEOUT_SEC` will not give a slow collector longer to

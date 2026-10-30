@@ -19,6 +19,22 @@ release workflow refuses a tag that disagrees with either this file or
 
 ## [Unreleased]
 
+## [0.41.2] - 2026-10-30
+
+### Changed
+
+- `80.workload/021.query-store-detail.sql` has 900 seconds per database
+  instead of 300. On a client instance its read of a store of a few thousand
+  queries ran past five minutes, and the full texts and plans that
+  `--query-store-detail` exists to collect came back empty for that database.
+  The flag is opt-in and `QUERY_STORE_DB_INCLUDE` narrows it, so the longer
+  limit is only paid by a run that asked for it.
+- The same collector forces the legacy cardinality estimator on its three
+  statements, which join up to eleven Query Store views, with
+  `USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION')`. The hint exists from
+  SQL Server 2016 SP1, so the collector's floor moves from 13 to 13.0.4001;
+  2016 RTM, out of support since 2018, no longer runs it.
+
 ## [0.41.1] - 2026-10-29
 
 ### Fixed

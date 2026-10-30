@@ -1,10 +1,24 @@
 -- @scope:        database
 -- @resultsets:   root:object, selected:array, intervals:array
 -- @permissions:  CONNECT, VIEW ANY DEFINITION, VIEW SERVER STATE
--- @timeout:      300
--- @min_version:  13
+-- @timeout:      900
+-- @min_version:  13.0.4001
 -- @requires_flag: query_store_detail
 -- @writer:       query-store-detail
+--
+-- 900 seconds, not the 300 it had until 0.41.2. One unit already ran 295 s
+-- against the old limit (docs/caps-inventory.md), and on a client instance in
+-- October 2026 a store of a few thousand queries ran past it, so the one read
+-- the operator turned this flag on for came back empty. The flag is opt-in and
+-- QUERY_STORE_DB_INCLUDE narrows it to the databases being investigated, so a
+-- longer limit costs a run that asked for it.
+--
+-- Every statement also forces the legacy cardinality estimator. They join up
+-- to eleven Query Store views, each one a function over in-memory and on-disk
+-- data, and the estimator of the database's compatibility level is the one
+-- that picks the join order for them. USE HINT is what a reader without
+-- sysadmin can pass (QUERYTRACEON 9481 needs sysadmin), and it exists from
+-- 2016 SP1, which is why this file's floor is 13.0.4001 rather than 13.
 --
 -- The DEEP read of the Query Store: the full text of the queries retained, the
 -- execution plans behind them, and the per-interval statistics each plan
@@ -117,7 +131,7 @@ SELECT DB_NAME()                                                  AS [database],
 FROM sys.databases AS d
 LEFT JOIN sys.database_query_store_options AS o ON 1 = 1
 WHERE d.database_id = DB_ID()
-OPTION (RECOMPILE, MAXDOP 1);
+OPTION (RECOMPILE, MAXDOP 1, USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION'));
 
 /* ───────── selected ─────────
    A capped round robin over FOUR metrics, then the forced plans outside the
@@ -332,7 +346,7 @@ JOIN       planRank                       AS pr ON pr.plan_id = p.plan_id
 LEFT JOIN  agg                            AS a  ON a.query_id = sel.query_id
 LEFT JOIN  ranked                         AS r  ON r.query_id = sel.query_id
 ORDER BY sel.sort_rn, sel.sort_metric, q.query_id, p.plan_id
-OPTION (RECOMPILE, MAXDOP 1);
+OPTION (RECOMPILE, MAXDOP 1, USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION'));
 
 /* ───────── intervals ─────────
    One row per (query, plan, interval) for the selected queries only, so the
@@ -439,4 +453,4 @@ JOIN       sys.query_store_runtime_stats_interval     AS i
              ON i.runtime_stats_interval_id = rs.runtime_stats_interval_id
 WHERE i.start_time < @qs_to AND i.end_time > @qs_from
 ORDER BY p.query_id, p.plan_id, i.start_time
-OPTION (RECOMPILE, MAXDOP 1);
+OPTION (RECOMPILE, MAXDOP 1, USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION'));
